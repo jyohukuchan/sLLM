@@ -44,6 +44,9 @@ extern "C" uint32_t sllm_test_select_causal_attention_providers_with_semantics(
 extern "C" uint32_t sllm_test_select_linear_attention_gfx942_wave64_column(
     uint64_t token_count, uint32_t qk_heads, uint32_t value_heads,
     uint32_t head_dim, const char *arch_name) noexcept;
+extern "C" uint32_t sllm_test_select_linear_attention_gfx1030_row32_lds(
+    uint64_t token_count, uint32_t qk_heads, uint32_t value_heads,
+    uint32_t head_dim, const char *arch_name) noexcept;
 extern "C" void
 sllm_test_deepseek_v4_moe_route_device_status(int32_t status) noexcept;
 extern "C" void
@@ -54,6 +57,10 @@ extern "C" uint32_t
 sllm_test_matmul_prepared_provider_semantics(const sllm_matmul_plan_t *raw_plan,
                                              uint32_t *provider, uint32_t *tile,
                                              uint32_t *inner_product) noexcept;
+extern "C" uint32_t sllm_test_select_fp8_lt_heuristic_rank_policy(
+    const char *arch_name, uint32_t fp8_dtype, uint64_t m, uint64_t k,
+    uint64_t n, const char *rank_environment, uint64_t *rank,
+    uint32_t *ranked_query, uint32_t *explicit_override) noexcept;
 
 namespace {
 
@@ -165,6 +172,56 @@ bool linear_attention_gfx942_wave64_column_selector_contract() {
   return valid;
 }
 
+bool linear_attention_gfx1030_row32_lds_selector_contract() {
+  constexpr const char *const opt_in_name =
+      "SLLM_LINEAR_ATTENTION_GFX1030_ROW32_LDS";
+  constexpr const char *const force_name = "SLLM_GDN_FORCE_BASELINE";
+  const char *const old_opt_in = std::getenv(opt_in_name);
+  const char *const old_force = std::getenv(force_name);
+  const bool had_opt_in = old_opt_in != nullptr;
+  const bool had_force = old_force != nullptr;
+  const std::string old_opt_in_value = had_opt_in ? old_opt_in : "";
+  const std::string old_force_value = had_force ? old_force : "";
+  const auto restore = [&]() {
+    if (had_opt_in) {
+      setenv(opt_in_name, old_opt_in_value.c_str(), 1);
+    } else {
+      unsetenv(opt_in_name);
+    }
+    if (had_force) {
+      setenv(force_name, old_force_value.c_str(), 1);
+    } else {
+      unsetenv(force_name);
+    }
+  };
+  const auto select = [](const uint64_t tokens, const uint32_t qk_heads,
+                         const uint32_t value_heads, const uint32_t head_dim,
+                         const char *const target) {
+    return sllm_test_select_linear_attention_gfx1030_row32_lds(
+        tokens, qk_heads, value_heads, head_dim, target);
+  };
+  unsetenv(force_name);
+  unsetenv(opt_in_name);
+  bool valid = select(1U, 16U, 48U, 128U, "gfx1030") == 0U;
+  setenv(opt_in_name, "1", 1);
+  valid = valid && select(1U, 16U, 48U, 128U, "gfx1030") == 1U;
+  valid = valid && select(2U, 16U, 48U, 128U, "gfx1030") == 0U &&
+          select(1U, 16U, 32U, 128U, "gfx1030") == 0U &&
+          select(1U, 16U, 48U, 64U, "gfx1030") == 0U &&
+          select(1U, 8U, 48U, 128U, "gfx1030") == 0U &&
+          select(1U, 16U, 48U, 128U, "gfx1201") == 0U &&
+          select(1U, 16U, 48U, 128U, "gfx1030:sramecc+:xnack-") == 0U;
+  setenv(opt_in_name, "0", 1);
+  valid = valid && select(1U, 16U, 48U, 128U, "gfx1030") == 0U;
+  setenv(opt_in_name, "unexpected", 1);
+  valid = valid && select(1U, 16U, 48U, 128U, "gfx1030") == 0U;
+  setenv(opt_in_name, "1", 1);
+  setenv(force_name, "1", 1);
+  valid = valid && select(1U, 16U, 48U, 128U, "gfx1030") == 0U;
+  restore();
+  return valid;
+}
+
 bool causal_attention_gqa4_p32_selector_contract() {
   constexpr const char *const p16_name =
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT";
@@ -272,6 +329,531 @@ bool causal_attention_gqa4_p32_selector_contract() {
   return valid;
 }
 
+bool causal_attention_gqa6_p32_selector_contract() {
+  constexpr const char *const candidate_name =
+      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P32";
+  constexpr const char *const p64_name =
+      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P64";
+  constexpr const char *const force_name =
+      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
+  const char *const old_candidate = std::getenv(candidate_name);
+  const char *const old_p64 = std::getenv(p64_name);
+  const char *const old_force = std::getenv(force_name);
+  const bool had_candidate = old_candidate != nullptr;
+  const bool had_p64 = old_p64 != nullptr;
+  const bool had_force = old_force != nullptr;
+  const std::string old_candidate_value = had_candidate ? old_candidate : "";
+  const std::string old_p64_value = had_p64 ? old_p64 : "";
+  const std::string old_force_value = had_force ? old_force : "";
+  const auto restore_environment = [&]() {
+    if (had_candidate) {
+      setenv(candidate_name, old_candidate_value.c_str(), 1);
+    } else {
+      unsetenv(candidate_name);
+    }
+    if (had_p64) {
+      setenv(p64_name, old_p64_value.c_str(), 1);
+    } else {
+      unsetenv(p64_name);
+    }
+    if (had_force) {
+      setenv(force_name, old_force_value.c_str(), 1);
+    } else {
+      unsetenv(force_name);
+    }
+  };
+  const auto select = [](const uint64_t expected_kv_length,
+                         const uint32_t query_count, const uint32_t query_heads,
+                         const uint32_t kv_heads, const uint32_t head_dim,
+                         const uint32_t encoding, const char *const arch_name) {
+    return sllm_test_select_causal_attention_providers(
+        expected_kv_length, query_count, query_heads, kv_heads, head_dim,
+        encoding, arch_name);
+  };
+  constexpr uint32_t kGfx1201Wave = 1U << 0U;
+  constexpr uint32_t kDecodeWaveSplit = 1U << 1U;
+  constexpr uint32_t kDecodeWaveQPreload = 1U << 5U;
+  constexpr uint32_t kDecodeGqa6SplitP32 = 1U << 16U;
+
+  unsetenv(candidate_name);
+  unsetenv(p64_name);
+  unsetenv(force_name);
+  bool valid = select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                      "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload) &&
+               select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                      "gfx1201") == (kGfx1201Wave | kDecodeWaveSplit);
+  for (const char *const disabled : {"0", "unknown"}) {
+    setenv(candidate_name, disabled, 1);
+    valid =
+        valid && select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                        "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload);
+  }
+  setenv(candidate_name, "1", 1);
+  valid = valid &&
+          select(4095U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload) &&
+          select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") ==
+              (kDecodeWaveSplit | kDecodeWaveQPreload | kDecodeGqa6SplitP32) &&
+          select(9435U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1201") ==
+              (kGfx1201Wave | kDecodeWaveSplit | kDecodeGqa6SplitP32) &&
+          select(4096U, 2U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == 0U &&
+          select(4096U, 1U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") ==
+              (kDecodeWaveSplit | kDecodeWaveQPreload | (1U << 4U)) &&
+          select(4096U, 1U, 24U, 8U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload) &&
+          select(4096U, 1U, 24U, 4U, 128U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == 0U &&
+          select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP8_V1,
+                 "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload) &&
+          select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx942") == 0U;
+  setenv(force_name, "1", 1);
+  valid = valid &&
+          select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload) &&
+          select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1201") == (kGfx1201Wave | kDecodeWaveSplit);
+  restore_environment();
+  return valid;
+}
+
+bool causal_attention_gqa6_p64_and_blocksoftmax_selector_contract() {
+  constexpr std::array<const char *const, 12> variables = {
+      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P32",
+      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P64",
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1030",
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1201",
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_Q8_GFX1201",
+      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4",
+      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K4_FP16",
+      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K8_FP16",
+      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K16_FP16",
+      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K32_FP16",
+      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE",
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1030_ROCBLAS_F32",
+  };
+  std::array<bool, variables.size()> was_present{};
+  std::array<std::string, variables.size()> old_values{};
+  for (std::size_t index = 0U; index < variables.size(); ++index) {
+    const char *const value = std::getenv(variables[index]);
+    was_present[index] = value != nullptr;
+    old_values[index] = value != nullptr ? value : "";
+    unsetenv(variables[index]);
+  }
+  const auto clear = [&]() {
+    for (const char *const variable : variables) {
+      unsetenv(variable);
+    }
+  };
+  const auto restore = [&]() {
+    for (std::size_t index = 0U; index < variables.size(); ++index) {
+      if (was_present[index]) {
+        setenv(variables[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(variables[index]);
+      }
+    }
+  };
+  const auto select = [](const uint64_t expected_kv_length,
+                         const uint32_t query_count, const uint32_t query_heads,
+                         const uint32_t kv_heads, const uint32_t head_dim,
+                         const uint32_t encoding, const char *const arch_name) {
+    return sllm_test_select_causal_attention_providers(
+        expected_kv_length, query_count, query_heads, kv_heads, head_dim,
+        encoding, arch_name);
+  };
+  const auto select_semantics = [](const uint64_t sliding_window,
+                                   const uint32_t explicit_scale,
+                                   const char *const arch_name) {
+    return sllm_test_select_causal_attention_providers_with_semantics(
+        128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1, sliding_window,
+        explicit_scale, arch_name);
+  };
+  constexpr uint32_t kGfx1201Wave = 1U << 0U;
+  constexpr uint32_t kDecodeWaveSplit = 1U << 1U;
+  constexpr uint32_t kDecodeWaveQPreload = 1U << 5U;
+  constexpr uint32_t kDecodeGqa6SplitP32 = 1U << 16U;
+  constexpr uint32_t kDecodeGqa6SplitP64 = 1U << 17U;
+  constexpr uint32_t kPrefillGqa6BlockSoftmax = 1U << 18U;
+  constexpr uint32_t kPrefillGqa6BlockSoftmaxQ8 = 1U << 19U;
+  const uint32_t gfx1030_decode_base = kDecodeWaveSplit | kDecodeWaveQPreload;
+  const uint32_t gfx1201_decode_base = kGfx1201Wave | kDecodeWaveSplit;
+
+  bool valid = select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                      "gfx1030") == gfx1030_decode_base &&
+               select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                      "gfx1201") == gfx1201_decode_base;
+
+  setenv(variables[1], "1", 1);
+  valid = valid &&
+          select(8191U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == gfx1030_decode_base &&
+          select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == (gfx1030_decode_base | kDecodeGqa6SplitP64) &&
+          select(4095U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1201") == gfx1201_decode_base &&
+          select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1201") == (gfx1201_decode_base | kDecodeGqa6SplitP64) &&
+          (select(8192U, 2U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           kDecodeGqa6SplitP64) == 0U &&
+          (select(8192U, 1U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           kDecodeGqa6SplitP64) == 0U &&
+          (select(8192U, 1U, 24U, 8U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           kDecodeGqa6SplitP64) == 0U &&
+          (select(8192U, 1U, 24U, 4U, 128U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           kDecodeGqa6SplitP64) == 0U &&
+          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP8_V1,
+                  "gfx1030") &
+           kDecodeGqa6SplitP64) == 0U &&
+          select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx942") == 0U;
+
+  setenv(variables[0], "1", 1);
+  valid = valid &&
+          select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == (gfx1030_decode_base | kDecodeGqa6SplitP64) &&
+          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           kDecodeGqa6SplitP32) == 0U;
+  setenv(variables[10], "1", 1);
+  valid =
+      valid && select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                      "gfx1030") == gfx1030_decode_base;
+  clear();
+  setenv(variables[1], "unexpected", 1);
+  valid =
+      valid && select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                      "gfx1030") == gfx1030_decode_base;
+
+  clear();
+  setenv(variables[2], "1", 1);
+  valid = valid &&
+          select(128U, 127U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == 0U &&
+          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == kPrefillGqa6BlockSoftmax &&
+          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1201") == kGfx1201Wave;
+  clear();
+  setenv(variables[3], "1", 1);
+  valid = valid &&
+          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1201") == (kGfx1201Wave | kPrefillGqa6BlockSoftmax) &&
+          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == 0U;
+  for (const char *const disabled : {"0", "unexpected"}) {
+    clear();
+    setenv(variables[3], disabled, 1);
+    valid =
+        valid && select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                        "gfx1201") == kGfx1201Wave;
+  }
+
+  clear();
+  setenv(variables[4], "1", 1);
+  valid = valid &&
+          select(128U, 127U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1201") == kGfx1201Wave &&
+          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1201") == (kGfx1201Wave | kPrefillGqa6BlockSoftmaxQ8);
+  setenv(variables[3], "1", 1);
+  valid =
+      valid && select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                      "gfx1201") == (kGfx1201Wave | kPrefillGqa6BlockSoftmaxQ8);
+
+  clear();
+  setenv(variables[2], "1", 1);
+  valid = valid &&
+          (select(128U, 128U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           kPrefillGqa6BlockSoftmax) == 0U &&
+          (select(128U, 128U, 24U, 8U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           kPrefillGqa6BlockSoftmax) == 0U &&
+          (select(128U, 128U, 24U, 4U, 128U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           kPrefillGqa6BlockSoftmax) == 0U &&
+          (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP8_V1,
+                  "gfx1030") &
+           kPrefillGqa6BlockSoftmax) == 0U &&
+          select_semantics(1U, 0U, "gfx1030") == 0U &&
+          select_semantics(0U, 1U, "gfx1030") == 0U;
+  setenv(variables[10], "1", 1);
+  valid = valid && select(128U, 128U, 24U, 4U, 256U,
+                          SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030") == 0U;
+
+  restore();
+  return valid;
+}
+
+bool causal_attention_gqa6_p128_selector_contract() {
+  constexpr const char *const p128_name =
+      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P128";
+  constexpr const char *const p64_name =
+      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P64";
+  constexpr const char *const p32_name =
+      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P32";
+  constexpr const char *const force_name =
+      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
+  const std::array<const char *const, 4> names = {p128_name, p64_name, p32_name,
+                                                  force_name};
+  std::array<bool, names.size()> was_present{};
+  std::array<std::string, names.size()> old_values{};
+  for (std::size_t index = 0U; index < names.size(); ++index) {
+    const char *const value = std::getenv(names[index]);
+    was_present[index] = value != nullptr;
+    old_values[index] = value != nullptr ? value : "";
+    unsetenv(names[index]);
+  }
+  const auto restore = [&]() {
+    for (std::size_t index = 0U; index < names.size(); ++index) {
+      if (was_present[index]) {
+        setenv(names[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(names[index]);
+      }
+    }
+  };
+  const auto select = [](const uint64_t expected_kv_length,
+                         const uint32_t query_count, const uint32_t query_heads,
+                         const uint32_t kv_heads, const uint32_t head_dim,
+                         const uint32_t encoding, const char *const arch_name) {
+    return sllm_test_select_causal_attention_providers(
+        expected_kv_length, query_count, query_heads, kv_heads, head_dim,
+        encoding, arch_name);
+  };
+  const auto select_semantics = [](const uint64_t sliding_window,
+                                   const uint32_t explicit_scale) {
+    return sllm_test_select_causal_attention_providers_with_semantics(
+        8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1, sliding_window,
+        explicit_scale, "gfx1030");
+  };
+  constexpr uint32_t kGfx1030DecodeBase = (1U << 1U) | (1U << 5U);
+  constexpr uint32_t kP128 = 1U << 22U;
+  bool valid = select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                      "gfx1030") == kGfx1030DecodeBase &&
+               select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                      "gfx1201") == ((1U << 0U) | (1U << 1U));
+
+  setenv(p128_name, "1", 1);
+  valid = valid &&
+          select(8191U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == kGfx1030DecodeBase &&
+          select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == (kGfx1030DecodeBase | kP128) &&
+          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1201") &
+           kP128) == 0U;
+
+  setenv(p64_name, "1", 1);
+  setenv(p32_name, "1", 1);
+  valid = valid &&
+          select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == (kGfx1030DecodeBase | kP128) &&
+          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           (1U << 17U)) == 0U &&
+          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           (1U << 16U)) == 0U;
+
+  for (const char *const value : {"0", "unknown"}) {
+    setenv(p128_name, value, 1);
+    valid =
+        valid && select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                        "gfx1030") == (kGfx1030DecodeBase | (1U << 17U));
+  }
+  setenv(p128_name, "1", 1);
+  valid = valid &&
+          select(8192U, 2U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == 0U &&
+          (select(8192U, 1U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           kP128) == 0U &&
+          (select(8192U, 1U, 24U, 8U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           kP128) == 0U &&
+          (select(8192U, 1U, 24U, 4U, 128U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           kP128) == 0U &&
+          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP8_V1,
+                  "gfx1030") &
+           kP128) == 0U &&
+          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx942") &
+           kP128) == 0U;
+  valid = valid && (select_semantics(1U, 0U) & kP128) == 0U &&
+          (select_semantics(0U, 1U) & kP128) == 0U;
+  setenv(force_name, "1", 1);
+  valid = valid && (select(8192U, 1U, 24U, 4U, 256U,
+                           SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030") &
+                    kP128) == 0U;
+  restore();
+  return valid;
+}
+
+bool causal_attention_gqa6_rocblas_f32_selector_contract() {
+  constexpr const char *const candidate_name =
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1030_ROCBLAS_F32";
+  constexpr const char *const qtile_name =
+      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K32_FP16";
+  constexpr const char *const blocksoftmax_name =
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1030";
+  constexpr const char *const force_name =
+      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
+  constexpr std::array<const char *const, 4> variables = {
+      candidate_name, qtile_name, blocksoftmax_name, force_name};
+  std::array<bool, variables.size()> was_present{};
+  std::array<std::string, variables.size()> old_values{};
+  for (std::size_t index = 0U; index < variables.size(); ++index) {
+    const char *const value = std::getenv(variables[index]);
+    was_present[index] = value != nullptr;
+    old_values[index] = value != nullptr ? value : "";
+    unsetenv(variables[index]);
+  }
+  const auto restore = [&]() {
+    for (std::size_t index = 0U; index < variables.size(); ++index) {
+      if (was_present[index]) {
+        setenv(variables[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(variables[index]);
+      }
+    }
+  };
+  const auto select = [](const uint64_t expected_kv_length,
+                         const uint32_t query_count, const uint32_t q_heads,
+                         const uint32_t kv_heads, const uint32_t head_dim,
+                         const char *const arch_name) {
+    return sllm_test_select_causal_attention_providers(
+        expected_kv_length, query_count, q_heads, kv_heads, head_dim,
+        SLLM_HIP_KV_ENCODING_FP16_V1, arch_name);
+  };
+  constexpr uint32_t kProvider = 1U << 20U;
+  constexpr uint32_t kQTile4K32 = 1U << 12U;
+  constexpr uint32_t kBlockSoftmax = 1U << 18U;
+  bool valid = select(128U, 128U, 24U, 4U, 256U, "gfx1030") == 0U;
+  setenv(candidate_name, "0", 1);
+  valid = valid && select(128U, 128U, 24U, 4U, 256U, "gfx1030") == 0U;
+  setenv(candidate_name, "1", 1);
+  valid = valid && select(128U, 128U, 24U, 4U, 256U, "gfx1030") == kProvider &&
+          select(128U, 128U, 24U, 4U, 256U, "gfx1201") != kProvider &&
+          select(128U, 128U, 16U, 4U, 256U, "gfx1030") != kProvider &&
+          select(1U, 1U, 24U, 4U, 256U, "gfx1030") != kProvider;
+  setenv(qtile_name, "1", 1);
+  valid = valid && select(128U, 128U, 24U, 4U, 256U, "gfx1030") == kProvider;
+  unsetenv(candidate_name);
+  valid = valid &&
+          (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kQTile4K32) != 0U;
+  setenv(candidate_name, "1", 1);
+  setenv(blocksoftmax_name, "1", 1);
+  valid = valid && select(128U, 128U, 24U, 4U, 256U, "gfx1030") == kProvider &&
+          (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kBlockSoftmax) == 0U;
+  setenv(force_name, "1", 1);
+  valid =
+      valid && (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kProvider) == 0U;
+  restore();
+  return valid;
+}
+
+bool causal_attention_gqa6_rocblas_f32_gfx1201_selector_contract() {
+  static_assert(
+      SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F32_GFX1201_V1 == 74U,
+      "gfx1201 GQA6 rocBLAS provider must use the next audit ID");
+  constexpr const char *const candidate_name =
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1201_ROCBLAS_F32";
+  constexpr const char *const gfx1030_candidate_name =
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1030_ROCBLAS_F32";
+  constexpr const char *const q8_name =
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_Q8_GFX1201";
+  constexpr const char *const force_name =
+      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
+  constexpr std::array<const char *const, 4> variables = {
+      candidate_name, gfx1030_candidate_name, q8_name, force_name};
+  std::array<bool, variables.size()> was_present{};
+  std::array<std::string, variables.size()> old_values{};
+  for (std::size_t index = 0U; index < variables.size(); ++index) {
+    const char *const value = std::getenv(variables[index]);
+    was_present[index] = value != nullptr;
+    old_values[index] = value != nullptr ? value : "";
+    unsetenv(variables[index]);
+  }
+  const auto restore = [&]() {
+    for (std::size_t index = 0U; index < variables.size(); ++index) {
+      if (was_present[index]) {
+        setenv(variables[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(variables[index]);
+      }
+    }
+  };
+  const auto select = [](const uint64_t expected_kv_length,
+                         const uint32_t query_count, const uint32_t q_heads,
+                         const uint32_t kv_heads, const uint32_t head_dim,
+                         const uint32_t encoding, const char *const target) {
+    return sllm_test_select_causal_attention_providers(
+        expected_kv_length, query_count, q_heads, kv_heads, head_dim, encoding,
+        target);
+  };
+  constexpr uint32_t kProvider = 1U << 21U;
+  bool valid = (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                       "gfx1201") &
+                kProvider) == 0U &&
+               select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                      "gfx1030") == 0U;
+  setenv(candidate_name, "0", 1);
+  valid = valid && (select(128U, 128U, 24U, 4U, 256U,
+                           SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1201") &
+                    kProvider) == 0U;
+  setenv(candidate_name, "1", 1);
+  valid = valid &&
+          (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1201") &
+           kProvider) == kProvider &&
+          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == 0U &&
+          (select(128U, 128U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1201") &
+           kProvider) == 0U &&
+          (select(128U, 128U, 24U, 8U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1201") &
+           kProvider) == 0U &&
+          (select(128U, 128U, 24U, 4U, 128U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1201") &
+           kProvider) == 0U &&
+          (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP8_V1,
+                  "gfx1201") &
+           kProvider) == 0U &&
+          (select(128U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1201") &
+           kProvider) == 0U &&
+          (select(129U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1201") &
+           kProvider) == 0U;
+  setenv(q8_name, "1", 1);
+  valid = valid && (select(128U, 128U, 24U, 4U, 256U,
+                           SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1201") &
+                    kProvider) == kProvider;
+  setenv(force_name, "1", 1);
+  valid = valid && (select(128U, 128U, 24U, 4U, 256U,
+                           SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1201") &
+                    kProvider) == 0U;
+  setenv(force_name, "0", 1);
+  setenv(candidate_name, "yes", 1);
+  valid = valid && (select(128U, 128U, 24U, 4U, 256U,
+                           SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1201") &
+                    kProvider) == 0U;
+  restore();
+  return valid;
+}
+
 bool causal_attention_target_scoped_selector_contract() {
   constexpr uint32_t kGfx1201Wave = 1U << 0U;
   constexpr uint32_t kDecodeWaveSplit = 1U << 1U;
@@ -279,6 +861,10 @@ bool causal_attention_target_scoped_selector_contract() {
   constexpr uint32_t kDecodeGqa4SplitP32 = 1U << 4U;
   constexpr uint32_t kPrefillGqa4 = 1U << 6U;
   constexpr uint32_t kPrefillGqa4QTile4 = 1U << 7U;
+  constexpr uint32_t kPrefillGqa6QTile4K32Fp16 = 1U << 12U;
+  constexpr uint32_t kPrefillGqa6QTile4K4Fp16 = 1U << 13U;
+  constexpr uint32_t kPrefillGqa6QTile4K8Fp16 = 1U << 14U;
+  constexpr uint32_t kPrefillGqa6QTile4K16Fp16 = 1U << 15U;
   constexpr uint32_t kTypedQ4K4 = 1U << 10U;
   constexpr uint32_t kTypedQ4K8 = 2U << 10U;
   constexpr uint32_t kTypedQ8K8 = 3U << 10U;
@@ -288,17 +874,38 @@ bool causal_attention_target_scoped_selector_contract() {
       "SLLM_CAUSAL_ATTENTION_GFX1201_DECODE_GQA4_SPLIT_P32";
   constexpr const char *const kPhase66TiledPrefill =
       "SLLM_CAUSAL_ATTENTION_PHASE66_TILED_PREFILL";
-  constexpr std::array<const char *const, 10> kCandidateVariables = {
+  constexpr const char *const kGqa6QTile4 = "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4";
+  constexpr const char *const kGqa6QTile4K4Fp16 =
+      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K4_FP16";
+  constexpr const char *const kGqa6QTile4K8Fp16 =
+      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K8_FP16";
+  constexpr const char *const kGqa6QTile4K16Fp16 =
+      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K16_FP16";
+  constexpr const char *const kGqa6QTile4K32Fp16 =
+      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K32_FP16";
+  constexpr std::array<const char *const, 22> kCandidateVariables = {
       "SLLM_CAUSAL_ATTENTION_GFX1030_Q_PRELOAD",
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT",
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT_Q_PRELOAD",
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_FP16_PAIR",
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT",
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT_P32",
+      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P32",
+      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P64",
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1030",
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1201",
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_Q8_GFX1201",
       "SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM",
       "SLLM_CAUSAL_ATTENTION_GFX1030_LONG_PREFILL_V2",
+      kGqa6QTile4,
+      kGqa6QTile4K4Fp16,
+      kGqa6QTile4K8Fp16,
+      kGqa6QTile4K16Fp16,
+      kGqa6QTile4K32Fp16,
       kPhase66TiledPrefill,
-      kForceBaseline};
+      kForceBaseline,
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1030_ROCBLAS_F32",
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1201_ROCBLAS_F32"};
   std::array<bool, kCandidateVariables.size()> had_old_value{};
   std::array<std::string, kCandidateVariables.size()> old_values{};
   for (std::size_t index = 0U; index < kCandidateVariables.size(); ++index) {
@@ -549,6 +1156,101 @@ bool causal_attention_target_scoped_selector_contract() {
   }
   setenv(kForceBaseline, "1", 1);
   valid = valid && expect_gfx1201(2048U, 128U, kGfx1201Wave | kPrefillGqa4);
+
+  // GQA6 K4/K8/K16/K32 are separate FP16-only opt-ins.  Their exact q24/kv4
+  // boundary is independent of the existing GQA6 qtile1 control and must
+  // roll back on unsupported semantics, shapes, encodings, targets, or
+  // FORCE_BASELINE.
+  clear_environment();
+  setenv(kGqa6QTile4K32Fp16, "1", 1);
+  const auto expect_gqa6_k32 = [&](const char *const label,
+                                   const uint32_t actual,
+                                   const uint32_t expected) {
+    if (actual != expected) {
+      std::cerr << label << " actual=" << actual << " expected=" << expected
+                << '\n';
+      return false;
+    }
+    return true;
+  };
+  valid = valid &&
+          expect_gqa6_k32("gqa6-k32-q127",
+                          select(127U, 127U, 24U, 4U, 256U,
+                                 SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030"),
+                          0U) &&
+          expect_gqa6_k32("gqa6-k32-v620",
+                          select(128U, 128U, 24U, 4U, 256U,
+                                 SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030"),
+                          kPrefillGqa6QTile4K32Fp16) &&
+          expect_gqa6_k32("gqa6-k32-r9700",
+                          select(128U, 128U, 24U, 4U, 256U,
+                                 SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1201"),
+                          kGfx1201Wave | kPrefillGqa6QTile4K32Fp16) &&
+          expect_gqa6_k32("gqa6-k32-encoding",
+                          select(128U, 128U, 24U, 4U, 256,
+                                 SLLM_HIP_KV_ENCODING_FP8_V1, "gfx1030"),
+                          0U) &&
+          expect_gqa6_k32("gqa6-k32-qheads",
+                          select(128U, 128U, 16U, 4U, 256,
+                                 SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030"),
+                          kPrefillGqa4 | kPrefillGqa4QTile4) &&
+          expect_gqa6_k32("gqa6-k32-kvheads",
+                          select(128U, 128U, 24U, 8U, 256,
+                                 SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030"),
+                          0U) &&
+          expect_gqa6_k32("gqa6-k32-headdim",
+                          select(128U, 128U, 24U, 4U, 128,
+                                 SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030"),
+                          0U) &&
+          expect_gqa6_k32(
+              "gqa6-k32-window",
+              sllm_test_select_causal_attention_providers_with_semantics(
+                  128U, 128U, 24U, 4U, 256, SLLM_HIP_KV_ENCODING_FP16_V1, 1U,
+                  0U, "gfx1030"),
+              0U) &&
+          expect_gqa6_k32(
+              "gqa6-k32-explicit",
+              sllm_test_select_causal_attention_providers_with_semantics(
+                  128U, 128U, 24U, 4U, 256, SLLM_HIP_KV_ENCODING_FP16_V1, 0U,
+                  1U, "gfx1030"),
+              0U);
+  const auto expect_gqa6_key_tile = [&](const char *const variable,
+                                        const uint32_t expected_bit) {
+    clear_environment();
+    setenv(variable, "1", 1);
+    return expect_gfx1201(128U, 128U, kGfx1201Wave | expected_bit, 24U, 4U,
+                          256U, SLLM_HIP_KV_ENCODING_FP16_V1) &&
+           select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") == expected_bit;
+  };
+  valid = valid &&
+          expect_gqa6_key_tile(kGqa6QTile4K4Fp16, kPrefillGqa6QTile4K4Fp16) &&
+          expect_gqa6_key_tile(kGqa6QTile4K8Fp16, kPrefillGqa6QTile4K8Fp16) &&
+          expect_gqa6_key_tile(kGqa6QTile4K16Fp16, kPrefillGqa6QTile4K16Fp16) &&
+          expect_gqa6_key_tile(kGqa6QTile4K32Fp16, kPrefillGqa6QTile4K32Fp16);
+  // Explicit mutual precedence: K4 wins if multiple candidate opt-ins are
+  // accidentally inherited by the process environment.
+  clear_environment();
+  setenv(kGqa6QTile4K4Fp16, "1", 1);
+  setenv(kGqa6QTile4K8Fp16, "1", 1);
+  setenv(kGqa6QTile4K16Fp16, "1", 1);
+  setenv(kGqa6QTile4K32Fp16, "1", 1);
+  valid = valid &&
+          expect_gfx1201(128U, 128U, kGfx1201Wave | kPrefillGqa6QTile4K4Fp16,
+                         24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1) &&
+          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == kPrefillGqa6QTile4K4Fp16;
+  setenv(kForceBaseline, "1", 1);
+  valid = valid &&
+          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == 0U &&
+          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1201") == kGfx1201Wave;
+  clear_environment();
+  setenv(kGqa6QTile4, "1", 1);
+  valid =
+      valid && select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                      "gfx1030") == kPrefillGqa4QTile4;
 
   restore_environment();
   return valid;
@@ -3332,6 +4034,448 @@ sllm_matmul_dispatch_info_t matmul_dispatch_info() {
   return info;
 }
 
+sllm_qwen38_projection_pack2_desc_t qwen38_projection_pack2_descriptor(
+    const sllm_buffer_t *const activation,
+    const std::array<sllm_buffer_t *, 2> &weights,
+    const std::array<sllm_buffer_t *, 2> &outputs) {
+  constexpr uint64_t kHidden = 5120U;
+  constexpr uint64_t kIntermediate = 17408U;
+  sllm_qwen38_projection_pack2_desc_t descriptor{};
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+  descriptor.op_version = SLLM_HIP_QWEN38_PROJECTION_PACK2_VERSION;
+  descriptor.role = SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_NVFP4_MLP_GATE_UP;
+  descriptor.input_global_scale_f32_bits = UINT32_C(0x44000000); // 512.0F
+  descriptor.activation = matmul_binding(activation, 0U, 1U, kHidden);
+  descriptor.gate_weight =
+      matmul_binding(weights[0], 0U, kIntermediate, kHidden);
+  descriptor.up_weight = matmul_binding(weights[1], 0U, kIntermediate, kHidden);
+  descriptor.gate_weight.dtype = SLLM_TENSOR_DTYPE_U8;
+  descriptor.up_weight.dtype = SLLM_TENSOR_DTYPE_U8;
+  descriptor.gate_weight.encoding =
+      SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
+  descriptor.up_weight.encoding =
+      SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
+  descriptor.gate_output = matmul_binding(outputs[0], 0U, 1U, kIntermediate);
+  descriptor.up_output = matmul_binding(outputs[1], 0U, 1U, kIntermediate);
+  return descriptor;
+}
+
+sllm_qwen38_projection_pack2_dispatch_info_t
+qwen38_projection_pack2_dispatch_info() {
+  sllm_qwen38_projection_pack2_dispatch_info_t info{};
+  info.struct_size = sizeof(info);
+  info.abi_version = SLLM_HIP_ABI_VERSION;
+  info.info_version = SLLM_HIP_QWEN38_PROJECTION_PACK2_DISPATCH_INFO_VERSION;
+  return info;
+}
+
+sllm_qwen38_projection_pack2_desc_t qwen38_projection_pack2_fp8_gdn_descriptor(
+    const sllm_buffer_t *const activation,
+    const std::array<sllm_buffer_t *, 2> &weights,
+    const std::array<sllm_buffer_t *, 2> &outputs) {
+  constexpr uint64_t kHidden = 5120U;
+  constexpr std::array<uint64_t, 2> kWidths = {10240U, 6144U};
+  sllm_qwen38_projection_pack2_desc_t descriptor{};
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+  descriptor.op_version = SLLM_HIP_QWEN38_PROJECTION_PACK2_VERSION;
+  descriptor.role = SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_FP8_GDN_QKV_Z;
+  descriptor.input_global_scale_f32_bits = 0U;
+  descriptor.activation = matmul_binding(activation, 0U, 1U, kHidden);
+  descriptor.gate_weight = matmul_binding(weights[0], 0U, kWidths[0], kHidden);
+  descriptor.up_weight = matmul_binding(weights[1], 0U, kWidths[1], kHidden);
+  descriptor.gate_output = matmul_binding(outputs[0], 0U, 1U, kWidths[0]);
+  descriptor.up_output = matmul_binding(outputs[1], 0U, 1U, kWidths[1]);
+  descriptor.gate_weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+  descriptor.up_weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+  descriptor.gate_weight.encoding = SLLM_TENSOR_ENCODING_FP8_OUTER_F32;
+  descriptor.up_weight.encoding = SLLM_TENSOR_ENCODING_FP8_OUTER_F32;
+  return descriptor;
+}
+
+bool qwen38_projection_pack2_public_contract() {
+  constexpr uint64_t kHidden = 5120U;
+  constexpr uint64_t kIntermediate = 17408U;
+  constexpr uint64_t kWeightValues = kIntermediate * kHidden / 2U;
+  constexpr uint64_t kWeightBlockScales = kIntermediate * (kHidden / 16U);
+  constexpr uint64_t kWeightBytes =
+      ((kWeightValues + kWeightBlockScales + 3U) & ~UINT64_C(3)) + 8U;
+  constexpr uint64_t kActivationBytes = kHidden * sizeof(uint16_t);
+  constexpr uint64_t kOutputBytes = kIntermediate * sizeof(uint16_t);
+  static_assert(kWeightBytes == UINT64_C(50135048));
+  static_assert(SLLM_HIP_QWEN38_PROJECTION_PACK2_WORKSPACE_BYTES ==
+                UINT64_C(2880));
+
+  constexpr std::array<const char *, 5> kSelectorVariables = {
+      "SLLM_NVFP4_W4A4_FORCE_BASELINE",
+      "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_COLUMNS",
+      "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4",
+      "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_ACTIVATION_SHARED",
+      "SLLM_NVFP4_W4A4_DECODE_FORCE_LDS_F32_LUT"};
+  std::array<bool, kSelectorVariables.size()> was_present{};
+  std::array<std::string, kSelectorVariables.size()> old_values{};
+  for (std::size_t index = 0U; index != kSelectorVariables.size(); ++index) {
+    const char *const value = std::getenv(kSelectorVariables[index]);
+    was_present[index] = value != nullptr;
+    old_values[index] = value != nullptr ? value : "";
+    unsetenv(kSelectorVariables[index]);
+  }
+  const auto restore_environment = [&]() {
+    for (std::size_t index = 0U; index != kSelectorVariables.size(); ++index) {
+      if (was_present[index]) {
+        setenv(kSelectorVariables[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(kSelectorVariables[index]);
+      }
+    }
+  };
+
+  const auto run_supported_target = [&](const char *const arch_name) {
+    fake_hip::reset();
+    sllm_public_runtime::FaultInjector::reset();
+    fake_hip::set_gcn_arch_name(arch_name);
+    sllm_context_t *context = nullptr;
+    sllm_queue_t *queue = nullptr;
+    sllm_buffer_t *activation = nullptr;
+    std::array<sllm_buffer_t *, 2> weights{};
+    std::array<sllm_buffer_t *, 2> outputs{};
+    sllm_qwen38_projection_pack2_plan_t *plan = nullptr;
+    sllm_completion_t *completion = nullptr;
+    bool valid = create_context_for_arch(arch_name, &context) &&
+                 create_queue(context, &queue) &&
+                 create_buffer_sized(context, kActivationBytes, &activation) &&
+                 create_buffer_sized(context, kWeightBytes, &weights[0]) &&
+                 create_buffer_sized(context, kWeightBytes, &weights[1]) &&
+                 create_buffer_sized(context, kOutputBytes, &outputs[0]) &&
+                 create_buffer_sized(context, kOutputBytes, &outputs[1]);
+    Error error;
+    if (valid) {
+      auto descriptor =
+          qwen38_projection_pack2_descriptor(activation, weights, outputs);
+      auto malformed = descriptor;
+      malformed.struct_size -= 1U;
+      valid = expect_status(sllm_qwen38_projection_pack2_prepare(
+                                context, &malformed, &plan, &error.sink),
+                            SLLM_STATUS_INVALID_ABI_VERSION,
+                            "Qwen3.8 projection-pack malformed ABI", error) &&
+              plan == nullptr;
+      malformed = descriptor;
+      malformed.reserved[0] = 1U;
+      valid =
+          valid &&
+          expect_status(sllm_qwen38_projection_pack2_prepare(
+                            context, &malformed, &plan, &error.sink),
+                        SLLM_STATUS_RESERVED_NONZERO,
+                        "Qwen3.8 projection-pack reserved rejection", error) &&
+          plan == nullptr;
+      malformed = descriptor;
+      malformed.input_global_scale_f32_bits = 0U;
+      valid = valid &&
+              expect_status(sllm_qwen38_projection_pack2_prepare(
+                                context, &malformed, &plan, &error.sink),
+                            SLLM_STATUS_INVALID_ARGUMENT,
+                            "Qwen3.8 projection-pack scale rejection", error) &&
+              plan == nullptr;
+      malformed = descriptor;
+      malformed.activation.shape[0] = 2U;
+      malformed.gate_output.shape[0] = 2U;
+      malformed.up_output.shape[0] = 2U;
+      valid = valid &&
+              expect_status(sllm_qwen38_projection_pack2_prepare(
+                                context, &malformed, &plan, &error.sink),
+                            SLLM_STATUS_UNSUPPORTED,
+                            "Qwen3.8 projection-pack M>1 rejection", error) &&
+              plan == nullptr;
+
+      const std::size_t allocations_before_prepare =
+          fake_hip::live_allocations();
+      valid = valid &&
+              expect_status(sllm_qwen38_projection_pack2_prepare(
+                                context, &descriptor, &plan, &error.sink),
+                            SLLM_STATUS_OK, "Qwen3.8 projection-pack prepare",
+                            error) &&
+              plan != nullptr &&
+              fake_hip::live_allocations() == allocations_before_prepare + 1U;
+    }
+    if (valid) {
+      auto *wrong_plan = reinterpret_cast<sllm_matmul_plan_t *>(plan);
+      valid = expect_status(sllm_matmul_plan_release(&wrong_plan, &error.sink),
+                            SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+                            "Qwen3.8 projection-pack matmul release rejection",
+                            error) &&
+              wrong_plan == reinterpret_cast<sllm_matmul_plan_t *>(plan);
+
+      auto invalid_info = qwen38_projection_pack2_dispatch_info();
+      invalid_info.reserved[0] = 1U;
+      sllm_completion_t *sentinel = reinterpret_cast<sllm_completion_t *>(
+          static_cast<uintptr_t>(UINT64_C(0x55)));
+      valid =
+          valid &&
+          expect_status(sllm_qwen38_projection_pack2_execute(
+                            plan, queue, &sentinel, &invalid_info, &error.sink),
+                        SLLM_STATUS_RESERVED_NONZERO,
+                        "Qwen3.8 projection-pack dispatch rejection", error) &&
+          sentinel == reinterpret_cast<sllm_completion_t *>(
+                          static_cast<uintptr_t>(UINT64_C(0x55)));
+
+      auto info = qwen38_projection_pack2_dispatch_info();
+      valid =
+          valid &&
+          expect_status(sllm_qwen38_projection_pack2_execute(
+                            plan, queue, &completion, &info, &error.sink),
+                        SLLM_STATUS_OK, "Qwen3.8 projection-pack execute",
+                        error) &&
+          completion != nullptr && info.backend == SLLM_BACKEND_HIP &&
+          info.dispatch_count == 3U &&
+          info.kernel_id ==
+              SLLM_HIP_QWEN38_PROJECTION_PACK2_KERNEL_ID_NVFP4_SHARED_ACTIVATION_V1 &&
+          info.workgroup_size_x == 256U && info.grid_size_x != 0U &&
+          info.m == 1U && info.k == kHidden && info.n == kIntermediate &&
+          info.output_elements == 2U * kIntermediate &&
+          info.workspace_bytes ==
+              SLLM_HIP_QWEN38_PROJECTION_PACK2_WORKSPACE_BYTES &&
+          info.role ==
+              SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_NVFP4_MLP_GATE_UP &&
+          info.fallback_allowed == 0U && info.fallback_used == 0U &&
+          std::strcmp(info.kernel_symbol,
+                      "qwen38.projection_pack2.nvfp4.shared_activation.v1") ==
+              0 &&
+          std::strcmp(
+              info.device_symbol,
+              "sllm_qwen38_projection_pack2_nvfp4_shared_activation_v1") == 0 &&
+          std::strcmp(info.gcn_arch_name, arch_name) == 0;
+
+      sllm_completion_t *second_completion = nullptr;
+      auto second_info = qwen38_projection_pack2_dispatch_info();
+      valid =
+          valid &&
+          expect_status(
+              sllm_qwen38_projection_pack2_execute(
+                  plan, queue, &second_completion, &second_info, &error.sink),
+              SLLM_STATUS_PUBLIC_BUSY,
+              "Qwen3.8 projection-pack single in-flight submission", error) &&
+          second_completion == nullptr &&
+          expect_status(
+              sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
+              SLLM_STATUS_PUBLIC_BUSY, "Qwen3.8 projection-pack in-flight plan",
+              error) &&
+          plan != nullptr && release_queue(&queue, SLLM_STATUS_PUBLIC_BUSY) &&
+          release_buffer(&activation, SLLM_STATUS_PUBLIC_BUSY) &&
+          release_buffer(&weights[0], SLLM_STATUS_PUBLIC_BUSY) &&
+          release_buffer(&weights[1], SLLM_STATUS_PUBLIC_BUSY) &&
+          release_buffer(&outputs[0], SLLM_STATUS_PUBLIC_BUSY) &&
+          release_buffer(&outputs[1], SLLM_STATUS_PUBLIC_BUSY) &&
+          release_context(&context, SLLM_STATUS_PUBLIC_BUSY) &&
+          query_completion(completion, SLLM_STATUS_OK) &&
+          release_completion(&completion) &&
+          expect_status(
+              sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
+              SLLM_STATUS_OK, "Qwen3.8 projection-pack plan release", error) &&
+          plan == nullptr;
+    }
+    if (completion != nullptr)
+      valid = release_completion(&completion) && valid;
+    if (plan != nullptr) {
+      valid = expect_status(
+                  sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
+                  SLLM_STATUS_OK, "Qwen3.8 projection-pack cleanup release",
+                  error) &&
+              valid;
+    }
+    if (queue != nullptr)
+      valid = release_queue(&queue) && valid;
+    for (sllm_buffer_t *&output : outputs) {
+      if (output != nullptr)
+        valid = release_buffer(&output) && valid;
+    }
+    for (sllm_buffer_t *&weight : weights) {
+      if (weight != nullptr)
+        valid = release_buffer(&weight) && valid;
+    }
+    if (activation != nullptr)
+      valid = release_buffer(&activation) && valid;
+    if (context != nullptr)
+      valid = release_context(&context) && valid;
+    return valid && fake_hip::live_events() == 0U &&
+           fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+  };
+
+  bool valid =
+      run_supported_target("gfx1030") && run_supported_target("gfx1201");
+  // The shared-quantization bundle must admit the same ID84 compute variant
+  // as standalone matmul on both exact targets.
+  setenv(kSelectorVariables[4], "1", 1);
+  valid = run_supported_target("gfx1030") && valid;
+  valid = run_supported_target("gfx1201") && valid;
+  unsetenv(kSelectorVariables[4]);
+
+  fake_hip::reset();
+  fake_hip::set_gcn_arch_name("gfx942");
+  sllm_context_t *context = nullptr;
+  sllm_buffer_t *activation = nullptr;
+  std::array<sllm_buffer_t *, 2> weights{};
+  std::array<sllm_buffer_t *, 2> outputs{};
+  sllm_qwen38_projection_pack2_plan_t *plan = nullptr;
+  valid = create_context_for_arch("gfx942", &context) && valid;
+  valid = create_buffer_sized(context, kActivationBytes, &activation) && valid;
+  valid = create_buffer_sized(context, kWeightBytes, &weights[0]) && valid;
+  valid = create_buffer_sized(context, kWeightBytes, &weights[1]) && valid;
+  valid = create_buffer_sized(context, kOutputBytes, &outputs[0]) && valid;
+  valid = create_buffer_sized(context, kOutputBytes, &outputs[1]) && valid;
+  if (context != nullptr && activation != nullptr && weights[0] != nullptr &&
+      weights[1] != nullptr && outputs[0] != nullptr && outputs[1] != nullptr) {
+    const auto descriptor =
+        qwen38_projection_pack2_descriptor(activation, weights, outputs);
+    Error error;
+    valid =
+        expect_status(sllm_qwen38_projection_pack2_prepare(context, &descriptor,
+                                                           &plan, &error.sink),
+                      SLLM_STATUS_UNSUPPORTED,
+                      "Qwen3.8 projection-pack unsupported target", error) &&
+        plan == nullptr && valid;
+  }
+  for (sllm_buffer_t *&output : outputs) {
+    if (output != nullptr)
+      valid = release_buffer(&output) && valid;
+  }
+  for (sllm_buffer_t *&weight : weights) {
+    if (weight != nullptr)
+      valid = release_buffer(&weight) && valid;
+  }
+  if (activation != nullptr)
+    valid = release_buffer(&activation) && valid;
+  if (context != nullptr)
+    valid = release_context(&context) && valid;
+  fake_hip::set_gcn_arch_name("gfx1201");
+  restore_environment();
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
+bool qwen38_projection_pack2_fp8_gdn_public_contract() {
+  constexpr uint64_t kHidden = 5120U;
+  constexpr std::array<uint64_t, 2> kWidths = {10240U, 6144U};
+  constexpr uint64_t kActivationBytes = kHidden * sizeof(uint16_t);
+  std::array<uint64_t, 2> weight_bytes{};
+  std::array<uint64_t, 2> output_bytes{};
+  for (std::size_t index = 0U; index != kWidths.size(); ++index) {
+    weight_bytes[index] = kHidden * kWidths[index] + kWidths[index] * 4U;
+    output_bytes[index] = kWidths[index] * sizeof(uint16_t);
+  }
+  static_assert(SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES ==
+                UINT64_C(5124));
+
+  auto run_supported_target = [&](const char *const arch_name) {
+    fake_hip::reset();
+    sllm_public_runtime::FaultInjector::reset();
+    fake_hip::set_gcn_arch_name(arch_name);
+    sllm_context_t *context = nullptr;
+    sllm_queue_t *queue = nullptr;
+    sllm_buffer_t *activation = nullptr;
+    std::array<sllm_buffer_t *, 2> weights{};
+    std::array<sllm_buffer_t *, 2> outputs{};
+    sllm_qwen38_projection_pack2_plan_t *plan = nullptr;
+    sllm_completion_t *completion = nullptr;
+    Error error;
+    bool valid = create_context_for_arch(arch_name, &context) &&
+                 create_queue(context, &queue) &&
+                 create_buffer_sized(context, kActivationBytes, &activation) &&
+                 create_buffer_sized(context, weight_bytes[0], &weights[0]) &&
+                 create_buffer_sized(context, weight_bytes[1], &weights[1]) &&
+                 create_buffer_sized(context, output_bytes[0], &outputs[0]) &&
+                 create_buffer_sized(context, output_bytes[1], &outputs[1]);
+    if (valid) {
+      auto descriptor = qwen38_projection_pack2_fp8_gdn_descriptor(
+          activation, weights, outputs);
+      auto malformed = descriptor;
+      malformed.input_global_scale_f32_bits = UINT32_C(0x3f800000);
+      valid =
+          expect_status(sllm_qwen38_projection_pack2_prepare(
+                            context, &malformed, &plan, &error.sink),
+                        SLLM_STATUS_INVALID_ARGUMENT,
+                        "Qwen3.8 FP8 GDN nonzero input-global scale rejection",
+                        error) &&
+          plan == nullptr;
+      malformed = descriptor;
+      malformed.activation.shape[0] = 2U;
+      malformed.gate_output.shape[0] = 2U;
+      malformed.up_output.shape[0] = 2U;
+      valid = valid &&
+              expect_status(sllm_qwen38_projection_pack2_prepare(
+                                context, &malformed, &plan, &error.sink),
+                            SLLM_STATUS_UNSUPPORTED,
+                            "Qwen3.8 FP8 GDN M>1 rejection", error) &&
+              plan == nullptr;
+      valid = valid &&
+              expect_status(sllm_qwen38_projection_pack2_prepare(
+                                context, &descriptor, &plan, &error.sink),
+                            SLLM_STATUS_OK,
+                            "Qwen3.8 FP8 GDN projection-pack prepare", error) &&
+              plan != nullptr;
+    }
+    if (valid) {
+      auto info = qwen38_projection_pack2_dispatch_info();
+      valid =
+          expect_status(sllm_qwen38_projection_pack2_execute(
+                            plan, queue, &completion, &info, &error.sink),
+                        SLLM_STATUS_OK,
+                        "Qwen3.8 FP8 GDN projection-pack execute", error) &&
+          completion != nullptr && info.dispatch_count == 3U &&
+          info.kernel_id ==
+              SLLM_HIP_QWEN38_PROJECTION_PACK2_KERNEL_ID_FP8_GDN_SHARED_ACTIVATION_V1 &&
+          info.workspace_bytes ==
+              SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES &&
+          info.role == SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_FP8_GDN_QKV_Z &&
+          info.m == 1U && info.k == kHidden && info.n == kWidths[0] &&
+          info.output_elements == kWidths[0] + kWidths[1] &&
+          info.fallback_allowed == 0U && info.fallback_used == 0U;
+      sllm_completion_t *second_completion = nullptr;
+      auto second_info = qwen38_projection_pack2_dispatch_info();
+      valid =
+          valid &&
+          expect_status(
+              sllm_qwen38_projection_pack2_execute(
+                  plan, queue, &second_completion, &second_info, &error.sink),
+              SLLM_STATUS_PUBLIC_BUSY,
+              "Qwen3.8 FP8 GDN single in-flight submission", error) &&
+          second_completion == nullptr &&
+          expect_status(
+              sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
+              SLLM_STATUS_PUBLIC_BUSY, "Qwen3.8 FP8 GDN in-flight plan", error);
+    }
+    if (completion != nullptr) {
+      valid = query_completion(completion, SLLM_STATUS_OK) && valid;
+      valid = release_completion(&completion) && valid;
+    }
+    if (plan != nullptr) {
+      valid = expect_status(
+                  sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
+                  SLLM_STATUS_OK, "Qwen3.8 FP8 GDN projection-pack release",
+                  error) &&
+              valid;
+    }
+    if (queue != nullptr)
+      valid = release_queue(&queue) && valid;
+    for (sllm_buffer_t *&output : outputs) {
+      if (output != nullptr)
+        valid = release_buffer(&output) && valid;
+    }
+    for (sllm_buffer_t *&weight : weights) {
+      if (weight != nullptr)
+        valid = release_buffer(&weight) && valid;
+    }
+    if (activation != nullptr)
+      valid = release_buffer(&activation) && valid;
+    if (context != nullptr)
+      valid = release_context(&context) && valid;
+    return valid && fake_hip::live_events() == 0U &&
+           fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+  };
+
+  return run_supported_target("gfx1030") && run_supported_target("gfx1201");
+}
+
 bool gdn_projection_bundle_launch_failure_rolls_back_accounting() {
   fake_hip::reset();
   sllm_public_runtime::FaultInjector::reset();
@@ -3417,6 +4561,7 @@ bool gdn_projection_bundle_launch_failure_rolls_back_accounting() {
   if (context != nullptr) {
     valid = release_context(&context) && valid;
   }
+
   fake_hip::set_gcn_arch_name("gfx1201");
   return valid && fake_hip::live_events() == 0U &&
          fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
@@ -4161,6 +5306,23 @@ bool matmul_mxfp_prefill_selector_contract() {
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
       sllm_matmul_kernel::select_mxfp6_variant(17U) ==
           sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
+      sllm_matmul_kernel::select_nvfp4_w4a4_variant(1U) ==
+          sllm_matmul_kernel::KernelVariant::Nvfp4W4A4Decode &&
+      sllm_matmul_kernel::select_nvfp4_w4a4_variant(2U) ==
+          sllm_matmul_kernel::KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      sllm_matmul_kernel::select_fp8_outer_variant(17U, 5120U, 17408U,
+                                                   "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::
+              Fp8OuterPrefillGfx1030Half2_64x64 &&
+      sllm_matmul_kernel::select_fp8_outer_variant(1U, 5120U, 17408U, "gfx1030",
+                                                   true) ==
+          sllm_matmul_kernel::KernelVariant::Fp8Emulation &&
+      sllm_matmul_kernel::select_fp8_outer_variant(17U, 5120U, 17408U,
+                                                   "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Fp8Native &&
+      sllm_matmul_kernel::select_fp8_outer_variant(1U, 5120U, 17408U,
+                                                   "gfx942:sramecc+:xnack-") ==
+          sllm_matmul_kernel::KernelVariant::Fp8Native &&
       sllm_matmul_kernel::select_mxfp8_variant(127U, 2560U, 9216U, "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
       sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, "gfx1201") ==
@@ -5209,6 +6371,1684 @@ bool matmul_mxfp_prefill_selector_contract() {
          fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
 }
 
+bool matmul_fp8_outer_decode_selector_contract() {
+  constexpr std::array<const char *const, 5> variables = {
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030Half2Environment,
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030Dword8Environment,
+      sllm_matmul_kernel::kFp8OuterDecodeBaselineEnvironment,
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030ActivationSharedEnvironment,
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030LdsLutEnvironment,
+  };
+  std::array<bool, variables.size()> was_present{};
+  std::array<std::string, variables.size()> old_values{};
+  for (std::size_t index = 0U; index < variables.size(); ++index) {
+    const char *const value = std::getenv(variables[index]);
+    was_present[index] = value != nullptr;
+    old_values[index] = value != nullptr ? value : "";
+    unsetenv(variables[index]);
+  }
+  const auto restore = [&]() {
+    for (std::size_t index = 0U; index < variables.size(); ++index) {
+      if (was_present[index]) {
+        setenv(variables[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(variables[index]);
+      }
+    }
+  };
+
+  using sllm_matmul_kernel::KernelVariant;
+  const auto select = [](const uint64_t m, const uint64_t k, const uint64_t n,
+                         const char *const target = "gfx1030",
+                         const bool fnuz = false) {
+    return sllm_matmul_kernel::select_fp8_outer_variant(m, k, n, target, fnuz);
+  };
+  bool valid =
+      select(1U, 64U, 33U) == KernelVariant::Fp8Emulation &&
+      static_cast<uint32_t>(
+          KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32) == 66U &&
+      static_cast<uint32_t>(
+          KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32) == 68U;
+
+  setenv(variables[0], "1", 1);
+  valid =
+      valid &&
+      select(1U, 64U, 1U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32 &&
+      select(1U, 5120U, 33U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32 &&
+      select(1U, 17408U, 17408U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32 &&
+      select(1U, 0U, 33U) == KernelVariant::Fp8Emulation &&
+      select(1U, 63U, 33U) == KernelVariant::Fp8Emulation &&
+      select(1U, 65U, 33U) == KernelVariant::Fp8Emulation &&
+      select(1U, 17472U, 33U) == KernelVariant::Fp8Emulation &&
+      select(1U, 64U, 0U) == KernelVariant::Fp8Emulation &&
+      select(2U, 64U, 33U) !=
+          KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32 &&
+      select(1U, 64U, 33U, "gfx1201") == KernelVariant::Fp8Native &&
+      select(1U, 64U, 33U, "gfx942:sramecc+:xnack-") ==
+          KernelVariant::Fp8Native &&
+      select(1U, 64U, 33U, "gfx9999") == KernelVariant::Fp8Emulation &&
+      select(1U, 64U, 33U, "gfx1030", true) == KernelVariant::Fp8Emulation &&
+      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                      KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32),
+                  "matmul.fp8.outer.decode.gfx1030.half2.wave4col32.v1") == 0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol(
+                      KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32),
+                  "sllm_matmul_fp8_outer_decode_gfx1030_half2_wave4col32_v1") ==
+          0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32) == 256U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32, 1U, 1U) == 1U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32, 1U, 32U) == 1U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32, 1U, 33U) == 2U;
+
+  unsetenv(variables[0]);
+  setenv(variables[1], "1", 1);
+  valid =
+      valid &&
+      select(1U, 64U, 1U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
+      select(1U, 5120U, 33U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
+      select(1U, 17408U, 17408U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
+      select(1U, 63U, 33U) == KernelVariant::Fp8Emulation &&
+      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                      KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32),
+                  "matmul.fp8.outer.decode.gfx1030.dword8.wave4col32.v1") ==
+          0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol(
+              KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32),
+          "sllm_matmul_fp8_outer_decode_gfx1030_dword8_wave4col32_v1") == 0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32) == 256U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32, 1U, 32U) ==
+          1U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32, 1U, 33U) == 2U;
+
+  unsetenv(variables[0]);
+  unsetenv(variables[1]);
+  unsetenv(variables[3]);
+  setenv(variables[4], "1", 1);
+  valid =
+      valid &&
+      select(1U, 64U, 1U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
+      select(1U, 5120U, 33U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
+      select(1U, 17408U, 17408U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
+      select(1U, 0U, 33U) == KernelVariant::Fp8Emulation &&
+      select(1U, 63U, 33U) == KernelVariant::Fp8Emulation &&
+      select(1U, 65U, 33U) == KernelVariant::Fp8Emulation &&
+      select(1U, 17472U, 33U) == KernelVariant::Fp8Emulation &&
+      select(1U, 64U, 0U) == KernelVariant::Fp8Emulation &&
+      select(2U, 5120U, 17408U) !=
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
+      select(1U, 64U, 33U, "gfx1201") == KernelVariant::Fp8Native &&
+      select(1U, 64U, 33U, "gfx1030", true) == KernelVariant::Fp8Emulation &&
+      static_cast<uint32_t>(
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32) == 82U &&
+      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                      KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32),
+                  "matmul.fp8.outer.decode.gfx1030.lds_lut.wave4col32.v1") ==
+          0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol(
+              KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32),
+          "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_wave4col32_v1") == 0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32) == 256U &&
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030LdsLutStaticLdsBytes == 544U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32, 1U, 32U) ==
+          1U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32, 1U, 33U) == 2U;
+
+  setenv(variables[2], "1", 1);
+  valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
+  unsetenv(variables[2]);
+  setenv(variables[4], "yes", 1);
+  valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
+  unsetenv(variables[4]);
+
+  setenv(variables[2], "1", 1);
+  valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
+  unsetenv(variables[2]);
+  setenv(variables[1], "yes", 1);
+  valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
+  unsetenv(variables[1]);
+
+  setenv(variables[0], "yes", 1);
+  valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
+
+  unsetenv(variables[0]);
+  unsetenv(variables[1]);
+  unsetenv(variables[2]);
+  setenv(variables[3], "1", 1);
+  valid =
+      valid &&
+      select(1U, 5120U, 17408U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32 &&
+      select(1U, 5120U, 12288U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64 &&
+      select(1U, 6144U, 5120U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64 &&
+      select(1U, 5120U, 10240U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64 &&
+      select(1U, 5120U, 6144U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
+      select(1U, 17408U, 5120U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
+      select(1U, 5120U, 1024U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
+      select(1U, 5120U, 248320U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
+      select(1U, 5120U, 12289U) == KernelVariant::Fp8Emulation &&
+      select(2U, 5120U, 17408U) ==
+          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
+      select(1U, 5120U, 17408U, "gfx1201") == KernelVariant::Fp8Native &&
+      select(1U, 5120U, 17408U, "gfx1030", true) ==
+          KernelVariant::Fp8Emulation &&
+      static_cast<uint32_t>(
+          KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32) ==
+          75U &&
+      static_cast<uint32_t>(
+          KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64) ==
+          76U &&
+      std::strcmp(
+          sllm_matmul_kernel::logical_kernel_id(
+              KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32),
+          "matmul.fp8.outer.decode.gfx1030.activation_shared.wave4col32.v1") ==
+          0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol(
+              KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32),
+          "sllm_matmul_fp8_outer_decode_gfx1030_actshared_wave4col32_v1") ==
+          0 &&
+      std::strcmp(
+          sllm_matmul_kernel::logical_kernel_id(
+              KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64),
+          "matmul.fp8.outer.decode.gfx1030.activation_shared.wave8col64.v1") ==
+          0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol(
+              KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64),
+          "sllm_matmul_fp8_outer_decode_gfx1030_actshared_wave8col64_v1") ==
+          0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32) ==
+          256U &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64) ==
+          256U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32, 1U,
+          17408U) == 544U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64, 1U,
+          12288U) == 192U &&
+      sllm_matmul_kernel::fp8_outer_decode_gfx1030_activation_shared_lds_bytes(
+          5120U) == 10240U &&
+      sllm_matmul_kernel::fp8_outer_decode_gfx1030_activation_shared_lds_bytes(
+          6144U) == 12288U;
+
+  setenv(variables[2], "1", 1);
+  valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
+  unsetenv(variables[2]);
+  setenv(variables[3], "yes", 1);
+  valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
+  unsetenv(variables[3]);
+  setenv(variables[0], "1", 1);
+
+  constexpr auto provider_request = sllm_lowp::make_provider_request(
+      sllm_lowp::MatmulFormat::Fp8OuterE4M3W8A8,
+      sllm_lowp::ExactTarget::Gfx1030, 1U, 33U, 64U);
+  constexpr auto provider_plan =
+      sllm_lowp::prepare_provider_plan(provider_request);
+  constexpr auto gfx1201_provider_request = sllm_lowp::make_provider_request(
+      sllm_lowp::MatmulFormat::Fp8OuterE4M3W8A8,
+      sllm_lowp::ExactTarget::Gfx1201, 1U, 33U, 64U);
+  constexpr auto gfx1201_provider_plan =
+      sllm_lowp::prepare_provider_plan(gfx1201_provider_request);
+  valid = valid && provider_plan.supported() &&
+          provider_plan.provider ==
+              sllm_lowp::ProviderKind::Fp8OuterGfx1030Software &&
+          provider_plan.weight_layout == sllm_lowp::BlockLayout::RowMajor &&
+          provider_plan.activation_layout == sllm_lowp::BlockLayout::RowMajor &&
+          provider_plan.activation_pack ==
+              sllm_lowp::ActivationPack::Fp8E4M3Outer &&
+          provider_plan.block_contract.weight_scale ==
+              sllm_lowp::BlockScaleType::Fp32OuterVector &&
+          provider_plan.block_contract.activation_scale ==
+              sllm_lowp::BlockScaleType::Fp32OuterVector &&
+          provider_plan.output == sllm_lowp::OutputType::Bf16Rne &&
+          !gfx1201_provider_plan.supported() &&
+          gfx1201_provider_plan.rejection ==
+              sllm_lowp::ProviderRejection::UnsupportedTarget;
+
+  fake_hip::reset();
+  fake_hip::set_gcn_arch_name("gfx1030");
+  sllm_context_t *context = nullptr;
+  sllm_buffer_t *activation = nullptr;
+  sllm_buffer_t *weight = nullptr;
+  sllm_buffer_t *output = nullptr;
+  sllm_matmul_plan_t *plan = nullptr;
+  constexpr uint64_t m = 1U;
+  constexpr uint64_t k = 64U;
+  constexpr uint64_t n = 33U;
+  Error error;
+  const bool resources =
+      create_context_for_arch("gfx1030", &context) &&
+      create_buffer_sized(context, m * k * sizeof(uint16_t), &activation) &&
+      create_buffer_sized(context, n * k + n * sizeof(float), &weight) &&
+      create_buffer_sized(context, m * n * sizeof(uint16_t), &output);
+  valid = valid && resources;
+  if (resources) {
+    auto descriptor =
+        matmul_descriptor(activation, 0U, weight, 0U, output, 0U, m, k, n);
+    descriptor.op_version = SLLM_HIP_MATMUL_FP8_VERSION;
+    descriptor.weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+    descriptor.weight.encoding = SLLM_TENSOR_ENCODING_FP8_OUTER_F32;
+    valid = expect_status(
+                sllm_matmul_prepare(context, &descriptor, &plan, &error.sink),
+                SLLM_STATUS_OK, "FP8 outer decode prepared provider", error) &&
+            plan != nullptr && valid;
+    if (plan != nullptr) {
+      uint32_t prepared_provider = 0U;
+      uint32_t prepared_tile = 0U;
+      uint32_t prepared_inner_product = 0U;
+      valid =
+          sllm_test_matmul_prepared_kernel_id(plan) == 66U &&
+          sllm_test_matmul_prepared_provider_semantics(
+              plan, &prepared_provider, &prepared_tile,
+              &prepared_inner_product) == 1U &&
+          prepared_provider ==
+              static_cast<uint32_t>(
+                  sllm_lowp::ProviderKind::Fp8OuterGfx1030Software) &&
+          prepared_tile == static_cast<uint32_t>(
+                               sllm_lowp::TilePolicy::DecodeWave4Column32) &&
+          prepared_inner_product ==
+              static_cast<uint32_t>(
+                  sllm_lowp::InnerProduct::E4M3Fp16Dot2Fp32) &&
+          valid;
+
+      unsetenv(variables[0]);
+      setenv(variables[1], "1", 1);
+      valid =
+          sllm_test_matmul_prepared_kernel_id(plan) == 66U &&
+          sllm_test_matmul_prepared_provider_semantics(
+              plan, &prepared_provider, &prepared_tile,
+              &prepared_inner_product) == 1U &&
+          prepared_tile == static_cast<uint32_t>(
+                               sllm_lowp::TilePolicy::DecodeWave4Column32) &&
+          valid;
+    }
+  }
+  if (plan != nullptr) {
+    valid = expect_status(
+                sllm_matmul_plan_release(&plan, &error.sink), SLLM_STATUS_OK,
+                "FP8 outer decode prepared provider release", error) &&
+            valid;
+  }
+  // Exercise the padded LDS-LUT provider and verify that the concrete tile
+  // semantics and selector result are frozen when the plan is prepared.
+  unsetenv(variables[0]);
+  unsetenv(variables[1]);
+  unsetenv(variables[2]);
+  unsetenv(variables[3]);
+  setenv(variables[4], "1", 1);
+  sllm_matmul_plan_t *lut_plan = nullptr;
+  if (resources) {
+    auto lut_descriptor =
+        matmul_descriptor(activation, 0U, weight, 0U, output, 0U, m, k, n);
+    lut_descriptor.op_version = SLLM_HIP_MATMUL_FP8_VERSION;
+    lut_descriptor.weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+    lut_descriptor.weight.encoding = SLLM_TENSOR_ENCODING_FP8_OUTER_F32;
+    valid = expect_status(sllm_matmul_prepare(context, &lut_descriptor,
+                                              &lut_plan, &error.sink),
+                          SLLM_STATUS_OK, "FP8 LUT decode prepared provider",
+                          error) &&
+            lut_plan != nullptr && valid;
+    if (lut_plan != nullptr) {
+      uint32_t lut_provider = 0U;
+      uint32_t lut_tile = 0U;
+      uint32_t lut_inner_product = 0U;
+      valid =
+          sllm_test_matmul_prepared_kernel_id(lut_plan) == 82U &&
+          sllm_test_matmul_prepared_provider_semantics(
+              lut_plan, &lut_provider, &lut_tile, &lut_inner_product) == 1U &&
+          lut_provider ==
+              static_cast<uint32_t>(
+                  sllm_lowp::ProviderKind::Fp8OuterGfx1030Software) &&
+          lut_tile == static_cast<uint32_t>(
+                          sllm_lowp::TilePolicy::DecodeDword8Wave4Column32) &&
+          lut_inner_product == static_cast<uint32_t>(
+                                   sllm_lowp::InnerProduct::E4M3Fp16Dot2Fp32) &&
+          valid;
+
+      // The prepared plan remains ID82 even if a different selector is
+      // requested after prepare; execute must not silently change kernels.
+      unsetenv(variables[4]);
+      setenv(variables[1], "1", 1);
+      valid = valid && sllm_test_matmul_prepared_kernel_id(lut_plan) == 82U;
+    }
+  }
+  if (lut_plan != nullptr) {
+    valid = expect_status(sllm_matmul_plan_release(&lut_plan, &error.sink),
+                          SLLM_STATUS_OK,
+                          "FP8 LUT decode prepared provider release", error) &&
+            valid;
+  }
+  unsetenv(variables[4]);
+  // Exercise the exact shared-LDS prepare path and verify that the selected
+  // variant is frozen for the plan lifetime even if selector environments
+  // change before execute.
+  unsetenv(variables[0]);
+  unsetenv(variables[1]);
+  unsetenv(variables[2]);
+  setenv(variables[3], "1", 1);
+  sllm_buffer_t *shared_activation = nullptr;
+  sllm_buffer_t *shared_weight = nullptr;
+  sllm_buffer_t *shared_output = nullptr;
+  sllm_matmul_plan_t *shared_plan = nullptr;
+  constexpr uint64_t shared_m = 1U;
+  constexpr uint64_t shared_k = 5120U;
+  constexpr uint64_t shared_n = 17408U;
+  const bool shared_resources =
+      resources &&
+      create_buffer_sized(context, shared_m * shared_k * sizeof(uint16_t),
+                          &shared_activation) &&
+      create_buffer_sized(context,
+                          shared_n * shared_k + shared_n * sizeof(float),
+                          &shared_weight) &&
+      create_buffer_sized(context, shared_m * shared_n * sizeof(uint16_t),
+                          &shared_output);
+  valid = shared_resources && valid;
+  if (shared_resources) {
+    auto shared_descriptor =
+        matmul_descriptor(shared_activation, 0U, shared_weight, 0U,
+                          shared_output, 0U, shared_m, shared_k, shared_n);
+    shared_descriptor.op_version = SLLM_HIP_MATMUL_FP8_VERSION;
+    shared_descriptor.weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+    shared_descriptor.weight.encoding = SLLM_TENSOR_ENCODING_FP8_OUTER_F32;
+    valid =
+        expect_status(sllm_matmul_prepare(context, &shared_descriptor,
+                                          &shared_plan, &error.sink),
+                      SLLM_STATUS_OK, "FP8 shared activation prepare", error) &&
+        shared_plan != nullptr && valid;
+    if (shared_plan != nullptr) {
+      uint32_t shared_provider = 0U;
+      uint32_t shared_tile = 0U;
+      uint32_t shared_inner_product = 0U;
+      valid = sllm_test_matmul_prepared_kernel_id(shared_plan) == 75U &&
+              sllm_test_matmul_prepared_provider_semantics(
+                  shared_plan, &shared_provider, &shared_tile,
+                  &shared_inner_product) == 1U &&
+              shared_provider ==
+                  static_cast<uint32_t>(
+                      sllm_lowp::ProviderKind::Fp8OuterGfx1030Software) &&
+              shared_tile ==
+                  static_cast<uint32_t>(
+                      sllm_lowp::TilePolicy::DecodeDword8Wave4Column32) &&
+              shared_inner_product ==
+                  static_cast<uint32_t>(
+                      sllm_lowp::InnerProduct::E4M3Fp16Dot2Fp32) &&
+              valid;
+      unsetenv(variables[3]);
+      setenv(variables[1], "1", 1);
+      valid = valid && sllm_test_matmul_prepared_kernel_id(shared_plan) == 75U;
+    }
+  }
+  if (shared_plan != nullptr) {
+    valid = expect_status(sllm_matmul_plan_release(&shared_plan, &error.sink),
+                          SLLM_STATUS_OK, "FP8 shared activation plan release",
+                          error) &&
+            valid;
+  }
+  if (shared_activation != nullptr) {
+    valid = release_buffer(&shared_activation) && valid;
+  }
+  if (shared_weight != nullptr) {
+    valid = release_buffer(&shared_weight) && valid;
+  }
+  if (shared_output != nullptr) {
+    valid = release_buffer(&shared_output) && valid;
+  }
+  if (activation != nullptr) {
+    valid = release_buffer(&activation) && valid;
+  }
+  if (weight != nullptr) {
+    valid = release_buffer(&weight) && valid;
+  }
+  if (output != nullptr) {
+    valid = release_buffer(&output) && valid;
+  }
+  if (context != nullptr) {
+    valid = release_context(&context) && valid;
+  }
+  fake_hip::set_gcn_arch_name("gfx1201");
+
+  restore();
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
+bool matmul_fp8_gfx1201_decode_rank_table_contract() {
+  const auto check =
+      [](const char *const arch, const uint32_t dtype, const uint64_t m,
+         const uint64_t k, const uint64_t n, const char *const override_value,
+         const uint32_t expected_valid, const uint64_t expected_rank,
+         const uint32_t expected_ranked, const uint32_t expected_explicit) {
+        uint64_t rank = UINT64_MAX;
+        uint32_t ranked = UINT32_MAX;
+        uint32_t explicit_override = UINT32_MAX;
+        const uint32_t result = sllm_test_select_fp8_lt_heuristic_rank_policy(
+            arch, dtype, m, k, n, override_value, &rank, &ranked,
+            &explicit_override);
+        const bool matches =
+            result == expected_valid && rank == expected_rank &&
+            ranked == expected_ranked && explicit_override == expected_explicit;
+        if (!matches) {
+          std::cerr << "FP8 rank policy mismatch arch=" << arch << " m=" << m
+                    << " k=" << k << " n=" << n << " override="
+                    << (override_value != nullptr ? override_value : "<unset>")
+                    << " got={" << result << ',' << rank << ',' << ranked << ','
+                    << explicit_override << "} expected={" << expected_valid
+                    << ',' << expected_rank << ',' << expected_ranked << ','
+                    << expected_explicit << "}\n";
+        }
+        return matches;
+      };
+  constexpr uint32_t fn = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+  constexpr uint32_t fnuz = SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ;
+  const bool short_projection_valid =
+      check("gfx1201", fn, 17U, 6144U, 5120U, nullptr, 1U, 3U, 1U, 0U) &&
+      check("gfx1201", fn, 17U, 6144U, 5120U, "7", 1U, 3U, 1U, 0U) &&
+      check("gfx1201", fn, 16U, 6144U, 5120U, nullptr, 1U, 0U, 0U, 0U) &&
+      check("gfx1201", fn, 18U, 6144U, 5120U, nullptr, 1U, 0U, 0U, 0U) &&
+      check("gfx1201", fn, 17U, 6143U, 5120U, nullptr, 1U, 0U, 0U, 0U) &&
+      check("gfx1201", fn, 17U, 6144U, 5119U, nullptr, 1U, 0U, 0U, 0U) &&
+      check("gfx1201", fnuz, 17U, 6144U, 5120U, nullptr, 1U, 0U, 0U, 0U) &&
+      check("gfx1030", fn, 17U, 6144U, 5120U, nullptr, 1U, 0U, 0U, 0U);
+  bool valid =
+      short_projection_valid &&
+      check("gfx1201", fn, 1U, 5120U, 10240U, nullptr, 1U, 7U, 1U, 0U) &&
+      check("gfx1201", fn, 1U, 5120U, 6144U, nullptr, 1U, 8U, 1U, 0U) &&
+      check("gfx1201", fn, 1U, 6144U, 5120U, nullptr, 1U, 8U, 1U, 0U) &&
+      check("gfx1201", fn, 1U, 5120U, 12288U, nullptr, 1U, 9U, 1U, 0U) &&
+      check("gfx1201", fn, 1U, 5120U, 1024U, nullptr, 1U, 9U, 1U, 0U) &&
+      check("gfx1201", fn, 1U, 5120U, 17408U, nullptr, 1U, 8U, 1U, 0U) &&
+      check("gfx1201", fn, 1U, 17408U, 5120U, nullptr, 1U, 9U, 1U, 0U);
+
+  // Explicit selection, including the established rank-7 override, wins over
+  // the automatic table.  Explicit rank zero still requests the expanded
+  // heuristic list and therefore remains distinct from historical default.
+  valid = valid &&
+          check("gfx1201", fn, 1U, 5120U, 17408U, "7", 1U, 7U, 1U, 1U) &&
+          check("gfx1201", fn, 1U, 5120U, 17408U, "0", 1U, 0U, 1U, 1U) &&
+          check("gfx1201", fnuz, 1U, 5120U, 17408U, "7", 1U, 7U, 1U, 1U);
+
+  // Non-table shapes, vocabulary output, other targets/M, and FNUZ retain the
+  // prior single-result rank-zero policy.  Adjacent dimensions do not match.
+  valid = valid &&
+          check("gfx1201", fn, 2U, 5120U, 17408U, nullptr, 1U, 0U, 0U, 0U) &&
+          check("gfx1030", fn, 1U, 5120U, 17408U, nullptr, 1U, 0U, 0U, 0U) &&
+          check("gfx1201:sramecc-:xnack-", fn, 1U, 5120U, 17408U, nullptr, 1U,
+                0U, 0U, 0U) &&
+          check("gfx1201", fnuz, 1U, 5120U, 17408U, nullptr, 1U, 0U, 0U, 0U) &&
+          check("gfx1201", fn, 1U, 5120U, 248320U, nullptr, 1U, 0U, 0U, 0U) &&
+          check("gfx1201", fn, 1U, 5120U, 17407U, nullptr, 1U, 0U, 0U, 0U) &&
+          check("gfx1201", fn, 1U, 17408U, 5121U, nullptr, 1U, 0U, 0U, 0U);
+
+  // Invalid explicit values remain fail-closed on the applicable target.
+  valid = valid &&
+          check("gfx1201", fn, 1U, 5120U, 17408U, "", 0U, 0U, 1U, 1U) &&
+          check("gfx1201", fn, 1U, 5120U, 17408U, "rank7", 0U, 0U, 1U, 1U) &&
+          check("gfx1201", fn, 1U, 5120U, 17408U, "18446744073709551616", 0U,
+                1844674407370955161U, 1U, 1U) &&
+          check("gfx1030", fn, 1U, 5120U, 17408U, "invalid", 1U, 0U, 0U, 0U) &&
+          check("gfx1201", fn, 2U, 5120U, 17408U, "invalid", 1U, 0U, 0U, 0U);
+  return valid;
+}
+
+bool matmul_fp8_outer_f16_staging_selector_and_lease_contract() {
+  constexpr std::array<const char *const, 8> variables = {
+      sllm_matmul_kernel::kFp8OuterPrefillGfx1030F16StagingEnvironment,
+      "SLLM_FP8_OUTER_PREFILL_FORCE_BASELINE",
+      "SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_HALF2",
+      sllm_matmul_kernel::kFp8OuterDecodeBaselineEnvironment,
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030Half2Environment,
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030Dword8Environment,
+      sllm_matmul_kernel::kFp8OuterPrefillGfx1030LdsLutEnvironment,
+      sllm_matmul_kernel::kFp8OuterPrefillGfx1030F16TileStagingEnvironment,
+  };
+  std::array<bool, variables.size()> was_present{};
+  std::array<std::string, variables.size()> old_values{};
+  for (std::size_t index = 0U; index < variables.size(); ++index) {
+    const char *const value = std::getenv(variables[index]);
+    was_present[index] = value != nullptr;
+    old_values[index] = value != nullptr ? value : "";
+    unsetenv(variables[index]);
+  }
+  const auto restore = [&]() {
+    for (std::size_t index = 0U; index < variables.size(); ++index) {
+      if (was_present[index]) {
+        setenv(variables[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(variables[index]);
+      }
+    }
+  };
+
+  using sllm_matmul_kernel::KernelVariant;
+  const auto select = [](const uint64_t m, const uint64_t k, const uint64_t n,
+                         const char *const target = "gfx1030",
+                         const bool fnuz = false) {
+    return sllm_matmul_kernel::select_fp8_outer_variant(m, k, n, target, fnuz);
+  };
+  bool valid =
+      static_cast<uint32_t>(KernelVariant::Fp8OuterPrefillGfx1030F16Staging) ==
+          70U &&
+      static_cast<uint32_t>(
+          KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging) == 86U &&
+      select(128U, 16U, 16U) ==
+          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64;
+  valid =
+      valid &&
+      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n64_shape(
+          2U, 5120U, 10240U) &&
+      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n64_shape(
+          32U, 5120U, 17408U) &&
+      !sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n64_shape(
+          1U, 5120U, 17408U) &&
+      !sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n64_shape(
+          33U, 5120U, 17408U) &&
+      !sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n64_shape(
+          32U, 5120U, 17409U) &&
+      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n32_shape(
+          2U, 17408U, 5120U) &&
+      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n32_shape(
+          32U, 6144U, 5120U) &&
+      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_shape(
+          17U, 6144U, 5120U) &&
+      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_shape(
+          32U, 6144U, 5120U) &&
+      !sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_shape(
+          33U, 6144U, 5120U) &&
+      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_shape(
+          32U, 5120U, 6144U) &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64, 17U, 5120U) ==
+          80U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64, 17U, 5120U,
+          6144U) == 160U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64, 17U, 10240U,
+          5120U) == 160U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64, 17U, 12288U,
+          5120U) == 192U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64, 17U, 17408U,
+          5120U) == 272U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64, 33U, 5120U,
+          6144U) == 80U;
+
+  // ID86 reuses ID70's FP16 workspace but consumes it with the measured
+  // 64x64/K32 tile. Row and column tails are guarded by the tile body; K/N
+  // retain the existing 16-element boundary and FNUZ stays on its rollback.
+  setenv(variables[7], "1", 1);
+  valid =
+      valid &&
+      select(128U, 16U, 16U) ==
+          KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging &&
+      select(219U, 6144U, 5120U) ==
+          KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging &&
+      select(127U, 16U, 16U) ==
+          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
+      select(128U, 15U, 16U) ==
+          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
+      select(128U, 16U, 17U) ==
+          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
+      select(128U, 16U, 16U, "gfx1030", true) ==
+          KernelVariant::Fp8OuterPrefillTiled16 &&
+      select(128U, 16U, 16U, "gfx1201") == KernelVariant::Fp8Native &&
+      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                      KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging),
+                  sllm_matmul_kernel::
+                      kFp8OuterPrefillGfx1030F16TileStagingLogicalKernelId) ==
+          0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol(
+                      KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging),
+                  sllm_matmul_kernel::
+                      kFp8OuterPrefillGfx1030F16TileStagingDeviceSymbol) == 0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging) == 256U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging, 219U, 5120U) ==
+          320U;
+  unsetenv(variables[7]);
+
+  setenv(variables[0], "1", 1);
+  valid = valid &&
+          select(128U, 16U, 16U) ==
+              KernelVariant::Fp8OuterPrefillGfx1030F16Staging &&
+          select(256U, 5120U, 17408U) ==
+              KernelVariant::Fp8OuterPrefillGfx1030F16Staging &&
+          select(128U, 17408U, 5120U) ==
+              KernelVariant::Fp8OuterPrefillGfx1030F16Staging &&
+          select(127U, 16U, 16U) ==
+              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
+          select(129U, 16U, 16U) ==
+              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
+          select(128U, 15U, 16U) ==
+              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
+          select(128U, 16U, 17U) ==
+              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
+          select(128U, 17424U, 16U) ==
+              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
+          select(128U, 16U, 17424U) ==
+              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
+          select(128U, 5120U, 248320U) ==
+              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
+          select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation &&
+          select(128U, 16U, 16U, "gfx1201") == KernelVariant::Fp8Native &&
+          select(128U, 16U, 16U, "gfx942:sramecc+:xnack-") ==
+              KernelVariant::Fp8Native &&
+          select(128U, 16U, 16U, "gfx9999") == KernelVariant::Fp8Emulation &&
+          select(128U, 16U, 16U, "gfx1030", true) ==
+              KernelVariant::Fp8OuterPrefillTiled16;
+
+  // ID85 is an explicit gfx1030 prefill opt-in. Its 64x64 tile geometry
+  // accepts non-aligned dimensions, remains disabled for FNUZ, and reports
+  // the stable registry identity used by the production dispatch path.
+  unsetenv(variables[0]);
+  setenv(variables[6], "1", 1);
+  valid =
+      valid &&
+      select(2U, 32U, 64U) == KernelVariant::Fp8OuterPrefillGfx1030LdsLut &&
+      select(65U, 5120U, 17408U) ==
+          KernelVariant::Fp8OuterPrefillGfx1030LdsLut &&
+      select(128U, 5120U, 17408U, "gfx1201") == KernelVariant::Fp8Native &&
+      select(128U, 5120U, 17408U, "gfx1030", true) ==
+          KernelVariant::Fp8OuterPrefillTiled16 &&
+      select(1U, 32U, 64U) == KernelVariant::Fp8Emulation &&
+      std::strcmp(
+          sllm_matmul_kernel::logical_kernel_id(
+              KernelVariant::Fp8OuterPrefillGfx1030LdsLut),
+          sllm_matmul_kernel::kFp8OuterPrefillGfx1030LdsLutLogicalKernelId) ==
+          0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol(
+              KernelVariant::Fp8OuterPrefillGfx1030LdsLut),
+          sllm_matmul_kernel::kFp8OuterPrefillGfx1030LdsLutDeviceSymbol) == 0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Fp8OuterPrefillGfx1030LdsLut) == 256U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterPrefillGfx1030LdsLut, 65U, 65U) == 4U;
+  unsetenv(variables[6]);
+  setenv(variables[0], "1", 1);
+
+  setenv(variables[2], "1", 1);
+  valid = valid && select(128U, 16U, 16U) ==
+                       KernelVariant::Fp8OuterPrefillGfx1030F16Staging;
+  setenv(variables[1], "1", 1);
+  valid = valid && select(128U, 16U, 16U) == KernelVariant::Fp8Emulation;
+  unsetenv(variables[1]);
+  unsetenv(variables[2]);
+  setenv(variables[0], "yes", 1);
+  valid = valid && select(128U, 16U, 16U) ==
+                       KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64;
+  setenv(variables[0], "1", 1);
+
+  sllm_matmul_kernel::F16StagingWorkspaceLayout layout{};
+  valid =
+      valid &&
+      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_f16_staging_workspace(
+          128U, 16U, 16U, &layout) &&
+      layout.activation_offset == 0U && layout.activation_bytes == 4096U &&
+      layout.weight_offset == 4096U && layout.weight_bytes == 512U &&
+      layout.output_offset == 4608U && layout.output_bytes == 8192U &&
+      layout.total_bytes == 12800U &&
+      (layout.weight_offset % sllm_matmul_kernel::kMatmulF16StagingAlignment) ==
+          0U &&
+      (layout.output_offset % sllm_matmul_kernel::kMatmulF16StagingAlignment) ==
+          0U &&
+      (layout.total_bytes % sllm_matmul_kernel::kMatmulF16StagingAlignment) ==
+          0U &&
+      !sllm_matmul_kernel::f16_staging_workspace_layout(UINT64_MAX, 2U, 2U,
+                                                        &layout) &&
+      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_f16_tile_staging_workspace(
+          219U, 6144U, 5120U, &layout) &&
+      layout.activation_bytes == 219U * 6144U * sizeof(uint16_t) &&
+      layout.weight_bytes == 5120U * 6144U * sizeof(uint16_t) &&
+      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                      KernelVariant::Fp8OuterPrefillGfx1030F16Staging),
+                  "matmul.fp8.outer.prefill.gfx1030.f16_staging.v1") == 0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol(
+                      KernelVariant::Fp8OuterPrefillGfx1030F16Staging),
+                  "rocblas_gemm_ex") == 0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Fp8OuterPrefillGfx1030F16Staging) == 256U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterPrefillGfx1030F16Staging, 128U, 16U) == 8U;
+
+  fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
+  fake_hip::set_gcn_arch_name("gfx1030");
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *first_queue = nullptr;
+  sllm_queue_t *second_queue = nullptr;
+  sllm_buffer_t *activation = nullptr;
+  sllm_buffer_t *weight = nullptr;
+  sllm_buffer_t *output = nullptr;
+  sllm_matmul_plan_t *first_plan = nullptr;
+  sllm_matmul_plan_t *second_plan = nullptr;
+  sllm_completion_t *first_completion = nullptr;
+  sllm_completion_t *second_completion = nullptr;
+  constexpr uint64_t m = 128U;
+  constexpr uint64_t k = 16U;
+  constexpr uint64_t n = 16U;
+  Error error;
+  const bool resources =
+      create_context_for_arch("gfx1030", &context) &&
+      create_queue(context, &first_queue) &&
+      create_queue(context, &second_queue) &&
+      create_buffer_sized(context, m * k * sizeof(uint16_t), &activation) &&
+      create_buffer_sized(context, n * k + n * sizeof(float), &weight) &&
+      create_buffer_sized(context, m * n * sizeof(uint16_t), &output);
+  valid = valid && resources;
+  if (resources) {
+    auto descriptor =
+        matmul_descriptor(activation, 0U, weight, 0U, output, 0U, m, k, n);
+    descriptor.op_version = SLLM_HIP_MATMUL_FP8_VERSION;
+    descriptor.weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+    descriptor.weight.encoding = SLLM_TENSOR_ENCODING_FP8_OUTER_F32;
+    valid =
+        expect_status(
+            sllm_matmul_prepare(context, &descriptor, &first_plan, &error.sink),
+            SLLM_STATUS_OK, "FP8 F16 staging first prepare", error) &&
+        first_plan != nullptr &&
+        expect_status(sllm_matmul_prepare(context, &descriptor, &second_plan,
+                                          &error.sink),
+                      SLLM_STATUS_OK, "FP8 F16 staging second prepare",
+                      error) &&
+        second_plan != nullptr && valid;
+  }
+  if (first_plan != nullptr && second_plan != nullptr) {
+    uint32_t prepared_provider = 0U;
+    uint32_t prepared_tile = 0U;
+    uint32_t prepared_inner_product = 0U;
+    valid = valid && sllm_test_matmul_prepared_kernel_id(first_plan) == 70U &&
+            sllm_test_matmul_prepared_provider_semantics(
+                first_plan, &prepared_provider, &prepared_tile,
+                &prepared_inner_product) == 1U &&
+            prepared_provider ==
+                static_cast<uint32_t>(
+                    sllm_lowp::ProviderKind::Fp8OuterGfx1030Software) &&
+            prepared_tile ==
+                static_cast<uint32_t>(sllm_lowp::TilePolicy::BlockTiled16x16) &&
+            prepared_inner_product ==
+                static_cast<uint32_t>(sllm_lowp::InnerProduct::E4M3OuterFp32);
+
+    unsetenv(variables[0]);
+    setenv(variables[1], "1", 1);
+    valid = valid && sllm_test_matmul_prepared_kernel_id(first_plan) == 70U;
+
+    auto first_info = matmul_dispatch_info();
+    valid =
+        valid &&
+        expect_status(sllm_matmul_execute(first_plan, first_queue,
+                                          &first_completion, &first_info,
+                                          &error.sink),
+                      SLLM_STATUS_OK, "FP8 F16 staging first execute", error) &&
+        first_completion != nullptr && first_info.dispatch_count == 5U &&
+        first_info.kernel_id == 70U && first_info.grid_size_x == 8U &&
+        std::strcmp(first_info.kernel_symbol,
+                    "matmul.fp8.outer.prefill.gfx1030.f16_staging.v1") == 0 &&
+        std::strcmp(first_info.device_symbol, "rocblas_gemm_ex") == 0;
+
+    auto blocked_info = matmul_dispatch_info();
+    valid = valid &&
+            expect_status(sllm_matmul_execute(second_plan, second_queue,
+                                              &second_completion, &blocked_info,
+                                              &error.sink),
+                          SLLM_STATUS_PUBLIC_NOT_READY,
+                          "FP8 F16 staging cross-queue lease", error) &&
+            second_completion == nullptr;
+
+    valid = valid && query_completion(first_completion, SLLM_STATUS_OK) &&
+            release_completion(&first_completion);
+
+    auto second_info = matmul_dispatch_info();
+    valid =
+        valid &&
+        expect_status(sllm_matmul_execute(second_plan, second_queue,
+                                          &second_completion, &second_info,
+                                          &error.sink),
+                      SLLM_STATUS_OK, "FP8 F16 staging lease reuse", error) &&
+        second_completion != nullptr && second_info.dispatch_count == 5U &&
+        second_info.kernel_id == 70U &&
+        query_completion(second_completion, SLLM_STATUS_OK) &&
+        release_completion(&second_completion);
+
+    // A failure after the workspace lease is acquired but before enqueue must
+    // roll the lease back.  A different queue can then acquire it immediately.
+    sllm_public_runtime::FaultInjector::set(
+        sllm_public_runtime::FaultPoint::RegistryInsertionFailure, 1U);
+    auto rollback_info = matmul_dispatch_info();
+    valid = valid &&
+            expect_status(sllm_matmul_execute(first_plan, first_queue,
+                                              &first_completion, &rollback_info,
+                                              &error.sink),
+                          SLLM_STATUS_INTERNAL_ERROR,
+                          "FP8 F16 staging registry rollback", error) &&
+            first_completion == nullptr;
+    sllm_public_runtime::FaultInjector::reset();
+
+    auto recovery_info = matmul_dispatch_info();
+    valid =
+        valid &&
+        expect_status(
+            sllm_matmul_execute(second_plan, second_queue, &second_completion,
+                                &recovery_info, &error.sink),
+            SLLM_STATUS_OK, "FP8 F16 staging rollback lease recovery", error) &&
+        second_completion != nullptr && recovery_info.dispatch_count == 5U &&
+        recovery_info.kernel_id == 70U &&
+        query_completion(second_completion, SLLM_STATUS_OK) &&
+        release_completion(&second_completion);
+  }
+
+  if (first_completion != nullptr) {
+    valid = query_completion(first_completion, SLLM_STATUS_OK) &&
+            release_completion(&first_completion) && valid;
+  }
+  if (second_completion != nullptr) {
+    valid = query_completion(second_completion, SLLM_STATUS_OK) &&
+            release_completion(&second_completion) && valid;
+  }
+  if (first_plan != nullptr) {
+    valid =
+        expect_status(sllm_matmul_plan_release(&first_plan, &error.sink),
+                      SLLM_STATUS_OK, "FP8 F16 staging first release", error) &&
+        valid;
+  }
+  if (second_plan != nullptr) {
+    valid = expect_status(sllm_matmul_plan_release(&second_plan, &error.sink),
+                          SLLM_STATUS_OK, "FP8 F16 staging second release",
+                          error) &&
+            valid;
+  }
+  if (first_queue != nullptr) {
+    valid = release_queue(&first_queue) && valid;
+  }
+  if (second_queue != nullptr) {
+    valid = release_queue(&second_queue) && valid;
+  }
+  if (activation != nullptr) {
+    valid = release_buffer(&activation) && valid;
+  }
+  if (weight != nullptr) {
+    valid = release_buffer(&weight) && valid;
+  }
+  if (output != nullptr) {
+    valid = release_buffer(&output) && valid;
+  }
+  if (context != nullptr) {
+    valid = release_context(&context) && valid;
+  }
+
+  fake_hip::set_gcn_arch_name("gfx1201");
+  restore();
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
+bool matmul_nvfp4_w4a4_selector_contract() {
+  constexpr std::array<const char *const, 13> variables = {
+      "SLLM_NVFP4_W4A4_FORCE_BASELINE",
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8",
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_COL8",
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A",
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA",
+      "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_COLUMNS",
+      "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4",
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA_F16SCALE",
+      sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201F16StagingEnvironment,
+      sllm_matmul_kernel::kNvfp4W4A4DecodeActivationSharedEnvironment,
+      sllm_matmul_kernel::kNvfp4W4A4PrefillDp4a64x64K128Environment,
+      sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201Wmma128x32Environment,
+      sllm_matmul_kernel::kNvfp4W4A4DecodeScaleLutEnvironment,
+  };
+  std::array<bool, variables.size()> was_present{};
+  std::array<std::string, variables.size()> old_values{};
+  for (std::size_t index = 0; index < variables.size(); ++index) {
+    const char *const value = std::getenv(variables[index]);
+    was_present[index] = value != nullptr;
+    old_values[index] = value != nullptr ? value : "";
+    unsetenv(variables[index]);
+  }
+  const auto restore = [&]() {
+    for (std::size_t index = 0; index < variables.size(); ++index) {
+      if (was_present[index]) {
+        setenv(variables[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(variables[index]);
+      }
+    }
+  };
+
+  using sllm_matmul_kernel::KernelVariant;
+  const auto select = [](const uint64_t m, const uint64_t k,
+                         const char *const target = "gfx1030",
+                         const uint64_t n = 17408U) {
+    return sllm_matmul_kernel::select_nvfp4_w4a4_variant(m, k, n, target);
+  };
+  bool valid =
+      select(1U, 5120U) == KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 15U) == KernelVariant::Nvfp4W4A4Decode &&
+      select(2U, 5120U) == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      select(2U, 5120U, "gfx1201") ==
+          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      static_cast<uint32_t>(KernelVariant::Nvfp4W4A4DecodeWave4Column32) ==
+          67U &&
+      static_cast<uint32_t>(
+          KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64) == 69U &&
+      static_cast<uint32_t>(KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging) ==
+          72U &&
+      static_cast<uint32_t>(KernelVariant::Nvfp4W4A4DecodeActivationShared) ==
+          73U &&
+      static_cast<uint32_t>(KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128) ==
+          80U &&
+      static_cast<uint32_t>(KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32) ==
+          81U;
+
+  // ID69 is exact gfx1201 and M>1/K16-aligned only.  Invalid target/shape
+  // requests must fall through to the existing provider.
+  setenv(variables[7], "1", 1);
+  valid = valid &&
+          select(2U, 5120U, "gfx1201") ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64 &&
+          select(129U, 48U, "gfx1201", 65U) ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64 &&
+          select(2U, 5119U, "gfx1201") ==
+              KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+          select(2U, 5120U, "gfx1030") ==
+              KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
+  valid =
+      valid &&
+      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                      KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64),
+                  "matmul.nvfp4.w4a4.prefill.gfx1201.wmma_f16scale128x64.v1") ==
+          0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol(
+                      KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64),
+                  "sllm_nvfp4_w4a4_prefill_gfx1201_wmma_f16scale128x64_v1") ==
+          0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64) == 256U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64, 127U,
+          63U) == 1U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64, 129U,
+          65U) == 4U;
+
+  // ID72 is a force-only exact-gfx1201 pipeline.  Its transient arena is
+  // shared with ID70 but conservatively reserves the largest Qwen3.8
+  // wide/down projection for the current M before any submission is in
+  // flight.  Baseline and the accepted ID64 force remain higher-priority
+  // rollback controls.
+  unsetenv(variables[7]);
+  setenv(variables[8], "1", 1);
+  valid =
+      valid &&
+      select(128U, 5120U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging &&
+      select(512U, 17408U, "gfx1201", 5120U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging &&
+      select(127U, 5120U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+      select(129U, 5120U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+      select(219U, 5120U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+      select(1024U, 5120U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging &&
+      select(1025U, 5120U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+      select(128U, 5119U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      select(128U, 17424U, "gfx1201", 5120U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+      select(128U, 5120U, "gfx1201", 17424U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+      select(128U, 5120U, "gfx1201", 248320U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+      select(128U, 5120U, "gfx1030", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      select(1U, 5120U, "gfx1201", 17408U) == KernelVariant::Nvfp4W4A4Decode;
+  valid =
+      valid &&
+      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                      KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging),
+                  "matmul.nvfp4.w4a4.prefill.gfx1201.f16_staging.v1") == 0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol(
+                      KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging),
+                  "rocblas_gemm_ex") == 0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging) == 256U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging, 128U, 17408U) ==
+          8704U;
+  sllm_matmul_kernel::F16StagingWorkspaceLayout staging_layout{};
+  uint64_t staging_reservation = 0U;
+  valid = valid &&
+          sllm_matmul_kernel::f16_staging_workspace_layout(128U, 5120U, 17408U,
+                                                           &staging_layout) &&
+          staging_layout.total_bytes == UINT64_C(188481536) &&
+          sllm_matmul_kernel::qwen38_f16_staging_workspace_reservation(
+              512U, &staging_reservation) &&
+          staging_reservation == UINT64_C(219152384);
+  setenv(variables[4], "1", 1);
+  valid = valid && select(128U, 5120U, "gfx1201", 17408U) ==
+                       KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64;
+  unsetenv(variables[4]);
+  setenv(variables[0], "1", 1);
+  valid = valid && select(128U, 5120U, "gfx1201", 17408U) ==
+                       KernelVariant::Nvfp4W4A4Packed;
+  unsetenv(variables[0]);
+  setenv(variables[8], "yes", 1);
+  valid = valid && select(128U, 5120U, "gfx1201", 17408U) ==
+                       KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
+  unsetenv(variables[8]);
+
+  setenv(variables[6], "1", 1);
+  valid =
+      valid &&
+      select(1U, 16U, "gfx1030", 31U) ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      select(1U, 16U, "gfx1201", 32U) ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      select(1U, 32U, "gfx1030", 33U) ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      select(1U, 48U, "gfx1201", 32U) ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      select(1U, 17408U, "gfx1030", 32U) ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      select(1U, 15U, "gfx1030", 32U) == KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 17424U, "gfx1201", 32U) == KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 16U, "gfx942:sramecc+:xnack-", 32U) ==
+          KernelVariant::Nvfp4W4A4Decode;
+
+  valid =
+      valid &&
+      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                      KernelVariant::Nvfp4W4A4DecodeWave4Column32),
+                  "matmul.nvfp4.w4a4.decode.dp4a.wave4col32.v1") == 0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol(
+                      KernelVariant::Nvfp4W4A4DecodeWave4Column32),
+                  "sllm_matmul_nvfp4_w4a4_decode_dp4a_wave4col32_v1") == 0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32) == 256U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32, 1U, 31U) == 1U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32, 1U, 32U) == 1U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32, 1U, 33U) == 2U;
+
+  // ID73 is a literal opt-in for the two Qwen3.8 MLP decode projections on
+  // exact gfx1030.  It supersedes ID67 only inside that narrow scope; an
+  // unset/invalid request and every other target or shape retain ID67.
+  setenv(variables[9], "1", 1);
+  valid =
+      valid &&
+      select(1U, 5120U, "gfx1030", 17408U) ==
+          KernelVariant::Nvfp4W4A4DecodeActivationShared &&
+      select(1U, 17408U, "gfx1030", 5120U) ==
+          KernelVariant::Nvfp4W4A4DecodeActivationShared &&
+      select(1U, 5120U, "gfx1030", 5120U) ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      select(1U, 17408U, "gfx1030", 17408U) ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      select(2U, 5120U, "gfx1030", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      select(1U, 5120U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                      KernelVariant::Nvfp4W4A4DecodeActivationShared),
+                  "matmul.nvfp4.w4a4.decode.dp4a.activation_shared."
+                  "wave4col32.v1") == 0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol(
+                      KernelVariant::Nvfp4W4A4DecodeActivationShared),
+                  "sllm_matmul_nvfp4_w4a4_decode_dp4a_activation_shared_v1") ==
+          0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Nvfp4W4A4DecodeActivationShared) == 256U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Nvfp4W4A4DecodeActivationShared, 1U, 5120U) == 160U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Nvfp4W4A4DecodeActivationShared, 1U, 17408U) == 544U &&
+      sllm_matmul_kernel::nvfp4_w4a4_decode_activation_shared_lds_bytes(
+          5120U) == 6400U &&
+      sllm_matmul_kernel::nvfp4_w4a4_decode_activation_shared_lds_bytes(
+          17408U) == 21760U;
+  setenv(variables[0], "1", 1);
+  valid = valid && select(1U, 5120U, "gfx1030", 17408U) ==
+                       KernelVariant::Nvfp4W4A4Packed;
+  unsetenv(variables[0]);
+  setenv(variables[9], "yes", 1);
+  valid = valid && select(1U, 5120U, "gfx1030", 17408U) ==
+                       KernelVariant::Nvfp4W4A4DecodeWave4Column32;
+  unsetenv(variables[9]);
+  valid = valid && select(1U, 5120U, "gfx1030", 17408U) ==
+                       KernelVariant::Nvfp4W4A4DecodeWave4Column32;
+
+  // ID84 is a target-specific decode LUT opt-in. The same logical plan uses
+  // the activation-shared exact shapes on gfx1030 and the wave4 exact shapes
+  // on gfx1201; adjacent dimensions and unsupported targets keep the prior
+  // selector result.
+  setenv(variables[12], "1", 1);
+  valid =
+      valid &&
+      select(1U, 5120U, "gfx1030", 17408U) ==
+          KernelVariant::Nvfp4W4A4DecodeScaleLut &&
+      select(1U, 17408U, "gfx1030", 5120U) ==
+          KernelVariant::Nvfp4W4A4DecodeScaleLut &&
+      select(1U, 5120U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4DecodeScaleLut &&
+      select(1U, 17408U, "gfx1201", 5120U) ==
+          KernelVariant::Nvfp4W4A4DecodeScaleLut &&
+      select(1U, 5120U, "gfx1030", 5120U) ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      select(1U, 5120U, "gfx942:sramecc+:xnack-", 17408U) ==
+          KernelVariant::Nvfp4W4A4Decode &&
+      select(2U, 5120U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      std::strcmp(
+          sllm_matmul_kernel::logical_kernel_id(
+              KernelVariant::Nvfp4W4A4DecodeScaleLut),
+          sllm_matmul_kernel::kNvfp4W4A4DecodeScaleLutLogicalKernelId) == 0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol(
+                      KernelVariant::Nvfp4W4A4DecodeScaleLut),
+                  sllm_matmul_kernel::kNvfp4W4A4DecodeScaleLutDeviceSymbol) ==
+          0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Nvfp4W4A4DecodeScaleLut) == 256U &&
+      sllm_matmul_kernel::grid_size_x(KernelVariant::Nvfp4W4A4DecodeScaleLut,
+                                      1U, 31U) == 1U &&
+      sllm_matmul_kernel::grid_size_x(KernelVariant::Nvfp4W4A4DecodeScaleLut,
+                                      1U, 33U) == 2U;
+  setenv(variables[0], "1", 1);
+  valid = valid && select(1U, 5120U, "gfx1201", 17408U) ==
+                       KernelVariant::Nvfp4W4A4Packed;
+  unsetenv(variables[0]);
+  unsetenv(variables[6]);
+  setenv(variables[12], "yes", 1);
+  valid = valid && select(1U, 5120U, "gfx1201", 17408U) ==
+                       KernelVariant::Nvfp4W4A4Decode;
+  unsetenv(variables[12]);
+  setenv(variables[6], "1", 1);
+
+  // ID67 takes precedence over the older ID65 candidate when both are
+  // explicitly requested; an invalid ID67 value then permits ID65.
+  setenv(variables[5], "1", 1);
+  valid = valid && select(1U, 16U, "gfx1030", 33U) ==
+                       KernelVariant::Nvfp4W4A4DecodeWave4Column32;
+  setenv(variables[6], "yes", 1);
+  valid = valid && select(1U, 16U, "gfx1030", 33U) ==
+                       KernelVariant::Nvfp4W4A4DecodeColumns128;
+  unsetenv(variables[6]);
+
+  setenv(variables[5], "1", 1);
+  valid =
+      valid &&
+      select(1U, 16U, "gfx1030") == KernelVariant::Nvfp4W4A4DecodeColumns128 &&
+      select(1U, 16U, "gfx1201") == KernelVariant::Nvfp4W4A4DecodeColumns128 &&
+      select(1U, 17408U, "gfx1030") ==
+          KernelVariant::Nvfp4W4A4DecodeColumns128 &&
+      select(1U, 15U, "gfx1030") == KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 17424U, "gfx1201") == KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 16U, "gfx942:sramecc+:xnack-") ==
+          KernelVariant::Nvfp4W4A4Decode;
+  setenv(variables[5], "yes", 1);
+  valid = valid && select(1U, 16U, "gfx1030") == KernelVariant::Nvfp4W4A4Decode;
+  setenv(variables[5], "1", 1);
+
+  // ID81 is the ID64-order 128x32 geometry.  Its dedicated opt-in applies
+  // only to exact gfx1201 and 1 < M <= 512; larger supported M stays on ID64.
+  unsetenv(variables[5]);
+  setenv(variables[11], "1", 1);
+  valid =
+      valid &&
+      select(2U, 16U, "gfx1201", 1U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32 &&
+      select(127U, 48U, "gfx1201", 31U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32 &&
+      select(129U, 48U, "gfx1201", 33U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32 &&
+      select(512U, 5120U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32 &&
+      select(513U, 5120U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+      select(1024U, 17408U, "gfx1201", 5120U) ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+      select(128U, 5119U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      select(128U, 5120U, "gfx1030", 17408U) ==
+          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      select(1U, 5120U, "gfx1201", 17408U) == KernelVariant::Nvfp4W4A4Decode &&
+      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                      KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32),
+                  "matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x32.v1") == 0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol(
+                      KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32),
+                  "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x32_v1") == 0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32) == 256U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32, 127U, 31U) == 1U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32, 129U, 33U) == 2U;
+  if (!valid) {
+    std::cerr << "ID81 direct selector/identity contract failed\n";
+  }
+
+  // Preparation freezes both the ID81 dispatch and its concrete audit
+  // semantics.  A later rollback-env change must not rewrite that plan.
+  fake_hip::reset();
+  fake_hip::set_gcn_arch_name("gfx1201");
+  constexpr uint64_t id81_m = 127U;
+  constexpr uint64_t id81_k = 16U;
+  constexpr uint64_t id81_n = 33U;
+  constexpr uint64_t id81_weight_values = id81_n * id81_k / UINT64_C(2);
+  constexpr uint64_t id81_weight_scales = id81_n * (id81_k / UINT64_C(16));
+  constexpr uint64_t id81_weight_bytes =
+      ((id81_weight_values + id81_weight_scales + UINT64_C(3)) & ~UINT64_C(3)) +
+      UINT64_C(8);
+  static_assert(id81_weight_bytes == 308U);
+  sllm_context_t *id81_context = nullptr;
+  sllm_buffer_t *id81_activation = nullptr;
+  sllm_buffer_t *id81_weight = nullptr;
+  sllm_buffer_t *id81_output = nullptr;
+  sllm_matmul_plan_t *id81_plan = nullptr;
+  Error id81_error;
+  if (!create_context_for_arch("gfx1201", &id81_context) ||
+      !create_buffer_sized(id81_context, id81_m * id81_k * sizeof(uint16_t),
+                           &id81_activation) ||
+      !create_buffer_sized(id81_context, id81_weight_bytes, &id81_weight) ||
+      !create_buffer_sized(id81_context, id81_m * id81_n * sizeof(uint16_t),
+                           &id81_output)) {
+    valid = false;
+  } else {
+    auto descriptor =
+        matmul_descriptor(id81_activation, 0U, id81_weight, 0U, id81_output, 0U,
+                          id81_m, id81_k, id81_n);
+    descriptor.op_version = SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION;
+    descriptor.weight.dtype = SLLM_TENSOR_DTYPE_U8;
+    descriptor.weight.encoding =
+        SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
+    valid =
+        expect_status(sllm_matmul_prepare(id81_context, &descriptor, &id81_plan,
+                                          &id81_error.sink),
+                      SLLM_STATUS_OK, "ID81 prepared provider", id81_error) &&
+        id81_plan != nullptr && valid;
+    uint32_t prepared_provider = 0U;
+    uint32_t prepared_tile = 0U;
+    uint32_t prepared_inner_product = 0U;
+    valid =
+        id81_plan != nullptr &&
+        sllm_test_matmul_prepared_kernel_id(id81_plan) == 81U &&
+        sllm_test_matmul_prepared_provider_semantics(
+            id81_plan, &prepared_provider, &prepared_tile,
+            &prepared_inner_product) == 1U &&
+        prepared_provider ==
+            static_cast<uint32_t>(sllm_lowp::ProviderKind::Nvfp4W4A4Block16) &&
+        prepared_tile ==
+            static_cast<uint32_t>(sllm_lowp::TilePolicy::BlockRow128Column32) &&
+        prepared_inner_product ==
+            static_cast<uint32_t>(
+                sllm_lowp::InnerProduct::E2M1ViaE4M3WmmaFp32) &&
+        valid;
+    setenv(variables[11], "yes", 1);
+    valid = id81_plan != nullptr &&
+            sllm_test_matmul_prepared_kernel_id(id81_plan) == 81U && valid;
+    if (!valid) {
+      std::cerr << "ID81 prepared selector/audit contract failed: kernel="
+                << (id81_plan != nullptr
+                        ? sllm_test_matmul_prepared_kernel_id(id81_plan)
+                        : 0U)
+                << " provider=" << prepared_provider
+                << " tile=" << prepared_tile
+                << " inner_product=" << prepared_inner_product << '\n';
+    }
+  }
+  if (id81_plan != nullptr) {
+    valid = expect_status(
+                sllm_matmul_plan_release(&id81_plan, &id81_error.sink),
+                SLLM_STATUS_OK, "ID81 prepared provider release", id81_error) &&
+            valid;
+  }
+  if (id81_output != nullptr) {
+    valid = release_buffer(&id81_output) && valid;
+  }
+  if (id81_weight != nullptr) {
+    valid = release_buffer(&id81_weight) && valid;
+  }
+  if (id81_activation != nullptr) {
+    valid = release_buffer(&id81_activation) && valid;
+  }
+  if (id81_context != nullptr) {
+    valid = release_context(&id81_context) && valid;
+  }
+  valid = fake_hip::live_events() == 0U && fake_hip::live_streams() == 0U &&
+          fake_hip::live_allocations() == 0U && valid;
+  setenv(variables[11], "yes", 1);
+  valid = valid && select(128U, 5120U, "gfx1201", 17408U) ==
+                       KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
+  unsetenv(variables[11]);
+  setenv(variables[5], "1", 1);
+
+  unsetenv(variables[7]);
+  setenv(variables[10], "1", 1);
+  valid = valid &&
+          select(2U, 5120U, "gfx1030") ==
+              KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128 &&
+          select(129U, 17408U, "gfx1030", 5120U) ==
+              KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128 &&
+          select(2U, 5119U, "gfx1030") ==
+              KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+          select(2U, 5120U, "gfx1201") ==
+              KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+          std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                          KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128),
+                      "matmul.nvfp4.w4a4.block16.prefill."
+                      "dp4a64x64_k128.v1") == 0 &&
+          std::strcmp(sllm_matmul_kernel::device_symbol(
+                          KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128),
+                      "sllm_matmul_nvfp4_w4a4_block16_prefill_"
+                      "dp4a_64x64_k128_v1") == 0 &&
+          sllm_matmul_kernel::workgroup_size_x(
+              KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128) == 256U &&
+          sllm_matmul_kernel::grid_size_x(
+              KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128, 65U, 65U) == 4U;
+  setenv(variables[10], "yes", 1);
+  valid = valid && select(2U, 5120U, "gfx1030") ==
+                       KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
+  unsetenv(variables[10]);
+  setenv(variables[3], "1", 1);
+  valid = valid &&
+          select(2U, 5120U) == KernelVariant::Nvfp4W4A4PrefillDp4a64x64 &&
+          select(2U, 5119U) == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
+
+  // ID62's optional gfx1030 index32 body is restricted to M>=33 and to
+  // overflow-free uint32 logical/packed-plane extents. Keep the boundary
+  // contract in the focused host test so the launcher cannot silently widen
+  // or wrap an index32 shape.
+  valid = valid &&
+          !sllm_matmul_kernel::phase78_nvfp4_w4a4_dp4a_index32_shape(32U, 16U,
+                                                                     64U) &&
+          sllm_matmul_kernel::phase78_nvfp4_w4a4_dp4a_index32_shape(33U, 16U,
+                                                                    64U) &&
+          !sllm_matmul_kernel::phase78_nvfp4_w4a4_dp4a_index32_shape(33U, 15U,
+                                                                     64U) &&
+          !sllm_matmul_kernel::phase78_nvfp4_w4a4_dp4a_index32_shape(
+              33U, 16U, static_cast<uint64_t>(UINT32_MAX) - UINT64_C(127)) &&
+          sllm_matmul_kernel::phase78_nvfp4_w4a4_dp4a_index32_shape(
+              static_cast<uint64_t>(UINT32_MAX) / 8U, 16U, 1U) &&
+          !sllm_matmul_kernel::phase78_nvfp4_w4a4_dp4a_index32_shape(
+              static_cast<uint64_t>(UINT32_MAX) / 8U + 1U, 16U, 1U) &&
+          !sllm_matmul_kernel::phase78_nvfp4_w4a4_dp4a_index32_shape(
+              33U, 16U, static_cast<uint64_t>(UINT32_MAX));
+
+  setenv(variables[4], "1", 1);
+  valid =
+      valid &&
+      select(1U, 5120U, "gfx1201") ==
+          KernelVariant::Nvfp4W4A4DecodeColumns128 &&
+      select(2U, 5120U, "gfx1201") ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+      select(2U, 5119U, "gfx1201") ==
+          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      select(2U, 5120U, "gfx1030") == KernelVariant::Nvfp4W4A4PrefillDp4a64x64;
+  setenv(variables[2], "1", 1);
+  valid = valid &&
+          select(2U, 5120U) == KernelVariant::Nvfp4W4A4PrefillRow8Col8Tiled256;
+  setenv(variables[1], "1", 1);
+  valid =
+      valid && select(2U, 5120U) == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
+  setenv(variables[0], "1", 1);
+  setenv(variables[7], "1", 1);
+  valid = valid && select(1U, 5120U) == KernelVariant::Nvfp4W4A4Packed &&
+          select(2U, 5120U) == KernelVariant::Nvfp4W4A4Packed;
+
+  // Freeze both target-specific launch contracts behind the shared ID84
+  // logical identity. The exact Qwen projection shape is intentionally used
+  // here because it is the only production scope accepted by the selector.
+  for (std::size_t index = 0U; index < variables.size(); ++index) {
+    unsetenv(variables[index]);
+  }
+  setenv(variables[12], "1", 1);
+  fake_hip::reset();
+  fake_hip::set_gcn_arch_name("gfx1201");
+  constexpr uint64_t id84_m = 1U;
+  constexpr uint64_t id84_k = 5120U;
+  constexpr uint64_t id84_n = 17408U;
+  constexpr uint64_t id84_weight_values = id84_n * id84_k / UINT64_C(2);
+  constexpr uint64_t id84_weight_scales = id84_n * (id84_k / UINT64_C(16));
+  constexpr uint64_t id84_weight_bytes =
+      ((id84_weight_values + id84_weight_scales + UINT64_C(3)) & ~UINT64_C(3)) +
+      UINT64_C(8);
+  static_assert(id84_weight_bytes == UINT64_C(50135048));
+  sllm_context_t *id84_context = nullptr;
+  sllm_buffer_t *id84_activation = nullptr;
+  sllm_buffer_t *id84_weight = nullptr;
+  sllm_buffer_t *id84_output = nullptr;
+  sllm_matmul_plan_t *id84_plan = nullptr;
+  Error id84_error;
+  const bool id84_resources =
+      create_context_for_arch("gfx1201", &id84_context) &&
+      create_buffer_sized(id84_context, id84_k * sizeof(uint16_t),
+                          &id84_activation) &&
+      create_buffer_sized(id84_context, id84_weight_bytes, &id84_weight) &&
+      create_buffer_sized(id84_context, id84_n * sizeof(uint16_t),
+                          &id84_output);
+  valid = valid && id84_resources;
+  if (id84_resources) {
+    auto id84_descriptor =
+        matmul_descriptor(id84_activation, 0U, id84_weight, 0U, id84_output, 0U,
+                          id84_m, id84_k, id84_n);
+    id84_descriptor.op_version = SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION;
+    id84_descriptor.weight.dtype = SLLM_TENSOR_DTYPE_U8;
+    id84_descriptor.weight.encoding =
+        SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
+    uint32_t id84_provider = 0U;
+    uint32_t id84_tile = 0U;
+    uint32_t id84_inner_product = 0U;
+    valid =
+        expect_status(sllm_matmul_prepare(id84_context, &id84_descriptor,
+                                          &id84_plan, &id84_error.sink),
+                      SLLM_STATUS_OK, "ID84 prepared provider", id84_error) &&
+        id84_plan != nullptr &&
+        sllm_test_matmul_prepared_kernel_id(id84_plan) == 84U &&
+        sllm_test_matmul_prepared_provider_semantics(
+            id84_plan, &id84_provider, &id84_tile, &id84_inner_product) == 1U &&
+        id84_provider ==
+            static_cast<uint32_t>(sllm_lowp::ProviderKind::Nvfp4W4A4Block16) &&
+        id84_tile ==
+            static_cast<uint32_t>(sllm_lowp::TilePolicy::DecodeWave4Column32) &&
+        id84_inner_product ==
+            static_cast<uint32_t>(
+                sllm_lowp::InnerProduct::E2M1BlockScaledDp4aFp32) &&
+        valid;
+    unsetenv(variables[12]);
+    setenv(variables[0], "1", 1);
+    valid = id84_plan != nullptr &&
+            sllm_test_matmul_prepared_kernel_id(id84_plan) == 84U && valid;
+  }
+  if (id84_plan != nullptr) {
+    valid = expect_status(
+                sllm_matmul_plan_release(&id84_plan, &id84_error.sink),
+                SLLM_STATUS_OK, "ID84 prepared provider release", id84_error) &&
+            valid;
+  }
+  if (id84_output != nullptr) {
+    valid = release_buffer(&id84_output) && valid;
+  }
+  if (id84_weight != nullptr) {
+    valid = release_buffer(&id84_weight) && valid;
+  }
+  if (id84_activation != nullptr) {
+    valid = release_buffer(&id84_activation) && valid;
+  }
+  if (id84_context != nullptr) {
+    valid = release_context(&id84_context) && valid;
+  }
+  valid = fake_hip::live_events() == 0U && fake_hip::live_streams() == 0U &&
+          fake_hip::live_allocations() == 0U && valid;
+  unsetenv(variables[0]);
+  unsetenv(variables[12]);
+  restore();
+  return valid;
+}
+
+bool matmul_nvfp4_w4a4_activation_shared_lifetime_contract() {
+  constexpr std::array<const char *, 4> kVariables = {
+      "SLLM_NVFP4_W4A4_FORCE_BASELINE",
+      "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_COLUMNS",
+      "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4",
+      "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_ACTIVATION_SHARED"};
+  std::array<bool, kVariables.size()> was_present{};
+  std::array<std::string, kVariables.size()> old_values{};
+  for (std::size_t index = 0U; index != kVariables.size(); ++index) {
+    const char *const value = std::getenv(kVariables[index]);
+    was_present[index] = value != nullptr;
+    old_values[index] = value != nullptr ? value : "";
+    unsetenv(kVariables[index]);
+  }
+  const auto restore = [&]() {
+    for (std::size_t index = 0U; index != kVariables.size(); ++index) {
+      if (was_present[index]) {
+        setenv(kVariables[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(kVariables[index]);
+      }
+    }
+  };
+
+  fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
+  fake_hip::set_gcn_arch_name("gfx1030");
+  setenv(kVariables[2], "1", 1);
+  setenv(kVariables[3], "1", 1);
+  constexpr uint64_t k = 5120U;
+  constexpr uint64_t n = 17408U;
+  constexpr uint64_t weight_values = n * k / UINT64_C(2);
+  constexpr uint64_t weight_scales = n * (k / UINT64_C(16));
+  constexpr uint64_t weight_bytes =
+      ((weight_values + weight_scales + UINT64_C(3)) & ~UINT64_C(3)) +
+      UINT64_C(8);
+  static_assert(weight_bytes == UINT64_C(50135048));
+
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_buffer_t *activation = nullptr;
+  sllm_buffer_t *weight = nullptr;
+  sllm_buffer_t *output = nullptr;
+  sllm_matmul_plan_t *plan = nullptr;
+  sllm_completion_t *completion = nullptr;
+  bool valid =
+      create_context_for_arch("gfx1030", &context) &&
+      create_queue(context, &queue) &&
+      create_buffer_sized(context, k * sizeof(uint16_t), &activation) &&
+      create_buffer_sized(context, weight_bytes, &weight) &&
+      create_buffer_sized(context, n * sizeof(uint16_t), &output);
+  Error error;
+  if (valid) {
+    std::array<sllm_buffer_t *, 2> weights{weight, weight};
+    std::array<sllm_buffer_t *, 2> outputs{output, output};
+    const auto pack_descriptor =
+        qwen38_projection_pack2_descriptor(activation, weights, outputs);
+    sllm_matmul_desc_t descriptor{};
+    descriptor.struct_size = sizeof(descriptor);
+    descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+    descriptor.op_version = SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION;
+    descriptor.activation = pack_descriptor.activation;
+    descriptor.weight = pack_descriptor.gate_weight;
+    descriptor.output = pack_descriptor.gate_output;
+    valid = expect_status(
+                sllm_matmul_prepare(context, &descriptor, &plan, &error.sink),
+                SLLM_STATUS_OK, "ID73 host prepare", error) &&
+            plan != nullptr;
+  }
+  if (valid) {
+    auto info = matmul_dispatch_info();
+    valid =
+        expect_status(
+            sllm_matmul_execute(plan, queue, &completion, &info, &error.sink),
+            SLLM_STATUS_OK, "ID73 host execute", error) &&
+        completion != nullptr && info.dispatch_count == 2U &&
+        info.kernel_id == 73U && info.workgroup_size_x == 256U &&
+        info.grid_size_x == 544U && info.m == 1U && info.k == k &&
+        info.n == n && info.output_elements == n &&
+        info.fallback_allowed == 0U && info.fallback_used == 0U &&
+        std::strcmp(
+            info.kernel_symbol,
+            "matmul.nvfp4.w4a4.decode.dp4a.activation_shared.wave4col32.v1") ==
+            0 &&
+        std::strcmp(
+            info.device_symbol,
+            "sllm_matmul_nvfp4_w4a4_decode_dp4a_activation_shared_v1") == 0 &&
+        std::strcmp(info.gcn_arch_name, "gfx1030") == 0 &&
+        expect_status(sllm_matmul_plan_release(&plan, &error.sink),
+                      SLLM_STATUS_PUBLIC_BUSY, "ID73 in-flight plan", error) &&
+        plan != nullptr && release_queue(&queue, SLLM_STATUS_PUBLIC_BUSY) &&
+        release_buffer(&activation, SLLM_STATUS_PUBLIC_BUSY) &&
+        release_buffer(&weight, SLLM_STATUS_PUBLIC_BUSY) &&
+        release_buffer(&output, SLLM_STATUS_PUBLIC_BUSY) &&
+        release_context(&context, SLLM_STATUS_PUBLIC_BUSY) &&
+        query_completion(completion, SLLM_STATUS_OK) &&
+        release_completion(&completion) &&
+        expect_status(sllm_matmul_plan_release(&plan, &error.sink),
+                      SLLM_STATUS_OK, "ID73 plan release", error) &&
+        plan == nullptr;
+  }
+  if (completion != nullptr)
+    valid = release_completion(&completion) && valid;
+  if (plan != nullptr) {
+    valid = expect_status(sllm_matmul_plan_release(&plan, &error.sink),
+                          SLLM_STATUS_OK, "ID73 cleanup plan", error) &&
+            valid;
+  }
+  if (queue != nullptr)
+    valid = release_queue(&queue) && valid;
+  if (output != nullptr)
+    valid = release_buffer(&output) && valid;
+  if (weight != nullptr)
+    valid = release_buffer(&weight) && valid;
+  if (activation != nullptr)
+    valid = release_buffer(&activation) && valid;
+  if (context != nullptr)
+    valid = release_context(&context) && valid;
+  fake_hip::set_gcn_arch_name("gfx1201");
+  restore();
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
 bool matmul_short_mixed_metadata_dispatch_contract() {
   fake_hip::reset();
   sllm_public_runtime::FaultInjector::reset();
@@ -5446,15 +8286,21 @@ void release_attention_buffers(AttentionBuffers *const buffers) {
 bool create_attention_resources(sllm_context_t **const context,
                                 sllm_queue_t **const queue,
                                 AttentionBuffers *const buffers,
-                                const uint64_t m) {
-  if (!create_context(context) || !create_queue(*context, queue)) {
+                                const uint64_t m, const uint64_t q_heads = 16U,
+                                const char *const arch_name = "gfx1201") {
+  if (!create_context_for_arch(arch_name, context) ||
+      !create_queue(*context, queue)) {
     return false;
   }
   const uint64_t sizes[8] = {
-      m * 16U * 512U * sizeof(uint16_t), m * 4U * 256U * sizeof(uint16_t),
-      16U * 256U * sizeof(uint16_t),     4U * 256U * sizeof(uint16_t),
-      m * 3U * sizeof(int32_t),          m * 16U * 256U * sizeof(uint16_t),
-      m * 16U * 256U * sizeof(uint16_t), m * 4U * 256U * sizeof(uint16_t),
+      m * q_heads * 512U * sizeof(uint16_t),
+      m * 4U * 256U * sizeof(uint16_t),
+      q_heads * 256U * sizeof(uint16_t),
+      4U * 256U * sizeof(uint16_t),
+      m * 3U * sizeof(int32_t),
+      m * q_heads * 256U * sizeof(uint16_t),
+      m * q_heads * 256U * sizeof(uint16_t),
+      m * 4U * 256U * sizeof(uint16_t),
   };
   for (std::size_t index = 0U; index != buffers->size(); ++index) {
     if (!create_buffer_sized(*context, sizes[index], &(*buffers)[index])) {
@@ -5487,14 +8333,14 @@ sllm_tensor_binding_t attention_binding(const sllm_buffer_t *const buffer,
 
 sllm_attention_preprocess_desc_t
 attention_preprocess_descriptor(const AttentionBuffers &buffers,
-                                const uint64_t m,
-                                const uint32_t start_position) {
-  uint64_t packed_shape[] = {m, 16U, 512U};
+                                const uint64_t m, const uint32_t start_position,
+                                const uint64_t q_heads = 16U) {
+  uint64_t packed_shape[] = {m, q_heads, 512U};
   uint64_t k_shape[] = {m, 4U, 256U};
-  constexpr uint64_t scale_q_shape[] = {16U, 256U};
+  const uint64_t scale_q_shape[] = {q_heads, 256U};
   constexpr uint64_t scale_k_shape[] = {4U, 256U};
   uint64_t positions_shape[] = {m};
-  uint64_t output_q_shape[] = {m, 16U, 256U};
+  uint64_t output_q_shape[] = {m, q_heads, 256U};
   uint64_t output_k_shape[] = {m, 4U, 256U};
   sllm_attention_preprocess_desc_t descriptor{};
   descriptor.struct_size = sizeof(descriptor);
@@ -5731,6 +8577,116 @@ bool attention_preprocess_success_metadata_and_dispatch() {
                     SLLM_STATUS_OK, "attention success plan release", error);
   release_attention_buffers(&buffers);
   return valid && release_queue(&queue) && release_context(&context);
+}
+
+bool attention_preprocess_qwen27_wave32_selector_and_rollback() {
+  constexpr const char *const gfx1030_env =
+      "SLLM_ATTENTION_PREPROCESS_GFX1030_WAVE32";
+  constexpr const char *const gfx1201_env =
+      "SLLM_ATTENTION_PREPROCESS_GFX1201_WAVE32";
+  const char *const old_gfx1030 = std::getenv(gfx1030_env);
+  const char *const old_gfx1201 = std::getenv(gfx1201_env);
+  const bool had_gfx1030 = old_gfx1030 != nullptr;
+  const bool had_gfx1201 = old_gfx1201 != nullptr;
+  const std::string old_gfx1030_value = had_gfx1030 ? old_gfx1030 : "";
+  const std::string old_gfx1201_value = had_gfx1201 ? old_gfx1201 : "";
+  const auto restore = [&]() {
+    if (had_gfx1030) {
+      setenv(gfx1030_env, old_gfx1030_value.c_str(), 1);
+    } else {
+      unsetenv(gfx1030_env);
+    }
+    if (had_gfx1201) {
+      setenv(gfx1201_env, old_gfx1201_value.c_str(), 1);
+    } else {
+      unsetenv(gfx1201_env);
+    }
+  };
+  const auto run = [](const char *const arch_name, const bool expect_wave32) {
+    fake_hip::reset();
+    fake_hip::set_gcn_arch_name(arch_name);
+    constexpr uint64_t m = 3U;
+    constexpr uint64_t q_heads = 24U;
+    sllm_context_t *context = nullptr;
+    sllm_queue_t *queue = nullptr;
+    AttentionBuffers buffers{};
+    if (!create_attention_resources(&context, &queue, &buffers, m, q_heads,
+                                    arch_name)) {
+      release_attention_buffers(&buffers);
+      release_queue(&queue);
+      release_context(&context);
+      return false;
+    }
+    Error error;
+    auto descriptor = attention_preprocess_descriptor(buffers, m, 17U, q_heads);
+    descriptor.reserved[0] =
+        SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1;
+    sllm_attention_preprocess_plan_t *plan = nullptr;
+    sllm_completion_t *completion = nullptr;
+    auto info = attention_preprocess_dispatch_info();
+    bool valid =
+        expect_status(sllm_attention_preprocess_prepare(context, &descriptor,
+                                                        &plan, &error.sink),
+                      SLLM_STATUS_OK, "Qwen 27B attention preprocess prepare",
+                      error) &&
+        plan != nullptr;
+    if (plan != nullptr) {
+      valid = expect_status(sllm_attention_preprocess_execute(
+                                plan, queue, &completion, &info, &error.sink),
+                            SLLM_STATUS_OK,
+                            "Qwen 27B attention preprocess execute", error) &&
+              valid;
+    }
+    const uint32_t expected_kernel =
+        expect_wave32
+            ? SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_WAVE32_BF16_V1
+            : SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1;
+    const uint32_t expected_workgroup =
+        expect_wave32 ? SLLM_HIP_ATTENTION_PREPROCESS_WAVE32_WORKGROUP_SIZE
+                      : SLLM_HIP_ATTENTION_PREPROCESS_WORKGROUP_SIZE;
+    const char *const expected_kernel_symbol =
+        expect_wave32 ? "attention_preprocess.headwise_norm_rope.wave32.v1"
+                      : "attention_preprocess.headwise_norm_rope.v1";
+    const char *const expected_device_symbol =
+        expect_wave32 ? "sllm_attention_preprocess_headwise_norm_rope_wave32_v1"
+                      : "sllm_attention_preprocess_headwise_norm_rope_v1";
+    valid = completion != nullptr && info.dispatch_count == 1U &&
+            info.kernel_id == expected_kernel &&
+            info.workgroup_size_x == expected_workgroup &&
+            info.grid_size_x == m * (q_heads + 4U) && info.m == m &&
+            info.q_heads == q_heads && info.k_heads == 4U &&
+            info.q_head_dim == 256U && info.k_head_dim == 256U &&
+            std::strcmp(info.kernel_symbol, expected_kernel_symbol) == 0 &&
+            std::strcmp(info.device_symbol, expected_device_symbol) == 0 &&
+            std::strcmp(info.gcn_arch_name, arch_name) == 0 &&
+            fake_hip::attention_preprocess_launch_calls() == 1U && valid;
+    if (completion != nullptr) {
+      valid = query_completion(completion, SLLM_STATUS_OK) && valid;
+      valid = release_completion(&completion) && valid;
+    }
+    if (plan != nullptr) {
+      valid = expect_status(
+                  sllm_attention_preprocess_plan_release(&plan, &error.sink),
+                  SLLM_STATUS_OK, "Qwen 27B attention preprocess plan release",
+                  error) &&
+              valid;
+    }
+    release_attention_buffers(&buffers);
+    valid = release_queue(&queue) && valid;
+    return release_context(&context) && valid;
+  };
+
+  unsetenv(gfx1030_env);
+  unsetenv(gfx1201_env);
+  bool valid = run("gfx1030", true);
+  valid = run("gfx1201", true) && valid;
+  setenv(gfx1030_env, "0", 1);
+  valid = run("gfx1030", false) && valid;
+  unsetenv(gfx1030_env);
+  setenv(gfx1201_env, "0", 1);
+  valid = run("gfx1201", false) && valid;
+  restore();
+  return valid;
 }
 
 bool attention_preprocess_derived_positions_skip_payload_validation() {
@@ -6497,6 +9453,159 @@ bool causal_attention_numerical_gqa_and_lifetime_contract() {
       release_buffer(&query) && release_buffer(&output);
   return output_matches && readback_released && buffers_released &&
          release_queue(&queue) && release_context(&context);
+}
+
+bool causal_attention_after_kv_append_chain_contract() {
+  fake_hip::reset();
+  constexpr uint64_t capacity = 1U;
+  constexpr uint64_t kv_elements = 4U * 256U;
+  constexpr uint64_t query_elements = 16U * 256U;
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_kv_state_t *state = nullptr;
+  sllm_buffer_t *key = nullptr;
+  sllm_buffer_t *value = nullptr;
+  sllm_buffer_t *query = nullptr;
+  sllm_buffer_t *output = nullptr;
+  if (!create_context(&context) || !create_queue(context, &queue) ||
+      !create_kv_state(context, capacity, &state) ||
+      !create_buffer_sized(context, kv_elements * sizeof(uint16_t), &key) ||
+      !create_buffer_sized(context, kv_elements * sizeof(uint16_t), &value) ||
+      !create_buffer_sized(context, query_elements * sizeof(uint16_t),
+                           &query) ||
+      !create_buffer_sized(context, query_elements * sizeof(uint16_t),
+                           &output)) {
+    return false;
+  }
+  std::vector<uint16_t> kv_words(kv_elements, UINT16_C(0x3c00));
+  std::vector<uint16_t> query_words(query_elements, UINT16_C(0));
+  if (!upload_kv_words(queue, key, kv_words) ||
+      !upload_kv_words(queue, value, kv_words) ||
+      !upload_kv_words(queue, query, query_words)) {
+    return false;
+  }
+
+  Error error;
+  if (!expect_status(
+          sllm_queue_set_completion_mode(
+              queue, SLLM_QUEUE_COMPLETION_MODE_DEFERRED, &error.sink),
+          SLLM_STATUS_OK, "chain deferred completion mode", error)) {
+    return false;
+  }
+  // This fence is intentionally recorded before the dependent dispatch.  A
+  // completed fence from before the append must still be rejected as stale.
+  sllm_completion_t *old_fence = nullptr;
+  if (!expect_status(sllm_queue_fence(queue, &old_fence, &error.sink),
+                     SLLM_STATUS_OK, "chain old fence", error) ||
+      old_fence == nullptr) {
+    return false;
+  }
+  sllm_kv_append_desc_t append_descriptor =
+      kv_append_descriptor(key, value, 1U, 0U);
+  sllm_kv_append_info_t append_info = kv_append_info();
+  sllm_completion_t *append_completion = nullptr;
+  if (!expect_status(sllm_kv_state_append(state, queue, &append_descriptor,
+                                          &append_completion, &append_info,
+                                          &error.sink),
+                     SLLM_STATUS_OK, "chain KV append", error) ||
+      append_completion == nullptr || append_info.dispatch_count != 1U) {
+    return false;
+  }
+  const auto descriptor =
+      causal_attention_descriptor(state, query, output, 1U, 0U, 1U);
+  auto dispatch_info = causal_attention_dispatch_info();
+  sllm_completion_t *attention_completion = nullptr;
+  if (!expect_status(sllm_causal_attention_execute_after_kv_append(
+                         context, queue, append_completion, &descriptor,
+                         &attention_completion, &dispatch_info, &error.sink),
+                     SLLM_STATUS_OK, "chain causal attention", error) ||
+      attention_completion == nullptr || dispatch_info.dispatch_count != 1U ||
+      fake_hip::causal_attention_launch_calls() != 1U ||
+      !query_completion(append_completion, SLLM_STATUS_PUBLIC_PENDING) ||
+      !query_completion(attention_completion, SLLM_STATUS_PUBLIC_PENDING)) {
+    return false;
+  }
+
+  // One append may have at most one dependent attention.  The claim also
+  // blocks cancellation/release until attention is finalized.
+  auto duplicate_info = causal_attention_dispatch_info();
+  sllm_completion_t *duplicate = nullptr;
+  if (!expect_status(sllm_causal_attention_execute_after_kv_append(
+                         context, queue, append_completion, &descriptor,
+                         &duplicate, &duplicate_info, &error.sink),
+                     SLLM_STATUS_PUBLIC_BUSY, "chain duplicate dependent",
+                     error) ||
+      duplicate != nullptr ||
+      !expect_status(
+          sllm_kv_state_append_cancel(state, append_completion, &error.sink),
+          SLLM_STATUS_PUBLIC_BUSY, "chain append cancel", error) ||
+      !release_completion(&append_completion, SLLM_STATUS_PUBLIC_BUSY) ||
+      append_completion == nullptr) {
+    return false;
+  }
+
+  sllm_completion_result_t result{};
+  result.struct_size = sizeof(result);
+  result.abi_version = SLLM_HIP_ABI_VERSION;
+  if (!expect_status(
+          sllm_completion_wait(old_fence, UINT32_MAX, &result, &error.sink),
+          SLLM_STATUS_OK, "chain old fence wait", error)) {
+    return false;
+  }
+  result = {};
+  result.struct_size = sizeof(result);
+  result.abi_version = SLLM_HIP_ABI_VERSION;
+  if (!expect_status(sllm_completion_finalize_after(
+                         append_completion, old_fence, &result, &error.sink),
+                     SLLM_STATUS_PUBLIC_NOT_READY, "chain stale fence",
+                     error) ||
+      result.state != SLLM_COMPLETION_STATE_PENDING) {
+    return false;
+  }
+
+  sllm_completion_t *current_fence = nullptr;
+  if (!expect_status(sllm_queue_fence(queue, &current_fence, &error.sink),
+                     SLLM_STATUS_OK, "chain current fence", error) ||
+      current_fence == nullptr) {
+    return false;
+  }
+  result = {};
+  result.struct_size = sizeof(result);
+  result.abi_version = SLLM_HIP_ABI_VERSION;
+  if (!expect_status(
+          sllm_completion_wait(current_fence, UINT32_MAX, &result, &error.sink),
+          SLLM_STATUS_OK, "chain current fence wait", error)) {
+    return false;
+  }
+  result = {};
+  result.struct_size = sizeof(result);
+  result.abi_version = SLLM_HIP_ABI_VERSION;
+  const bool attention_finalized =
+      expect_status(sllm_completion_finalize_after(attention_completion,
+                                                   current_fence, &result,
+                                                   &error.sink),
+                    SLLM_STATUS_OK, "chain attention finalize", error) &&
+      result.state == SLLM_COMPLETION_STATE_SUCCESS;
+  result = {};
+  result.struct_size = sizeof(result);
+  result.abi_version = SLLM_HIP_ABI_VERSION;
+  const bool append_finalized =
+      expect_status(sllm_completion_finalize_after(
+                        append_completion, current_fence, &result, &error.sink),
+                    SLLM_STATUS_OK, "chain append finalize", error) &&
+      result.state == SLLM_COMPLETION_STATE_SUCCESS;
+  const bool released =
+      append_finalized && attention_finalized &&
+      release_completion(&attention_completion) &&
+      release_completion(&append_completion) &&
+      release_completion(&current_fence) && release_completion(&old_fence) &&
+      kv_query(state, 1U, 1U) &&
+      expect_status(sllm_kv_state_release(&state, &error.sink), SLLM_STATUS_OK,
+                    "chain state release", error) &&
+      release_buffer(&key) && release_buffer(&value) &&
+      release_buffer(&query) && release_buffer(&output) &&
+      release_queue(&queue) && release_context(&context);
+  return released;
 }
 
 bool kv_append_accounting_multiplicity_contract() {
@@ -7965,6 +11074,7 @@ bool kv_append_lifetime_alias_and_quarantine_contract() {
 
 bool linear_attention_transaction_and_lifetime_contract() {
   fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
   constexpr uint64_t token_count = 3U;
   constexpr uint64_t capacity = 7U;
   const std::array<uint64_t, 9> sizes = {token_count * 8192U * 2U,
@@ -8002,6 +11112,8 @@ bool linear_attention_transaction_and_lifetime_contract() {
   reviewed_27b_create.value_heads = 48U;
   reviewed_27b_create.head_dim = 128U;
   reviewed_27b_create.conv_kernel_size = 4U;
+  const std::size_t reviewed_27b_allocations_before =
+      fake_hip::live_allocations();
   sllm_linear_attention_state_t *reviewed_27b_state = nullptr;
   Error reviewed_27b_error;
   if (!expect_status(sllm_linear_attention_state_create(
@@ -8029,11 +11141,201 @@ bool linear_attention_transaction_and_lifetime_contract() {
       reviewed_27b_view.recurrent_state_shape[0] == 48U &&
       reviewed_27b_view.recurrent_state_shape[1] == 128U &&
       reviewed_27b_view.recurrent_state_shape[2] == 128U;
+  const bool reviewed_27b_compact_allocation =
+      fake_hip::live_allocations() == reviewed_27b_allocations_before + 1U;
+  const std::array<uint64_t, 4> reviewed_27b_plane_bytes = {
+      UINT64_C(3) * 10240U * sizeof(uint16_t),
+      UINT64_C(3) * 10240U * sizeof(uint16_t),
+      UINT64_C(48) * 128U * 128U * sizeof(float),
+      UINT64_C(48) * 128U * 128U * sizeof(float)};
+  bool reviewed_27b_initial_zero = true;
+  for (std::size_t index = 0U; index != reviewed_27b_plane_bytes.size();
+       ++index) {
+    std::vector<uint8_t> image(
+        static_cast<std::size_t>(reviewed_27b_plane_bytes[index]), 0xa5U);
+    sllm_state_chunk_t chunk{};
+    chunk.struct_size = sizeof(chunk);
+    chunk.abi_version = SLLM_HIP_ABI_VERSION;
+    chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+    chunk.plane = static_cast<uint32_t>(index + 1U);
+    chunk.byte_length = reviewed_27b_plane_bytes[index];
+    chunk.host_pointer = image.data();
+    chunk.host_capacity = reviewed_27b_plane_bytes[index];
+    const bool exported = expect_status(
+        sllm_linear_attention_state_export(reviewed_27b_state, &chunk,
+                                           &reviewed_27b_error.sink),
+        SLLM_STATUS_OK, "Qwen3.5-27B initial plane export", reviewed_27b_error);
+    reviewed_27b_initial_zero =
+        reviewed_27b_initial_zero && exported &&
+        std::all_of(image.begin(), image.end(),
+                    [](const uint8_t value) { return value == 0U; });
+  }
   const bool reviewed_27b_released = expect_status(
       sllm_linear_attention_state_release(&reviewed_27b_state,
                                           &reviewed_27b_error.sink),
       SLLM_STATUS_OK, "Qwen3.5-27B linear state release", reviewed_27b_error);
-  if (!reviewed_27b_valid || !reviewed_27b_released) {
+  const bool reviewed_27b_cleanup =
+      fake_hip::live_allocations() == reviewed_27b_allocations_before;
+  if (!reviewed_27b_valid || !reviewed_27b_compact_allocation ||
+      !reviewed_27b_initial_zero || !reviewed_27b_released ||
+      !reviewed_27b_cleanup) {
+    release_queue(&queue);
+    release_context(&context);
+    return false;
+  }
+  /* A failed compact backing free must quarantine the single backing
+   * allocation and the state, while the successful scratch-free path (there
+   * is no scratch at creation) must not retry or double-free the backing. */
+  sllm_context_t *compact_release_failure_context = nullptr;
+  sllm_linear_attention_state_t *compact_release_failure_state = nullptr;
+  Error compact_release_failure_error;
+  const std::size_t compact_release_failure_allocations_before =
+      fake_hip::live_allocations();
+  const std::size_t compact_release_failure_frees_before =
+      fake_hip::allocation_free_calls();
+  const std::size_t compact_release_failure_orphans_before =
+      sllm_test_orphan_count();
+  const std::size_t compact_release_failure_poison_before =
+      sllm_test_poison_count();
+  const bool compact_release_failure_context_created =
+      create_context(&compact_release_failure_context);
+  const bool compact_release_failure_state_created =
+      compact_release_failure_context_created &&
+      expect_status(sllm_linear_attention_state_create(
+                        compact_release_failure_context, &reviewed_27b_create,
+                        &compact_release_failure_state,
+                        &compact_release_failure_error.sink),
+                    SLLM_STATUS_OK,
+                    "Qwen3.5-27B compact release-failure create",
+                    compact_release_failure_error) &&
+      compact_release_failure_state != nullptr &&
+      fake_hip::live_allocations() ==
+          compact_release_failure_allocations_before + 1U;
+  sllm_status_t compact_release_failure_status = SLLM_STATUS_INTERNAL_ERROR;
+  if (compact_release_failure_state_created) {
+    sllm_public_runtime::FaultInjector::set(
+        sllm_public_runtime::FaultPoint::AllocationFreeError, 1U);
+    compact_release_failure_status = sllm_linear_attention_state_release(
+        &compact_release_failure_state, &compact_release_failure_error.sink);
+    sllm_public_runtime::FaultInjector::reset();
+  }
+  const bool compact_release_failure_quarantined =
+      compact_release_failure_state_created &&
+      compact_release_failure_status == SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR &&
+      compact_release_failure_state == nullptr &&
+      sllm_test_orphan_count() == compact_release_failure_orphans_before + 1U &&
+      sllm_test_poison_count() == compact_release_failure_poison_before + 1U &&
+      fake_hip::live_allocations() ==
+          compact_release_failure_allocations_before + 1U &&
+      fake_hip::allocation_free_calls() == compact_release_failure_frees_before;
+  Error compact_release_retry_error;
+  const bool compact_release_failure_no_retry =
+      expect_status(sllm_linear_attention_state_release(
+                        &compact_release_failure_state,
+                        &compact_release_retry_error.sink),
+                    SLLM_STATUS_INVALID_ARGUMENT,
+                    "Qwen3.5-27B compact release-failure no retry",
+                    compact_release_retry_error) &&
+      fake_hip::allocation_free_calls() == compact_release_failure_frees_before;
+  Error compact_release_context_error;
+  const bool compact_release_failure_poisoned_context =
+      compact_release_failure_context_created &&
+      expect_status(sllm_context_release(&compact_release_failure_context,
+                                         &compact_release_context_error.sink),
+                    SLLM_STATUS_INTERNAL_ERROR,
+                    "Qwen3.5-27B compact release-failure poisoned context",
+                    compact_release_context_error) &&
+      compact_release_failure_context != nullptr;
+  if (!compact_release_failure_quarantined ||
+      !compact_release_failure_no_retry ||
+      !compact_release_failure_poisoned_context) {
+    release_queue(&queue);
+    release_context(&context);
+    return false;
+  }
+  sllm_public_runtime::FaultInjector::set(
+      sllm_public_runtime::FaultPoint::NativeCreationFailure, 1U);
+  sllm_linear_attention_state_t *failed_reviewed_27b_state = nullptr;
+  Error failed_reviewed_27b_error;
+  const sllm_status_t failed_reviewed_27b_status =
+      sllm_linear_attention_state_create(context, &reviewed_27b_create,
+                                         &failed_reviewed_27b_state,
+                                         &failed_reviewed_27b_error.sink);
+  sllm_public_runtime::FaultInjector::reset();
+  const bool reviewed_27b_creation_cleanup =
+      failed_reviewed_27b_status == SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR &&
+      failed_reviewed_27b_state == nullptr &&
+      fake_hip::live_allocations() == reviewed_27b_allocations_before + 1U;
+  if (!reviewed_27b_creation_cleanup) {
+    release_queue(&queue);
+    release_context(&context);
+    return false;
+  }
+  sllm_linear_attention_state_t *compact_fork_source = nullptr;
+  sllm_linear_attention_state_t *compact_fork_child = nullptr;
+  Error compact_fork_error;
+  const std::size_t compact_fork_allocations_before =
+      fake_hip::live_allocations();
+  const bool compact_fork_source_created =
+      expect_status(sllm_linear_attention_state_create(
+                        context, &reviewed_27b_create, &compact_fork_source,
+                        &compact_fork_error.sink),
+                    SLLM_STATUS_OK, "Qwen3.5-27B compact fork source create",
+                    compact_fork_error);
+  sllm_linear_attention_state_create_info_t compact_fork_destination =
+      reviewed_27b_create;
+  compact_fork_destination.capacity_tokens = capacity + 1U;
+  sllm_state_fork_info_t compact_fork_info{};
+  compact_fork_info.struct_size = sizeof(compact_fork_info);
+  compact_fork_info.abi_version = SLLM_HIP_ABI_VERSION;
+  compact_fork_info.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  const bool compact_fork_created =
+      compact_fork_source_created &&
+      expect_status(sllm_linear_attention_state_fork(
+                        compact_fork_source, &compact_fork_destination,
+                        &compact_fork_child, &compact_fork_info,
+                        &compact_fork_error.sink),
+                    SLLM_STATUS_OK, "Qwen3.5-27B compact fork child",
+                    compact_fork_error) &&
+      compact_fork_child != nullptr &&
+      compact_fork_info.mode == SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY &&
+      compact_fork_info.shared_bytes == 0U;
+  const bool compact_fork_source_released =
+      compact_fork_source == nullptr ||
+      expect_status(sllm_linear_attention_state_release(
+                        &compact_fork_source, &compact_fork_error.sink),
+                    SLLM_STATUS_OK, "Qwen3.5-27B compact fork source release",
+                    compact_fork_error);
+  bool compact_fork_child_zero = false;
+  if (compact_fork_child != nullptr) {
+    std::vector<uint8_t> image(
+        static_cast<std::size_t>(reviewed_27b_plane_bytes[0]), 0xa5U);
+    sllm_state_chunk_t chunk{};
+    chunk.struct_size = sizeof(chunk);
+    chunk.abi_version = SLLM_HIP_ABI_VERSION;
+    chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+    chunk.plane = SLLM_HIP_LINEAR_STATE_PLANE_CONV_SLOT0;
+    chunk.byte_length = reviewed_27b_plane_bytes[0];
+    chunk.host_pointer = image.data();
+    chunk.host_capacity = reviewed_27b_plane_bytes[0];
+    compact_fork_child_zero =
+        expect_status(sllm_linear_attention_state_export(
+                          compact_fork_child, &chunk, &compact_fork_error.sink),
+                      SLLM_STATUS_OK, "Qwen3.5-27B compact fork child export",
+                      compact_fork_error) &&
+        std::all_of(image.begin(), image.end(),
+                    [](const uint8_t value) { return value == 0U; });
+  }
+  const bool compact_fork_child_released =
+      compact_fork_child == nullptr ||
+      expect_status(sllm_linear_attention_state_release(
+                        &compact_fork_child, &compact_fork_error.sink),
+                    SLLM_STATUS_OK, "Qwen3.5-27B compact fork child release",
+                    compact_fork_error);
+  if (!compact_fork_created || !compact_fork_source_released ||
+      !compact_fork_child_zero || !compact_fork_child_released ||
+      compact_fork_source != nullptr || compact_fork_child != nullptr ||
+      fake_hip::live_allocations() != compact_fork_allocations_before) {
     release_queue(&queue);
     release_context(&context);
     return false;
@@ -10002,12 +13304,41 @@ int main() {
     std::cerr << "matmul prepare/execute contract test failed\n";
     return 1;
   }
+  if (!qwen38_projection_pack2_public_contract()) {
+    std::cerr << "Qwen3.8 projection-pack public contract test failed\n";
+    return 1;
+  }
+  if (!qwen38_projection_pack2_fp8_gdn_public_contract()) {
+    std::cerr
+        << "Qwen3.8 FP8 GDN projection-pack public contract test failed\n";
+    return 1;
+  }
   if (!matmul_mxfp_weight_activation_descriptor_contract()) {
     std::cerr << "matmul MXFP descriptor contract test failed\n";
     return 1;
   }
   if (!matmul_mxfp_prefill_selector_contract()) {
     std::cerr << "matmul MXFP provider selector contract test failed\n";
+    return 1;
+  }
+  if (!matmul_fp8_outer_decode_selector_contract()) {
+    std::cerr << "matmul FP8 outer decode selector contract test failed\n";
+    return 1;
+  }
+  if (!matmul_fp8_gfx1201_decode_rank_table_contract()) {
+    std::cerr << "matmul FP8 gfx1201 decode rank table test failed\n";
+    return 1;
+  }
+  if (!matmul_fp8_outer_f16_staging_selector_and_lease_contract()) {
+    std::cerr << "matmul FP8 outer F16 staging contract test failed\n";
+    return 1;
+  }
+  if (!matmul_nvfp4_w4a4_selector_contract()) {
+    std::cerr << "matmul NVFP4 W4A4 selector contract test failed\n";
+    return 1;
+  }
+  if (!matmul_nvfp4_w4a4_activation_shared_lifetime_contract()) {
+    std::cerr << "matmul NVFP4 W4A4 activation-shared lifetime test failed\n";
     return 1;
   }
   if (!matmul_short_mixed_metadata_dispatch_contract()) {
@@ -10031,6 +13362,7 @@ int main() {
       !attention_preprocess_position_payload_mismatch_is_pre_dispatch() ||
       !attention_preprocess_derived_positions_skip_payload_validation() ||
       !attention_preprocess_success_metadata_and_dispatch() ||
+      !attention_preprocess_qwen27_wave32_selector_and_rollback() ||
       !attention_preprocess_mrope_positions_dispatch()) {
     std::cerr << "attention preprocess public ABI contract test failed\n";
     return 1;
@@ -10045,6 +13377,28 @@ int main() {
   }
   if (!causal_attention_gqa4_p32_selector_contract()) {
     std::cerr << "causal attention GQA4 P32 selector contract test failed\n";
+    return 1;
+  }
+  if (!causal_attention_gqa6_p32_selector_contract()) {
+    std::cerr << "causal attention GQA6 P32 selector contract test failed\n";
+    return 1;
+  }
+  if (!causal_attention_gqa6_p64_and_blocksoftmax_selector_contract()) {
+    std::cerr << "causal attention GQA6 P64/block-softmax selector contract "
+                 "test failed\n";
+    return 1;
+  }
+  if (!causal_attention_gqa6_p128_selector_contract()) {
+    std::cerr << "causal attention GQA6 P128 selector contract test failed\n";
+    return 1;
+  }
+  if (!causal_attention_gqa6_rocblas_f32_selector_contract()) {
+    std::cerr << "causal attention GQA6 rocBLAS F32 selector test failed\n";
+    return 1;
+  }
+  if (!causal_attention_gqa6_rocblas_f32_gfx1201_selector_contract()) {
+    std::cerr << "causal attention gfx1201 GQA6 rocBLAS F32 selector test "
+                 "failed\n";
     return 1;
   }
   if (!causal_attention_target_scoped_selector_contract()) {
@@ -10111,6 +13465,11 @@ int main() {
                  "test failed\n";
     return 1;
   }
+  if (!linear_attention_gfx1030_row32_lds_selector_contract()) {
+    std::cerr << "linear attention gfx1030 row32-LDS selector contract test "
+                 "failed\n";
+    return 1;
+  }
 #define SLLM_RUN_KV_CONTRACT(test_name)                                        \
   if (!(test_name)()) {                                                        \
     std::cerr << #test_name " failed\n";                                       \
@@ -10118,6 +13477,7 @@ int main() {
   }
   SLLM_RUN_KV_CONTRACT(kv_append_accounting_multiplicity_contract)
   SLLM_RUN_KV_CONTRACT(causal_attention_numerical_gqa_and_lifetime_contract)
+  SLLM_RUN_KV_CONTRACT(causal_attention_after_kv_append_chain_contract)
   SLLM_RUN_KV_CONTRACT(linear_attention_transaction_and_lifetime_contract)
   SLLM_RUN_KV_CONTRACT(kv_append_same_buffer_disjoint_lifecycle_contract)
   SLLM_RUN_KV_CONTRACT(kv_state_create_snapshot_contract)

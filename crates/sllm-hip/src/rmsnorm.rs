@@ -410,6 +410,10 @@ impl HipBackend {
 }
 
 impl PreparedRmsNorm {
+    pub(crate) fn raw_plan_handle(&self) -> *const sys::sllm_rmsnorm_plan_t {
+        self.state.raw.as_ptr()
+    }
+
     /// Enqueue the reusable baseline RMSNorm plan on `queue`.
     ///
     /// The native completion retains the plan, queue, and all three bound

@@ -93,6 +93,8 @@
 
 - DeepSeek v4: MoE、DFlash。
 - Qwen3.5: Dense、MoE、MTP。
+- Qwen3.8: 27B Dense、MTP。最初の対象artifactを`unsloth/Qwen3.8-27B-NVFP4`へ固定し、文章生成を優先する。
+  visionはこの性能laneをblockしない独立後続とする。
 - Gemma4: Dense、MoE、MTP、[Diffusion]。
 - MiniMax M3。
 - 列挙順は実装優先順位を表さない。
@@ -127,19 +129,28 @@
 
 - 重み:
   - NVFP4。
-  - [MXFP4。]
+  - [MXFP4（W4A8のみ。ActivationはOCP MXFP8 E4M3、block 32、E8M0 scale。W4A4は対応対象外）。]
   - FP8。
   - MXFP8 E4M3（block 32、E8M0 scale、W8A8）。
   - MXFP6 E3M2（block 32、E8M0 scale、W6A6）。
   - BF16。
 - 活性値:
-  - FP8。
+  - FP8（MXFP4 W4A8ではOCP MXFP8 E4M3、block 32、E8M0 scaleとして使用）。
   - MXFP8 E4M3（動的block 32量子化）。
   - MXFP6 E3M2（動的block 32量子化）。
   - BF16。
 - CDNA3では、e4m3fnモデルをVRAMへ読み込む際にe4m3fnuzへ変換する。
 - 混乱を避けるため、テスト専用のe4m3fnuz量子化モデルは作成しない。
 - NVFP4ではtensor scaleをtensor表現とkernel契約に含める。
+- 2026-09-03のユーザー決定により、MXFP4の対応方針はW4A8だけに限定する。既存のW4A4 ABI、provider、
+  model lock、実測記録は過去の実装事実として保持するが、今後の対応形式または新規model対応の根拠にはしない。
+  W4A8の実装が完了するまで、MXFP4は方針とruntime実装に差分がある状態として扱い、既存W4A4をW4A8へ
+  読み替えない。W4A8のActivationはOCP MXFP8 E4M3、K-axis block 32、E8M0 scaleへ固定する。
+- 一般に「FP8 model」と呼ばれるartifactへの汎用対応は、2026-09-03のユーザー決定により保留する。現行の
+  per-output-channel weight／dynamic per-token activation／F32 scaleの限定経路を汎用FP8対応とはみなさない。
+  再開時は少なくともtensor/static、channel/token-dynamic、weight 128x128＋activation 1x128 block-dynamic、
+  weight-only W8A16を別recipeとして扱い、`compressed-tensors`、`quant_method: fp8`、scaleとinverse-scale、
+  F32／BF16／UE8M0 scaleをconverterでversioned内部契約へ正規化する。保留中は実装やprovider追加を開始しない。
 - OCP MXFP8 W8A8／MXFP6 W6A6ではweightをvalue planeとblockごとのE8M0 scale planeとして常駐させ、
   BF16 activationを各matmulの前段で同じOCP block-32形式へ動的量子化する。積はFP32で累積し、graph境界のoutputは
   BF16 RNEとする。E8M0 NaN scaleはblock全体へNaN伝播し、Infはelement最大有限値へsaturationする。
@@ -418,7 +429,17 @@
 | 完了・内部MX fast path採用 | 68 | gfx1030 E4／scaleを分離測定。内部MX value planeのnormal common pathと安全なcombined-exponent block decodeを採用し、4B prefillをさらに約2.97〜4.35%改善 |
 | 完了・ID41限定採用 | 69 | exact gfx1030 MXFP8 software-MMQで32-bit E4 ingressを既存ID27 scopeへ採用し、4B prefillを22〜24%改善。scale register化／combined候補はbenchmark-only |
 | 完了・gfx1201 ID45 shape限定採用／ID46・gfx1030 ID43 benchmark-only | 70 | packed E3M2→E4M3 exact ingressでMXFP8 MMQ／WMMA骨格を再利用。P70-Fで4-value ingressのID45をID44比1.61〜1.69倍へ改善して既定化 |
+| 完了・実モデル評価済み | 71 | Qwen3.5-27B MXFP6 reviewed model対応と両RDNAでのbounded-VRAM実測 |
+| 完了・shape限定採用 | 72 | exact gfx1201 MXFP6 ID45 wide-N selectorをN<=32,768へ拡張 |
 | 完了・ユーザー指定scope拡張 | 73 | exact gfx1201 MXFP8 ID31／34／36／37のN上限を32,768へ緩和。host／provider contractをPASSし、新規wide-N性能・数値GPU再検証は省略 |
+| 完了・両target限定採用 | 74 | MXFP6 prefillを3反復で改善し、gfx1030 ID47／gfx1201 ID48を限定採用 |
+| 完了 | 75 | gfx1030 MXFP8／MXFP6 decode共通half2経路を改善し、ID55／57を限定採用 |
+| 完了・両target実モデルPASS（R9700 single-visible） | 76 | exact Unsloth Qwen3.8-27B混合NVFP4 artifactの統合、正しさ、baseline／profile |
+| 完了・decode機能／dispatch PASS（速度残差はPhase 78へ統合） | 77 | 同artifactのsingle-request decode専用経路を成立。実用速度は未達のため、whole-model速度gateをPhase 78で閉じる |
+| 完了・ユーザー承認による目標変更／未達受容 | 78 | r25を到達点として終了。V620 decode基準を実artifact帯域へ変更し、prefill等の旧目標未達・正式比較未実施を明記。モデル固有の追加最適化は要求しない |
+| 計画済み | 79 | static FP8 KV、MTP、文章生成の実用closeout |
+| 計画済み | 80 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了 |
+| 計画済み | 81 | NVFP4のGPU batching最適化 |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
 
@@ -433,6 +454,151 @@ superseded履歴となった。v2のfresh correctnessは両local targetでPASS�
 フェーズ53を完了した。その後2026-08-30のユーザー決定でblock16経路を廃止し、同じreviewed Qwen3.5-4B BF16 dense scopeの
 省略時KVをstandard OCP MXFP8 E4M3へ変更した。Phase 53/54のblock16 evidenceは採用根拠ではなく履歴としてのみ保持する。
 gfx942実機は今後の検証項目との一括実行へ延期し、local RDNA follow-upをblockしない。
+2026-09-05の最新ユーザー指示によりPhase 78は完了扱いとする。
+[完了記録](archive/2026/09/1-10/phase78-accepted-closeout.md)と
+[目標変更・未達・未実施の履歴](../history/2026/09/1-10/phase76-78-qwen38-nvfp4.md)を現在の判断とし、
+以下の未完了・旧gateの記述はそれ以前の経過として読む。ID72はopt-in採用保留を維持する。
+
+2026-09-03のユーザー指示により、次の優先laneをPhase 76〜79のexact
+`unsloth/Qwen3.8-27B-NVFP4`実用化へ固定する。このartifactは168個のMLP projectionをNVFP4 W4A4、233個の
+attention／linear-attention／最終8層MLP／`lm_head` projectionをFP8 W8A8、embedding／norm／GDN補助tensor／
+vision／MTP等をBF16で保持し、KVはstatic tensor FP8 recipeを指定する。generic FP8 artifact対応の保留は維持し、このexact
+recipeの実行に必要な範囲だけを先行する。Phase 76で統合・correctness・baseline／profile、Phase 77でsingle-request decode、
+Phase 78でsingle-request prefill、Phase 79でstatic FP8 KV・MTP・文章生成closeoutを行う。その後Phase 80で他精度を一巡し、
+Phase 81でNVFP4 batchingへ進む。詳細は[Phase 76〜81計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
+2026-09-03時点で固定artifactのV620 `gfx1030` 2台とR9700 `gfx1201`（single-GPU visible）のfull-model smoke
+（17-token prefill、4-token decode、replay、fallback 0、cleanup 0）とNVFP4 W4A4 M=1 decode kernel id 58の実dispatchを確認し、
+Phase 76〜77とPhase 78のcorrectness／dispatch部分は完了したが、Phase 78自体は速度ゲート未達のため保留とした。R9700は全GPU可視のphysical index 2ではHIP最小kernelが`invalid image`となるため、
+実行時は`ROCR_VISIBLE_DEVICES=2`または`HIP_VISIBLE_DEVICES=2`で単一GPU可視化する。このenumeration caveatは
+compatibility文書へ記録し、single-visibleのR9700 evidenceとは分離する。
+Phase 78ではNVFP4 W4A4のM>1 prefill row8/tiled256（ID59）と、V620向けFP8 outer-vector 16x16/K32
+software tile（ID60）を追加し、R9700ではFP8 hipBLASLt native（ID5）を明示選択した。非整列operator oracle、
+17-token replay、512／2,048／9,435-tokenの同一resident prefill profileを両targetでHIP-only、fallback 0、
+cleanup 0としてPASSした。9,435-token prefillはV620 1,171.765秒、R9700 721.757秒であり、既存のllama.cpp
+system-equivalent参考値（V620 340.80 tok/s prefill・33.42 tok/s decode、R9700 779.06・41.93）に対して未達である。
+したがってこれは速度hard gate前のbaselineであり、Phase 78は正式完了しない。2026-09-04のユーザー決定で、
+9,435-token prefillの絶対下限をV620 `340.80 tok/s`、R9700 `779.06 tok/s`へ固定した。decodeは2026-09-04の
+ユーザー修正により、`27B * 4.5/8 byte`の近似weight readで理論メモリ帯域の50%に相当するV620 `16.86 tok/s`、
+R9700 `21.07 tok/s`へ固定する。MTP込みllama.cpp decode `33.42/41.93 tok/s`は参考値でありhard gateにしない。
+加えて`17/17`、`512/32`、`2,048/128`、`9,435/128`の全行でfresh llama.cppとのprefill／TTFT中央値が
+MAD幅を含めて遅くないことを要求する。decode TPOTとE2E差は定量報告するが50%帯域を超える追加gateにしない。
+NVFP4 target別matrix provider、
+multi-column decode、activation pack共有、FP8 projection、attention/GDN fusion、host同期削減を開始仮説とする。
+実装前のP78-P0Aでexact artifactをlocal RDNA上で実行できる対応forkを調べる。2026-09-04時点でupstream
+vLLM／SGLangと確認できた公開forkはlocal `gfx1030`／`gfx1201`上のexact artifact比較には使えず、適格forkは
+見つかっていないため、これらの起動を期待した作業や待ちは行わない。P78-P0Bでは固定llama.cppのsystem-equivalent E2E、
+sLLM exact artifactのoperator profile、NVFP4のcompute／memory rooflineとFP8／BF16 vendor provider比較を分離して取得する。
+他GPU向けvLLM／SGLang実装はno-copy構造参照だけに使い、そのthroughputをlocal性能差へ代入しない。P78-P1で
+operator family別wall差と有効なpeerまたはroofline／provider gapから実装順、中間目標、候補を改訂してから着手し、両targetの
+prefill絶対・相対gateとdecode 50%帯域gateを通過した後にPhase 79 static FP8 KV／MTP／CLI/APIへ進む。詳細な測定契約、中間replan値、
+実装方法は[Phase 76〜81計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
+汎用FP8 artifact対応の保留は維持する。
+
+2026-09-04の継続profileでは、NVFP4 decode ID67、V620 FP8 decode ID68、R9700 hipBLASLt decode
+rank再選別、GQA6 shared-KV P32を追加した。GQA6 operatorは9,435-token相当でV620 6.38倍、R9700
+6.20倍、全24 head最大1 BF16 ULPを確認し、競合ありの探索full runでもdecodeをV620
+`5.125→9.994 tok/s`、R9700 `8.381→13.927 tok/s`へ改善した。固定artifactの実parameter payloadは
+約`19.051 GB/token`なので、既定のdecode gateは実trafficではnominal帯域62.72%超を要求するが、ユーザー指定の
+`16.86/21.07 tok/s`は維持する。単独fresh profile後の残件はV620 FP8 prefill/decode、R9700 NVFP4 prefill、
+activation pack共有と安定decode列のlaunch削減である。
+その後の単独・profilerなし9,435/128 runでは、V620がprefill `167.118 tok/s`（`56.457 s`）、decode
+`9.884 tok/s`（`101.170 ms/token`）、R9700がprefill `342.920 tok/s`（`27.514 s`）、decode
+`13.980 tok/s`（`71.529 ms/token`）だった。いずれもHIP-only、fallback／cleanup 0である。固定gateまでの残差は
+V620 prefill `2.039x`・decode `1.706x`、R9700 prefill `2.272x`・decode `1.507x`であり、競合あり探索値を
+正式なreplan値へ使わない。V620単独rocprofではprefill device時間の`45.72%`がFP8 ID63、`23.94%`がNVFP4
+ID62、`20.00%`がGQA6 K32、decodeではFP8 ID68 `41.48 ms/token`、NVFP4 ID67 `21.97 ms/token`、
+GQA6 P32 `11.20 ms/token`を占めた。したがってpack共有だけでは閉じず、prefill blockwise softmax、R9700
+NVFP4 scale-aware WMMA、V620 FP8構造変更、decode weight streamとHIP launch削減を並行する。
+exact mixed graphのmetadata-only解析では、同一activationを再量子化せず共有できるprojection packを
+NVFP4 MLP gate/up 56組、FP8 MLP gate/up 8組、FP8 full-attention Q/K/V 16組、FP8 GDN qkv/z 48組の
+計128組としてfail-closedに確定した。第一段階の量子化共有だけなら401 quantizerを257へ減らせるが、matmul数と
+weight trafficは変わらないため、decode weight kernel／launch削減と組み合わせて評価する。またexact gfx1201の
+hipBLASLt FP8 outer-vector、rank 7、workspace 0をHIP Graphへ直接captureし、1 nodeのinstantiate後に
+1,000/1,000 replay、入力／scale更新7点のeager BF16 bit一致、allocation 5/5解放を確認した。したがって
+R9700のstateless decode spanはhipBLASLtを除外せず実装できるが、通常Completion／eventをcaptureせず、
+request-owned raw-launch graphとして個別に採否する。
+2026-09-05の一時停止checkpointでは、9,435/128の最新長文bestがV620 prefill `279.866 tok/s`・decode
+`12.604 tok/s`、R9700 prefill `439.332 tok/s`・decode `15.961 tok/s`まで改善したが、いずれも速度hard gate未達で
+Phase 78は未完了である。gfx1030 FP8 decode ID82は512/32同一build A/Bでdecode wallを`2.51%`短縮した。
+未統合候補はgfx1030 FP8 prefill LDS LUT `1.300x`、gfx1030 NVFP4 decode scale LUT `1.44〜2.10x`、
+gfx1201 NVFP4→FP8 staging `2.08〜5.10x`である。最後のstagingはID83として実装途中で、enum／workspace／staging
+kernelは存在するがproduction launchは未接続で、selectorから隔離してある。ID80は実モデル効果なし、ID81は`2.575%`退行で
+非採用。正確なopt-in集合、測定値、途中状態、再開順は[Phase 76〜81計画の2026-09-05 checkpoint](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
+同日の再開後、ID83は追加のFP8再符号化による丸め／飽和を確認し、N3候補としてselector隔離を維持する。
+再開順はID72の端数chunk選択修正と、演算順を保持するFP8 prefill／NVFP4 decode LUT候補へ更新した。
+長文探索値はV620 `275.312／13.251 tok/s`、端数修正後のR9700 `1134.906／16.688 tok/s`（prefill／decode）で、
+R9700 prefillの絶対下限を超えたが、decodeと最終比較条件は未達である。
+V620 P128候補による生成token分岐も切り分けられたため採用を保留する。詳細は同計画の「checkpointからの再開」を正とする。
+最終benchmarkはprefillで生成した最初のtokenを合計出力budgetへ含めるv3へ修正し、llama.cppも同じ合計出力数へ揃える。
+既存v2の探索値を最終証拠へ読み替えず、速度下限は維持する。
+ID84/85のproduction接続不具合を修正し、公開API／未整列入力のGPU oracleをPASSしたが、v3-r2の実モデル比較では
+LUTだけの速度改善を確認できなかったため性能採用せず、現行production controlで再計画する。
+その後の明示的な再開指示を受け、v3-r5（各行1 warm＋3 measured）の長文ではV620
+`265.213／13.700 tok/s`、R9700 `1131.527／17.607 tok/s`（prefill／decode）を確認した。
+V620のID86 FP16 tile stagingは固定binaryの512/32 on/offでprefillが`5.36%`退行し、性能採用を保留する。
+短文matmulの無効行削減、V620 decode P2先読み、R9700 P64 attentionのFP16 LDS化を次の作業単位とする。
+R9700 ID72のN2判断待ち、短文TTFT、長文decode速度、全4行の最終比較は未解決であり、Phase 78は未完了。
+v3-r6ではR9700長文decodeが`18.092 tok/s`、v3-r7ではID82 P2先読みでV620が`14.658 tok/s`へ改善し、
+全4行で生成token一致とHIP-only／cleanup成功を確認した。V620長文prefillは`275.307 tok/s`で未達。
+v3-r8ではNVFP4 scale乗算のN0移動により長文prefillが`279.797 tok/s`へ約1.6%改善し、
+全4行のtoken一致を維持した。長文decodeは`14.684 tok/s`、Phase 78の性能条件は引き続き未達。
+v3-r10では安全なIndex32 addressingと短文GDN register-stateを接続し、V620長文は
+`283.231／14.700 tok/s`、短文TTFTは`285.236 ms`となった。R9700短文TTFTは`247.610 ms`。
+いずれも探索測定（1 warm＋3 measured）であり、最終速度条件は未達のままである。
+v3-r11の読み出し指定と状態一括確保でV620長文prefillは`296.387 tok/s`へ改善した。
+短文TTFTはV620 `281.070 ms`、R9700 `244.851 ms`、生成token一致を維持した。
+長文decodeはV620 `14.663 tok/s`で、性能条件は引き続き未達。
+v3-r13の短文split-K／GDN thin projection／FP8 rank選択で、17-token TTFTはV620
+`240.040 ms`、R9700 `241.015 ms`となった（各1 warm＋3 measured）。本番kernel oracleと
+各build内の生成再現性はPASSしたが、N1加算順変更を含むためr11とは両targetとも15番目の出力tokenから差がある。
+短文の最終比較、長文性能、最終3 warm＋10 measuredの証拠は未完了のままである。
+v3-r14のrequest-owned HIP Graphはgfx1030のG1と短文／長文の生成token一致を確認した。
+長文decodeは同一binary off/onで`14.686→14.884 tok/s`（約1.35%改善）だが、短文では約1.3%退行した。
+Graphは長文向けopt-in候補に留め、Phase 78の最終性能条件は引き続き未達である。
+r15の限定FP8 full-tile接続でV620長文prefillは`299.134 tok/s`へ改善し、token一致を維持した。
+r17のID82 3形状専用経路でV620長文decodeは`14.793→15.224 tok/s`、TPOTは`65.686 ms`へ改善した。
+全token一致、HIP-only／cleanup 0を確認したが、prefill `300.074 tok/s`とともに最終性能条件は未達。
+R9700 Graphは短文の速度差がなく、長文では`18.184→18.568 tok/s`へ約2.1%改善し、両方のtoken一致を確認した。
+r19の要求開始時コピー削減・不変plan共有で、短文TTFTはV620 `234.249 ms`、R9700 `236.314 ms`。
+両targetでtoken一致を維持した。各1 warm＋3 measuredの探索結果で、最終比較は未完了。
+r21のR9700短文NVFP4通常loadとdecode activation共有で、短文TTFTは`179.119 ms`、
+prefillは`107.655 tok/s`へ改善した。旧版と全token／文章／audit一致、HIP-only／cleanup 0。
+1 warm＋3 measuredでは短文の比較基準を満たすが、正式3 warm＋10 measuredは未実施。
+V620には改善したM1024 wide形状だけNVFP4次stage先読みを接続し、両targetのbuildを確認した。
+r21 V620長文は全token／文章／audit一致、HIP-only／cleanup 0で、prefill `300.074→307.808 tok/s`、
+decode `15.266 tok/s`、TPOT `65.504 ms`。prefill `340.80`／decode `16.86 tok/s`の目標は未達。
+r21 R9700長文も全token／文章／audit一致、HIP-only／cleanup 0で、prefill `1150.989 tok/s`、
+decode `18.719 tok/s`、TPOT `53.422 ms`。decode目標 `21.07 tok/s`には未達である。
+r23ではGDN qkv/zのFP8量子化をM1だけ共有し、48組で各4→3 kernelへ減らすopt-inを接続した。
+両targetのG1で独立期待値・入力変更・3-node HIP Graph replay・cleanup 0、既存NVFP4の維持を確認した。
+core／native host testと両release buildはPASS。短文17/17の各1 warm＋3 measuredは両targetで
+全token／文章／停止理由一致、HIP-only／cleanup 0。decodeはV620 `16.186→16.417 tok/s`、
+R9700 `19.559→19.719 tok/s`、TTFTは各`232.206／180.982 ms`。
+長文9435/128も両targetの全4 runでtoken／文章／停止理由一致、HIP-only／cleanup 0を確認した。
+decodeはV620 `15.266→15.402 tok/s`、R9700 `18.719→18.828 tok/s`へ改善したが、
+目標`16.86／21.07 tok/s`には未達。prefillは各`307.530／1145.812 tok/s`で旧測定のばらつき範囲内。
+今回の共有はN0 opt-inとして維持し、正式4行3 warm＋10 measuredの比較は未実施である。
+r24ではV620のGDN z投影M1/K5120/N6144を既存ID82 rolled tuple bodyへ接続した。
+private比較は全出力・独立数値期待値・repeat／cleanupを維持して約10.1%時間短縮したが、
+実モデル長文decodeは`15.402→15.412 tok/s`と測定ばらつき内で、whole-model改善は未確定。
+短文／長文とも全token・文章・停止理由・audit一致、HIP-only／cleanup 0を確認した。
+引き続きopt-in候補として扱う。V620 NVFP4 decode定数化は実GPUで速度差がなく非採用。
+r25のFP8 prefill 64-bit loadは改善したM1024の2形状だけへ接続し、全出力・独立期待値・
+非整列fallback・repeat／guard／cleanupを確認した。長文prefillは`308.308→312.115 tok/s`、
+TTFTは`30625.455→30252.204 ms`へ改善し、全token／文章／停止理由／audit一致、HIP-only／cleanup 0。
+各1 warm＋3 measuredの探索結果であり、prefill目標`340.80 tok/s`には未達。decodeも`15.445 tok/s`で未達である。
+NVFP4 signedpack再構成のprivate r26は両targetの数値検証を通過したが、実GPUで速度改善がなく非採用とした。
+本番r25を維持している。ID72のN2採用判断待ちとPhase 78の最終性能条件は未解決のままである。
+容量2048のV620探索はrocBLAS workspace OOMで終了したため、1024の証拠を維持し、
+命令・cache再利用に基づく最適化へ絞る。最新の詳細は同じPhase 76〜81計画を正とする。
+R9700のread counterは計測中の`profile_standard`とAMD upstreamの256-byte request event追加で取得できた。
+r25固定binaryのwhole-model counterは両targetで取得し、出力／audit一致と全kernel coverageを確認した。
+GL2C/EA read-request量はdecodeあたりV620約21.66 GB、R9700約21.80 GBであり、物理DRAM bytesとは区別する。
+通常速度測定は`auto`を維持する。最終性能条件は未達で、最終candidateへの証拠適用確認は残る。
+2026-09-05のユーザー判断により、実効帯域50%超を根拠にV620 decode最適化はr25で終了する。
+read-request量による推定約334.45 GB/s（65.32%）、artifact payloadだけでも約294.24 GB/s（57.47%）。
+物理DRAM utilizationの直接実測とは区別し、V620の旧decode 16.86 tok/s gateを置き換える。
+V620 prefill、R9700条件、正式最終比較とID72判断は引き続き未完了である。
 フェーズ61はKV形式とは独立したmodel weight／activation経路である。OCP MX v1.0のE4M3／E3M2、block 32、E8M0、
 roundTiesToEven、saturationを実装し、GGUFでは未標準のMXFP8／MXFP6 type番号を発明せずI8 carrierのvalue／scale面を
 versioned recipeで結合する。exact `gfx1030`／`gfx1201`のdecode M=1、短prefill M=3、実モデルshape由来の非整列prefill M=17を
@@ -671,7 +837,10 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
     生成し、同一streamのsegment末尾で各ownerを個別queryする。フェーズ21でsegment単位completionを比較したが実時間改善が
     測定雑音内だったため通常の既定経路へ採用しなかった。event/completion pool、
     registry lock削減、parameter更新可能なnative command-listまたは実運用graph replayはフェーズ21へ含めず、
-    未割当課題として維持する。requestごとの素朴なgraph instantiateは再導入しない。
+    未割当課題として維持する。tokenごとのgraph instantiateは再導入しない。Phase 78のQwen3.8 decodeで
+    `932` semantic submission、約`1,384` device dispatch、V620のwall/device差約`24.9 ms/token`を観測したため、
+    request生成時に一度だけinstantiateして再利用するstateless-span graphは再評価対象とする。linear state、attention
+    preprocess、KV append、causal attention、Argmaxは初期graphへ含めず、約65 spanへ分けてstate publication契約を維持する。
   - decodeのtoken IDとpositionを別々の同期付きH2Dにせず、一つのstaging transferまたはdevice-side position生成へ
     まとめる。terminal argmax完了と4-byte token readbackも一つのstream boundaryへ含める。
   - full-attention層ごとのKV append ホスト待機は、受理済み状態だけを公開するtransaction契約を維持したまま、
@@ -1077,4 +1246,5 @@ gfx942のPhase 53相当実機証拠は、追加のMI300X検証項目がまとま
 - 資源条件の1 TOPS、16 GB、帯域の定義と例外承認基準。
 - Infinity Fabric、他RDMA protocol、KV永続化の詳細設計。
 - 量子化形式ごとのlayout、scale粒度、accumulator、fallback表。
+- MXFP4 W4A4実装から、ActivationをOCP MXFP8 E4M3 block32／E8M0とするW4A8契約への移行範囲。
 - sudo以外の既存平文credentialの失効・rotationとsecret managerへの移行状況。

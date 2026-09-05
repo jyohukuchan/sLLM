@@ -1,0 +1,18 @@
+# ROCm 7.14's installed definitions omit this gfx1201 request-size bin.
+# Hardware event identity: ROCm/rocm-systems PR 8022 (merged 2026-07-09).
+# https://github.com/ROCm/rocm-systems/pull/8022/files
+# Use with rocprofv3 -E and profile_standard on the measured GPU; restore its
+# previous performance level after collection. Do not change timed-run policy.
+# Collect with the stock 32B/64B/128B bins (four GL2C events per pass maximum).
+# Sum size * request_count across bins and instances for GL2C/EA read bytes.
+# This interface count is not a direct physical DRAM bus-byte measurement.
+rocprofiler-sdk:
+  counters-schema-version: 1
+  counters:
+    - name: SLLM_GL2C_EA_RDREQ_256B
+      description: "Number of 256-byte GL2C/EA read requests"
+      properties: []
+      definitions:
+        - architectures: [gfx1201]
+          block: GL2C
+          event: 149

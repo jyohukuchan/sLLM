@@ -211,6 +211,10 @@ impl HipBackend {
 }
 
 impl PreparedResidualRmsNorm {
+    pub(crate) fn raw_plan_handle(&self) -> *const sys::sllm_residual_rmsnorm_plan_t {
+        self.state.raw.as_ptr()
+    }
+
     pub fn execute(
         &self,
         queue: &Queue,

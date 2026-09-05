@@ -1,3 +1,4 @@
+#include "linear_attention_register_state.hpp"
 #include "sllm/hip.h"
 
 #include <algorithm>
@@ -431,6 +432,371 @@ bool check_scalar_boundary_regressions() {
   return true;
 }
 
+bool check_register_state_shape_boundaries() {
+  using namespace sllm_linear_attention_kernel;
+  const auto supported = [](const uint32_t token_count, const uint32_t qk_heads,
+                            const uint32_t value_heads, const uint32_t head_dim,
+                            const uint32_t qkv_width,
+                            const uint32_t output_width) {
+    return register_state_shape_supported(token_count, qk_heads, value_heads,
+                                          head_dim, qkv_width, output_width);
+  };
+  const bool pass = !supported(1U, 16U, 48U, 128U, 10240U, 6144U) &&
+                    supported(2U, 16U, 48U, 128U, 10240U, 6144U) &&
+                    supported(32U, 16U, 48U, 128U, 10240U, 6144U) &&
+                    !supported(33U, 16U, 48U, 128U, 10240U, 6144U) &&
+                    !supported(2U, 16U, 32U, 128U, 8192U, 4096U) &&
+                    !supported(2U, 15U, 48U, 128U, 10240U, 6144U);
+  if (!pass) {
+    std::cerr << "register-state shape boundary regression failed\n";
+  }
+  return pass;
+}
+
+// The production row32-LDS path is an exact gfx1030 Qwen3.8 M=1 route. Keep a
+// focused public-runtime oracle here so the selector, convolution state,
+// recurrent state and output are checked together. This intentionally uses a
+// nonzero imported recurrent/conv state and finite extreme B/A values.
+bool row32_lds_production_gpu_oracle() {
+  if (std::string(SLLM_TEST_EXPECTED_TARGET) != "gfx1030") {
+    return true;
+  }
+  constexpr uint32_t qk_heads = 16U;
+  constexpr uint32_t value_heads = 48U;
+  constexpr uint32_t head_dim = 128U;
+  constexpr uint32_t qkv_width = 10240U;
+  constexpr uint32_t output_width = 6144U;
+  constexpr uint32_t conv_history = 3U;
+  constexpr uint32_t conv_kernel = 4U;
+  constexpr uint64_t state_elements =
+      static_cast<uint64_t>(value_heads) * head_dim * head_dim;
+  constexpr uint64_t recurrent_bytes = state_elements * sizeof(float);
+  constexpr uint64_t conv_bytes =
+      static_cast<uint64_t>(conv_history) * qkv_width * sizeof(uint16_t);
+
+  constexpr const char *const opt_in_name =
+      "SLLM_LINEAR_ATTENTION_GFX1030_ROW32_LDS";
+  constexpr const char *const force_name = "SLLM_GDN_FORCE_BASELINE";
+  const char *const old_opt_in = std::getenv(opt_in_name);
+  const char *const old_force = std::getenv(force_name);
+  const bool had_opt_in = old_opt_in != nullptr;
+  const bool had_force = old_force != nullptr;
+  const std::string old_opt_in_value = had_opt_in ? old_opt_in : "";
+  const std::string old_force_value = had_force ? old_force : "";
+  const auto restore_environment = [&]() {
+    if (had_opt_in)
+      setenv(opt_in_name, old_opt_in_value.c_str(), 1);
+    else
+      unsetenv(opt_in_name);
+    if (had_force)
+      setenv(force_name, old_force_value.c_str(), 1);
+    else
+      unsetenv(force_name);
+  };
+
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  std::array<sllm_buffer_t *, 9> buffers{};
+  sllm_linear_attention_state_t *baseline_state = nullptr;
+  sllm_linear_attention_state_t *row_state = nullptr;
+  Error error;
+  bool ok = true;
+  const auto finish = [&](bool result) {
+    restore_environment();
+    if (baseline_state != nullptr)
+      result =
+          expect(
+              sllm_linear_attention_state_release(&baseline_state, &error.sink),
+              SLLM_STATUS_OK, "row oracle baseline state release", error) &&
+          result;
+    if (row_state != nullptr)
+      result =
+          expect(sllm_linear_attention_state_release(&row_state, &error.sink),
+                 SLLM_STATUS_OK, "row oracle row state release", error) &&
+          result;
+    for (auto &buffer : buffers) {
+      if (buffer != nullptr)
+        result = expect(sllm_buffer_release(&buffer, &error.sink),
+                        SLLM_STATUS_OK, "row oracle buffer release", error) &&
+                 result;
+    }
+    if (queue != nullptr)
+      result = expect(sllm_queue_release(&queue, &error.sink), SLLM_STATUS_OK,
+                      "row oracle queue release", error) &&
+               result;
+    if (context != nullptr)
+      result = expect(sllm_context_release(&context, &error.sink),
+                      SLLM_STATUS_OK, "row oracle context release", error) &&
+               result;
+    return result;
+  };
+
+  sllm_context_create_info_t context_info{};
+  context_info.struct_size = sizeof(context_info);
+  context_info.abi_version = SLLM_HIP_ABI_VERSION;
+  context_info.device_index = 0U;
+  std::memcpy(context_info.expected_gcn_arch_name, SLLM_TEST_EXPECTED_TARGET,
+              sizeof(SLLM_TEST_EXPECTED_TARGET));
+  ok = expect(sllm_context_create(&context_info, &context, &error.sink),
+              SLLM_STATUS_OK, "row oracle context create", error);
+  if (!ok)
+    return finish(false);
+  sllm_queue_create_info_t queue_info{};
+  queue_info.struct_size = sizeof(queue_info);
+  queue_info.abi_version = SLLM_HIP_ABI_VERSION;
+  ok = expect(sllm_queue_create(context, &queue_info, &queue, &error.sink),
+              SLLM_STATUS_OK, "row oracle queue create", error);
+  if (!ok)
+    return finish(false);
+
+  const std::array<uint64_t, 9> sizes = {qkv_width * sizeof(uint16_t),
+                                         output_width * sizeof(uint16_t),
+                                         value_heads * sizeof(uint16_t),
+                                         value_heads * sizeof(uint16_t),
+                                         static_cast<uint64_t>(qkv_width) *
+                                             conv_kernel * sizeof(uint16_t),
+                                         value_heads * sizeof(float),
+                                         value_heads * sizeof(uint16_t),
+                                         head_dim * sizeof(float),
+                                         output_width * sizeof(uint16_t)};
+  for (std::size_t index = 0U; index != buffers.size(); ++index) {
+    sllm_buffer_create_info_t buffer_info{};
+    buffer_info.struct_size = sizeof(buffer_info);
+    buffer_info.abi_version = SLLM_HIP_ABI_VERSION;
+    buffer_info.size_bytes = sizes[index];
+    ok = expect(sllm_buffer_create(context, &buffer_info, &buffers[index],
+                                   &error.sink),
+                SLLM_STATUS_OK, "row oracle buffer create", error) &&
+         ok;
+  }
+  if (!ok)
+    return finish(false);
+
+  std::vector<uint16_t> qkv(qkv_width);
+  std::vector<uint16_t> z(output_width);
+  std::vector<uint16_t> b(value_heads);
+  std::vector<uint16_t> a(value_heads);
+  std::vector<uint16_t> conv(static_cast<std::size_t>(qkv_width) * conv_kernel);
+  std::vector<float> a_log(value_heads);
+  std::vector<uint16_t> dt_bias(value_heads);
+  std::vector<float> norm(head_dim);
+  std::vector<uint16_t> conv_seed(static_cast<std::size_t>(conv_history) *
+                                  qkv_width);
+  std::vector<float> recurrent_seed(state_elements);
+  for (uint32_t index = 0U; index != qkv_width; ++index)
+    qkv[index] =
+        float_to_bf16_rne(0.35F * std::sin(static_cast<float>(index) * 0.013F));
+  for (uint32_t index = 0U; index != output_width; ++index)
+    z[index] = float_to_bf16_rne(
+        0.2F + 0.45F * std::cos(static_cast<float>(index) * 0.017F));
+  for (uint32_t head = 0U; head != value_heads; ++head) {
+    b[head] = float_to_bf16_rne((head & 1U) == 0U ? 18.0F : -18.0F);
+    a[head] = float_to_bf16_rne((head % 3U) == 0U   ? 12.0F
+                                : (head % 3U) == 1U ? -12.0F
+                                                    : 0.25F);
+    a_log[head] = (head & 1U) == 0U ? -0.5F : -1.25F;
+    dt_bias[head] = float_to_bf16_rne((head & 1U) == 0U ? 0.125F : -0.125F);
+  }
+  for (uint32_t dimension = 0U; dimension != head_dim; ++dimension)
+    norm[dimension] =
+        0.8F + 0.15F * std::cos(static_cast<float>(dimension) * 0.031F);
+  for (uint32_t channel = 0U; channel != qkv_width; ++channel) {
+    for (uint32_t tap = 0U; tap != conv_kernel; ++tap)
+      conv[static_cast<std::size_t>(channel) * conv_kernel + tap] =
+          float_to_bf16_rne(
+              0.1F * std::sin(static_cast<float>(channel + tap) * 0.071F));
+  }
+  for (std::size_t index = 0U; index != conv_seed.size(); ++index)
+    conv_seed[index] = float_to_bf16_rne(
+        0.1F * std::cos(static_cast<float>(index % 257U) * 0.023F));
+  for (std::size_t index = 0U; index != recurrent_seed.size(); ++index)
+    recurrent_seed[index] =
+        0.001F * std::sin(static_cast<float>(index % 4093U) * 0.037F);
+
+  ok = upload(queue, buffers[0], qkv.data(), sizes[0]) &&
+       upload(queue, buffers[1], z.data(), sizes[1]) &&
+       upload(queue, buffers[2], b.data(), sizes[2]) &&
+       upload(queue, buffers[3], a.data(), sizes[3]) &&
+       upload(queue, buffers[4], conv.data(), sizes[4]) &&
+       upload(queue, buffers[5], a_log.data(), sizes[5]) &&
+       upload(queue, buffers[6], dt_bias.data(), sizes[6]) &&
+       upload(queue, buffers[7], norm.data(), sizes[7]);
+  if (!ok)
+    return finish(false);
+
+  sllm_linear_attention_state_create_info_t state_info{};
+  state_info.struct_size = sizeof(state_info);
+  state_info.abi_version = SLLM_HIP_ABI_VERSION;
+  state_info.session_id = 1U;
+  state_info.layer_id = 0U;
+  state_info.capacity_tokens = 2U;
+  state_info.qk_heads = qk_heads;
+  state_info.value_heads = value_heads;
+  state_info.head_dim = head_dim;
+  state_info.conv_kernel_size = conv_kernel;
+  ok = expect(sllm_linear_attention_state_create(context, &state_info,
+                                                 &baseline_state, &error.sink),
+              SLLM_STATUS_OK, "row oracle baseline state create", error);
+  ok = expect(sllm_linear_attention_state_create(context, &state_info,
+                                                 &row_state, &error.sink),
+              SLLM_STATUS_OK, "row oracle row state create", error) &&
+       ok;
+  if (!ok)
+    return finish(false);
+
+  const auto import_plane = [&](sllm_linear_attention_state_t *const state,
+                                const uint32_t plane, void *const data,
+                                const uint64_t bytes) {
+    sllm_state_chunk_t chunk{};
+    chunk.struct_size = sizeof(chunk);
+    chunk.abi_version = SLLM_HIP_ABI_VERSION;
+    chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+    chunk.plane = plane;
+    chunk.byte_length = bytes;
+    chunk.host_pointer = data;
+    chunk.host_capacity = bytes;
+    return expect(
+        sllm_linear_attention_state_import(state, &chunk, &error.sink),
+        SLLM_STATUS_OK, "row oracle state import", error);
+  };
+  ok = import_plane(baseline_state, SLLM_HIP_LINEAR_STATE_PLANE_CONV_SLOT0,
+                    conv_seed.data(), conv_bytes) &&
+       import_plane(row_state, SLLM_HIP_LINEAR_STATE_PLANE_CONV_SLOT0,
+                    conv_seed.data(), conv_bytes) &&
+       import_plane(baseline_state, SLLM_HIP_LINEAR_STATE_PLANE_RECURRENT_SLOT0,
+                    recurrent_seed.data(), recurrent_bytes) &&
+       import_plane(row_state, SLLM_HIP_LINEAR_STATE_PLANE_RECURRENT_SLOT0,
+                    recurrent_seed.data(), recurrent_bytes) &&
+       ok;
+  if (!ok)
+    return finish(false);
+
+  const uint64_t qkv_shape[] = {1U, qkv_width};
+  const uint64_t output_shape[] = {1U, output_width};
+  const uint64_t scalar_shape[] = {1U, value_heads};
+  const uint64_t conv_shape[] = {qkv_width, 1U, conv_kernel};
+  const uint64_t head_shape[] = {value_heads};
+  const uint64_t norm_shape[] = {head_dim};
+  const auto make_descriptor = [&](sllm_linear_attention_state_t *const state) {
+    sllm_linear_attention_desc_t descriptor{};
+    descriptor.struct_size = sizeof(descriptor);
+    descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+    descriptor.op_version = SLLM_HIP_LINEAR_ATTENTION_VERSION;
+    descriptor.expected_length = 1U;
+    descriptor.state = state;
+    descriptor.qkv = binding(buffers[0], SLLM_TENSOR_DTYPE_BF16, 2U, qkv_shape);
+    descriptor.z =
+        binding(buffers[1], SLLM_TENSOR_DTYPE_BF16, 2U, output_shape);
+    descriptor.b_input =
+        binding(buffers[2], SLLM_TENSOR_DTYPE_BF16, 2U, scalar_shape);
+    descriptor.a_input =
+        binding(buffers[3], SLLM_TENSOR_DTYPE_BF16, 2U, scalar_shape);
+    descriptor.conv_weight =
+        binding(buffers[4], SLLM_TENSOR_DTYPE_BF16, 3U, conv_shape);
+    descriptor.a_log =
+        binding(buffers[5], SLLM_TENSOR_DTYPE_F32, 1U, head_shape);
+    descriptor.dt_bias =
+        binding(buffers[6], SLLM_TENSOR_DTYPE_BF16, 1U, head_shape);
+    descriptor.norm_weight =
+        binding(buffers[7], SLLM_TENSOR_DTYPE_F32, 1U, norm_shape);
+    descriptor.output =
+        binding(buffers[8], SLLM_TENSOR_DTYPE_BF16, 2U, output_shape);
+    return descriptor;
+  };
+
+  unsetenv(opt_in_name);
+  unsetenv(force_name);
+  sllm_linear_attention_desc_t baseline_descriptor =
+      make_descriptor(baseline_state);
+  sllm_linear_attention_dispatch_info_t baseline_dispatch{};
+  baseline_dispatch.struct_size = sizeof(baseline_dispatch);
+  baseline_dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+  baseline_dispatch.info_version =
+      SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION;
+  sllm_completion_t *baseline_completion = nullptr;
+  ok = expect(sllm_linear_attention_execute(
+                  context, queue, &baseline_descriptor, &baseline_completion,
+                  &baseline_dispatch, &error.sink),
+              SLLM_STATUS_OK, "row oracle baseline execute", error) &&
+       baseline_dispatch.recurrent_kernel_id ==
+           SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1 &&
+       completion_wait(baseline_completion) &&
+       completion_release(&baseline_completion) && ok;
+  std::vector<uint16_t> baseline_output(output_width);
+  if (ok)
+    ok = read_output(queue, buffers[8], &baseline_output);
+  if (!ok)
+    return finish(false);
+
+  setenv(opt_in_name, "1", 1);
+  sllm_linear_attention_desc_t row_descriptor = make_descriptor(row_state);
+  sllm_linear_attention_dispatch_info_t row_dispatch{};
+  row_dispatch.struct_size = sizeof(row_dispatch);
+  row_dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+  row_dispatch.info_version = SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION;
+  sllm_completion_t *row_completion = nullptr;
+  ok =
+      expect(sllm_linear_attention_execute(context, queue, &row_descriptor,
+                                           &row_completion, &row_dispatch,
+                                           &error.sink),
+             SLLM_STATUS_OK, "row oracle row32-LDS execute", error) &&
+      row_dispatch.recurrent_kernel_id ==
+          SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_ROW32_LDS_V1 &&
+      std::string(row_dispatch.kernel_symbol) ==
+          "linear_attention.gdn.row32_lds.v1" &&
+      completion_wait(row_completion) && completion_release(&row_completion) &&
+      ok;
+  std::vector<uint16_t> row_output(output_width);
+  if (ok)
+    ok = read_output(queue, buffers[8], &row_output);
+
+  const auto export_plane = [&](sllm_linear_attention_state_t *const state,
+                                const uint32_t plane,
+                                std::vector<uint8_t> *data) {
+    sllm_state_chunk_t chunk{};
+    chunk.struct_size = sizeof(chunk);
+    chunk.abi_version = SLLM_HIP_ABI_VERSION;
+    chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+    chunk.plane = plane;
+    chunk.byte_length = data->size();
+    chunk.host_pointer = data->data();
+    chunk.host_capacity = data->size();
+    return expect(
+        sllm_linear_attention_state_export(state, &chunk, &error.sink),
+        SLLM_STATUS_OK, "row oracle state export", error);
+  };
+  std::vector<uint8_t> baseline_conv(conv_bytes);
+  std::vector<uint8_t> row_conv(conv_bytes);
+  std::vector<uint8_t> baseline_recurrent(recurrent_bytes);
+  std::vector<uint8_t> row_recurrent(recurrent_bytes);
+  if (ok)
+    ok = export_plane(baseline_state, SLLM_HIP_LINEAR_STATE_PLANE_CONV_SLOT1,
+                      &baseline_conv) &&
+         export_plane(row_state, SLLM_HIP_LINEAR_STATE_PLANE_CONV_SLOT1,
+                      &row_conv) &&
+         export_plane(baseline_state,
+                      SLLM_HIP_LINEAR_STATE_PLANE_RECURRENT_SLOT1,
+                      &baseline_recurrent) &&
+         export_plane(row_state, SLLM_HIP_LINEAR_STATE_PLANE_RECURRENT_SLOT1,
+                      &row_recurrent);
+  const bool exact =
+      ok && baseline_output == row_output && baseline_conv == row_conv &&
+      baseline_recurrent == row_recurrent &&
+      baseline_recurrent != std::vector<uint8_t>(recurrent_bytes, 0U);
+  std::cout << "row32_lds_gpu_oracle output_bitwise="
+            << (baseline_output == row_output ? "PASS" : "FAIL")
+            << " conv_state_bitwise="
+            << (baseline_conv == row_conv ? "PASS" : "FAIL")
+            << " recurrent_state_bitwise="
+            << (baseline_recurrent == row_recurrent ? "PASS" : "FAIL")
+            << " nonzero_state="
+            << (baseline_recurrent != std::vector<uint8_t>(recurrent_bytes, 0U)
+                    ? "PASS"
+                    : "FAIL")
+            << " status=" << (exact ? "PASS" : "FAIL") << '\n';
+  return finish(exact);
+}
+
 uint32_t bf16_ulp_distance(const uint16_t left, const uint16_t right) {
   const auto ordered = [](const uint16_t value) {
     return (value & UINT16_C(0x8000)) != 0U
@@ -449,6 +815,13 @@ int main() {
   constexpr uint64_t max_tokens = 3U;
   constexpr uint64_t capacity = 4U;
   if (!check_scalar_boundary_regressions()) {
+    return 1;
+  }
+  if (!check_register_state_shape_boundaries()) {
+    return 1;
+  }
+  if (!row32_lds_production_gpu_oracle()) {
+    std::cerr << "row32-LDS production GPU oracle failed\n";
     return 1;
   }
   sllm_context_create_info_t context_info{};

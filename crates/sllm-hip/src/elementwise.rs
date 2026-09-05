@@ -527,6 +527,10 @@ impl HipBackend {
 }
 
 impl PreparedElementwise {
+    pub(crate) fn raw_plan_handle(&self) -> *const sys::sllm_elementwise_plan_t {
+        self.state.raw.as_ptr()
+    }
+
     pub fn execute(
         &self,
         queue: &Queue,

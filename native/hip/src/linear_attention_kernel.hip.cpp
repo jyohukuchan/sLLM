@@ -7,9 +7,11 @@
 // SPDX-License-Identifier: MIT
 
 #include "linear_attention_kernel_internal.hpp"
+#include "linear_attention_register_state.hpp"
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 namespace {
@@ -276,6 +278,316 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
         bf16_to_float(float_to_bf16_rne_bits(normalized));
     output[output_index] = float_to_bf16_rne_bits(
         normalized_bf16 * norm_weight[dimension] * z_silu);
+    __syncthreads();
+  }
+}
+
+// Register-state N0 provider. Each thread keeps its 128 key entries in
+// registers across the token loop. The production recurrent_state_index()
+// helper keeps the target-specific physical state layout unchanged. The q/k
+// normalization, scalar math, wave reductions, BF16 roundings, and two FP32
+// update loops intentionally mirror the generic control kernel.
+#pragma clang fp contract(off)
+extern "C" __global__
+__launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_register_state_v1(
+    const uint16_t *const convolved_qkv, const uint16_t *const z,
+    const uint16_t *const b_input, const uint16_t *const a_input,
+    const float *const a_log, const uint16_t *const dt_bias,
+    const float *const norm_weight, const float *const previous_recurrent_state,
+    float *const next_recurrent_state, uint16_t *const output,
+    const uint32_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const uint32_t qkv_width, const uint32_t output_width) {
+  const uint32_t value_head = blockIdx.x;
+  const uint32_t dimension = threadIdx.x;
+  if (value_head >= value_heads || dimension >= head_dim || head_dim != 128U ||
+      qk_heads == 0U || value_heads == 0U || value_heads % qk_heads != 0U)
+    return;
+  const uint32_t qk_head = value_head / (value_heads / qk_heads);
+  const uint64_t state_base =
+      static_cast<uint64_t>(value_head) * head_dim * head_dim;
+  float state[128];
+#pragma unroll
+  for (uint32_t key_dimension = 0U; key_dimension != 128U; ++key_dimension) {
+    state[key_dimension] = previous_recurrent_state[recurrent_state_index(
+        state_base, dimension, key_dimension, head_dim)];
+  }
+  __shared__ float q_values[128];
+  __shared__ float k_values[128];
+  __shared__ float q_inverse_norm;
+  __shared__ float k_inverse_norm;
+  __shared__ float beta;
+  __shared__ float decay;
+  __shared__ float output_values[128];
+  __shared__ float output_inverse_rms;
+  __shared__ float q_wave_sums[4];
+  __shared__ float k_wave_sums[4];
+  __shared__ float output_wave_sums[4];
+  const uint32_t lane = dimension & 31U;
+  const uint32_t wave = dimension >> 5U;
+
+  for (uint32_t token = 0U; token != token_count; ++token) {
+    const uint64_t qkv_row = static_cast<uint64_t>(token) * qkv_width;
+    q_values[dimension] = bf16_to_float(
+        convolved_qkv[qkv_row + static_cast<uint64_t>(qk_head) * head_dim +
+                      dimension]);
+    k_values[dimension] = bf16_to_float(
+        convolved_qkv[qkv_row + static_cast<uint64_t>(qk_heads) * head_dim +
+                      static_cast<uint64_t>(qk_head) * head_dim + dimension]);
+    __syncthreads();
+    const float q_square = q_values[dimension] * q_values[dimension];
+    const float k_square = k_values[dimension] * k_values[dimension];
+    const float q_wave_sum = wave_sum<32U>(q_square);
+    const float k_wave_sum = wave_sum<32U>(k_square);
+    if (lane == 0U) {
+      q_wave_sums[wave] = q_wave_sum;
+      k_wave_sums[wave] = k_wave_sum;
+    }
+    __syncthreads();
+    if (dimension == 0U) {
+      float q_sum = 0.0F;
+      float k_sum = 0.0F;
+      for (uint32_t index = 0U; index != 4U; ++index) {
+        q_sum += q_wave_sums[index];
+        k_sum += k_wave_sums[index];
+      }
+      q_inverse_norm = 1.0F / sqrtf(q_sum + 1.0e-6F);
+      k_inverse_norm = 1.0F / sqrtf(k_sum + 1.0e-6F);
+      const uint64_t scalar_index =
+          static_cast<uint64_t>(token) * value_heads + value_head;
+      const float b_value = bf16_to_float(b_input[scalar_index]);
+      const float beta_f32 = 1.0F / (1.0F + expf(-b_value));
+      beta = bf16_to_float(float_to_bf16_rne_bits(beta_f32));
+      const float a_value = bf16_to_float(a_input[scalar_index]) +
+                            bf16_to_float(dt_bias[value_head]);
+      const float g = -expf(a_log[value_head]) * softplus(a_value);
+      decay = expf(g);
+    }
+    __syncthreads();
+    q_values[dimension] = bf16_to_float(
+        float_to_bf16_rne_bits(q_values[dimension] * q_inverse_norm));
+    q_values[dimension] *= 1.0F / sqrtf(static_cast<float>(head_dim));
+    k_values[dimension] = bf16_to_float(
+        float_to_bf16_rne_bits(k_values[dimension] * k_inverse_norm));
+    __syncthreads();
+
+    float previous_projection = 0.0F;
+#pragma unroll
+    for (uint32_t key_dimension = 0U; key_dimension != 128U; ++key_dimension) {
+      const float decayed = state[key_dimension] * decay;
+      state[key_dimension] = decayed;
+      previous_projection += decayed * k_values[key_dimension];
+    }
+    const float value = bf16_to_float(
+        convolved_qkv[qkv_row +
+                      static_cast<uint64_t>(2U * qk_heads) * head_dim +
+                      static_cast<uint64_t>(value_head) * head_dim +
+                      dimension]);
+    const float residual = value - previous_projection;
+    float current_projection = 0.0F;
+#pragma unroll
+    for (uint32_t key_dimension = 0U; key_dimension != 128U; ++key_dimension) {
+      const float updated =
+          state[key_dimension] + beta * residual * k_values[key_dimension];
+      state[key_dimension] = updated;
+      current_projection += updated * q_values[key_dimension];
+    }
+    output_values[dimension] =
+        bf16_to_float(float_to_bf16_rne_bits(current_projection));
+    const float output_square =
+        output_values[dimension] * output_values[dimension];
+    const float output_wave_sum = wave_sum<32U>(output_square);
+    if (lane == 0U)
+      output_wave_sums[wave] = output_wave_sum;
+    __syncthreads();
+    if (dimension == 0U) {
+      float sum = 0.0F;
+      for (uint32_t index = 0U; index != 4U; ++index)
+        sum += output_wave_sums[index];
+      output_inverse_rms =
+          1.0F / sqrtf(sum / static_cast<float>(head_dim) + 1.0e-6F);
+    }
+    __syncthreads();
+    const uint64_t output_index = static_cast<uint64_t>(token) * output_width +
+                                  static_cast<uint64_t>(value_head) * head_dim +
+                                  dimension;
+    const float z_value = bf16_to_float(z[output_index]);
+    const float z_silu = z_value / (1.0F + expf(-z_value));
+    const float normalized = output_values[dimension] * output_inverse_rms;
+    const float normalized_bf16 =
+        bf16_to_float(float_to_bf16_rne_bits(normalized));
+    output[output_index] = float_to_bf16_rne_bits(
+        normalized_bf16 * norm_weight[dimension] * z_silu);
+    __syncthreads();
+  }
+
+#pragma unroll
+  for (uint32_t key_dimension = 0U; key_dimension != 128U; ++key_dimension) {
+    next_recurrent_state[recurrent_state_index(
+        state_base, dimension, key_dimension, head_dim)] = state[key_dimension];
+  }
+}
+
+// Exact gfx1030 Qwen3.8 M=1 provider.  The generic recurrent kernel accepts
+// arbitrary head counts and keeps its dimensions runtime-parametrized.  This
+// provider fixes the 48-value-head/128-dimension contract and uses a 32-row
+// state tile in LDS.  The first pass computes the decayed previous projection;
+// the second pass applies the rank-one update.  Reloading the four tiles is
+// intentional: keeping the complete 128x128 state in LDS would collapse
+// occupancy on gfx1030, while this bounded tile keeps the result bitwise with
+// the generic provider for the exact M=1 contract.
+#pragma clang fp contract(off)
+extern "C" __global__
+__launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_row32_lds_v1(
+    const uint16_t *const convolved_qkv, const uint16_t *const z,
+    const uint16_t *const b_input, const uint16_t *const a_input,
+    const float *const a_log, const uint16_t *const dt_bias,
+    const float *const norm_weight, const float *const previous_state,
+    float *const next_state, uint16_t *const output, const uint32_t token_count,
+    const uint32_t qk_heads, const uint32_t value_heads,
+    const uint32_t head_dim, const uint32_t qkv_width,
+    const uint32_t output_width) {
+  constexpr uint32_t kTileRows = 32U;
+  const uint32_t value_head = blockIdx.x;
+  const uint32_t dimension = threadIdx.x;
+  if (value_head >= value_heads || dimension >= head_dim || head_dim != 128U ||
+      qk_heads == 0U || value_heads == 0U || value_heads % qk_heads != 0U) {
+    return;
+  }
+  const uint32_t qk_head = value_head / (value_heads / qk_heads);
+  const uint64_t state_base =
+      static_cast<uint64_t>(value_head) * head_dim * head_dim;
+  const uint32_t lane = dimension & 31U;
+  const uint32_t wave = dimension >> 5U;
+  __shared__ float q_values[128];
+  __shared__ float k_values[128];
+  __shared__ float q_wave_sums[4];
+  __shared__ float k_wave_sums[4];
+  __shared__ float q_inverse_norm;
+  __shared__ float k_inverse_norm;
+  __shared__ float output_values[128];
+  __shared__ float output_wave_sums[4];
+  __shared__ float output_inverse_rms;
+  __shared__ float state_tile[kTileRows][128];
+
+  for (uint32_t token = 0U; token != token_count; ++token) {
+    const uint64_t qkv_row = static_cast<uint64_t>(token) * qkv_width;
+    q_values[dimension] = bf16_to_float(
+        convolved_qkv[qkv_row + static_cast<uint64_t>(qk_head) * head_dim +
+                      dimension]);
+    k_values[dimension] = bf16_to_float(
+        convolved_qkv[qkv_row + static_cast<uint64_t>(qk_heads) * head_dim +
+                      static_cast<uint64_t>(qk_head) * head_dim + dimension]);
+    __syncthreads();
+    const float q_wave =
+        wave_sum<32U>(q_values[dimension] * q_values[dimension]);
+    const float k_wave =
+        wave_sum<32U>(k_values[dimension] * k_values[dimension]);
+    if (lane == 0U) {
+      q_wave_sums[wave] = q_wave;
+      k_wave_sums[wave] = k_wave;
+    }
+    __syncthreads();
+    if (dimension == 0U) {
+      float q_sum = 0.0F;
+      float k_sum = 0.0F;
+      for (uint32_t index = 0U; index != 4U; ++index) {
+        q_sum += q_wave_sums[index];
+        k_sum += k_wave_sums[index];
+      }
+      q_inverse_norm = 1.0F / sqrtf(q_sum + 1.0e-6F);
+      k_inverse_norm = 1.0F / sqrtf(k_sum + 1.0e-6F);
+    }
+    __syncthreads();
+    q_values[dimension] = bf16_to_float(
+        float_to_bf16_rne_bits(q_values[dimension] * q_inverse_norm));
+    q_values[dimension] *= 1.0F / sqrtf(static_cast<float>(head_dim));
+    k_values[dimension] = bf16_to_float(
+        float_to_bf16_rne_bits(k_values[dimension] * k_inverse_norm));
+    __syncthreads();
+
+    const uint64_t scalar_index =
+        static_cast<uint64_t>(token) * value_heads + value_head;
+    const float b_value = bf16_to_float(b_input[scalar_index]);
+    const float beta =
+        bf16_to_float(float_to_bf16_rne_bits(1.0F / (1.0F + expf(-b_value))));
+    const float a_value = bf16_to_float(a_input[scalar_index]) +
+                          bf16_to_float(dt_bias[value_head]);
+    const float decay = expf(-expf(a_log[value_head]) * softplus(a_value));
+    float previous_projection = 0.0F;
+
+    // gfx1030 stores each state as [key][output-dimension].
+    for (uint32_t tile = 0U; tile != head_dim; tile += kTileRows) {
+      for (uint32_t row = 0U; row != kTileRows; ++row) {
+        const uint32_t key = tile + row;
+        const uint64_t index =
+            state_base + static_cast<uint64_t>(key) * head_dim + dimension;
+        state_tile[row][dimension] =
+            (token == 0U ? previous_state[index] : next_state[index]) * decay;
+      }
+      __syncthreads();
+      for (uint32_t row = 0U; row != kTileRows; ++row) {
+        previous_projection +=
+            state_tile[row][dimension] * k_values[tile + row];
+      }
+      for (uint32_t row = 0U; row != kTileRows; ++row) {
+        const uint32_t key = tile + row;
+        next_state[state_base + static_cast<uint64_t>(key) * head_dim +
+                   dimension] = state_tile[row][dimension];
+      }
+      __syncthreads();
+    }
+
+    const float value = bf16_to_float(
+        convolved_qkv[qkv_row +
+                      static_cast<uint64_t>(2U * qk_heads + value_head) *
+                          head_dim +
+                      dimension]);
+    const float delta = beta * (value - previous_projection);
+    float current_projection = 0.0F;
+    for (uint32_t tile = 0U; tile != head_dim; tile += kTileRows) {
+      for (uint32_t row = 0U; row != kTileRows; ++row) {
+        const uint32_t key = tile + row;
+        const uint64_t index =
+            state_base + static_cast<uint64_t>(key) * head_dim + dimension;
+        state_tile[row][dimension] = next_state[index] + delta * k_values[key];
+      }
+      __syncthreads();
+      for (uint32_t row = 0U; row != kTileRows; ++row) {
+        const uint32_t key = tile + row;
+        const float updated = state_tile[row][dimension];
+        next_state[state_base + static_cast<uint64_t>(key) * head_dim +
+                   dimension] = updated;
+        current_projection += updated * q_values[key];
+      }
+      __syncthreads();
+    }
+    output_values[dimension] =
+        bf16_to_float(float_to_bf16_rne_bits(current_projection));
+    const float output_wave =
+        wave_sum<32U>(output_values[dimension] * output_values[dimension]);
+    if (lane == 0U) {
+      output_wave_sums[wave] = output_wave;
+    }
+    __syncthreads();
+    if (dimension == 0U) {
+      float sum = 0.0F;
+      for (uint32_t index = 0U; index != 4U; ++index) {
+        sum += output_wave_sums[index];
+      }
+      output_inverse_rms =
+          1.0F / sqrtf(sum / static_cast<float>(head_dim) + 1.0e-6F);
+    }
+    __syncthreads();
+    const uint64_t output_index = static_cast<uint64_t>(token) * output_width +
+                                  static_cast<uint64_t>(value_head) * head_dim +
+                                  dimension;
+    const float z_value = bf16_to_float(z[output_index]);
+    const float z_silu = z_value / (1.0F + expf(-z_value));
+    const float normalized = bf16_to_float(
+        float_to_bf16_rne_bits(output_values[dimension] * output_inverse_rms));
+    output[output_index] =
+        float_to_bf16_rne_bits(normalized * norm_weight[dimension] * z_silu);
     __syncthreads();
   }
 }
@@ -916,12 +1228,50 @@ launch_recurrent(const uint16_t *const convolved_qkv, const uint16_t *const z,
       value_heads % qk_heads != 0U || head_dim != kHeadDim) {
     return hipErrorInvalidValue;
   }
+#if defined(SLLM_HIP_COMPILE_TARGET)
+  if ((std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1030") == 0 ||
+       std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1201") == 0) &&
+      register_state_shape_supported(token_count, qk_heads, value_heads,
+                                     head_dim, qkv_width, output_width)) {
+    return launch_register_state(
+        convolved_qkv, z, b_input, a_input, a_log, dt_bias, norm_weight,
+        previous_recurrent_state, next_recurrent_state, output, token_count,
+        qk_heads, value_heads, head_dim, qkv_width, output_width, stream);
+  }
+#endif
   hipLaunchKernelGGL(sllm_linear_attention_recurrent_gated_norm_v1,
                      dim3(value_heads), dim3(kWorkgroupSize), 0U, stream,
                      convolved_qkv, z, b_input, a_input, a_log, dt_bias,
                      norm_weight, previous_recurrent_state,
                      next_recurrent_state, output, token_count, qk_heads,
                      value_heads, head_dim, qkv_width, output_width);
+  return hipGetLastError();
+}
+
+hipError_t launch_register_state(
+    const uint16_t *const convolved_qkv, const uint16_t *const z,
+    const uint16_t *const b_input, const uint16_t *const a_input,
+    const float *const a_log, const uint16_t *const dt_bias,
+    const float *const norm_weight, const float *const previous_recurrent_state,
+    float *const next_recurrent_state, uint16_t *const output,
+    const uint32_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const uint32_t qkv_width, const uint32_t output_width,
+    const hipStream_t stream) noexcept {
+  if (convolved_qkv == nullptr || z == nullptr || b_input == nullptr ||
+      a_input == nullptr || a_log == nullptr || dt_bias == nullptr ||
+      norm_weight == nullptr || previous_recurrent_state == nullptr ||
+      next_recurrent_state == nullptr || output == nullptr ||
+      !register_state_shape_supported(token_count, qk_heads, value_heads,
+                                      head_dim, qkv_width, output_width)) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(
+      sllm_linear_attention_recurrent_gated_norm_register_state_v1,
+      dim3(kRegisterStateValueHeads), dim3(kWorkgroupSize), 0U, stream,
+      convolved_qkv, z, b_input, a_input, a_log, dt_bias, norm_weight,
+      previous_recurrent_state, next_recurrent_state, output, token_count,
+      qk_heads, value_heads, head_dim, qkv_width, output_width);
   return hipGetLastError();
 }
 
@@ -948,6 +1298,34 @@ launch_decode_pair(const uint16_t *const convolved_qkv, const uint16_t *const z,
                      dim3(kQkHeads), dim3(kDecodePairWorkgroupSize), 0U, stream,
                      convolved_qkv, z, b_input, a_input, a_log, dt_bias,
                      norm_weight, previous_recurrent_state,
+                     next_recurrent_state, output, token_count, qk_heads,
+                     value_heads, head_dim, qkv_width, output_width);
+  return hipGetLastError();
+}
+
+hipError_t
+launch_row32_lds(const uint16_t *const convolved_qkv, const uint16_t *const z,
+                 const uint16_t *const b_input, const uint16_t *const a_input,
+                 const float *const a_log, const uint16_t *const dt_bias,
+                 const float *const norm_weight,
+                 const float *const previous_recurrent_state,
+                 float *const next_recurrent_state, uint16_t *const output,
+                 const uint32_t token_count, const uint32_t qk_heads,
+                 const uint32_t value_heads, const uint32_t head_dim,
+                 const uint32_t qkv_width, const uint32_t output_width,
+                 const hipStream_t stream) noexcept {
+  if (convolved_qkv == nullptr || z == nullptr || b_input == nullptr ||
+      a_input == nullptr || a_log == nullptr || dt_bias == nullptr ||
+      norm_weight == nullptr || previous_recurrent_state == nullptr ||
+      next_recurrent_state == nullptr || output == nullptr ||
+      token_count != 1U || qk_heads != kRow32LdsQkHeads ||
+      value_heads != kRow32LdsValueHeads || head_dim != kRow32LdsHeadDim) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(sllm_linear_attention_recurrent_gated_norm_row32_lds_v1,
+                     dim3(kRow32LdsValueHeads), dim3(kRow32LdsWorkgroupSize),
+                     0U, stream, convolved_qkv, z, b_input, a_input, a_log,
+                     dt_bias, norm_weight, previous_recurrent_state,
                      next_recurrent_state, output, token_count, qk_heads,
                      value_heads, head_dim, qkv_width, output_width);
   return hipGetLastError();

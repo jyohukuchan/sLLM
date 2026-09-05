@@ -94,6 +94,11 @@ option(SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST
     OFF
 )
 
+option(SLLM_ENABLE_HIPBLASLT_FP8_GRAPH_GPU_TEST
+    "Build the focused gfx1201 hipBLASLt FP8 graph-capture probe"
+    OFF
+)
+
 option(SLLM_ENABLE_ROTARY_GPU_TEST
     "Build the focused real-GPU split-half rotary runner"
     OFF
@@ -101,6 +106,11 @@ option(SLLM_ENABLE_ROTARY_GPU_TEST
 
 option(SLLM_ENABLE_ROTARY_PUBLIC_GPU_TEST
     "Build the focused real-GPU public-ABI split-half rotary runner"
+    OFF
+)
+
+option(SLLM_ENABLE_QWEN38_PROJECTION_PACK2_PUBLIC_GPU_TEST
+    "Build the focused Qwen3.8 NVFP4 projection-pack public GPU oracle"
     OFF
 )
 
@@ -183,6 +193,7 @@ if(SLLM_SEMANTIC_G1_DISCOVERY_TEST)
        SLLM_ENABLE_TOKEN_SELECTOR_GPU_TEST OR
        SLLM_ENABLE_DEEPSEEK_V4_MOE_ROUTE_GPU_TEST OR
        SLLM_ENABLE_MINIMAX_M3_MOE_ROUTE_GPU_TEST OR
+       SLLM_ENABLE_HIPBLASLT_FP8_GRAPH_GPU_TEST OR
        SLLM_ENABLE_PHASE41_STATE_GPU_TEST OR
        SLLM_ENABLE_BROADCAST_ADD_PUBLIC_GPU_TEST OR
        SLLM_ENABLE_MINISTRAL3_YARN_PUBLIC_GPU_TEST)
@@ -196,7 +207,8 @@ endif()
 
 if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
    SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR
-   SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST)
+   SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST OR
+   SLLM_ENABLE_HIPBLASLT_FP8_GRAPH_GPU_TEST)
     if(NOT DEFINED ROCM_PATH OR ROCM_PATH STREQUAL "")
         message(FATAL_ERROR "HIP build requires an explicit ROCM_PATH")
     endif()
@@ -392,7 +404,8 @@ endif()
 
 if((SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
    SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR
-   SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST) AND
+   SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST OR
+   SLLM_ENABLE_HIPBLASLT_FP8_GRAPH_GPU_TEST) AND
    NOT SLLM_SEMANTIC_G1_AUTHORITY)
     set(CMAKE_HIP_STANDARD 17)
     set(CMAKE_HIP_STANDARD_REQUIRED ON)
@@ -554,8 +567,13 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
             DEPENDS src/minimax_m3_moe_route_public_runtime.hip.cpp
                 src/public_runtime.hip.cpp src/matmul_runtime.inc
+                src/graph_span_runtime.inc
                 src/low_precision_matmul_provider.hpp
+                src/nvfp4_decode_scale_lut.inc src/fp8_prefill_lds_lut.inc
+                src/fp8_prefill_f16_tile_staging.inc
+                src/fp8_prefill_short_m32.inc
                 src/mlp_gate_up_silu_bundle_runtime.inc
+                src/qwen38_projection_pack_runtime.inc
                 src/mlp_gate_up_silu_bundle_kernel_internal.hpp
                 src/argmax_runtime.inc
                 src/token_selector_runtime.inc
@@ -635,6 +653,9 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
             DEPENDS src/matmul_kernel.hip.cpp src/matmul_kernel_internal.hpp
                 src/low_precision_block_codec.hpp
+                src/nvfp4_decode_scale_lut.inc src/fp8_prefill_lds_lut.inc
+                src/fp8_prefill_f16_tile_staging.inc
+                src/fp8_prefill_short_m32.inc
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -759,6 +780,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_LINEAR_ATTENTION_G1_KERNEL_OBJECT}"
             DEPENDS src/linear_attention_kernel.hip.cpp
                 src/linear_attention_kernel_internal.hpp
+                src/linear_attention_register_state.hpp
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
         )
@@ -1228,6 +1250,9 @@ if(SLLM_ENABLE_LINEAR_ATTENTION_GPU_TEST)
     add_executable(sllm_linear_attention_gpu_test
         tests/linear_attention_gpu_test.cpp
     )
+    target_include_directories(sllm_linear_attention_gpu_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+    )
     target_compile_features(sllm_linear_attention_gpu_test PRIVATE cxx_std_17)
     target_compile_definitions(sllm_linear_attention_gpu_test PRIVATE
         SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
@@ -1430,6 +1455,41 @@ if(SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST)
     )
 endif()
 
+if(SLLM_ENABLE_HIPBLASLT_FP8_GRAPH_GPU_TEST)
+    if(SLLM_SEMANTIC_G1_AUTHORITY OR
+       NOT SLLM_HIP_TARGET STREQUAL "gfx1201")
+        message(FATAL_ERROR
+            "hipBLASLt FP8 graph probe requires the normal exact gfx1201 HIP build")
+    endif()
+    add_executable(sllm_hipblaslt_fp8_graph_capture_gpu_test
+        tests/hipblaslt_fp8_graph_capture_gpu_test.hip.cpp
+    )
+    set_source_files_properties(
+        tests/hipblaslt_fp8_graph_capture_gpu_test.hip.cpp
+        PROPERTIES LANGUAGE HIP
+    )
+    target_compile_features(sllm_hipblaslt_fp8_graph_capture_gpu_test PRIVATE
+        cxx_std_17
+    )
+    target_compile_definitions(sllm_hipblaslt_fp8_graph_capture_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+        __HIP_PLATFORM_AMD__=1
+    )
+    target_compile_options(sllm_hipblaslt_fp8_graph_capture_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+        $<$<COMPILE_LANGUAGE:HIP>:-mcode-object-version=6>
+        $<$<COMPILE_LANGUAGE:HIP>:${SLLM_WAVEFRONT_FLAG}>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>
+    )
+    target_include_directories(sllm_hipblaslt_fp8_graph_capture_gpu_test PRIVATE
+        "${ROCM_PATH}/include"
+    )
+    target_link_libraries(sllm_hipblaslt_fp8_graph_capture_gpu_test PRIVATE
+        "${ROCM_PATH}/lib/libamdhip64.so"
+        "${ROCM_PATH}/lib/libhipblaslt.so"
+    )
+endif()
+
 if(SLLM_ENABLE_ROTARY_GPU_TEST)
     if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
         message(FATAL_ERROR
@@ -1477,6 +1537,36 @@ if(SLLM_ENABLE_ROTARY_PUBLIC_GPU_TEST)
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
     )
     target_link_libraries(sllm_rotary_public_gpu_test PRIVATE sllm_hip_stub)
+endif()
+
+if(SLLM_ENABLE_QWEN38_PROJECTION_PACK2_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Qwen3.8 projection-pack GPU test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_qwen38_projection_pack2_public_gpu_test
+        tests/qwen38_projection_pack2_public_gpu_test.cpp
+    )
+    target_compile_features(sllm_qwen38_projection_pack2_public_gpu_test
+        PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_qwen38_projection_pack2_public_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+    )
+    target_compile_options(sllm_qwen38_projection_pack2_public_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_qwen38_projection_pack2_public_gpu_test PRIVATE
+        sllm_hip_stub
+    )
+    add_test(NAME sllm_qwen38_projection_pack2_public_gpu_test
+        COMMAND sllm_qwen38_projection_pack2_public_gpu_test
+    )
+    set_tests_properties(sllm_qwen38_projection_pack2_public_gpu_test PROPERTIES
+        LABELS "gpu;phase78;qwen38;nvfp4;projection-pack"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}"
+    )
 endif()
 
 if(SLLM_ENABLE_MINISTRAL3_YARN_PUBLIC_GPU_TEST)

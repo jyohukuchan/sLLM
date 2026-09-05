@@ -3,7 +3,7 @@
 // abi_version: 1
 // options: --allowlist-type '^sllm_.*' --allowlist-function '^sllm_.*' --allowlist-var '^SLLM_.*' --no-layout-tests
 
-use core::ffi::c_char;
+use core::ffi::{c_char, c_void};
 
 pub type sllm_status_t = u32;
 
@@ -112,6 +112,14 @@ pub const SLLM_HIP_GDN_PROJECTION_BUNDLE_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_MLP_GATE_UP_SILU_BUNDLE_VERSION: u32 = 1;
 pub const SLLM_HIP_MLP_GATE_UP_SILU_BUNDLE_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_MLP_GATE_UP_SILU_BUNDLE_KERNEL_ID_V1: u32 = 1;
+pub const SLLM_HIP_QWEN38_PROJECTION_PACK2_VERSION: u32 = 1;
+pub const SLLM_HIP_QWEN38_PROJECTION_PACK2_DISPATCH_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_NVFP4_MLP_GATE_UP: u32 = 1;
+pub const SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_FP8_GDN_QKV_Z: u32 = 2;
+pub const SLLM_HIP_QWEN38_PROJECTION_PACK2_KERNEL_ID_NVFP4_SHARED_ACTIVATION_V1: u32 = 1;
+pub const SLLM_HIP_QWEN38_PROJECTION_PACK2_KERNEL_ID_FP8_GDN_SHARED_ACTIVATION_V1: u32 = 2;
+pub const SLLM_HIP_QWEN38_PROJECTION_PACK2_WORKSPACE_BYTES: u64 = 2_880;
+pub const SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES: u64 = 5_124;
 pub const SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1: u32 = 1;
 pub const SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2: u32 = 2;
 pub const SLLM_HIP_MATMUL_KERNEL_ID_DECODE_BF16_FP32_V2: u32 = 3;
@@ -351,6 +359,9 @@ pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2: u32 = 2;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3: u32 = 3;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1: u32 = 4;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1: u32 = 5;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F32_GFX1201_V1: u32 = 74;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F16_TAIL_GFX1201_V1: u32 = 77;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_SPLIT_P128_GFX1030_V1: u32 = 78;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE: u32 = 256;
@@ -364,6 +375,7 @@ pub const SLLM_HIP_LINEAR_ATTENTION_VIEW_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1: u32 = 1;
 pub const SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1: u32 = 2;
+pub const SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_ROW32_LDS_V1: u32 = 79;
 pub const SLLM_HIP_LINEAR_ATTENTION_KERNEL_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_LINEAR_ATTENTION_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE: u32 = 128;
@@ -463,6 +475,11 @@ pub struct sllm_completion_t {
 }
 
 #[repr(C)]
+pub struct sllm_graph_span_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
 pub struct sllm_rmsnorm_plan_t {
     _private: [u8; 0],
 }
@@ -484,6 +501,11 @@ pub struct sllm_embedding_plan_t {
 
 #[repr(C)]
 pub struct sllm_matmul_plan_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct sllm_qwen38_projection_pack2_plan_t {
     _private: [u8; 0],
 }
 
@@ -891,6 +913,49 @@ pub struct sllm_matmul_dispatch_info_t {
     pub k: u64,
     pub n: u64,
     pub output_elements: u64,
+    pub kernel_symbol: [c_char; 64],
+    pub device_symbol: [c_char; 64],
+    pub gcn_arch_name: [c_char; 64],
+    pub reserved: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_qwen38_projection_pack2_desc_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub op_version: u32,
+    pub role: u32,
+    pub input_global_scale_f32_bits: u32,
+    pub reserved: [u32; 3],
+    pub activation: sllm_tensor_binding_t,
+    pub gate_weight: sllm_tensor_binding_t,
+    pub up_weight: sllm_tensor_binding_t,
+    pub gate_output: sllm_tensor_binding_t,
+    pub up_output: sllm_tensor_binding_t,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_qwen38_projection_pack2_dispatch_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub backend: u32,
+    pub dispatch_id: u64,
+    pub dispatch_count: u32,
+    pub kernel_id: u32,
+    pub workgroup_size_x: u32,
+    pub grid_size_x: u32,
+    pub fallback_allowed: u32,
+    pub fallback_used: u32,
+    pub m: u64,
+    pub k: u64,
+    pub n: u64,
+    pub output_elements: u64,
+    pub workspace_bytes: u64,
+    pub role: u32,
+    pub reserved0: u32,
     pub kernel_symbol: [c_char; 64],
     pub device_symbol: [c_char; 64],
     pub gcn_arch_name: [c_char; 64],
@@ -1833,6 +1898,27 @@ unsafe extern "C" {
         completion: *mut *mut sllm_completion_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
+    pub fn sllm_graph_span_create(
+        queue: *const sllm_queue_t,
+        prepared_plan_handles: *const *const c_void,
+        prepared_plan_count: u64,
+        graph: *mut *mut sllm_graph_span_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_graph_span_execute(
+        graph: *const sllm_graph_span_t,
+        completion: *mut *mut sllm_completion_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_graph_span_release(
+        graph: *mut *mut sllm_graph_span_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_graph_span_node_count(
+        graph: *const sllm_graph_span_t,
+        node_count: *mut u64,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
     pub fn sllm_completion_finalize_after(
         completion: *mut sllm_completion_t,
         fence: *mut sllm_completion_t,
@@ -1949,6 +2035,23 @@ unsafe extern "C" {
         queue: *const sllm_queue_t,
         completion: *mut *mut sllm_completion_t,
         dispatch_info: *mut sllm_matmul_dispatch_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_qwen38_projection_pack2_prepare(
+        context: *const sllm_context_t,
+        descriptor: *const sllm_qwen38_projection_pack2_desc_t,
+        plan: *mut *mut sllm_qwen38_projection_pack2_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_qwen38_projection_pack2_plan_release(
+        plan: *mut *mut sllm_qwen38_projection_pack2_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_qwen38_projection_pack2_execute(
+        plan: *const sllm_qwen38_projection_pack2_plan_t,
+        queue: *const sllm_queue_t,
+        completion: *mut *mut sllm_completion_t,
+        dispatch_info: *mut sllm_qwen38_projection_pack2_dispatch_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
     pub fn sllm_gdn_projection_bundle_prepare(
@@ -2260,6 +2363,15 @@ unsafe extern "C" {
     pub fn sllm_causal_attention_execute(
         context: *const sllm_context_t,
         queue: *const sllm_queue_t,
+        descriptor: *const sllm_causal_attention_desc_t,
+        completion: *mut *mut sllm_completion_t,
+        dispatch_info: *mut sllm_causal_attention_dispatch_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_causal_attention_execute_after_kv_append(
+        context: *const sllm_context_t,
+        queue: *const sllm_queue_t,
+        append_completion: *mut sllm_completion_t,
         descriptor: *const sllm_causal_attention_desc_t,
         completion: *mut *mut sllm_completion_t,
         dispatch_info: *mut sllm_causal_attention_dispatch_info_t,

@@ -25,6 +25,7 @@ mod deepseek_v4_moe_route;
 mod elementwise;
 mod embedding;
 mod gdn_projection_bundle;
+mod graph_span;
 mod kv_state;
 mod linear_attention;
 mod matmul;
@@ -33,6 +34,7 @@ mod ministral3_yarn;
 mod mlp_gate_up_silu_bundle;
 mod moe_expert;
 mod moe_route;
+mod qwen38_projection_pack;
 mod residual_rmsnorm;
 mod rmsnorm;
 mod rotary;
@@ -61,6 +63,8 @@ pub use gdn_projection_bundle::{
     GdnProjectionBundleDescriptor, GdnProjectionBundleDispatchInfo, GdnProjectionBundleSubmission,
     PreparedGdnProjectionBundle,
 };
+pub use graph_span::GraphSpan;
+pub(crate) use graph_span::GraphSpanPlan;
 pub use kv_state::{
     CausalAttentionEvidence, KvAppendEvidence, bf16_to_f16_bits, expected_storage_offset,
 };
@@ -84,6 +88,10 @@ pub use moe_expert::{
 };
 pub use moe_route::{
     MoeRouteDescriptor, MoeRouteDispatchInfo, MoeRouteLayout, MoeRouteSubmission, PreparedMoeRoute,
+};
+pub use qwen38_projection_pack::{
+    PreparedQwen38ProjectionPack2, Qwen38ProjectionPack2Descriptor,
+    Qwen38ProjectionPack2DispatchInfo, Qwen38ProjectionPack2Submission,
 };
 pub use residual_rmsnorm::{
     PreparedResidualRmsNorm, ResidualRmsNormDescriptor, ResidualRmsNormDispatchInfo,

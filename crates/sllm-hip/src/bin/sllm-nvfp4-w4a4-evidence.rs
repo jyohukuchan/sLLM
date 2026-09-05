@@ -17,8 +17,26 @@ use sllm_hip::HipBackend;
 
 const WAIT: Duration = Duration::from_secs(30);
 const SHUTDOWN: Duration = Duration::from_secs(16);
-const KERNEL: &str = "matmul.nvfp4.w4a4.block16.packed.v1";
-const DEVICE: &str = "sllm_matmul_nvfp4_w4a4_block16_packed_v1";
+const PREFILL_KERNEL: &str = "matmul.nvfp4.w4a4.block16.prefill.row8_tiled256.v1";
+const PREFILL_DEVICE: &str = "sllm_matmul_nvfp4_w4a4_block16_prefill_row8_tiled256_v1";
+const PREFILL_COL8_KERNEL: &str = "matmul.nvfp4.w4a4.block16.prefill.row8_col8_tiled256.v1";
+const PREFILL_COL8_DEVICE: &str = "sllm_matmul_nvfp4_w4a4_block16_prefill_row8_col8_tiled256_v1";
+const PREFILL_DP4A_KERNEL: &str = "matmul.nvfp4.w4a4.block16.prefill.dp4a64x64.v1";
+const PREFILL_DP4A_DEVICE: &str = "sllm_matmul_nvfp4_w4a4_block16_prefill_dp4a_64x64_v1";
+const PREFILL_GFX1201_WMMA_KERNEL: &str = "matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x64.v1";
+const PREFILL_GFX1201_WMMA_DEVICE: &str = "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_v1";
+const PREFILL_GFX1201_WMMA_F16SCALE_KERNEL: &str =
+    "matmul.nvfp4.w4a4.prefill.gfx1201.wmma_f16scale128x64.v1";
+const PREFILL_GFX1201_WMMA_F16SCALE_DEVICE: &str =
+    "sllm_nvfp4_w4a4_prefill_gfx1201_wmma_f16scale128x64_v1";
+const DECODE_KERNEL: &str = "matmul.nvfp4.w4a4.block16.decode.v1";
+const DECODE_DEVICE: &str = "sllm_matmul_nvfp4_w4a4_block16_decode_v1";
+const DECODE_COLUMNS128_KERNEL: &str = "matmul.nvfp4.w4a4.decode.columns128.v1";
+const DECODE_COLUMNS128_DEVICE: &str = "sllm_matmul_nvfp4_w4a4_decode_columns128_v1";
+const DECODE_WAVE4_KERNEL: &str = "matmul.nvfp4.w4a4.decode.dp4a.wave4col32.v1";
+const DECODE_WAVE4_DEVICE: &str = "sllm_matmul_nvfp4_w4a4_decode_dp4a_wave4col32_v1";
+const BASELINE_KERNEL: &str = "matmul.nvfp4.w4a4.block16.packed.v1";
+const BASELINE_DEVICE: &str = "sllm_matmul_nvfp4_w4a4_block16_packed_v1";
 
 #[derive(Clone, Copy)]
 struct Shape {
@@ -27,7 +45,7 @@ struct Shape {
     n: usize,
 }
 
-const CASES: [Shape; 12] = [
+const CASES: [Shape; 21] = [
     Shape { m: 1, k: 15, n: 17 },
     Shape { m: 3, k: 16, n: 16 },
     Shape { m: 7, k: 17, n: 15 },
@@ -64,6 +82,51 @@ const CASES: [Shape; 12] = [
         k: 17,
         n: 32,
     },
+    Shape {
+        m: 128,
+        k: 17,
+        n: 33,
+    },
+    Shape {
+        m: 512,
+        k: 31,
+        n: 17,
+    },
+    Shape {
+        m: 1024,
+        k: 33,
+        n: 15,
+    },
+    Shape {
+        m: 127,
+        k: 48,
+        n: 63,
+    },
+    Shape {
+        m: 128,
+        k: 48,
+        n: 64,
+    },
+    Shape {
+        m: 129,
+        k: 48,
+        n: 65,
+    },
+    Shape {
+        m: 1,
+        k: 16,
+        n: 127,
+    },
+    Shape {
+        m: 1,
+        k: 32,
+        n: 128,
+    },
+    Shape {
+        m: 1,
+        k: 48,
+        n: 129,
+    },
 ];
 
 #[derive(Serialize)]
@@ -74,6 +137,9 @@ struct CaseReport {
     dispatch_count: u32,
     kernel_id: u32,
     kernel_elapsed_ns: u64,
+    kernel_elapsed_samples_ns: Vec<u64>,
+    warmup_count: usize,
+    measured_count: usize,
     input_decode_global: f32,
     max_abs_error: f32,
     max_relative_error: f32,
@@ -198,8 +264,41 @@ fn wait_ok(
 
 fn matrix(rows: usize, columns: usize, phase: usize) -> Vec<u16> {
     (0..rows * columns)
-        .map(|index| bf16((((index * 37 + phase * 19) % 257) as i32 - 128) as f32 / 31.0))
+        .map(|index| {
+            let block_scale = match (index % columns) / 16 % 4 {
+                0 => 0.125,
+                1 => 0.5,
+                2 => 2.0,
+                _ => 8.0,
+            };
+            bf16((((index * 37 + phase * 19) % 257) as i32 - 128) as f32 / 31.0 * block_scale)
+        })
         .collect()
+}
+
+fn benchmark_iterations(name: &str, default: usize) -> Result<usize, String> {
+    match env::var(name) {
+        Ok(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|count| *count > 0)
+            .ok_or_else(|| format!("{name} must be a positive usize")),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(format!("cannot read {name}: {error}")),
+    }
+}
+
+fn median_u64(values: &[u64]) -> u64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let middle = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        let lower = sorted[middle - 1];
+        let upper = sorted[middle];
+        lower / 2 + upper / 2 + (lower % 2 + upper % 2) / 2
+    } else {
+        sorted[middle]
+    }
 }
 
 fn run_case(
@@ -214,6 +313,14 @@ fn run_case(
     let weight_f32 = weight.iter().copied().map(from_bf16).collect::<Vec<_>>();
     let quantized_weight =
         quantize_nvfp4_weights(&weight_f32, shape.n, shape.k).map_err(|error| error.to_string())?;
+    if shape.k >= 32
+        && quantized_weight.block_scales.first() == quantized_weight.block_scales.get(1)
+    {
+        return Err(format!(
+            "test fixture did not produce distinct adjacent K16 weight scales for k={}",
+            shape.k
+        ));
+    }
     let weight_decoded = quantized_weight.dequantize();
     let activation_max = activation
         .iter()
@@ -305,25 +412,98 @@ fn run_case(
     let prepared = session
         .prepare(operation)
         .map_err(|error| error.to_string())?;
-    let mut submission = session
-        .submit(&prepared, queue)
-        .map_err(|error| error.to_string())?;
-    let dispatch = submission.dispatch().clone();
-    wait_ok(submission.wait(WAIT), "W4A4 matmul")?;
-    if dispatch.dispatch_count != 2
-        || dispatch.kernel_id != 11
-        || dispatch.kernel_symbol != KERNEL
-        || dispatch.device_symbol != DEVICE
-        || dispatch.target != target
-        || dispatch.fallback_allowed
-        || dispatch.fallback_used
+    let force_baseline = env::var("SLLM_NVFP4_W4A4_FORCE_BASELINE").as_deref() == Ok("1");
+    let force_row8 = env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8").as_deref() == Ok("1");
+    let force_col8 = env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_COL8").as_deref() == Ok("1");
+    let force_dp4a = env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A").as_deref() == Ok("1");
+    let force_gfx1201_wmma =
+        env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA").as_deref() == Ok("1");
+    let force_gfx1201_wmma_f16scale =
+        env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA_F16SCALE").as_deref() == Ok("1");
+    let force_decode_columns =
+        env::var("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_COLUMNS").as_deref() == Ok("1");
+    let force_decode_wave4 =
+        env::var("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4").as_deref() == Ok("1");
+    let (expected_kernel_id, expected_kernel, expected_device) = if force_baseline {
+        (11, BASELINE_KERNEL, BASELINE_DEVICE)
+    } else if shape.m == 1 {
+        if force_decode_wave4
+            && matches!(target, "gfx1030" | "gfx1201")
+            && (shape.k % 16 == 0)
+            && shape.k <= 17_408
+        {
+            (67, DECODE_WAVE4_KERNEL, DECODE_WAVE4_DEVICE)
+        } else if force_decode_columns
+            && matches!(target, "gfx1030" | "gfx1201")
+            && (shape.k % 16 == 0)
+            && shape.k <= 17_408
+        {
+            (65, DECODE_COLUMNS128_KERNEL, DECODE_COLUMNS128_DEVICE)
+        } else {
+            (58, DECODE_KERNEL, DECODE_DEVICE)
+        }
+    } else if force_row8 {
+        (59, PREFILL_KERNEL, PREFILL_DEVICE)
+    } else if force_col8 {
+        (61, PREFILL_COL8_KERNEL, PREFILL_COL8_DEVICE)
+    } else if force_gfx1201_wmma_f16scale && target == "gfx1201" && shape.m > 1 && shape.k % 16 == 0
     {
-        return Err(format!("unexpected W4A4 dispatch: {dispatch:?}"));
+        (
+            69,
+            PREFILL_GFX1201_WMMA_F16SCALE_KERNEL,
+            PREFILL_GFX1201_WMMA_F16SCALE_DEVICE,
+        )
+    } else if force_gfx1201_wmma && target == "gfx1201" && shape.k % 16 == 0 {
+        (64, PREFILL_GFX1201_WMMA_KERNEL, PREFILL_GFX1201_WMMA_DEVICE)
+    } else if force_dp4a && shape.k % 16 == 0 {
+        (62, PREFILL_DP4A_KERNEL, PREFILL_DP4A_DEVICE)
+    } else {
+        (59, PREFILL_KERNEL, PREFILL_DEVICE)
+    };
+    let benchmark = env::var("SLLM_NVFP4_BENCHMARK").as_deref() == Ok("1");
+    let warmup_count = if benchmark {
+        benchmark_iterations("SLLM_NVFP4_BENCHMARK_WARMUPS", 3)?
+    } else {
+        0
+    };
+    let measured_count = if benchmark {
+        benchmark_iterations("SLLM_NVFP4_BENCHMARK_MEASURED", 10)?
+    } else {
+        1
+    };
+    let total_count = warmup_count + measured_count;
+    let mut kernel_elapsed_samples_ns = Vec::with_capacity(measured_count);
+    let mut final_submission = None;
+    for iteration in 0..total_count {
+        let mut submission = session
+            .submit(&prepared, queue)
+            .map_err(|error| error.to_string())?;
+        let dispatch = submission.dispatch().clone();
+        wait_ok(submission.wait(WAIT), "W4A4 matmul")?;
+        if dispatch.dispatch_count != 2
+            || dispatch.kernel_id != expected_kernel_id
+            || dispatch.kernel_symbol != expected_kernel
+            || dispatch.device_symbol != expected_device
+            || dispatch.target != target
+            || dispatch.fallback_allowed
+            || dispatch.fallback_used
+        {
+            return Err(format!("unexpected W4A4 dispatch: {dispatch:?}"));
+        }
+        if iteration >= warmup_count {
+            kernel_elapsed_samples_ns.push(
+                submission
+                    .kernel_elapsed_ns()
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "missing GPU timing".to_owned())?,
+            );
+        }
+        if iteration + 1 == total_count {
+            final_submission = Some(submission);
+        }
     }
-    let kernel_elapsed_ns = submission
-        .kernel_elapsed_ns()
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "missing GPU timing".to_owned())?;
+    let kernel_elapsed_ns = median_u64(&kernel_elapsed_samples_ns);
+    let mut submission = final_submission.ok_or_else(|| "no measured submission".to_owned())?;
     let mut readback = submission
         .start_output_readback(0)
         .map_err(|error| error.to_string())?;
@@ -336,6 +516,17 @@ fn run_case(
     let mut max_relative_error = 0.0_f32;
     for row in 0..shape.m {
         for column in 0..shape.n {
+            if benchmark && !matches!(row, 0 | 1) && row != shape.m / 2 && row + 1 != shape.m {
+                continue;
+            }
+            if benchmark
+                && !matches!(column, 0 | 1)
+                && column != shape.n / 3
+                && column != (shape.n * 2) / 3
+                && column + 1 != shape.n
+            {
+                continue;
+            }
             let expected = (0..shape.k)
                 .map(|inner| {
                     activation_decoded[row * shape.k + inner]
@@ -360,9 +551,12 @@ fn run_case(
         m: shape.m,
         k: shape.k,
         n: shape.n,
-        dispatch_count: dispatch.dispatch_count,
-        kernel_id: dispatch.kernel_id,
+        dispatch_count: 2,
+        kernel_id: expected_kernel_id,
         kernel_elapsed_ns,
+        kernel_elapsed_samples_ns,
+        warmup_count,
+        measured_count,
         input_decode_global,
         max_abs_error,
         max_relative_error,
@@ -383,18 +577,71 @@ fn run(device_index: u32, target: String) -> Result<Report, String> {
     let result = (|| {
         let queue = session.create_queue().map_err(|error| error.to_string())?;
         let cases = if env::var("SLLM_NVFP4_BENCHMARK").as_deref() == Ok("1") {
-            vec![
+            let scope = env::var("SLLM_NVFP4_BENCHMARK_SCOPE").unwrap_or_else(|_| "all".to_owned());
+            let shapes = vec![
                 Shape {
                     m: 1,
-                    k: 2048,
-                    n: 6144,
+                    k: 5120,
+                    n: 17408,
                 },
                 Shape {
-                    m: 32,
-                    k: 2048,
-                    n: 6144,
+                    m: 1,
+                    k: 17408,
+                    n: 5120,
                 },
-            ]
+                Shape {
+                    m: 128,
+                    k: 5120,
+                    n: 17408,
+                },
+                Shape {
+                    m: 128,
+                    k: 17408,
+                    n: 5120,
+                },
+                Shape {
+                    m: 512,
+                    k: 5120,
+                    n: 17408,
+                },
+                Shape {
+                    m: 512,
+                    k: 17408,
+                    n: 5120,
+                },
+                Shape {
+                    m: 1024,
+                    k: 5120,
+                    n: 17408,
+                },
+                Shape {
+                    m: 1024,
+                    k: 17408,
+                    n: 5120,
+                },
+            ];
+            let mut selected = match scope.as_str() {
+                "all" => shapes,
+                "decode" => shapes.into_iter().filter(|shape| shape.m == 1).collect(),
+                "prefill" => shapes.into_iter().filter(|shape| shape.m > 1).collect(),
+                _ => {
+                    return Err(
+                        "SLLM_NVFP4_BENCHMARK_SCOPE must be all, decode, or prefill".to_owned()
+                    );
+                }
+            };
+            if let Ok(rows) = env::var("SLLM_NVFP4_BENCHMARK_M") {
+                let rows = rows
+                    .parse::<usize>()
+                    .map_err(|_| "SLLM_NVFP4_BENCHMARK_M must be an integer".to_owned())?;
+                selected.retain(|shape| shape.m == rows);
+                if selected.is_empty() {
+                    return Err(format!(
+                        "SLLM_NVFP4_BENCHMARK_M={rows} selected no benchmark shapes"
+                    ));
+                }
+            }
+            selected
         } else {
             CASES.to_vec()
         };
@@ -416,7 +663,7 @@ fn run(device_index: u32, target: String) -> Result<Report, String> {
         state: "PASS",
         target,
         device_index,
-        provider: "dynamic-block16-packed",
+        provider: "dynamic-block16-w4a4-decode-row8-prefill",
         arithmetic: "E2M1xE2M1/FP32-accumulate/BF16-output",
         fallback_allowed: false,
         fallback_used: false,

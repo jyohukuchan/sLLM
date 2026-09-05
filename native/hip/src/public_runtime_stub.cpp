@@ -619,6 +619,95 @@ sllm_queue_fence(const sllm_queue_t *const queue,
   }
 }
 
+extern "C" sllm_status_t sllm_graph_span_create(
+    const sllm_queue_t *const queue, const void *const *const plan_handles,
+    const uint64_t plan_count, sllm_graph_span_t **const span,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (span != nullptr) {
+      *span = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (queue == nullptr || plan_handles == nullptr || span == nullptr ||
+        plan_count == 0U) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "graph span queue, plans, count, or output is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception creating graph span");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_graph_span_execute(const sllm_graph_span_t *const span,
+                        sllm_completion_t **const completion,
+                        sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (completion != nullptr) {
+      *completion = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (span == nullptr || completion == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "graph span or completion output is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception executing graph span");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_graph_span_release(sllm_graph_span_t **const span,
+                        sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (span == nullptr || *span == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "graph span handle is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception releasing graph span");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_graph_span_node_count(const sllm_graph_span_t *const span,
+                           uint64_t *const node_count,
+                           sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (node_count != nullptr) {
+      *node_count = 0U;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (span == nullptr || node_count == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "graph span or node-count output is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception querying graph span node count");
+  }
+}
+
 extern "C" sllm_status_t
 sllm_buffer_create(const sllm_context_t *const context,
                    const sllm_buffer_create_info_t *const info,
@@ -2365,6 +2454,59 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
   }
 }
 
+extern "C" sllm_status_t sllm_causal_attention_execute_after_kv_append(
+    const sllm_context_t *const context, const sllm_queue_t *const queue,
+    sllm_completion_t *const append_completion,
+    const sllm_causal_attention_desc_t *const descriptor,
+    sllm_completion_t **const completion,
+    sllm_causal_attention_dispatch_info_t *const dispatch_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (completion != nullptr) {
+      *completion = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (append_completion == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "KV append dependency completion is null");
+    }
+    if (dispatch_info == nullptr ||
+        dispatch_info->struct_size != sizeof(*dispatch_info)) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "causal attention dispatch info is invalid");
+    }
+    if (dispatch_info->abi_version != SLLM_HIP_ABI_VERSION) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ABI_VERSION,
+                         "causal attention dispatch info ABI is unsupported");
+    }
+    if (dispatch_info->info_version !=
+            SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION ||
+        !std::all_of(std::begin(dispatch_info->reserved),
+                     std::end(dispatch_info->reserved),
+                     [](const uint32_t value) { return value == 0U; })) {
+      return write_error(error_sink, SLLM_STATUS_RESERVED_NONZERO,
+                         "causal attention dispatch info is unsupported");
+    }
+    const sllm_status_t descriptor_status =
+        sllm_causal_attention::validate_descriptor_prefix(descriptor,
+                                                          error_sink);
+    if (descriptor_status != SLLM_STATUS_OK) {
+      return descriptor_status;
+    }
+    if (context == nullptr || queue == nullptr || completion == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "causal attention chain input or output is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in causal attention chain stub");
+  }
+}
+
 extern "C" sllm_status_t sllm_linear_attention_state_create(
     const sllm_context_t *const context,
     const sllm_linear_attention_state_create_info_t *const info,
@@ -2751,6 +2893,34 @@ sllm_hip_kv_view_readback(const sllm_hip_kv_readback_request_t *const request,
 extern "C" sllm_status_t sllm_gdn_projection_bundle_prepare(
     const sllm_context_t *, const sllm_gdn_projection_bundle_desc_t *,
     sllm_gdn_projection_bundle_plan_t **,
+    sllm_error_sink_t *const error_sink) noexcept {
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "public HIP runtime is unavailable; CPU fallback is disabled");
+}
+
+extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
+    const sllm_context_t *, const sllm_qwen38_projection_pack2_desc_t *,
+    sllm_qwen38_projection_pack2_plan_t **const plan,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (plan != nullptr)
+    *plan = nullptr;
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "public HIP runtime is unavailable; CPU fallback is disabled");
+}
+
+extern "C" sllm_status_t sllm_qwen38_projection_pack2_plan_release(
+    sllm_qwen38_projection_pack2_plan_t **,
+    sllm_error_sink_t *const error_sink) noexcept {
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "public HIP runtime is unavailable; CPU fallback is disabled");
+}
+
+extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
+    const sllm_qwen38_projection_pack2_plan_t *, const sllm_queue_t *,
+    sllm_completion_t **, sllm_qwen38_projection_pack2_dispatch_info_t *,
     sllm_error_sink_t *const error_sink) noexcept {
   return sllm_public_runtime::write_error(
       error_sink, SLLM_STATUS_HIP_UNAVAILABLE,

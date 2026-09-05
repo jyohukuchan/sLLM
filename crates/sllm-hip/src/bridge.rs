@@ -41,24 +41,25 @@ use crate::{
     DeepSeekV4MoeRouteDescriptor, DeepSeekV4MoeRouteDispatchInfo, DeepSeekV4MoeRouteSubmission,
     ElementwiseDescriptor, ElementwiseDispatchInfo, ElementwiseSubmission, EmbeddingDescriptor,
     EmbeddingDispatchInfo, EmbeddingSubmission, GdnProjectionBundleDescriptor,
-    GdnProjectionBundleDispatchInfo, GdnProjectionBundleSubmission, HipBackend, MatmulDescriptor,
-    MatmulDispatchInfo, MatmulSubmission, MiniMaxM3MoeRouteDescriptor,
-    MiniMaxM3MoeRouteDispatchInfo, MiniMaxM3MoeRouteSubmission, Ministral3YarnDescriptor,
-    Ministral3YarnDispatchInfo, Ministral3YarnPositionMode,
+    GdnProjectionBundleDispatchInfo, GdnProjectionBundleSubmission, GraphSpan, GraphSpanPlan,
+    HipBackend, MatmulDescriptor, MatmulDispatchInfo, MatmulSubmission,
+    MiniMaxM3MoeRouteDescriptor, MiniMaxM3MoeRouteDispatchInfo, MiniMaxM3MoeRouteSubmission,
+    Ministral3YarnDescriptor, Ministral3YarnDispatchInfo, Ministral3YarnPositionMode,
     Ministral3YarnSubmission as HipMinistral3YarnSubmission, MlpGateUpSiluBundleDescriptor,
     MlpGateUpSiluBundleDispatchInfo, MlpGateUpSiluBundleSubmission, MoeExpertDescriptor,
     MoeExpertDispatchInfo, MoeExpertSubmission, MoeRouteDescriptor, MoeRouteDispatchInfo,
     MoeRouteLayout, MoeRouteSubmission, PreparedAttentionPreprocess, PreparedDeepSeekV4MoeRoute,
     PreparedElementwise, PreparedEmbedding, PreparedGdnProjectionBundle, PreparedMatmul,
     PreparedMiniMaxM3MoeRoute, PreparedMlpGateUpSiluBundle, PreparedMoeExpert, PreparedMoeRoute,
-    PreparedResidualRmsNorm, PreparedRmsNorm, PreparedRotary, PreparedTokenSelector,
-    PreparedWindowedAttention, Queue, QueueCompletionMode as HipQueueCompletionMode,
-    ResidualRmsNormDescriptor, ResidualRmsNormDispatchInfo, ResidualRmsNormSubmission,
-    RmsNormDescriptor, RmsNormDispatchInfo, RmsNormSubmission, RotaryDescriptor,
-    RotaryDispatchInfo, RotarySubmission, RuntimeError, RuntimeStatus, TokenSelectorDescriptor,
-    TokenSelectorDispatchInfo, TokenSelectorSubmission, WindowedAttentionDescriptor,
-    WindowedAttentionDispatchInfo, WindowedAttentionSubmission, gemma4_moe_expert_workspace_bytes,
-    moe_expert_workspace_bytes,
+    PreparedQwen38ProjectionPack2, PreparedResidualRmsNorm, PreparedRmsNorm, PreparedRotary,
+    PreparedTokenSelector, PreparedWindowedAttention, Queue,
+    QueueCompletionMode as HipQueueCompletionMode, Qwen38ProjectionPack2Descriptor,
+    Qwen38ProjectionPack2DispatchInfo, Qwen38ProjectionPack2Submission, ResidualRmsNormDescriptor,
+    ResidualRmsNormDispatchInfo, ResidualRmsNormSubmission, RmsNormDescriptor, RmsNormDispatchInfo,
+    RmsNormSubmission, RotaryDescriptor, RotaryDispatchInfo, RotarySubmission, RuntimeError,
+    RuntimeStatus, TokenSelectorDescriptor, TokenSelectorDispatchInfo, TokenSelectorSubmission,
+    WindowedAttentionDescriptor, WindowedAttentionDispatchInfo, WindowedAttentionSubmission,
+    gemma4_moe_expert_workspace_bytes, moe_expert_workspace_bytes,
 };
 
 const HIP_BACKEND_NAME: &str = "hip";
@@ -399,6 +400,16 @@ struct ActiveOperation {
     active: bool,
 }
 
+impl ActiveOperation {
+    fn clone_active(&self) -> Result<Self, ExecutionError> {
+        self.state.activity.acquire_active()?;
+        Ok(Self {
+            state: Arc::clone(&self.state),
+            active: true,
+        })
+    }
+}
+
 impl Drop for ActiveOperation {
     fn drop(&mut self) {
         if self.active {
@@ -456,6 +467,7 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 | sllm_core::SemanticOpKind::TanhSoftcap
                 | sllm_core::SemanticOpKind::Embedding
                 | sllm_core::SemanticOpKind::Matmul
+                | sllm_core::SemanticOpKind::Qwen38ProjectionPack2
                 | sllm_core::SemanticOpKind::GdnProjectionBundle
                 | sllm_core::SemanticOpKind::MlpGateUpSiluBundle
                 | sllm_core::SemanticOpKind::RmsNorm
@@ -1163,6 +1175,37 @@ impl ExecutionSessionAdapter for HipExecutionSession {
     ) -> Result<AdapterResource, ExecutionError> {
         self.state.ensure_open()?;
         let prepared = match operation.descriptor().kind() {
+            sllm_core::SemanticOpKind::Qwen38ProjectionPack2 => {
+                let activation = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
+                    .clone();
+                let gate_weight = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[1].buffer())?
+                    .clone();
+                let up_weight = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[2].buffer())?
+                    .clone();
+                let gate_output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[0].buffer())?
+                    .clone();
+                let up_output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[1].buffer())?
+                    .clone();
+                let descriptor = Qwen38ProjectionPack2Descriptor::from_validated_semantic(
+                    Arc::clone(operation.descriptor()),
+                    activation.binding(operation.inputs()[0].view().clone()),
+                    gate_weight.binding(operation.inputs()[1].view().clone()),
+                    up_weight.binding(operation.inputs()[2].view().clone()),
+                    gate_output.binding(operation.outputs()[0].view().clone()),
+                    up_output.binding(operation.outputs()[1].view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                HipPreparedPlan::Qwen38ProjectionPack2(
+                    self.backend
+                        .prepare_qwen38_projection_pack2(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
             sllm_core::SemanticOpKind::GdnProjectionBundle => {
                 let activation = access
                     .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
@@ -1846,6 +1889,13 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                     dispatch_from_matmul(dispatch),
                 )
             }
+            HipPreparedPlan::Qwen38ProjectionPack2(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::Qwen38ProjectionPack2(submission),
+                    dispatch_from_qwen38_projection_pack2(dispatch),
+                )
+            }
             HipPreparedPlan::GdnProjectionBundle(plan) => {
                 let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
                 (
@@ -1945,6 +1995,48 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             }),
             dispatch,
         ))
+    }
+
+    fn create_graph_span(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        queue: &sllm_core::ExecutionQueue,
+        operations: &[PreparedOperation],
+    ) -> Result<(AdapterResource, u64), ExecutionError> {
+        self.state.ensure_open()?;
+        let queue = access.downcast_queue_payload::<Queue>(queue)?.clone();
+        let mut plans = Vec::with_capacity(operations.len());
+        for operation in operations {
+            let prepared = access.downcast_prepared_payload::<HipPreparedPlan>(operation)?;
+            plans.push(graph_span_plan(prepared)?);
+        }
+        let span = GraphSpan::create(&queue, &plans).map_err(map_backend_error)?;
+        let node_count = span.node_count();
+        Ok((AdapterResource::new(span), node_count))
+    }
+
+    fn submit_graph_span(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        span: &sllm_core::ExecutionGraphSpan,
+    ) -> Result<Box<dyn ExecutionSubmissionAdapter>, ExecutionError> {
+        self.state.ensure_open()?;
+        let span = access
+            .downcast_graph_span_payload::<GraphSpan>(span)?
+            .clone();
+        let ticket = self.state.acquire_active()?;
+        let completion = match span.execute() {
+            Ok(completion) => completion,
+            Err(error) => {
+                drop(ticket);
+                return Err(map_backend_error(error));
+            }
+        };
+        Ok(Box::new(HipGraphSubmission {
+            completion,
+            span,
+            _ticket: ticket,
+        }))
     }
 
     fn upload(
@@ -2051,6 +2143,23 @@ impl ExecutionSessionAdapter for HipExecutionSession {
     }
 }
 
+fn graph_span_plan(plan: &HipPreparedPlan) -> Result<GraphSpanPlan, ExecutionError> {
+    match plan {
+        HipPreparedPlan::RmsNorm(plan) => Ok(GraphSpanPlan::RmsNorm(plan.clone())),
+        HipPreparedPlan::ResidualRmsNorm(plan) => {
+            Ok(GraphSpanPlan::ResidualRmsNorm(plan.clone()))
+        }
+        HipPreparedPlan::Elementwise(plan) => Ok(GraphSpanPlan::Elementwise(plan.clone())),
+        HipPreparedPlan::Matmul(plan) => Ok(GraphSpanPlan::Matmul(plan.clone())),
+        HipPreparedPlan::Qwen38ProjectionPack2(plan) => {
+            Ok(GraphSpanPlan::Qwen38ProjectionPack2(plan.clone()))
+        }
+        _ => Err(ExecutionError::Unsupported {
+            reason: "HIP graph spans currently support only RMSNorm, elementwise, matmul, and Qwen3.8 projection-pack plans".to_owned(),
+        }),
+    }
+}
+
 #[derive(Clone)]
 enum HipPreparedPlan {
     RmsNorm(PreparedRmsNorm),
@@ -2058,6 +2167,7 @@ enum HipPreparedPlan {
     Elementwise(PreparedElementwise),
     Embedding(PreparedEmbedding),
     Matmul(PreparedMatmul),
+    Qwen38ProjectionPack2(PreparedQwen38ProjectionPack2),
     GdnProjectionBundle(PreparedGdnProjectionBundle),
     MlpGateUpSiluBundle(PreparedMlpGateUpSiluBundle),
     Argmax(PreparedArgmax),
@@ -2085,6 +2195,7 @@ enum HipSemanticSubmission {
     Elementwise(ElementwiseSubmission),
     Embedding(EmbeddingSubmission),
     Matmul(MatmulSubmission),
+    Qwen38ProjectionPack2(Qwen38ProjectionPack2Submission),
     GdnProjectionBundle(GdnProjectionBundleSubmission),
     MlpGateUpSiluBundle(MlpGateUpSiluBundleSubmission),
     Argmax(ArgmaxSubmission),
@@ -2113,6 +2224,7 @@ impl HipSemanticSubmission {
             Self::Elementwise(submission) => submission.query(),
             Self::Embedding(submission) => submission.query(),
             Self::Matmul(submission) => submission.query(),
+            Self::Qwen38ProjectionPack2(submission) => submission.query(),
             Self::GdnProjectionBundle(submission) => submission.query(),
             Self::MlpGateUpSiluBundle(submission) => submission.query(),
             Self::Argmax(submission) => submission.query(),
@@ -2135,6 +2247,7 @@ impl HipSemanticSubmission {
             Self::Elementwise(submission) => submission.wait(timeout),
             Self::Embedding(submission) => submission.wait(timeout),
             Self::Matmul(submission) => submission.wait(timeout),
+            Self::Qwen38ProjectionPack2(submission) => submission.wait(timeout),
             Self::GdnProjectionBundle(submission) => submission.wait(timeout),
             Self::MlpGateUpSiluBundle(submission) => submission.wait(timeout),
             Self::Argmax(submission) => submission.wait(timeout),
@@ -2157,6 +2270,7 @@ impl HipSemanticSubmission {
             Self::Elementwise(submission) => submission.finalize_after_token(fence_token),
             Self::Embedding(submission) => submission.finalize_after_token(fence_token),
             Self::Matmul(submission) => submission.finalize_after_token(fence_token),
+            Self::Qwen38ProjectionPack2(submission) => submission.finalize_after_token(fence_token),
             Self::GdnProjectionBundle(submission) => submission.finalize_after_token(fence_token),
             Self::MlpGateUpSiluBundle(submission) => submission.finalize_after_token(fence_token),
             Self::Argmax(submission) => submission.finalize_after_token(fence_token),
@@ -2183,6 +2297,7 @@ impl HipSemanticSubmission {
             Self::Elementwise(submission) => submission.kernel_elapsed_ns(),
             Self::Embedding(submission) => submission.kernel_elapsed_ns(),
             Self::Matmul(submission) => submission.kernel_elapsed_ns(),
+            Self::Qwen38ProjectionPack2(submission) => submission.kernel_elapsed_ns(),
             Self::GdnProjectionBundle(submission) => submission.kernel_elapsed_ns(),
             Self::MlpGateUpSiluBundle(submission) => submission.kernel_elapsed_ns(),
             Self::Argmax(submission) => submission.kernel_elapsed_ns(),
@@ -2250,6 +2365,63 @@ impl ExecutionSubmissionAdapter for HipSubmission {
         let ticket = self._ticket.state.acquire_active()?;
         let completion = self
             .queue
+            .copy_to_host(
+                &buffer,
+                output.view().payload_bytes(),
+                output.view().byte_offset(),
+            )
+            .map_err(map_backend_error)?;
+        Ok(Box::new(HipReadback {
+            completion,
+            _ticket: ticket,
+        }))
+    }
+}
+
+struct HipGraphSubmission {
+    completion: Completion,
+    span: GraphSpan,
+    _ticket: ActiveOperation,
+}
+
+impl ExecutionSubmissionAdapter for HipGraphSubmission {
+    fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .query()
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .wait(timeout)
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
+    fn finalize_after_fence(&mut self, fence_token: u64) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .finalize_after_token(fence_token)
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
+    fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
+        Ok(None)
+    }
+
+    fn start_output_readback(
+        &mut self,
+        access: &ExecutionAdapterAccess<'_>,
+        output: &OwnedTensorBinding,
+    ) -> Result<Box<dyn ExecutionReadbackAdapter>, ExecutionError> {
+        let buffer = access
+            .downcast_buffer_payload::<Buffer>(output.buffer())?
+            .clone();
+        let ticket = self._ticket.state.acquire_active()?;
+        let completion = self
+            .span
+            .queue()
             .copy_to_host(
                 &buffer,
                 output.view().payload_bytes(),
@@ -2405,6 +2577,60 @@ impl ExecutionKvStateSubmissionAdapter for HipKvSubmission {
             .finalize_after_token(fence_token)
             .map(map_completion_state)
             .map_err(map_async_error)
+    }
+
+    fn execute_causal_attention_after_kv_append(
+        &mut self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::KvState,
+        queue: &sllm_core::ExecutionQueue,
+        query: &OwnedTensorBinding,
+        output: &OwnedTensorBinding,
+        descriptor: CausalAttentionDescriptor,
+    ) -> Result<
+        (
+            Box<dyn ExecutionCausalAttentionSubmissionAdapter>,
+            DispatchEvidence,
+        ),
+        ExecutionError,
+    > {
+        let state_resource = access
+            .downcast_kv_state_payload::<KvStateResource>(state)?
+            .clone();
+        let queue = access.downcast_queue_payload::<Queue>(queue)?.clone();
+        let query_buffer = access
+            .downcast_buffer_payload::<Buffer>(query.buffer())?
+            .clone();
+        let output_buffer = access
+            .downcast_buffer_payload::<Buffer>(output.buffer())?
+            .clone();
+        let query = query_buffer.binding(query.view().clone());
+        let output = output_buffer.binding(output.view().clone());
+        let ticket = self._ticket.clone_active()?;
+        let (completion, evidence) = match state_resource.causal_attention_after_kv_append(
+            &queue,
+            &self.completion,
+            &query,
+            &output,
+            descriptor.start_position(),
+            descriptor.expected_kv_length(),
+            descriptor.sliding_window(),
+            descriptor.score_scale(),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                drop(ticket);
+                return Err(map_backend_error(error));
+            }
+        };
+        Ok((
+            Box::new(HipCausalAttentionSubmission {
+                completion,
+                _evidence: evidence.clone(),
+                _ticket: ticket,
+            }),
+            dispatch_from_causal_attention(evidence),
+        ))
     }
 }
 
@@ -2572,6 +2798,28 @@ fn dispatch_from_embedding(dispatch: EmbeddingDispatchInfo) -> DispatchEvidence 
 }
 
 fn dispatch_from_matmul(dispatch: MatmulDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.m,
+        normalized_size: dispatch.output_elements,
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
+    }
+}
+
+fn dispatch_from_qwen38_projection_pack2(
+    dispatch: Qwen38ProjectionPack2DispatchInfo,
+) -> DispatchEvidence {
     DispatchEvidence {
         abi_version: dispatch.abi_version,
         info_version: dispatch.info_version,

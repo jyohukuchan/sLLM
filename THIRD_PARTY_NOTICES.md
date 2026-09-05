@@ -154,6 +154,74 @@ import:
   commit: b3fbfdccda87628b94d1440df1bf25707cd93c35
 ```
 
+## llama-cpp-phase78-nvfp4-byte-permute-001
+
+The Phase 78 NVFP4 DP4A providers adapt llama.cpp's AMD four-bit table lookup
+implemented with `__builtin_amdgcn_perm`. sLLM replaces the generic table
+pointer with fixed OCP E2M1 signed-byte tables and returns two local packed
+integer words for its block-16 scale domains.
+
+```yaml
+schema_version: 1
+id: llama-cpp-phase78-nvfp4-byte-permute-001
+component: sLLM HIP NVFP4 E2M1 signed-byte ingress
+upstream:
+  repository: https://github.com/ggml-org/llama.cpp
+  commit: 3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70
+  sources:
+    - path: ggml/src/ggml-cuda/vecdotq.cuh
+      git_blob: 0f039c735b6bbeda80af924e17bf3b7cdb62b80d
+      sha256: 2d6a6ce1a60eed1e80912e6a76ef480bd2ef0648a1d7da1a10fae49ee2c27bb6
+      url: https://github.com/ggml-org/llama.cpp/blob/3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70/ggml/src/ggml-cuda/vecdotq.cuh
+local:
+  files:
+    - path: native/hip/src/matmul_kernel.hip.cpp
+      imported_sha256: dfa24fc6c44645bf71275ddf398abaa6e9bf617449eb87d0da37e3287c0126a1
+    - path: native/hip/src/nvfp4_decode_scale_lut.inc
+      imported_sha256: e4606024ea3312a89cf057789df9d6a9934ffd84bf8be5be7552cf8718990c95
+    - path: native/hip/tests/phase78_nvfp4_decode_dot_probe.hip.cpp
+      imported_sha256: 22d802cabd8c0a43c05b91cc1c7bbe65c316b531a65c913815bb2f04a7467d11
+    - path: native/hip/tests/phase78_nvfp4_decode_prefetch_probe.hip.cpp
+      imported_sha256: c161b3bf265af8f517e8eeac277c9dca4275170eea7044d9afb60bbe0c668fd0
+    - path: native/hip/tests/phase78_nvfp4_decode_scale_lut_kernel_probe.hip.cpp
+      imported_sha256: a94627f2819076d0f69401ab360f55723651da5237436826de36225f48a76e13
+    - path: native/hip/tests/phase78_nvfp4_gfx1030_decode_probe.hip.cpp
+      imported_sha256: 546907884cb0253872cfb94828eaf926044d40645ceab304e0842c6b9d7e46bb
+    - path: native/hip/tests/phase78_nvfp4_gfx1030_decode_scale_lut_probe.hip.cpp
+      imported_sha256: 4999b3356409877c8b5810a759161a5c1a038fd34e56927b1a598ab71028cb27
+    - path: native/hip/tests/phase78_nvfp4_gfx1030_dp4a_tile_probe.hip.cpp
+      imported_sha256: 861ff90aa21d83b4c5d002f1444fc2acc21b1d3e33bb735d362b4e3922cfd7ca
+    - path: native/hip/tests/phase78_nvfp4_gfx1030_f16_staging_probe.cpp
+      imported_sha256: 89daeb725757bdca3d573850703c0bd5d116f760ce9192681c6276e932987a16
+    - path: native/hip/tests/phase78_nvfp4_gfx1030_i8_staging_probe.hip.cpp
+      imported_sha256: ddf485aefb5cd2d58948b814bbb35150f01c69222aafbabb761b15e5a0da1d75
+    - path: native/hip/tests/phase78_nvfp4_gfx1201_decode_shared_probe.hip.cpp
+      imported_sha256: f4549ed3bb17ce3ae893d01a951d52c93d25b96bb69ee1cdaaf476f41a6915e7
+    - path: native/hip/tests/phase78_nvfp4_gfx1201_dp4a_id62_probe.hip.cpp
+      imported_sha256: 6fd6250ec4af130fe25075125eeb66fc0ec39fb74425601016edd555a385cebd
+    - path: native/hip/tests/phase78_nvfp4_gfx1201_f16_staging_probe.cpp
+      imported_sha256: 170110b69868c616a75bd07eb62d575faa341f9a82ac519137eb5154fdc435c1
+    - path: native/hip/tests/phase78_nvfp4_gfx1201_wmma_scaled_ingress_probe.hip.cpp
+      imported_sha256: e48748e6bac7685887e17e66eb575d7edf4209173fe37af543b7a51f868cbe59
+    - path: native/hip/tests/phase78_nvfp4_prefill_fma_probe.hip.cpp
+      imported_sha256: e71db2b7253e8a561bb57f6c40ecb2795820991da819296c5dc645cd52d25655
+copyright:
+  - Copyright (c) 2023-2026 The ggml authors
+license:
+  spdx: MIT
+  file: docs/provenance/licenses/llama.cpp-MIT-f5919bf4.txt
+  upstream_blob: e7dca554bcb802f98408383a864404e3aa4eacca
+  sha256: 94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d
+reuse:
+  mode: adapted
+  modifications:
+    - Replaced the generic 16-byte lookup table pointer with compile-time OCP E2M1 value-times-two tables.
+    - Returned two signed int8x4 packs in an sLLM-local type and applied the block scale outside the integer dot product.
+    - Kept only the AMD byte-permute route and removed CUDA, MUSA, ggml tensor, and quant-type dependencies.
+import:
+  commit: pending-phase78-import-commit
+```
+
 ## llama-cpp-profile-v1-sampling-tests-001
 
 Selected tiny-logit and boundary ideas were adapted from llama.cpp's sampling tests.

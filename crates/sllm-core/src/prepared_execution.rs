@@ -39,6 +39,7 @@ pub struct PreparedDynamicIdentity {
     expected_length: Option<u64>,
     binding_generation: u64,
     state_generation: Option<u64>,
+    node_ordinal: u64,
 }
 
 impl PreparedDynamicIdentity {
@@ -49,6 +50,7 @@ impl PreparedDynamicIdentity {
             expected_length: None,
             binding_generation,
             state_generation: None,
+            node_ordinal: 0,
         }
     }
 
@@ -65,6 +67,7 @@ impl PreparedDynamicIdentity {
             expected_length: Some(expected_length),
             binding_generation,
             state_generation: Some(state_generation),
+            node_ordinal: 0,
         }
     }
 
@@ -86,6 +89,19 @@ impl PreparedDynamicIdentity {
 
     pub const fn state_generation(self) -> Option<u64> {
         self.state_generation
+    }
+
+    /// Adds the immutable prepared-plan node ordinal to a reusable cache key.
+    /// Repeated graph nodes may share descriptors and backing workspace views
+    /// while earlier submissions are still in flight; keeping their ordinals
+    /// distinct prevents unsafe prepared-plan reuse.
+    pub const fn with_node_ordinal(mut self, node_ordinal: u64) -> Self {
+        self.node_ordinal = node_ordinal;
+        self
+    }
+
+    pub const fn node_ordinal(self) -> u64 {
+        self.node_ordinal
     }
 }
 
@@ -310,8 +326,24 @@ impl<N> PreparedExecutionPlan<N> {
         transition: PreparedTransition,
         mut adapter: impl FnMut(&PreparedPlanNode<N>, PreparedTransition) -> Result<(), E>,
     ) -> Result<(), E> {
-        for node in self.nodes.iter() {
-            adapter(node, transition)?;
+        self.execute_with_ordinal(transition, |node, current, _ordinal| adapter(node, current))
+    }
+
+    /// Visits every node in plan order and supplies its immutable ordinal.
+    /// Model adapters that use request-local prepared caches can include this
+    /// ordinal without searching the plan for the current node on every
+    /// callback (which would turn a linear graph walk into O(nodes²)).
+    pub fn execute_with_ordinal<E>(
+        &self,
+        transition: PreparedTransition,
+        mut adapter: impl FnMut(&PreparedPlanNode<N>, PreparedTransition, u64) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for (ordinal, node) in self.nodes.iter().enumerate() {
+            // A plan cannot practically contain more than u64::MAX entries;
+            // retain an explicit checked conversion instead of truncating a
+            // cache identity if that invariant is ever violated.
+            let ordinal = u64::try_from(ordinal).expect("prepared plan ordinal exceeds u64");
+            adapter(node, transition, ordinal)?;
         }
         Ok(())
     }
@@ -333,9 +365,22 @@ trait SegmentCompletionOwner: Send {
         self.query()
     }
     fn dispatch(&self) -> &DispatchEvidence;
+    fn graph_logical_dispatches(&self) -> Option<&[(String, DispatchEvidence)]> {
+        None
+    }
+
+    /// A chained attention must be finalized before its append owner so the
+    /// append claim remains live until the dependent consumer is terminal.
+    fn is_dependent_attention(&self) -> bool {
+        false
+    }
 }
 
 impl SegmentCompletionOwner for Submission {
+    fn graph_logical_dispatches(&self) -> Option<&[(String, DispatchEvidence)]> {
+        self.graph_logical_dispatches()
+    }
+
     fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         self.query()
     }
@@ -357,6 +402,31 @@ impl SegmentCompletionOwner for Submission {
 }
 
 impl SegmentCompletionOwner for CausalAttentionSubmission {
+    fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        self.query()
+    }
+
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        self.wait(timeout)
+    }
+
+    fn finalize_after_fence(
+        &mut self,
+        fence: &ExecutionQueueFence,
+    ) -> Result<ExecutionState, ExecutionError> {
+        self.finalize_after_fence(fence)
+    }
+
+    fn dispatch(&self) -> &DispatchEvidence {
+        self.dispatch()
+    }
+
+    fn is_dependent_attention(&self) -> bool {
+        self.is_dependent_on_kv_append()
+    }
+}
+
+impl SegmentCompletionOwner for KvStateAppendSubmission {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         self.query()
     }
@@ -409,6 +479,10 @@ pub(crate) struct ExecutionSegment {
     pending: Vec<RetainedSubmission>,
     deferred: Option<(ExecutionSession, ExecutionQueue, Duration)>,
     profiled_timeout: Option<Duration>,
+    // Number of append -> attention chains retained in this segment.  A
+    // decode segment contains one pair per full-attention layer, so a boolean
+    // would under-report the physical routes in the audit.
+    chain_route_count: u64,
 }
 
 impl ExecutionSegment {
@@ -417,6 +491,7 @@ impl ExecutionSegment {
             pending: Vec::new(),
             deferred: None,
             profiled_timeout: Some(timeout),
+            chain_route_count: 0,
         }
     }
 
@@ -435,6 +510,7 @@ impl ExecutionSegment {
                     pending: Vec::new(),
                     deferred: None,
                     profiled_timeout: Some(timeout),
+                    chain_route_count: 0,
                 });
             }
             Err(error) => return Err(error),
@@ -443,6 +519,7 @@ impl ExecutionSegment {
             pending: Vec::new(),
             deferred: Some((session.clone(), queue.clone(), timeout)),
             profiled_timeout: Some(timeout),
+            chain_route_count: 0,
         })
     }
 
@@ -477,17 +554,13 @@ impl ExecutionSegment {
             } else {
                 let mut fence = session.create_queue_fence(queue)?;
                 require_terminal_success("execution segment abort fence", fence.wait(*timeout)?)?;
-                for mut retained in self.pending.drain(..) {
-                    require_terminal_success(
-                        &retained.label,
-                        retained.owner.finalize_after_fence(&fence)?,
-                    )?;
-                }
+                self.finalize_deferred_pending_in_dependency_order(&fence, None)?;
                 Ok(())
             }
         } else {
             self.drain_profiled_pending(self.profiled_timeout.unwrap_or(Duration::ZERO))
         };
+        self.chain_route_count = 0;
         let restore = self.restore_profiled();
         match (result, restore) {
             (Ok(()), Ok(())) => Ok(()),
@@ -506,6 +579,20 @@ impl ExecutionSegment {
         owner: CausalAttentionSubmission,
     ) {
         self.retain(label, owner);
+    }
+
+    pub(crate) fn retain_kv_append(
+        &mut self,
+        label: impl Into<String>,
+        owner: KvStateAppendSubmission,
+    ) -> Result<(), PreparedExecutionError> {
+        self.chain_route_count = self.chain_route_count.checked_add(1).ok_or_else(|| {
+            PreparedExecutionError::InvalidAudit(
+                "KV append-attention chain count overflowed u64".to_owned(),
+            )
+        })?;
+        self.retain(label, owner);
+        Ok(())
     }
 
     pub(crate) fn retain_linear_attention(
@@ -538,12 +625,15 @@ impl ExecutionSegment {
             {
                 let mut fence = session.create_queue_fence(&queue)?;
                 require_terminal_success("execution segment fence", fence.wait(timeout)?)?;
+                audit.record_queue_fence()?;
                 self.finalize_deferred_pending(&fence, audit)?;
             } else {
+                let chain_route_count = std::mem::take(&mut self.chain_route_count);
                 for mut retained in self.pending.drain(..) {
                     require_terminal_success(&retained.label, retained.owner.query()?)?;
-                    audit.record_labeled(&retained.label, retained.owner.dispatch())?;
+                    audit.record_owner(&retained.label, retained.owner.as_ref())?;
                 }
+                audit.record_kv_append_attention_chain(chain_route_count)?;
             }
             audit.record_boundary(boundary, had_work)?;
             Ok(())
@@ -578,6 +668,7 @@ impl ExecutionSegment {
             };
             let mut fence = session.create_queue_fence(&queue)?;
             require_terminal_success("execution segment fence", fence.wait(timeout)?)?;
+            audit.record_queue_fence()?;
             self.finalize_deferred_pending(&fence, audit)?;
             require_terminal_success(label, terminal.finalize_after_fence(&fence)?)?;
             audit.record_labeled(label, terminal.dispatch())?;
@@ -617,6 +708,7 @@ impl ExecutionSegment {
             };
             let mut fence = session.create_queue_fence(&queue)?;
             require_terminal_success("execution segment fence", fence.wait(timeout)?)?;
+            audit.record_queue_fence()?;
             self.finalize_deferred_pending(&fence, audit)?;
             require_terminal_success(label, terminal.finalize_after_fence(&fence)?)?;
             audit.record_labeled(label, terminal.dispatch())?;
@@ -643,10 +735,12 @@ impl ExecutionSegment {
         &mut self,
         audit: &mut ExecutionAuditAccumulator,
     ) -> Result<(), PreparedExecutionError> {
+        let chain_route_count = std::mem::take(&mut self.chain_route_count);
         for mut retained in self.pending.drain(..) {
             require_terminal_success(&retained.label, retained.owner.query()?)?;
-            audit.record_labeled(&retained.label, retained.owner.dispatch())?;
+            audit.record_owner(&retained.label, retained.owner.as_ref())?;
         }
+        audit.record_kv_append_attention_chain(chain_route_count)?;
         Ok(())
     }
 
@@ -663,9 +757,45 @@ impl ExecutionSegment {
         fence: &ExecutionQueueFence,
         audit: &mut ExecutionAuditAccumulator,
     ) -> Result<(), PreparedExecutionError> {
-        for mut retained in self.pending.drain(..) {
-            require_terminal_success(&retained.label, retained.owner.finalize_after_fence(fence)?)?;
-            audit.record_labeled(&retained.label, retained.owner.dispatch())?;
+        self.finalize_deferred_pending_in_dependency_order(fence, Some(audit))
+    }
+
+    /// Finalizes a chained attention before its append owner.  Both kernels
+    /// are already ordered by the one queue fence, but this host ordering is
+    /// needed to keep the append's dependent-claim lifetime valid until the
+    /// consumer is terminal.  Audit entries are emitted in original graph
+    /// order after finalization so the logical StatePublication trace remains
+    /// append -> attention.
+    fn finalize_deferred_pending_in_dependency_order(
+        &mut self,
+        fence: &ExecutionQueueFence,
+        audit: Option<&mut ExecutionAuditAccumulator>,
+    ) -> Result<(), PreparedExecutionError> {
+        let chain_route_count = std::mem::take(&mut self.chain_route_count);
+        let mut retained = std::mem::take(&mut self.pending);
+        for submission in retained
+            .iter_mut()
+            .filter(|submission| submission.owner.is_dependent_attention())
+        {
+            require_terminal_success(
+                &submission.label,
+                submission.owner.finalize_after_fence(fence)?,
+            )?;
+        }
+        for submission in retained
+            .iter_mut()
+            .filter(|submission| !submission.owner.is_dependent_attention())
+        {
+            require_terminal_success(
+                &submission.label,
+                submission.owner.finalize_after_fence(fence)?,
+            )?;
+        }
+        if let Some(audit) = audit {
+            for submission in &retained {
+                audit.record_owner(&submission.label, submission.owner.as_ref())?;
+            }
+            audit.record_kv_append_attention_chain(chain_route_count)?;
         }
         Ok(())
     }
@@ -674,6 +804,7 @@ impl ExecutionSegment {
     /// budget for the segment, rather than one fresh budget per submission,
     /// so a large failed graph cannot turn abort into an unbounded drain.
     fn drain_profiled_pending(&mut self, timeout: Duration) -> Result<(), PreparedExecutionError> {
+        self.chain_route_count = 0;
         let deadline = Instant::now().checked_add(timeout);
         let mut first_error = None;
         for mut retained in self.pending.drain(..) {
@@ -724,8 +855,14 @@ pub struct PreparedExecutionAudit {
     fallback_used: bool,
     segment_count: u64,
     boundary_count: u64,
+    physical_queue_fence_count: u64,
+    graph_replay_count: u64,
+    kv_append_attention_chain_count: u64,
     sparse_moe_submission_count: u64,
     sparse_moe_active_pair_count: u64,
+    projection_pack_submission_count: u64,
+    projection_pack_member_count: u64,
+    projection_pack_activation_quantize_count: u64,
     kernel_dispatches_by_identity: BTreeMap<(u32, String), u64>,
 }
 
@@ -758,12 +895,40 @@ impl PreparedExecutionAudit {
         self.boundary_count
     }
 
+    /// Number of physical queue fences that supplied completion evidence.
+    pub const fn physical_queue_fence_count(&self) -> u64 {
+        self.physical_queue_fence_count
+    }
+
+    /// Physical graph launches; logical submissions and kernel identities stay separate.
+    pub const fn graph_replay_count(&self) -> u64 {
+        self.graph_replay_count
+    }
+
+    /// Number of deferred append -> causal-attention routes finalized in the
+    /// request.  This is independent of kernel dispatch count.
+    pub const fn kv_append_attention_chain_count(&self) -> u64 {
+        self.kv_append_attention_chain_count
+    }
+
     pub const fn sparse_moe_submission_count(&self) -> u64 {
         self.sparse_moe_submission_count
     }
 
     pub const fn sparse_moe_active_pair_count(&self) -> u64 {
         self.sparse_moe_active_pair_count
+    }
+
+    pub const fn projection_pack_submission_count(&self) -> u64 {
+        self.projection_pack_submission_count
+    }
+
+    pub const fn projection_pack_member_count(&self) -> u64 {
+        self.projection_pack_member_count
+    }
+
+    pub const fn projection_pack_activation_quantize_count(&self) -> u64 {
+        self.projection_pack_activation_quantize_count
     }
 
     pub(crate) fn kernel_dispatches_by_identity(&self) -> &BTreeMap<(u32, String), u64> {
@@ -779,8 +944,14 @@ pub(crate) struct ExecutionAuditAccumulator {
     fallback_used: bool,
     segment_count: u64,
     boundary_count: u64,
+    physical_queue_fence_count: u64,
+    graph_replay_count: u64,
+    kv_append_attention_chain_count: u64,
     sparse_moe_submission_count: u64,
     sparse_moe_active_pair_count: u64,
+    projection_pack_submission_count: u64,
+    projection_pack_member_count: u64,
+    projection_pack_activation_quantize_count: u64,
     kernel_dispatches_by_identity: BTreeMap<(u32, String), u64>,
 }
 
@@ -794,9 +965,33 @@ impl ExecutionAuditAccumulator {
             fallback_used: false,
             segment_count: 0,
             boundary_count: 0,
+            physical_queue_fence_count: 0,
+            graph_replay_count: 0,
+            kv_append_attention_chain_count: 0,
             sparse_moe_submission_count: 0,
             sparse_moe_active_pair_count: 0,
+            projection_pack_submission_count: 0,
+            projection_pack_member_count: 0,
+            projection_pack_activation_quantize_count: 0,
             kernel_dispatches_by_identity: BTreeMap::new(),
+        }
+    }
+
+    fn record_owner(
+        &mut self,
+        label: &str,
+        owner: &dyn SegmentCompletionOwner,
+    ) -> Result<(), PreparedExecutionError> {
+        if let Some(members) = owner.graph_logical_dispatches() {
+            for (member_label, evidence) in members {
+                self.record_labeled(member_label, evidence)?;
+            }
+            self.graph_replay_count = self.graph_replay_count.checked_add(1).ok_or_else(|| {
+                PreparedExecutionError::InvalidAudit("graph replay count overflow".to_owned())
+            })?;
+            Ok(())
+        } else {
+            self.record_labeled(label, owner.dispatch())
         }
     }
 
@@ -805,7 +1000,40 @@ impl ExecutionAuditAccumulator {
         label: &str,
         evidence: &DispatchEvidence,
     ) -> Result<(), PreparedExecutionError> {
+        let projection_pack2 = label.ends_with(".qwen38_projection_pack2");
+        if projection_pack2 && evidence.dispatch_count != 3 {
+            return Err(PreparedExecutionError::InvalidAudit(format!(
+                "qwen38_projection_pack2 requires exactly three physical dispatches, got {}",
+                evidence.dispatch_count
+            )));
+        }
         self.record(evidence)?;
+        if projection_pack2 {
+            self.projection_pack_submission_count = self
+                .projection_pack_submission_count
+                .checked_add(1)
+                .ok_or_else(|| {
+                    PreparedExecutionError::InvalidAudit(
+                        "projection-pack submission count overflowed u64".to_owned(),
+                    )
+                })?;
+            self.projection_pack_member_count = self
+                .projection_pack_member_count
+                .checked_add(2)
+                .ok_or_else(|| {
+                    PreparedExecutionError::InvalidAudit(
+                        "projection-pack member count overflowed u64".to_owned(),
+                    )
+                })?;
+            self.projection_pack_activation_quantize_count = self
+                .projection_pack_activation_quantize_count
+                .checked_add(1)
+                .ok_or_else(|| {
+                    PreparedExecutionError::InvalidAudit(
+                        "projection-pack activation-quantize count overflowed u64".to_owned(),
+                    )
+                })?;
+        }
         if label.ends_with(".sparse_moe")
             || label.ends_with(".routed_expert")
             || label.ends_with(".routed_experts_nvfp4")
@@ -898,6 +1126,33 @@ impl ExecutionAuditAccumulator {
         Ok(())
     }
 
+    pub(crate) fn record_queue_fence(&mut self) -> Result<(), PreparedExecutionError> {
+        self.physical_queue_fence_count = self
+            .physical_queue_fence_count
+            .checked_add(1)
+            .ok_or_else(|| {
+                PreparedExecutionError::InvalidAudit(
+                    "physical queue fence count overflowed u64".to_owned(),
+                )
+            })?;
+        Ok(())
+    }
+
+    pub(crate) fn record_kv_append_attention_chain(
+        &mut self,
+        chain_count: u64,
+    ) -> Result<(), PreparedExecutionError> {
+        self.kv_append_attention_chain_count = self
+            .kv_append_attention_chain_count
+            .checked_add(chain_count)
+            .ok_or_else(|| {
+                PreparedExecutionError::InvalidAudit(
+                    "KV append-attention chain count overflowed u64".to_owned(),
+                )
+            })?;
+        Ok(())
+    }
+
     pub(crate) fn snapshot(&self) -> Result<PreparedExecutionAudit, PreparedExecutionError> {
         let target = self.target.clone().ok_or_else(|| {
             PreparedExecutionError::InvalidAudit(
@@ -921,8 +1176,15 @@ impl ExecutionAuditAccumulator {
             fallback_used: self.fallback_used,
             segment_count: self.segment_count,
             boundary_count: self.boundary_count,
+            physical_queue_fence_count: self.physical_queue_fence_count,
+            graph_replay_count: self.graph_replay_count,
+            kv_append_attention_chain_count: self.kv_append_attention_chain_count,
             sparse_moe_submission_count: self.sparse_moe_submission_count,
             sparse_moe_active_pair_count: self.sparse_moe_active_pair_count,
+            projection_pack_submission_count: self.projection_pack_submission_count,
+            projection_pack_member_count: self.projection_pack_member_count,
+            projection_pack_activation_quantize_count: self
+                .projection_pack_activation_quantize_count,
             kernel_dispatches_by_identity: self.kernel_dispatches_by_identity.clone(),
         })
     }
@@ -1198,6 +1460,13 @@ mod tests {
         })
         .unwrap();
         assert_eq!(visited, vec![(3, 3), (17, 3)]);
+        let mut ordinals = Vec::new();
+        plan.execute_with_ordinal(transition, |node, _, ordinal| {
+            ordinals.push((*node.operation(), ordinal));
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(ordinals, vec![(3, 0), (17, 1)]);
     }
 
     #[test]
@@ -1279,6 +1548,10 @@ mod tests {
                 },
             );
         }
+        // A decode segment can carry one chain per full-attention layer; the
+        // audit must preserve that multiplicity instead of collapsing it to a
+        // segment-level boolean.
+        segment.chain_route_count = 16;
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         let mut audit = ExecutionAuditAccumulator::new(1);
         segment
@@ -1302,6 +1575,7 @@ mod tests {
         );
         assert_eq!(snapshot.segment_count(), 1);
         assert_eq!(snapshot.boundary_count(), 1);
+        assert_eq!(snapshot.kv_append_attention_chain_count(), 16);
     }
 
     #[test]
@@ -1493,4 +1767,38 @@ mod tests {
             assert_eq!(audit.sparse_moe_active_pair_count, 1, "{label}");
         }
     }
+
+    #[test]
+    fn audit_requires_and_counts_projection_pack_physical_dispatches() {
+        let label = "layer.17.mlp_gate_matmul.qwen38_projection_pack2";
+        let mut wrong = ExecutionAuditAccumulator::new(1);
+        assert!(matches!(
+            wrong.record_labeled(label, &evidence(2)),
+            Err(PreparedExecutionError::InvalidAudit(_))
+        ));
+        assert_eq!(wrong.submission_count, 0);
+
+        let mut audit = ExecutionAuditAccumulator::new(1);
+        audit.record_labeled(label, &evidence(3)).unwrap();
+        audit
+            .record_boundary(ExecutionBoundaryKind::TerminalReadback, true)
+            .unwrap();
+        let snapshot = audit.snapshot().unwrap();
+        assert_eq!(snapshot.projection_pack_submission_count(), 1);
+        assert_eq!(snapshot.projection_pack_member_count(), 2);
+        assert_eq!(snapshot.projection_pack_activation_quantize_count(), 1);
+        assert_eq!(snapshot.kernel_dispatch_count(), 3);
+
+        let mut decomposed = ExecutionAuditAccumulator::new(1);
+        decomposed
+            .record_labeled("qwen38_projection_pack2.decomposed.gate", &evidence(1))
+            .unwrap();
+        assert_eq!(decomposed.projection_pack_submission_count, 0);
+        assert_eq!(decomposed.projection_pack_member_count, 0);
+        assert_eq!(decomposed.projection_pack_activation_quantize_count, 0);
+    }
 }
+
+#[cfg(test)]
+#[path = "graph_span_audit_tests.rs"]
+mod graph_span_audit_tests;

@@ -276,6 +276,12 @@ fn main() {
     let matmul_kernel_internal = source_dir.join("src/matmul_kernel_internal.hpp");
     let matmul_kernel = source_dir.join("src/matmul_kernel.hip.cpp");
     let matmul_runtime = source_dir.join("src/matmul_runtime.inc");
+    let graph_span_runtime = source_dir.join("src/graph_span_runtime.inc");
+    let qwen38_projection_pack_runtime = source_dir.join("src/qwen38_projection_pack_runtime.inc");
+    let nvfp4_decode_scale_lut = source_dir.join("src/nvfp4_decode_scale_lut.inc");
+    let fp8_prefill_lds_lut = source_dir.join("src/fp8_prefill_lds_lut.inc");
+    let fp8_prefill_f16_tile_staging = source_dir.join("src/fp8_prefill_f16_tile_staging.inc");
+    let fp8_prefill_short_m32 = source_dir.join("src/fp8_prefill_short_m32.inc");
     let mlp_gate_up_silu_bundle_kernel_internal =
         source_dir.join("src/mlp_gate_up_silu_bundle_kernel_internal.hpp");
     let mlp_gate_up_silu_bundle_kernel =
@@ -336,6 +342,8 @@ fn main() {
     let linear_attention_api = source_dir.join("src/linear_attention_api.cpp");
     let linear_attention_kernel_internal =
         source_dir.join("src/linear_attention_kernel_internal.hpp");
+    let linear_attention_register_state =
+        source_dir.join("src/linear_attention_register_state.hpp");
     let linear_attention_kernel = source_dir.join("src/linear_attention_kernel.hip.cpp");
     let linear_attention_runtime = source_dir.join("src/linear_attention_runtime.inc");
     let moe_route_api_header = source_dir.join("src/moe_route_api.hpp");
@@ -448,6 +456,21 @@ fn main() {
     );
     println!("cargo:rerun-if-changed={}", matmul_kernel.display());
     println!("cargo:rerun-if-changed={}", matmul_runtime.display());
+    println!("cargo:rerun-if-changed={}", graph_span_runtime.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        qwen38_projection_pack_runtime.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        nvfp4_decode_scale_lut.display()
+    );
+    println!("cargo:rerun-if-changed={}", fp8_prefill_lds_lut.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        fp8_prefill_f16_tile_staging.display()
+    );
+    println!("cargo:rerun-if-changed={}", fp8_prefill_short_m32.display());
     println!(
         "cargo:rerun-if-changed={}",
         mlp_gate_up_silu_bundle_kernel_internal.display()
@@ -595,6 +618,10 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         linear_attention_kernel_internal.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        linear_attention_register_state.display()
     );
     println!(
         "cargo:rerun-if-changed={}",

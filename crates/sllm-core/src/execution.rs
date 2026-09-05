@@ -640,6 +640,28 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         queue: &ExecutionQueue,
     ) -> Result<(Box<dyn ExecutionSubmissionAdapter>, DispatchEvidence), ExecutionError>;
 
+    /// Captures an already prepared, warmed stateless sequence on its queue.
+    fn create_graph_span(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _queue: &ExecutionQueue,
+        _operations: &[PreparedOperation],
+    ) -> Result<(AdapterResource, u64), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support prepared graph spans".to_owned(),
+        })
+    }
+
+    fn submit_graph_span(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _span: &ExecutionGraphSpan,
+    ) -> Result<Box<dyn ExecutionSubmissionAdapter>, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support graph replay".to_owned(),
+        })
+    }
+
     fn upload(
         &self,
         access: &ExecutionAdapterAccess<'_>,
@@ -1001,6 +1023,30 @@ pub trait ExecutionKvStateSubmissionAdapter: Send {
     ) -> Result<ExecutionState, ExecutionError> {
         Err(ExecutionError::Unsupported {
             reason: "backend does not support deferred KV completion finalization".to_owned(),
+        })
+    }
+
+    /// Optionally enqueue causal attention behind this still-owned append.
+    /// Append and attention remain separate completion owners and are drained
+    /// in queue order by the request-local execution segment.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_causal_attention_after_kv_append(
+        &mut self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &KvState,
+        _queue: &ExecutionQueue,
+        _query: &OwnedTensorBinding,
+        _output: &OwnedTensorBinding,
+        _descriptor: CausalAttentionDescriptor,
+    ) -> Result<
+        (
+            Box<dyn ExecutionCausalAttentionSubmissionAdapter>,
+            DispatchEvidence,
+        ),
+        ExecutionError,
+    > {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support KV append to causal attention chaining".to_owned(),
         })
     }
 }
@@ -2004,6 +2050,7 @@ impl ExecutionSession {
             request,
             dispatch,
             completion_state: ExecutionState::Pending,
+            dependent_attention: false,
             inner: Some(inner),
         })
     }
@@ -2085,6 +2132,93 @@ impl ExecutionSession {
             dispatch,
             attention_in_flight: Arc::clone(&state.attention_in_flight),
             completion_state: ExecutionState::Pending,
+            dependent_on_kv_append: false,
+            inner: Some(inner),
+        })
+    }
+
+    /// Submits causal attention after an append that is still owned by the
+    /// caller. This is deliberately separate from `causal_attention`: the
+    /// backend claims the append's exact transition and both completions are
+    /// retained in FIFO order by the caller's execution segment.
+    #[allow(clippy::too_many_arguments)]
+    pub fn causal_attention_after_kv_append(
+        &self,
+        append: &mut KvStateAppendSubmission,
+        query: OwnedTensorBinding,
+        output: OwnedTensorBinding,
+        descriptor: CausalAttentionDescriptor,
+    ) -> Result<CausalAttentionSubmission, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_kv_state(&append.state)?;
+        self.ensure_queue(&append.queue)?;
+        validate_causal_attention_bindings(
+            self,
+            &query,
+            &output,
+            descriptor,
+            append.state.descriptor.layout(),
+        )?;
+        if descriptor.start_position() != append.request.start_position()
+            || descriptor.query_count() != append.request.token_count()
+            || descriptor.expected_kv_length() != append.request.end_position()
+            || append.dependent_attention
+        {
+            return Err(ExecutionError::Busy);
+        }
+        if descriptor.expected_kv_length() > append.state.capacity() {
+            return Err(ExecutionError::InvalidRange {
+                reason: "chained causal attention snapshot length exceeds KV capacity".to_owned(),
+            });
+        }
+        {
+            let _admission = append
+                .state
+                .operation_admission
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            if !append.state.append_in_flight.load(Ordering::Acquire)
+                || append
+                    .state
+                    .attention_in_flight
+                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_err()
+            {
+                return Err(ExecutionError::Busy);
+            }
+        }
+        let (inner, dispatch) = match append
+            .inner
+            .as_mut()
+            .expect("KV submission adapter remains owned until drop")
+            .execute_causal_attention_after_kv_append(
+                &ExecutionAdapterAccess { session: self },
+                &append.state,
+                &append.queue,
+                &query,
+                &output,
+                descriptor,
+            ) {
+            Ok(result) => result,
+            Err(error) => {
+                append
+                    .state
+                    .attention_in_flight
+                    .store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
+        append.dependent_attention = true;
+        Ok(CausalAttentionSubmission {
+            state: append.state.clone(),
+            queue: append.queue.clone(),
+            query,
+            output,
+            descriptor,
+            dispatch,
+            attention_in_flight: Arc::clone(&append.state.attention_in_flight),
+            completion_state: ExecutionState::Pending,
+            dependent_on_kv_append: true,
             inner: Some(inner),
         })
     }
@@ -2185,6 +2319,75 @@ impl ExecutionSession {
             prepared: prepared.clone(),
             queue: queue.clone(),
             dispatch,
+            graph_span: None,
+            completion_state: ExecutionState::Pending,
+            inner,
+        })
+    }
+
+    /// Builds a request-owned graph without executing its captured kernels.
+    /// Logical evidence comes from the same operations' completed eager run.
+    pub fn create_graph_span(
+        &self,
+        queue: &ExecutionQueue,
+        operations: &[PreparedOperation],
+        logical_dispatches: &[(String, DispatchEvidence)],
+    ) -> Result<ExecutionGraphSpan, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_queue(queue)?;
+        if operations.is_empty() || operations.len() != logical_dispatches.len() {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "graph operations and logical evidence must be nonempty and one-to-one"
+                    .to_owned(),
+            });
+        }
+        for operation in operations {
+            self.ensure_prepared(operation)?;
+        }
+        let (resource, native_kernel_nodes) = self.state.adapter.create_graph_span(
+            &ExecutionAdapterAccess { session: self },
+            queue,
+            operations,
+        )?;
+        if native_kernel_nodes == 0 {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "captured graph contains no native kernel nodes".to_owned(),
+            });
+        }
+        Ok(ExecutionGraphSpan {
+            inner: Arc::new(ExecutionGraphSpanInner {
+                payload: resource.payload,
+                operations: operations.to_vec(),
+                queue: queue.clone(),
+                state: Arc::clone(&self.state),
+                logical_dispatches: logical_dispatches.to_vec(),
+                native_kernel_nodes,
+            }),
+        })
+    }
+
+    pub fn submit_graph_span(
+        &self,
+        span: &ExecutionGraphSpan,
+    ) -> Result<Submission, ExecutionError> {
+        self.ensure_open()?;
+        ensure_identity(
+            self.backend_name(),
+            self.id(),
+            span.inner.state.backend,
+            span.inner.state.id,
+        )?;
+        self.ensure_queue(&span.inner.queue)?;
+        let inner = self
+            .state
+            .adapter
+            .submit_graph_span(&ExecutionAdapterAccess { session: self }, span)?;
+        Ok(Submission {
+            state: Arc::clone(&self.state),
+            prepared: span.inner.operations[0].clone(),
+            queue: span.inner.queue.clone(),
+            dispatch: span.inner.logical_dispatches[0].1.clone(),
+            graph_span: Some(span.clone()),
             completion_state: ExecutionState::Pending,
             inner,
         })
@@ -2515,6 +2718,25 @@ impl ExecutionAdapterAccess<'_> {
         queue: &'a ExecutionQueue,
     ) -> Result<&'a T, ExecutionError> {
         self.session.downcast_queue_payload(queue)
+    }
+
+    pub fn downcast_graph_span_payload<'a, T: Any + Send + Sync>(
+        &self,
+        span: &'a ExecutionGraphSpan,
+    ) -> Result<&'a T, ExecutionError> {
+        ensure_identity(
+            self.session.backend_name(),
+            self.session.id(),
+            span.inner.state.backend,
+            span.inner.state.id,
+        )?;
+        span.inner
+            .payload
+            .downcast_ref::<T>()
+            .ok_or(ExecutionError::WrongBackend {
+                expected: self.session.backend_name(),
+                actual: span.inner.state.backend,
+            })
     }
 
     pub fn downcast_prepared_payload<'a, T: Any + Send + Sync>(
@@ -3003,6 +3225,7 @@ pub struct KvStateAppendSubmission {
     request: KvStateAppendRequest,
     dispatch: DispatchEvidence,
     completion_state: ExecutionState,
+    dependent_attention: bool,
     inner: Option<Box<dyn ExecutionKvStateSubmissionAdapter>>,
 }
 
@@ -3089,6 +3312,7 @@ impl Drop for KvStateAppendSubmission {
         // Revoke or transfer backend commit/cleanup ownership before allowing a
         // concurrent core append to be admitted for the same state.
         drop(self.inner.take());
+        self.dependent_attention = false;
         self.state.append_in_flight.store(false, Ordering::Release);
     }
 }
@@ -3105,6 +3329,7 @@ pub struct CausalAttentionSubmission {
     dispatch: DispatchEvidence,
     attention_in_flight: Arc<AtomicBool>,
     completion_state: ExecutionState,
+    dependent_on_kv_append: bool,
     inner: Option<Box<dyn ExecutionCausalAttentionSubmissionAdapter>>,
 }
 
@@ -3128,6 +3353,10 @@ impl fmt::Debug for CausalAttentionSubmission {
 }
 
 impl CausalAttentionSubmission {
+    pub(crate) const fn is_dependent_on_kv_append(&self) -> bool {
+        self.dependent_on_kv_append
+    }
+
     pub fn state(&self) -> &KvState {
         &self.state
     }
@@ -3487,6 +3716,14 @@ impl BoundSemanticOp {
                 ("matmul weight", &inputs[1]),
                 ("matmul output", &outputs[0]),
             ])?;
+        } else if descriptor.kind() == SemanticOpKind::Qwen38ProjectionPack2 {
+            validate_nonoverlap(&[
+                ("qwen38_projection_pack2 activation", &inputs[0]),
+                ("qwen38_projection_pack2 gate weight", &inputs[1]),
+                ("qwen38_projection_pack2 up weight", &inputs[2]),
+                ("qwen38_projection_pack2 gate output", &outputs[0]),
+                ("qwen38_projection_pack2 up output", &outputs[1]),
+            ])?;
         } else if descriptor.kind() == SemanticOpKind::MlpGateUpSiluBundle {
             validate_nonoverlap(&[
                 ("mlp_gate_up_silu_bundle activation", &inputs[0]),
@@ -3581,6 +3818,9 @@ fn input_role(kind: SemanticOpKind, index: usize) -> &'static str {
         (SemanticOpKind::Embedding, 1) => "embedding token IDs",
         (SemanticOpKind::Matmul, 0) => "matmul activation",
         (SemanticOpKind::Matmul, 1) => "matmul weight",
+        (SemanticOpKind::Qwen38ProjectionPack2, 0) => "qwen38_projection_pack2 activation",
+        (SemanticOpKind::Qwen38ProjectionPack2, 1) => "qwen38_projection_pack2 gate weight",
+        (SemanticOpKind::Qwen38ProjectionPack2, 2) => "qwen38_projection_pack2 up weight",
         (SemanticOpKind::MlpGateUpSiluBundle, 0) => "mlp_gate_up_silu_bundle activation",
         (SemanticOpKind::MlpGateUpSiluBundle, 1) => "mlp_gate_up_silu_bundle gate weight",
         (SemanticOpKind::MlpGateUpSiluBundle, 2) => "mlp_gate_up_silu_bundle up weight",
@@ -3621,6 +3861,8 @@ fn output_role(kind: SemanticOpKind, index: usize) -> &'static str {
         (SemanticOpKind::ScalarMul, 0) => "scalar_mul output",
         (SemanticOpKind::Embedding, 0) => "embedding output",
         (SemanticOpKind::Matmul, 0) => "matmul output",
+        (SemanticOpKind::Qwen38ProjectionPack2, 0) => "qwen38_projection_pack2 gate output",
+        (SemanticOpKind::Qwen38ProjectionPack2, 1) => "qwen38_projection_pack2 up output",
         (SemanticOpKind::MlpGateUpSiluBundle, 0) => "mlp_gate_up_silu_bundle gate output",
         (SemanticOpKind::MlpGateUpSiluBundle, 1) => "mlp_gate_up_silu_bundle up output",
         (SemanticOpKind::MlpGateUpSiluBundle, 2) => "mlp_gate_up_silu_bundle silu output",
@@ -4424,6 +4666,45 @@ impl PreparedOperation {
     }
 }
 
+/// A captured stateless sequence with stable prepared plans and device bindings.
+/// Field order releases the native graph payload before its plans and queue.
+#[derive(Clone)]
+pub struct ExecutionGraphSpan {
+    inner: Arc<ExecutionGraphSpanInner>,
+}
+
+struct ExecutionGraphSpanInner {
+    payload: Arc<dyn Any + Send + Sync>,
+    operations: Vec<PreparedOperation>,
+    queue: ExecutionQueue,
+    state: Arc<ExecutionSessionState>,
+    logical_dispatches: Vec<(String, DispatchEvidence)>,
+    native_kernel_nodes: u64,
+}
+
+impl ExecutionGraphSpan {
+    pub fn queue(&self) -> &ExecutionQueue {
+        &self.inner.queue
+    }
+    pub fn operations(&self) -> &[PreparedOperation] {
+        &self.inner.operations
+    }
+    pub fn native_kernel_nodes(&self) -> u64 {
+        self.inner.native_kernel_nodes
+    }
+}
+
+impl fmt::Debug for ExecutionGraphSpan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionGraphSpan")
+            .field("operation_count", &self.inner.operations.len())
+            .field("native_kernel_nodes", &self.inner.native_kernel_nodes)
+            .field("queue", &self.inner.queue)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A single-observer asynchronous submission.  It is `Send` but deliberately
 /// not `Sync`: polling, waiting, and starting readback all require `&mut self`.
 pub struct Submission {
@@ -4433,6 +4714,7 @@ pub struct Submission {
     dispatch: DispatchEvidence,
     completion_state: ExecutionState,
     inner: Box<dyn ExecutionSubmissionAdapter>,
+    graph_span: Option<ExecutionGraphSpan>,
 }
 
 impl fmt::Debug for Submission {
@@ -4448,6 +4730,12 @@ impl fmt::Debug for Submission {
 }
 
 impl Submission {
+    pub(crate) fn graph_logical_dispatches(&self) -> Option<&[(String, DispatchEvidence)]> {
+        self.graph_span
+            .as_ref()
+            .map(|span| span.inner.logical_dispatches.as_slice())
+    }
+
     pub fn dispatch(&self) -> &DispatchEvidence {
         &self.dispatch
     }
@@ -8702,3 +8990,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "graph_span_tests.rs"]
+mod graph_span_tests;

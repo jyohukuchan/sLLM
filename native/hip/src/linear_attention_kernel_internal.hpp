@@ -10,6 +10,9 @@ namespace sllm_linear_attention_kernel {
 constexpr uint32_t kQkHeads = 16U;
 constexpr uint32_t kValueHeads = 32U;
 constexpr uint32_t kHeadDim = 128U;
+constexpr uint32_t kRow32LdsQkHeads = 16U;
+constexpr uint32_t kRow32LdsValueHeads = 48U;
+constexpr uint32_t kRow32LdsHeadDim = 128U;
 constexpr uint32_t kQkvWidth = 8192U;
 constexpr uint32_t kOutputWidth = 4096U;
 constexpr uint32_t kConvHistory = 3U;
@@ -25,6 +28,11 @@ constexpr const char *kDecodePairLogicalKernelId =
     "linear_attention.gdn.decode_pair.v1";
 constexpr const char *kDecodePairDeviceSymbol =
     "sllm_linear_attention_recurrent_gated_norm_decode_pair_v1";
+constexpr uint32_t kRow32LdsWorkgroupSize = 128U;
+constexpr const char *kRow32LdsLogicalKernelId =
+    "linear_attention.gdn.row32_lds.v1";
+constexpr const char *kRow32LdsDeviceSymbol =
+    "sllm_linear_attention_recurrent_gated_norm_row32_lds_v1";
 constexpr const char *kColumnLogicalKernelId =
     "linear_attention.gdn.column_state.v2";
 constexpr const char *kColumnRecurrentDeviceSymbol =
@@ -54,6 +62,18 @@ hipError_t launch_recurrent(
 // value heads in sequence, sharing the Q/K load and normalization while
 // retaining independent recurrent-state updates and output gates.
 hipError_t launch_decode_pair(
+    const uint16_t *convolved_qkv, const uint16_t *z, const uint16_t *b_input,
+    const uint16_t *a_input, const float *a_log, const uint16_t *dt_bias,
+    const float *norm_weight, const float *previous_recurrent_state,
+    float *next_recurrent_state, uint16_t *output, uint32_t token_count,
+    uint32_t qk_heads, uint32_t value_heads, uint32_t head_dim,
+    uint32_t qkv_width, uint32_t output_width, hipStream_t stream) noexcept;
+
+// Exact gfx1030 Qwen3.8 M=1 path. One block owns one value head and keeps a
+// 32-key state tile in LDS while preserving the generic arithmetic order.
+// The runtime selector enables this only for qk_heads=16, value_heads=48,
+// head_dim=128, token_count=1 and an explicit environment opt-in.
+hipError_t launch_row32_lds(
     const uint16_t *convolved_qkv, const uint16_t *z, const uint16_t *b_input,
     const uint16_t *a_input, const float *a_log, const uint16_t *dt_bias,
     const float *norm_weight, const float *previous_recurrent_state,

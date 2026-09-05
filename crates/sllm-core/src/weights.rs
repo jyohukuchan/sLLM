@@ -557,7 +557,38 @@ impl VerifiedGgufWeightSource {
     }
 
     pub fn has_quantized_linear_recipe(&self) -> bool {
-        self.has_fp8_recipe() || self.has_mx_weight_activation_recipe()
+        !self.recipe_bindings.is_empty()
+            && self.recipe_bindings.values().all(|binding| {
+                matches!(
+                    binding.encoding,
+                    GgufRecipeEncoding::Fp8E4m3fnChannelBf16Scale
+                        | GgufRecipeEncoding::Fp8E4m3fnChannelF32Scale
+                        | GgufRecipeEncoding::Nvfp4E2m1Block16E4m3fnF32Outer
+                        | GgufRecipeEncoding::Mxfp4E2m1Block32E8m0
+                        | GgufRecipeEncoding::Mxfp8E4m3Block32E8m0
+                        | GgufRecipeEncoding::Mxfp6E3m2Block32E8m0
+                )
+            })
+    }
+
+    /// True when a recipe contains more than one resident family (for
+    /// example Qwen3.8's NVFP4 MLP plus FP8 attention/lm_head).  Unbound
+    /// BF16 tensors are intentionally allowed; they are the expected mixed
+    /// precision remainder.
+    pub fn has_mixed_quantized_linear_recipe(&self) -> bool {
+        let families: BTreeSet<_> = self
+            .recipe_bindings
+            .values()
+            .map(|binding| match binding.encoding {
+                GgufRecipeEncoding::Fp8E4m3fnChannelBf16Scale
+                | GgufRecipeEncoding::Fp8E4m3fnChannelF32Scale => "fp8",
+                GgufRecipeEncoding::Nvfp4E2m1Block16E4m3fnF32Outer => "nvfp4",
+                GgufRecipeEncoding::Mxfp4E2m1Block32E8m0 => "mxfp4",
+                GgufRecipeEncoding::Mxfp8E4m3Block32E8m0 => "mxfp8",
+                GgufRecipeEncoding::Mxfp6E3m2Block32E8m0 => "mxfp6",
+            })
+            .collect();
+        families.len() > 1
     }
 
     pub fn mx_weight_activation_encoding_name(&self) -> Option<&'static str> {
@@ -1373,6 +1404,7 @@ pub fn build_verified_gguf_qwen_weight_load_plan(
                 | GgufRecipeEncoding::Fp8E4m3fnChannelF32Scale
                 | GgufRecipeEncoding::Mxfp8E4m3Block32E8m0
                 | GgufRecipeEncoding::Mxfp6E3m2Block32E8m0
+                | GgufRecipeEncoding::Nvfp4E2m1Block16E4m3fnF32Outer
         )
     }) {
         return Err(WeightPlanError::invalid(
@@ -1487,6 +1519,172 @@ pub fn build_verified_gguf_qwen_weight_load_plan(
         gguf: verified.gguf,
     };
     Ok((source, plan))
+}
+
+/// Build the reviewed Qwen3.5-27B semantic load plan for the exact Unsloth
+/// Qwen3.8 mixed NVFP4 source.  The artifact owns the physical safetensors
+/// ranges; this plan deliberately records logical resident dtype/shape while
+/// the Qwen38 provision source performs the value/scale packing at upload.
+pub fn build_qwen38_nvfp4_weight_load_plan(
+    lock: &ModelLock,
+    artifact: &crate::VerifiedUnslothQwen38Nvfp4,
+) -> Result<WeightLoadPlan, WeightPlanError> {
+    validate_fixed_lock(lock)?;
+    let spec = reviewed_qwen35_spec(lock)
+        .ok_or_else(|| WeightPlanError::invalid("Qwen3.5 lock is not reviewed"))?;
+    if spec.repo_id != crate::model::QWEN35_27B_REPO_ID
+        || artifact.repository() != crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY
+    {
+        return Err(WeightPlanError::invalid(
+            "Qwen3.8 NVFP4 requires the reviewed Qwen3.5-27B semantic lock",
+        ));
+    }
+    let expected = expected_consumers(
+        &lock.model.architecture.text_config.layer_types,
+        lock.model.architecture.text_config.tie_word_embeddings,
+    );
+    let model_file = artifact
+        .root()
+        .join("model.safetensors")
+        .display()
+        .to_string();
+    let mtp_file = artifact
+        .root()
+        .join("model_mtp.safetensors")
+        .display()
+        .to_string();
+    let mut observed = BTreeSet::new();
+    let mut entries = Vec::with_capacity(artifact.tensors().len());
+    let mut destination_cursor = 0_u64;
+    for descriptor in artifact.tensors() {
+        let dtype = if descriptor.logical_name.ends_with(".A_log")
+            || descriptor
+                .logical_name
+                .ends_with(".linear_attn.norm.weight")
+        {
+            TensorDType::F32
+        } else {
+            TensorDType::Bf16
+        };
+        let synthetic = TensorDescriptor {
+            tensor_name: descriptor.logical_name.clone(),
+            source_file: if descriptor.source_name.starts_with("mtp.") {
+                mtp_file.clone()
+            } else {
+                model_file.clone()
+            },
+            dtype,
+            shape: descriptor.logical_shape.clone(),
+            header_length_field_bytes: 8,
+            header_length_bytes: 0,
+            data_buffer_start: 0,
+            data_offset_basis: "safetensors-data-buffer".to_owned(),
+            data_offsets: descriptor.value_range,
+            absolute_byte_range: descriptor.value_range,
+            byte_size: descriptor.value_range[1]
+                .checked_sub(descriptor.value_range[0])
+                .ok_or_else(|| WeightPlanError::invalid("Qwen3.8 source range underflows"))?,
+        };
+        let (classification, consumer) = classify_descriptor(
+            &synthetic,
+            &lock.model.architecture.text_config.layer_types,
+            &lock.model.architecture.vision.tensor_prefix,
+            &lock.model.architecture.mtp.tensor_prefix,
+            lock.model.architecture.text_config.tie_word_embeddings,
+        )?;
+        if let Some(key) = consumer {
+            if classification != WeightClassification::Required || !observed.insert(key) {
+                return Err(WeightPlanError::invalid(format!(
+                    "Qwen3.8 consumer is not one-to-one: {}",
+                    descriptor.logical_name
+                )));
+            }
+        }
+        let destination_start = if classification == WeightClassification::Required {
+            let start = destination_cursor;
+            let logical_bytes = descriptor
+                .logical_shape
+                .iter()
+                .try_fold(dtype_width(dtype), |bytes, extent| {
+                    bytes.checked_mul(*extent)
+                })
+                .ok_or_else(|| WeightPlanError::invalid("Qwen3.8 logical byte size overflows"))?;
+            destination_cursor = destination_cursor
+                .checked_add(logical_bytes)
+                .ok_or_else(|| WeightPlanError::invalid("Qwen3.8 destination size overflows"))?;
+            Some(start)
+        } else {
+            None
+        };
+        let (source_file, locked_size, locked_sha) = if descriptor.source_name.starts_with("mtp.") {
+            (
+                mtp_file.clone(),
+                crate::UNSLOTH_QWEN38_NVFP4_MTP_SIZE,
+                crate::UNSLOTH_QWEN38_NVFP4_MTP_SHA256.to_owned(),
+            )
+        } else {
+            (
+                model_file.clone(),
+                crate::UNSLOTH_QWEN38_NVFP4_MODEL_SIZE,
+                crate::UNSLOTH_QWEN38_NVFP4_MODEL_SHA256.to_owned(),
+            )
+        };
+        entries.push(WeightLoadEntry {
+            tensor_name: descriptor.logical_name.clone(),
+            classification,
+            consumer,
+            dtype,
+            shape: descriptor.logical_shape.clone(),
+            source_file,
+            locked_file_size: locked_size,
+            locked_file_sha256: locked_sha,
+            source_range: descriptor.value_range,
+            destination_start,
+            chunks: Vec::new(),
+        });
+    }
+    if observed != expected || entries.len() as u64 != spec.indexed_tensor_count {
+        return Err(WeightPlanError::invalid(format!(
+            "Qwen3.8 consumer/count coverage differs: consumers={}/{}, entries={}/{}",
+            observed.len(),
+            expected.len(),
+            entries.len(),
+            spec.indexed_tensor_count
+        )));
+    }
+    let schema_version = "qwen38-nvfp4-model-plan-v1";
+    let digest = digest_plan(
+        &PlanDigestHeader {
+            schema_version,
+            repo_id: &lock.model.repo_id,
+            resolved_revision: &lock.model.resolved_revision,
+            fingerprint: lock.fingerprint(),
+            tied_embeddings: lock.model.architecture.text_config.tie_word_embeddings,
+            chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+            total_destination_bytes: destination_cursor,
+        },
+        &entries,
+    )?;
+    Ok(WeightLoadPlan {
+        schema_version: schema_version.to_owned(),
+        repo_id: lock.model.repo_id.clone(),
+        resolved_revision: lock.model.resolved_revision.clone(),
+        lock_fingerprint: lock.fingerprint().to_owned(),
+        tied_embeddings: lock.model.architecture.text_config.tie_word_embeddings,
+        chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+        total_destination_bytes: destination_cursor,
+        entries,
+        digest,
+    })
+}
+
+fn dtype_width(dtype: TensorDType) -> u64 {
+    match dtype {
+        TensorDType::Bf16 | TensorDType::F16 => 2,
+        TensorDType::F32 | TensorDType::I32 => 4,
+        TensorDType::I64 => 8,
+        TensorDType::U8 => 1,
+    }
 }
 
 fn build_qwen_gguf_quantized_plan(

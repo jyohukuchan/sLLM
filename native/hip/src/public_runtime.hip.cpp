@@ -56,6 +56,7 @@ extern "C" rocblas_status rocblas_gemm_ex_get_solutions(
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <map>
 #include <memory>
@@ -222,6 +223,17 @@ hipError_t launch_fp8_emulation(const uint8_t *, const float *, const uint8_t *,
 hipError_t launch_nvfp4_quantize(const uint16_t *, uint8_t *, uint8_t *,
                                  const float *, uint64_t, uint64_t,
                                  hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
+
+hipError_t launch_nvfp4_block16_to_fp8_staging(const uint8_t *, const uint8_t *,
+                                               uint8_t *, uint64_t, uint64_t,
+                                               hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
+
+hipError_t launch_nvfp4_tensor_scale_product(const float *, const float *,
+                                             float *, hipStream_t) noexcept {
   return hipErrorInvalidValue;
 }
 
@@ -495,6 +507,57 @@ hipError_t launch_decode_gqa4_split_p32(
       static_key_scale, static_value_scale, workspace, workspace_bytes, stream);
 }
 
+hipError_t launch_decode_gqa6_split_p32(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t start_position, const uint64_t committed_kv_length,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    const uint32_t encoding, const float static_key_scale,
+    const float static_value_scale, void *const workspace,
+    const uint64_t workspace_bytes, const hipStream_t stream) noexcept {
+  return launch_decode_gqa4_split(
+      query, key, value, key_scales, value_scales, key_outer_scales,
+      value_outer_scales, output, query_count, start_position,
+      committed_kv_length, q_heads, kv_heads, head_dim, encoding,
+      static_key_scale, static_value_scale, workspace, workspace_bytes, stream);
+}
+
+hipError_t launch_decode_gqa6_split_p64(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t start_position, const uint64_t committed_kv_length,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    const uint32_t encoding, const float static_key_scale,
+    const float static_value_scale, void *const workspace,
+    const uint64_t workspace_bytes, const hipStream_t stream) noexcept {
+  return launch_decode_gqa4_split(
+      query, key, value, key_scales, value_scales, key_outer_scales,
+      value_outer_scales, output, query_count, start_position,
+      committed_kv_length, q_heads, kv_heads, head_dim, encoding,
+      static_key_scale, static_value_scale, workspace, workspace_bytes, stream);
+}
+
+hipError_t launch_decode_gqa6_split_p128(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t start_position, const uint64_t committed_kv_length,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    const uint32_t encoding, const float static_key_scale,
+    const float static_value_scale, void *const workspace,
+    const uint64_t workspace_bytes, const hipStream_t stream) noexcept {
+  return launch_decode_gqa4_split(
+      query, key, value, key_scales, value_scales, key_outer_scales,
+      value_outer_scales, output, query_count, start_position,
+      committed_kv_length, q_heads, kv_heads, head_dim, encoding,
+      static_key_scale, static_value_scale, workspace, workspace_bytes, stream);
+}
+
 hipError_t launch_decode_wave_split_fp16_pair(
     const uint16_t *const query, const void *const key, const void *const value,
     const void *const key_scales, const void *const value_scales,
@@ -522,20 +585,20 @@ hipError_t launch_decode_wave_split_fp16_pair(
       committed_kv_length, start_position, committed_kv_length, stream);
 }
 
-hipError_t
-launch(const uint16_t *const query, const void *const key,
-       const void *const value, const void *const key_scales,
-       const void *const value_scales, const float *const key_outer_scales,
-       const float *const value_outer_scales, uint16_t *const output,
-       const uint32_t query_count, const uint64_t capacity_tokens,
-       const uint64_t start_position, const uint64_t committed_kv_length,
-       const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-       const uint32_t encoding, const float static_key_scale,
-       const float static_value_scale, const bool use_gfx1201_wave_provider,
-       const bool use_decode_wave_split,
-       const bool use_decode_wave_split_q_preload, const bool use_prefill_gqa4,
-       const bool use_prefill_gqa4_qtile4, const uint64_t sliding_window,
-       const float score_scale, const hipStream_t stream) noexcept {
+hipError_t launch(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t capacity_tokens, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim, const uint32_t encoding,
+    const float static_key_scale, const float static_value_scale,
+    const bool use_gfx1201_wave_provider, const bool use_decode_wave_split,
+    const bool use_decode_wave_split_q_preload, const bool use_prefill_gqa4,
+    const bool use_prefill_gqa4_qtile4,
+    const bool use_prefill_gqa6_qtile4_k32_fp16, const uint64_t sliding_window,
+    const float score_scale, const hipStream_t stream) noexcept {
   (void)key_scales;
   (void)value_scales;
   (void)key_outer_scales;
@@ -550,6 +613,7 @@ launch(const uint16_t *const query, const void *const key,
   (void)use_decode_wave_split_q_preload;
   (void)use_prefill_gqa4;
   (void)use_prefill_gqa4_qtile4;
+  (void)use_prefill_gqa6_qtile4_k32_fp16;
   (void)score_scale;
   if ((sliding_window == 0U ||
        sliding_window == SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4) &&
@@ -661,13 +725,22 @@ bool matches_runtime_gcn_arch(const char *actual,
 struct Fp8LtPlan;
 struct Queue;
 struct Context;
+struct GraphSpan;
+struct Completion;
+bool release_graph_span_active(Completion *completion) noexcept;
+bool release_graph_span_completion(Completion *completion) noexcept;
+bool rollback_graph_span_completion(Completion *completion) noexcept;
 void destroy_causal_scaled_prefill_workspace(Context *context) noexcept;
+void destroy_matmul_f16_staging_workspace(Context *context) noexcept;
 hipError_t free_allocation_with_fault_injection(void *allocation) noexcept;
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 hipError_t create_fp8_lt_plan(hipblasLtHandle_t handle, Fp8LtPlan **plan,
                               float *activation_scales,
                               const float *weight_scales, uint32_t fp8_dtype,
-                              uint64_t m, uint64_t k, uint64_t n) noexcept;
+                              uint64_t m, uint64_t k, uint64_t n,
+                              const char *arch_name, bool use_outer_scales,
+                              bool device_alpha,
+                              const float *device_alpha_pointer) noexcept;
 void destroy_fp8_lt_plan(Fp8LtPlan *plan) noexcept;
 hipError_t launch_fp8_lt_plan(Fp8LtPlan *plan, const uint8_t *activation,
                               const uint8_t *weight, uint16_t *output,
@@ -680,6 +753,7 @@ enum class HandleKind : uint32_t {
   Buffer,
   Event,
   Completion,
+  GraphSpan,
   RmsNormPlan,
   ElementwisePlan,
   EmbeddingPlan,
@@ -701,9 +775,10 @@ struct QuarantineNode {
   HandleKind kind;
   QuarantineNode *next;
   bool poison_owned;
+  uint64_t graph_pins;
 
   explicit QuarantineNode(const HandleKind kind_value) noexcept
-      : kind(kind_value), next(nullptr), poison_owned(false) {}
+      : kind(kind_value), next(nullptr), poison_owned(false), graph_pins(0U) {}
 };
 
 struct Context final : QuarantineNode {
@@ -720,10 +795,18 @@ struct Context final : QuarantineNode {
   Queue *causal_scaled_prefill_owner_queue;
   uint64_t causal_scaled_prefill_in_flight;
   std::mutex causal_scaled_prefill_plan_mutex;
+  void *matmul_f16_staging_workspace;
+  uint64_t matmul_f16_staging_workspace_bytes;
+  uint64_t matmul_f16_staging_workspace_high_water_bytes;
+  Queue *matmul_f16_staging_owner_queue;
+  uint64_t matmul_f16_staging_in_flight;
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
   hipblasHandle_t matmul_blas_handle;
   rocblas_handle matmul_rocblas_handle;
   std::vector<std::array<uint64_t, 3>> matmul_rocblas_primed_shapes;
+  // {m, k, n, solution}; solution zero means rocBLAS standard.  This cache is
+  // format-neutral because packed formats share the transient-FP16 GEMM.
+  std::vector<std::array<int64_t, 4>> matmul_f16_staging_rocblas_solutions;
   std::mutex matmul_blas_mutex;
   hipblasLtHandle_t matmul_lt_handle;
   std::mutex matmul_lt_mutex;
@@ -737,18 +820,24 @@ struct Context final : QuarantineNode {
         causal_scaled_prefill_workspace_bytes(0U),
         causal_scaled_prefill_workspace_high_water_bytes(0U),
         causal_scaled_prefill_owner_queue(nullptr),
-        causal_scaled_prefill_in_flight(0U), causal_scaled_prefill_plan_mutex()
+        causal_scaled_prefill_in_flight(0U), causal_scaled_prefill_plan_mutex(),
+        matmul_f16_staging_workspace(nullptr),
+        matmul_f16_staging_workspace_bytes(0U),
+        matmul_f16_staging_workspace_high_water_bytes(0U),
+        matmul_f16_staging_owner_queue(nullptr),
+        matmul_f16_staging_in_flight(0U)
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
         ,
         matmul_blas_handle(nullptr), matmul_rocblas_handle(nullptr),
-        matmul_rocblas_primed_shapes(), matmul_blas_mutex(),
-        matmul_lt_handle(nullptr), matmul_lt_mutex()
+        matmul_rocblas_primed_shapes(), matmul_f16_staging_rocblas_solutions(),
+        matmul_blas_mutex(), matmul_lt_handle(nullptr), matmul_lt_mutex()
 #endif
   {
   }
 
   ~Context() {
     destroy_causal_scaled_prefill_workspace(this);
+    destroy_matmul_f16_staging_workspace(this);
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
     if (matmul_blas_handle != nullptr) {
       (void)hipblasDestroy(matmul_blas_handle);
@@ -769,16 +858,39 @@ struct Queue final : QuarantineNode {
   sllm_public_runtime::AccountingState accounting;
   bool release_active;
   uint32_t completion_mode;
+  /* Monotonic submission order for deferred completion/fence validation. */
+  uint64_t next_submission_serial;
+  std::atomic<bool> graph_capture_active;
 
   Queue(Context *const context_value, const hipStream_t stream_value)
       : QuarantineNode(HandleKind::Queue), context(context_value),
         stream(stream_value), accounting(), release_active(false),
-        completion_mode(SLLM_QUEUE_COMPLETION_MODE_PROFILED) {}
+        completion_mode(SLLM_QUEUE_COMPLETION_MODE_PROFILED),
+        next_submission_serial(0U), graph_capture_active(false) {}
 };
+
+/* A non-null value is installed only by the thread performing a bounded graph
+ * capture. Queue handle lookup rejects submissions from other threads while
+ * capture is active, while allowing the existing C ABI execute calls to
+ * reuse their eventless deferred completion path on the capture thread. */
+thread_local Queue *graph_capture_queue = nullptr;
 
 bool queue_profiles_completions(const Queue *const queue) noexcept {
   return queue != nullptr &&
          queue->completion_mode == SLLM_QUEUE_COMPLETION_MODE_PROFILED;
+}
+
+/* Submission serials are queue-local and are assigned while the queue's
+ * context accounting lock is held.  Zero is reserved for legacy completions
+ * and exhaustion is fail-closed. */
+bool next_queue_submission_serial(Queue *const queue,
+                                  uint64_t *const serial) noexcept {
+  if (queue == nullptr || serial == nullptr ||
+      queue->next_submission_serial == std::numeric_limits<uint64_t>::max()) {
+    return false;
+  }
+  *serial = ++queue->next_submission_serial;
+  return *serial != 0U;
 }
 
 struct Buffer final : QuarantineNode {
@@ -1624,6 +1736,9 @@ struct LinearAttentionState final : QuarantineNode {
   uint32_t output_width;
   std::array<void *, 2> conv_state;
   std::array<void *, 2> recurrent_state;
+  // Non-null only for the compact Phase 78 fresh-state backing allocation.
+  // Forked states retain the historical independent plane ownership.
+  void *state_backing;
   void *scratch;
   uint64_t scratch_bytes;
   sllm_public_runtime::AccountingState accounting;
@@ -1657,9 +1772,9 @@ struct LinearAttentionState final : QuarantineNode {
         qkv_width((2U * qk_heads_value + value_heads_value) * head_dim_value),
         output_width(value_heads_value * head_dim_value),
         conv_state(conv_value), recurrent_state(recurrent_value),
-        scratch(nullptr), scratch_bytes(0U), accounting(), published_length(0U),
-        generation(0U), active_slot(0U), import_plane_mask(0U),
-        last_published_start(0U), last_published_end(0U),
+        state_backing(nullptr), scratch(nullptr), scratch_bytes(0U),
+        accounting(), published_length(0U), generation(0U), active_slot(0U),
+        import_plane_mask(0U), last_published_start(0U), last_published_end(0U),
         last_published_generation(0U), transition_token(0U),
         transition_start(0U), transition_count(0U), transition_end(0U),
         commit_allowed(false), release_active(false) {}
@@ -1756,6 +1871,7 @@ struct Completion final : QuarantineNode {
   Buffer *elementwise_input1;
   Buffer *elementwise_output;
   bool matmul;
+  bool matmul_f16_staging_workspace_acquired;
   ElementwisePlan *matmul_plan;
   Buffer *matmul_activation;
   Buffer *matmul_weight;
@@ -1770,6 +1886,11 @@ struct Completion final : QuarantineNode {
   Buffer *mlp_bundle_activation;
   std::array<Buffer *, 2> mlp_bundle_weights;
   std::array<Buffer *, 3> mlp_bundle_outputs;
+  bool qwen38_projection_pack2 = false;
+  ElementwisePlan *qwen38_projection_pack2_plan = nullptr;
+  Buffer *qwen38_projection_pack2_activation = nullptr;
+  std::array<Buffer *, 2> qwen38_projection_pack2_weights{};
+  std::array<Buffer *, 2> qwen38_projection_pack2_outputs{};
   bool argmax;
   ElementwisePlan *argmax_plan;
   Buffer *argmax_logits;
@@ -1805,6 +1926,14 @@ struct Completion final : QuarantineNode {
   uint64_t linear_attention_count;
   uint64_t linear_attention_end;
   bool queue_fence;
+  bool graph_span;
+  GraphSpan *graph_span_owner;
+  uint64_t submission_serial;
+  /* An append completion can be claimed by at most one dependent attention
+   * submission.  The claim keeps its transition/references alive until the
+   * dependent completion reaches a terminal state. */
+  bool dependent_attention_claimed;
+  Completion *dependent_append;
   bool d2d_copy;
   Buffer *d2d_source;
   Buffer *d2d_destination;
@@ -1870,7 +1999,9 @@ struct Completion final : QuarantineNode {
         elementwise_input0(elementwise_input0_value),
         elementwise_input1(elementwise_input1_value),
         elementwise_output(elementwise_output_value),
-        matmul(matmul_plan_value != nullptr), matmul_plan(matmul_plan_value),
+        matmul(matmul_plan_value != nullptr),
+        matmul_f16_staging_workspace_acquired(false),
+        matmul_plan(matmul_plan_value),
         matmul_activation(matmul_activation_value),
         matmul_weight(matmul_weight_value), matmul_output(matmul_output_value),
         gdn_bundle(false), gdn_bundle_plan(nullptr),
@@ -1901,7 +2032,9 @@ struct Completion final : QuarantineNode {
         linear_attention(false), linear_attention_state(nullptr),
         linear_attention_buffers(), linear_attention_token(0U),
         linear_attention_start(0U), linear_attention_count(0U),
-        linear_attention_end(0U), queue_fence(false),
+        linear_attention_end(0U), queue_fence(false), graph_span(false),
+        graph_span_owner(nullptr), submission_serial(0U),
+        dependent_attention_claimed(false), dependent_append(nullptr),
         d2d_copy(d2d_source_value != nullptr ||
                  d2d_destination_value != nullptr),
         d2d_source(d2d_source_value), d2d_destination(d2d_destination_value) {}
@@ -1975,9 +2108,21 @@ struct ElementwisePlan final : QuarantineNode {
   std::array<Buffer *, 3> mlp_outputs;
   std::array<sllm_matmul::DescriptorMetadata, 2> mlp_metadata;
   sllm_matmul::TensorMetadata mlp_silu_metadata;
+  bool qwen38_projection_pack2 = false;
+  std::array<Buffer *, 2> qwen38_projection_pack2_weights{};
+  std::array<Buffer *, 2> qwen38_projection_pack2_outputs{};
+  std::array<sllm_matmul::DescriptorMetadata, 2>
+      qwen38_projection_pack2_metadata{};
+  uint32_t qwen38_projection_pack2_input_global_scale_f32_bits = 0U;
+  uint32_t qwen38_projection_pack2_role =
+      SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_NVFP4_MLP_GATE_UP;
+  std::array<sllm_matmul_kernel::KernelVariant, 2>
+      qwen38_projection_pack2_kernel_variants{};
+  std::array<Fp8LtPlan *, 2> qwen38_projection_pack2_fp8_lt_plans{};
   bool argmax;
   void *matmul_workspace;
   uint64_t matmul_workspace_bytes;
+  uint64_t matmul_context_workspace_bytes = 0U;
   sllm_matmul_kernel::KernelVariant matmul_kernel_variant =
       sllm_matmul_kernel::KernelVariant::Baseline;
   std::optional<sllm_lowp::PreparedProviderPlan> matmul_provider_plan;
@@ -1996,7 +2141,8 @@ struct ElementwisePlan final : QuarantineNode {
         gdn_metadata(), mlp_bundle(false), mlp_weights{}, mlp_outputs{},
         mlp_metadata(), mlp_silu_metadata(), argmax(false),
         matmul_workspace(nullptr), matmul_workspace_bytes(0U),
-        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
+        matmul_context_workspace_bytes(0U), fp8_lt_plan(nullptr),
+        release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const weight_value,
                   Buffer *const token_ids_value, Buffer *const output_value,
@@ -2008,8 +2154,8 @@ struct ElementwisePlan final : QuarantineNode {
         gdn_bundle(false), gdn_weights{}, gdn_outputs{}, gdn_metadata(),
         mlp_bundle(false), mlp_weights{}, mlp_outputs{}, mlp_metadata(),
         mlp_silu_metadata(), argmax(false), matmul_workspace(nullptr),
-        matmul_workspace_bytes(0U), fp8_lt_plan(nullptr), release_active(false),
-        in_flight(false) {}
+        matmul_workspace_bytes(0U), matmul_context_workspace_bytes(0U),
+        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const activation_value,
                   Buffer *const weight_value, Buffer *const output_value,
@@ -2021,8 +2167,8 @@ struct ElementwisePlan final : QuarantineNode {
         gdn_bundle(false), gdn_weights{}, gdn_outputs{}, gdn_metadata(),
         mlp_bundle(false), mlp_weights{}, mlp_outputs{}, mlp_metadata(),
         mlp_silu_metadata(), argmax(false), matmul_workspace(nullptr),
-        matmul_workspace_bytes(0U), fp8_lt_plan(nullptr), release_active(false),
-        in_flight(false) {}
+        matmul_workspace_bytes(0U), matmul_context_workspace_bytes(0U),
+        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
 
   ElementwisePlan(
       Context *const context_value, Buffer *const activation_value,
@@ -2038,7 +2184,8 @@ struct ElementwisePlan final : QuarantineNode {
         gdn_metadata(metadata_value), mlp_bundle(false), mlp_weights{},
         mlp_outputs{}, mlp_metadata(), mlp_silu_metadata(), argmax(false),
         matmul_workspace(nullptr), matmul_workspace_bytes(0U),
-        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
+        matmul_context_workspace_bytes(0U), fp8_lt_plan(nullptr),
+        release_active(false), in_flight(false) {}
 
   ElementwisePlan(
       Context *const context_value, Buffer *const activation_value,
@@ -2056,6 +2203,26 @@ struct ElementwisePlan final : QuarantineNode {
         mlp_silu_metadata(metadata_value[0].output), argmax(false),
         matmul_workspace(nullptr), matmul_workspace_bytes(0U),
         fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
+
+  ElementwisePlan(
+      Context *const context_value, Buffer *const activation_value,
+      const std::array<Buffer *, 2> &weights_value,
+      const std::array<Buffer *, 2> &outputs_value,
+      const std::array<sllm_matmul::DescriptorMetadata, 2> &metadata_value,
+      const uint32_t input_global_scale_f32_bits)
+      : ElementwisePlan(context_value, activation_value, weights_value,
+                        std::array<Buffer *, 3>{outputs_value[0],
+                                                outputs_value[1],
+                                                activation_value},
+                        metadata_value) {
+    mlp_bundle = false;
+    qwen38_projection_pack2 = true;
+    qwen38_projection_pack2_weights = weights_value;
+    qwen38_projection_pack2_outputs = outputs_value;
+    qwen38_projection_pack2_metadata = metadata_value;
+    qwen38_projection_pack2_input_global_scale_f32_bits =
+        input_global_scale_f32_bits;
+  }
 
   ElementwisePlan(Context *const context_value, Buffer *const logits_value,
                   Buffer *const output_value,
@@ -2086,6 +2253,9 @@ struct ElementwisePlan final : QuarantineNode {
   ~ElementwisePlan() {
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
     destroy_fp8_lt_plan(fp8_lt_plan);
+    for (Fp8LtPlan *const plan : qwen38_projection_pack2_fp8_lt_plans) {
+      destroy_fp8_lt_plan(plan);
+    }
 #endif
     if (matmul_workspace != nullptr) {
       (void)hipFree(matmul_workspace);
@@ -2299,6 +2469,32 @@ void destroy_causal_scaled_prefill_workspace(Context *const context) noexcept {
   }
   if (allocation != nullptr &&
       free_allocation_with_fault_injection(allocation) != hipSuccess) {
+    orphan_owner.retain_allocation(nullptr, allocation);
+  }
+}
+
+void destroy_matmul_f16_staging_workspace(Context *const context) noexcept {
+  if (context == nullptr) {
+    return;
+  }
+  void *allocation = nullptr;
+  bool retain_for_process_lifetime = false;
+  {
+    std::lock_guard<std::mutex> accounting_lock(context->accounting_mutex);
+    if (context->matmul_f16_staging_in_flight != 0U) {
+      context->poisoned.store(true);
+      retain_for_process_lifetime = true;
+    }
+    allocation = context->matmul_f16_staging_workspace;
+    context->matmul_f16_staging_workspace = nullptr;
+    context->matmul_f16_staging_workspace_bytes = 0U;
+    context->matmul_f16_staging_owner_queue = nullptr;
+    context->matmul_f16_staging_in_flight = 0U;
+  }
+  if (allocation != nullptr && retain_for_process_lifetime) {
+    orphan_owner.retain_allocation(nullptr, allocation);
+  } else if (allocation != nullptr &&
+             free_allocation_with_fault_injection(allocation) != hipSuccess) {
     orphan_owner.retain_allocation(nullptr, allocation);
   }
 }
@@ -2608,6 +2804,26 @@ bool release_causal_scaled_prefill_plan_reference(
   return true;
 }
 
+bool release_matmul_f16_staging_workspace_reference(
+    Completion *const completion) noexcept {
+  if (completion == nullptr ||
+      !completion->matmul_f16_staging_workspace_acquired) {
+    return true;
+  }
+  Context *const context = completion->context;
+  if (context == nullptr || completion->queue == nullptr ||
+      context->matmul_f16_staging_in_flight == 0U ||
+      context->matmul_f16_staging_owner_queue != completion->queue) {
+    return false;
+  }
+  --context->matmul_f16_staging_in_flight;
+  if (context->matmul_f16_staging_in_flight == 0U) {
+    context->matmul_f16_staging_owner_queue = nullptr;
+  }
+  completion->matmul_f16_staging_workspace_acquired = false;
+  return true;
+}
+
 bool rollback_causal_attention(Completion *const completion) noexcept {
   if (completion == nullptr || completion->context == nullptr ||
       completion->queue == nullptr ||
@@ -2717,7 +2933,15 @@ T *lookup(const void *const raw, const HandleKind kind) noexcept {
   if (found == registry.end() || found->second.kind != kind) {
     return nullptr;
   }
-  return static_cast<T *>(found->second.state);
+  T *const state = static_cast<T *>(found->second.state);
+  if constexpr (std::is_same_v<T, Queue>) {
+    Queue *const queue = state;
+    if (queue->graph_capture_active.load(std::memory_order_acquire) &&
+        graph_capture_queue != queue) {
+      return nullptr;
+    }
+  }
+  return state;
 }
 
 uintptr_t register_handle(void *const state, const HandleKind kind) {
@@ -3479,6 +3703,81 @@ void initialize_embedding_dispatch_info(
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
 
+struct Fp8LtHeuristicRankPolicy final {
+  bool valid;
+  bool ranked_query;
+  bool explicit_override;
+  uint64_t rank;
+};
+
+Fp8LtHeuristicRankPolicy select_fp8_lt_heuristic_rank_policy(
+    const char *const arch_name, const uint32_t fp8_dtype, const uint64_t m,
+    const uint64_t k, const uint64_t n,
+    const char *const rank_environment) noexcept {
+  Fp8LtHeuristicRankPolicy policy{true, false, false, 0U};
+  if (!matches_runtime_gcn_arch(arch_name, "gfx1201")) {
+    return policy;
+  }
+  // The measured short projection uses four heuristic results, independently
+  // of the decode-only environment override and its 32-result query.
+  if (m == 17U && k == 6144U && n == 5120U &&
+      fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN) {
+    return {true, true, false, 3U};
+  }
+  if (m != 1U)
+    return policy;
+  if (rank_environment != nullptr) {
+    policy.ranked_query = true;
+    policy.explicit_override = true;
+    if (*rank_environment == '\0') {
+      policy.valid = false;
+      return policy;
+    }
+    for (const unsigned char *cursor =
+             reinterpret_cast<const unsigned char *>(rank_environment);
+         *cursor != '\0'; ++cursor) {
+      if (*cursor < static_cast<unsigned char>('0') ||
+          *cursor > static_cast<unsigned char>('9')) {
+        policy.valid = false;
+        return policy;
+      }
+      const uint64_t digit = static_cast<uint64_t>(*cursor - '0');
+      if (policy.rank >
+          (std::numeric_limits<uint64_t>::max() - digit) / UINT64_C(10)) {
+        policy.valid = false;
+        return policy;
+      }
+      policy.rank = policy.rank * UINT64_C(10) + digit;
+    }
+    return policy;
+  }
+  if (fp8_dtype != SLLM_TENSOR_DTYPE_F8_E4M3_FN) {
+    return policy;
+  }
+  struct RankEntry final {
+    uint64_t k;
+    uint64_t n;
+    uint64_t rank;
+  };
+  constexpr std::array<RankEntry, 7> table = {{
+      {5120U, 10240U, 7U},
+      {5120U, 6144U, 8U},
+      {6144U, 5120U, 8U},
+      {5120U, 12288U, 9U},
+      {5120U, 1024U, 9U},
+      {5120U, 17408U, 8U},
+      {17408U, 5120U, 9U},
+  }};
+  for (const auto &entry : table) {
+    if (entry.k == k && entry.n == n) {
+      policy.ranked_query = true;
+      policy.rank = entry.rank;
+      break;
+    }
+  }
+  return policy;
+}
+
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 struct Fp8LtPlan {
   hipblasLtHandle_t handle;
@@ -3488,6 +3787,10 @@ struct Fp8LtPlan {
   hipblasLtMatrixLayout_t c;
   hipblasLtMatrixLayout_t d;
   hipblasLtMatmulAlgo_t algorithm;
+  bool device_alpha;
+  const float *device_alpha_pointer;
+  float *device_beta_pointer;
+  float host_alpha;
 };
 
 void destroy_fp8_lt_plan(Fp8LtPlan *const plan) noexcept {
@@ -3509,18 +3812,24 @@ void destroy_fp8_lt_plan(Fp8LtPlan *const plan) noexcept {
   if (plan->operation != nullptr) {
     (void)hipblasLtMatmulDescDestroy(plan->operation);
   }
+  if (plan->device_beta_pointer != nullptr) {
+    (void)hipFree(plan->device_beta_pointer);
+  }
   delete plan;
 }
 
-hipError_t create_fp8_lt_plan(const hipblasLtHandle_t handle,
-                              Fp8LtPlan **const plan_output,
-                              float *const activation_scales,
-                              const float *const weight_scales,
-                              const uint32_t fp8_dtype, const uint64_t m,
-                              const uint64_t k, const uint64_t n) noexcept {
-  if (handle == nullptr || plan_output == nullptr ||
+hipError_t create_fp8_lt_plan(
+    const hipblasLtHandle_t handle, Fp8LtPlan **const plan_output,
+    float *const activation_scales, const float *const weight_scales,
+    const uint32_t fp8_dtype, const uint64_t m, const uint64_t k,
+    const uint64_t n, const char *const arch_name, const bool use_outer_scales,
+    const bool device_alpha, const float *const device_alpha_pointer) noexcept {
+  if (handle == nullptr || plan_output == nullptr || arch_name == nullptr ||
       (fp8_dtype != SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
-       fp8_dtype != SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ)) {
+       fp8_dtype != SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ) ||
+      (use_outer_scales &&
+       (activation_scales == nullptr || weight_scales == nullptr)) ||
+      (device_alpha && device_alpha_pointer == nullptr)) {
     return hipErrorInvalidValue;
   }
   *plan_output = nullptr;
@@ -3538,6 +3847,9 @@ hipError_t create_fp8_lt_plan(const hipblasLtHandle_t handle,
     return status != HIPBLAS_STATUS_SUCCESS;
   };
   plan->handle = handle;
+  plan->device_alpha = device_alpha;
+  plan->device_alpha_pointer = device_alpha_pointer;
+  plan->host_alpha = 1.0F;
   if (failed(hipblasLtMatmulDescCreate(&plan->operation, HIPBLAS_COMPUTE_32F,
                                        HIP_R_32F))) {
     destroy_fp8_lt_plan(plan.release());
@@ -3557,23 +3869,40 @@ hipError_t create_fp8_lt_plan(const hipblasLtHandle_t handle,
     destroy_fp8_lt_plan(plan.release());
     return hipErrorUnknown;
   }
-  void *weight_scale_pointer = const_cast<float *>(weight_scales);
-  void *activation_scale_pointer = const_cast<float *>(activation_scales);
-  const hipblasLtMatmulMatrixScale_t scale_mode =
-      HIPBLASLT_MATMUL_MATRIX_SCALE_OUTER_VEC_32F;
-  if (failed(hipblasLtMatmulDescSetAttribute(
-          plan->operation, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
-          &weight_scale_pointer, sizeof(weight_scale_pointer))) ||
-      failed(hipblasLtMatmulDescSetAttribute(
-          plan->operation, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
-          &activation_scale_pointer, sizeof(activation_scale_pointer))) ||
-      failed(hipblasLtMatmulDescSetAttribute(
-          plan->operation, HIPBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode,
-          sizeof(scale_mode))) ||
-      failed(hipblasLtMatmulDescSetAttribute(
-          plan->operation, HIPBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode,
-          sizeof(scale_mode))) ||
-      failed(hipblasLtMatrixLayoutCreate(&plan->a, fp8_library_dtype, k, n,
+  if (use_outer_scales) {
+    void *weight_scale_pointer = const_cast<float *>(weight_scales);
+    void *activation_scale_pointer = const_cast<float *>(activation_scales);
+    const hipblasLtMatmulMatrixScale_t scale_mode =
+        HIPBLASLT_MATMUL_MATRIX_SCALE_OUTER_VEC_32F;
+    if (failed(hipblasLtMatmulDescSetAttribute(
+            plan->operation, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+            &weight_scale_pointer, sizeof(weight_scale_pointer))) ||
+        failed(hipblasLtMatmulDescSetAttribute(
+            plan->operation, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+            &activation_scale_pointer, sizeof(activation_scale_pointer))) ||
+        failed(hipblasLtMatmulDescSetAttribute(
+            plan->operation, HIPBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode,
+            sizeof(scale_mode))) ||
+        failed(hipblasLtMatmulDescSetAttribute(
+            plan->operation, HIPBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode,
+            sizeof(scale_mode)))) {
+      destroy_fp8_lt_plan(plan.release());
+      return hipErrorUnknown;
+    }
+  }
+  if (device_alpha) {
+    const int32_t pointer_mode = HIPBLASLT_POINTER_MODE_DEVICE;
+    if (failed(hipblasLtMatmulDescSetAttribute(
+            plan->operation, HIPBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode,
+            sizeof(pointer_mode))) ||
+        hipMalloc(reinterpret_cast<void **>(&plan->device_beta_pointer),
+                  sizeof(float)) != hipSuccess ||
+        hipMemset(plan->device_beta_pointer, 0, sizeof(float)) != hipSuccess) {
+      destroy_fp8_lt_plan(plan.release());
+      return hipErrorUnknown;
+    }
+  }
+  if (failed(hipblasLtMatrixLayoutCreate(&plan->a, fp8_library_dtype, k, n,
                                          static_cast<int64_t>(k))) ||
       failed(hipblasLtMatrixLayoutCreate(&plan->b, fp8_library_dtype, k, m,
                                          static_cast<int64_t>(k))) ||
@@ -3594,29 +3923,78 @@ hipError_t create_fp8_lt_plan(const hipblasLtHandle_t handle,
     destroy_fp8_lt_plan(plan.release());
     return hipErrorUnknown;
   }
+  // Explicit rank selection wins.  With no environment override, exact
+  // gfx1201 decode shapes and one short projection use measured policies;
+  // other shapes retain the single-result/rank-zero query. Selection lives
+  // after descriptor construction so prepare freezes the algorithm in-plan.
+  const char *const rank_environment =
+      matches_runtime_gcn_arch(arch_name, "gfx1201") && m == 1U
+          ? std::getenv("SLLM_FP8_OUTER_GFX1201_HIPBLASLT_HEURISTIC_RANK")
+          : nullptr;
+  const Fp8LtHeuristicRankPolicy rank_policy =
+      select_fp8_lt_heuristic_rank_policy(arch_name, fp8_dtype, m, k, n,
+                                          rank_environment);
+  if (!rank_policy.valid) {
+    cleanup_preference();
+    destroy_fp8_lt_plan(plan.release());
+    return hipErrorInvalidValue;
+  }
+  const bool rank_opt_in = rank_policy.explicit_override;
+  const uint64_t heuristic_rank = rank_policy.rank;
+  const int requested_solution_count =
+      rank_policy.ranked_query ? (m == 17U ? 4 : 32) : 1;
   hipblasLtMatmulHeuristicResult_t heuristic{};
   static std::mutex algorithm_cache_mutex;
-  static std::map<std::array<uint64_t, 4>, hipblasLtMatmulAlgo_t>
+  static std::map<std::array<uint64_t, 6>, hipblasLtMatmulAlgo_t>
       algorithm_cache;
-  const std::array<uint64_t, 4> shape_key = {fp8_dtype, m, k, n};
+  // Include the selected rank so an opt-in plan cannot accidentally reuse a
+  // rank-zero algorithm prepared under the default policy.  The policy bit is
+  // also part of the key: rank zero requested explicitly must still perform
+  // the 32-result probe instead of inheriting an earlier default query.
+  const std::array<uint64_t, 6> shape_key = {
+      fp8_dtype,
+      m,
+      k,
+      n,
+      heuristic_rank,
+      rank_policy.ranked_query ? UINT64_C(1) : UINT64_C(0)};
   {
     std::lock_guard<std::mutex> cache_lock(algorithm_cache_mutex);
     const auto cached = algorithm_cache.find(shape_key);
     if (cached != algorithm_cache.end()) {
       plan->algorithm = cached->second;
     } else {
+      std::array<hipblasLtMatmulHeuristicResult_t, 32> heuristics{};
       int solution_count = 0;
       if (failed(hipblasLtMatmulAlgoGetHeuristic(
               plan->handle, plan->operation, plan->a, plan->b, plan->c, plan->d,
-              preference, 1, &heuristic, &solution_count)) ||
-          solution_count != 1 || heuristic.state != HIPBLAS_STATUS_SUCCESS ||
+              preference, requested_solution_count, heuristics.data(),
+              &solution_count))) {
+        cleanup_preference();
+        destroy_fp8_lt_plan(plan.release());
+        return hipErrorNotSupported;
+      }
+      if (solution_count <= 0 ||
+          heuristic_rank >= static_cast<uint64_t>(solution_count)) {
+        cleanup_preference();
+        destroy_fp8_lt_plan(plan.release());
+        return rank_opt_in ? hipErrorInvalidValue : hipErrorNotSupported;
+      }
+      heuristic = heuristics[static_cast<std::size_t>(heuristic_rank)];
+      if (heuristic.state != HIPBLAS_STATUS_SUCCESS ||
           heuristic.workspaceSize != 0U) {
         cleanup_preference();
         destroy_fp8_lt_plan(plan.release());
         return hipErrorNotSupported;
       }
       plan->algorithm = heuristic.algo;
-      algorithm_cache.emplace(shape_key, heuristic.algo);
+      try {
+        algorithm_cache.emplace(shape_key, heuristic.algo);
+      } catch (...) {
+        cleanup_preference();
+        destroy_fp8_lt_plan(plan.release());
+        return hipErrorOutOfMemory;
+      }
     }
   }
   cleanup_preference();
@@ -3634,10 +4012,16 @@ hipError_t launch_fp8_lt_plan(Fp8LtPlan *const plan,
   }
   const float alpha = 1.0F;
   const float beta = 0.0F;
-  const hipblasStatus_t launch =
-      hipblasLtMatmul(plan->handle, plan->operation, &alpha, weight, plan->a,
-                      activation, plan->b, &beta, output, plan->c, output,
-                      plan->d, &plan->algorithm, nullptr, 0U, stream);
+  const void *const alpha_pointer =
+      plan->device_alpha ? static_cast<const void *>(plan->device_alpha_pointer)
+                         : static_cast<const void *>(&alpha);
+  const void *const beta_pointer =
+      plan->device_alpha ? static_cast<const void *>(plan->device_beta_pointer)
+                         : static_cast<const void *>(&beta);
+  const hipblasStatus_t launch = hipblasLtMatmul(
+      plan->handle, plan->operation, alpha_pointer, weight, plan->a, activation,
+      plan->b, beta_pointer, output, plan->c, output, plan->d, &plan->algorithm,
+      nullptr, 0U, stream);
   return launch == HIPBLAS_STATUS_SUCCESS ? hipSuccess : hipErrorUnknown;
 }
 #endif
@@ -3661,16 +4045,47 @@ void initialize_matmul_dispatch_info(
   // launch; re-running a selector here would make environment changes between
   // launch and reporting observable and could describe a different kernel.
   const auto variant = prepared_variant;
+  const bool fp8_id82_tuple =
+      variant == ::sllm_matmul_kernel::KernelVariant::
+                     Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
+      matches_runtime_gcn_arch(arch_name, "gfx1030") &&
+      ::sllm_matmul_kernel::fp8_outer_decode_gfx1030_lds_lut_tuple_shape(
+          metadata.m, metadata.k, metadata.n);
+  const bool nvfp4_split4 =
+      metadata.nvfp4_w4a4 &&
+      ((variant ==
+            ::sllm_matmul_kernel::KernelVariant::Nvfp4W4A4PrefillDp4a64x64 &&
+        matches_runtime_gcn_arch(arch_name, "gfx1030") &&
+        ::sllm_matmul_kernel::phase78_gfx1030_nvfp4_w4a4_split4_shape(
+            metadata.m, metadata.k, metadata.n)) ||
+       (variant == ::sllm_matmul_kernel::KernelVariant::
+                       Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+        matches_runtime_gcn_arch(arch_name, "gfx1201") &&
+        ::sllm_matmul_kernel::phase78_gfx1201_nvfp4_w4a4_split4_shape(
+            metadata.m, metadata.k, metadata.n)));
   info->dispatch_count =
-      metadata.fp8_outer || metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ||
+      nvfp4_split4 ? 3U
+      : variant == ::sllm_matmul_kernel::KernelVariant::
+                       Fp8OuterPrefillGfx1030F16Staging ||
+              variant == ::sllm_matmul_kernel::KernelVariant::
+                             Nvfp4W4A4PrefillGfx1201F16Staging
+          ? 5U
+      : variant == ::sllm_matmul_kernel::KernelVariant::
+                       Fp8OuterPrefillGfx1030F16TileStaging
+          ? 4U
+      // The three ID82 tuple symbols each enqueue one kernel; the tuple
+      // branch is explicit here so metadata remains one logical dispatch even
+      // though device_symbol_for_target reports a shape-specific code object.
+      : fp8_id82_tuple ? 2U
+      : metadata.fp8_outer || metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ||
               metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6 ||
               variant == ::sllm_matmul_kernel::KernelVariant::PrefillShortMixed
           ? 2U
           : 1U;
   info->kernel_id = static_cast<uint32_t>(variant);
   info->workgroup_size_x = ::sllm_matmul_kernel::workgroup_size_x(variant);
-  info->grid_size_x =
-      ::sllm_matmul_kernel::grid_size_x(variant, metadata.m, metadata.n);
+  info->grid_size_x = ::sllm_matmul_kernel::grid_size_x(variant, metadata.m,
+                                                        metadata.n, metadata.k);
   info->fallback_allowed = 0U;
   info->fallback_used = 0U;
   info->m = metadata.m;
@@ -3679,10 +4094,11 @@ void initialize_matmul_dispatch_info(
   info->output_elements = metadata.output_elements;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX,
-      ::sllm_matmul_kernel::logical_kernel_id(variant));
+      ::sllm_matmul_kernel::logical_kernel_id_for_target(variant, arch_name));
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX,
-      ::sllm_matmul_kernel::device_symbol(variant));
+      ::sllm_matmul_kernel::device_symbol_for_target(
+          variant, arch_name, metadata.m, metadata.k, metadata.n));
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -4347,6 +4763,24 @@ bool revoke_kv_append_commit(Completion *const completion) noexcept {
   return true;
 }
 
+/* Clear a dependency claim only after the dependent attention has reached a
+ * terminal outcome.  The append owner remains registry-pinned by its normal
+ * caller-owned handle while this pointer is installed; a missing or already
+ * changed claim is treated as an accounting failure by the caller. */
+bool clear_dependent_append_claim(Completion *const completion) noexcept {
+  if (completion == nullptr || completion->dependent_append == nullptr) {
+    return true;
+  }
+  Completion *const append = completion->dependent_append;
+  std::lock_guard<std::mutex> lock(append->state_mutex);
+  if (!append->kv_state_append || !append->dependent_attention_claimed) {
+    return false;
+  }
+  append->dependent_attention_claimed = false;
+  completion->dependent_append = nullptr;
+  return true;
+}
+
 bool clear_linear_attention_transition_locked(LinearAttentionState *const state,
                                               const uint64_t token,
                                               const bool publish) noexcept {
@@ -4458,7 +4892,9 @@ bool release_submission_references(Completion *const completion) noexcept {
   bool released = false;
   if (!sllm_public_runtime::FaultInjector::consume(
           sllm_public_runtime::FaultPoint::AccountingFailure)) {
-    if (completion->queue_fence) {
+    if (completion->graph_span) {
+      released = release_graph_span_active(completion);
+    } else if (completion->queue_fence) {
       released =
           sllm_public_runtime::AccountingState::release_queue_fence_active(
               completion->queue->accounting);
@@ -4523,12 +4959,24 @@ bool release_submission_references(Completion *const completion) noexcept {
                 completion->mlp_bundle_outputs[2]->accounting,
                 completion->mlp_bundle_activation->accounting);
       }
+    } else if (completion->qwen38_projection_pack2) {
+      released =
+          sllm_public_runtime::AccountingState::release_five_buffer_active(
+              completion->queue->accounting,
+              completion->qwen38_projection_pack2_activation->accounting,
+              completion->qwen38_projection_pack2_weights[0]->accounting,
+              completion->qwen38_projection_pack2_weights[1]->accounting,
+              completion->qwen38_projection_pack2_outputs[0]->accounting,
+              completion->qwen38_projection_pack2_outputs[1]->accounting);
     } else if (completion->matmul) {
       released = sllm_public_runtime::AccountingState::release_rmsnorm_active(
           completion->queue->accounting,
           completion->matmul_activation->accounting,
           completion->matmul_weight->accounting,
           completion->matmul_output->accounting);
+      if (released) {
+        released = release_matmul_f16_staging_workspace_reference(completion);
+      }
     } else if (completion->argmax) {
       released =
           sllm_public_runtime::AccountingState::release_two_buffer_active(
@@ -4592,6 +5040,10 @@ bool release_submission_references(Completion *const completion) noexcept {
   if (completion->mlp_bundle && completion->mlp_bundle_plan != nullptr) {
     completion->mlp_bundle_plan->in_flight = false;
   }
+  if (completion->qwen38_projection_pack2 &&
+      completion->qwen38_projection_pack2_plan != nullptr) {
+    completion->qwen38_projection_pack2_plan->in_flight = false;
+  }
   if (completion->matmul && completion->matmul_plan != nullptr) {
     completion->matmul_plan->in_flight = false;
   }
@@ -4618,7 +5070,9 @@ bool rollback_submission_references(Completion *const completion) noexcept {
   bool released = false;
   if (!sllm_public_runtime::FaultInjector::consume(
           sllm_public_runtime::FaultPoint::AccountingFailure)) {
-    if (completion->queue_fence) {
+    if (completion->graph_span) {
+      released = rollback_graph_span_completion(completion);
+    } else if (completion->queue_fence) {
       released = sllm_public_runtime::AccountingState::rollback_queue_fence(
           completion->context->accounting, completion->queue->accounting);
     } else if (completion->rmsnorm) {
@@ -4684,6 +5138,15 @@ bool rollback_submission_references(Completion *const completion) noexcept {
                 completion->mlp_bundle_outputs[2]->accounting,
                 completion->mlp_bundle_activation->accounting);
       }
+    } else if (completion->qwen38_projection_pack2) {
+      released =
+          sllm_public_runtime::AccountingState::rollback_five_buffer_submission(
+              completion->context->accounting, completion->queue->accounting,
+              completion->qwen38_projection_pack2_activation->accounting,
+              completion->qwen38_projection_pack2_weights[0]->accounting,
+              completion->qwen38_projection_pack2_weights[1]->accounting,
+              completion->qwen38_projection_pack2_outputs[0]->accounting,
+              completion->qwen38_projection_pack2_outputs[1]->accounting);
     } else if (completion->matmul) {
       released =
           sllm_public_runtime::AccountingState::rollback_rmsnorm_submission(
@@ -4691,6 +5154,9 @@ bool rollback_submission_references(Completion *const completion) noexcept {
               completion->matmul_activation->accounting,
               completion->matmul_weight->accounting,
               completion->matmul_output->accounting);
+      if (released) {
+        released = release_matmul_f16_staging_workspace_reference(completion);
+      }
     } else if (completion->argmax) {
       released =
           sllm_public_runtime::AccountingState::rollback_two_buffer_submission(
@@ -4764,6 +5230,10 @@ bool rollback_submission_references(Completion *const completion) noexcept {
     if (completion->mlp_bundle && completion->mlp_bundle_plan != nullptr) {
       completion->mlp_bundle_plan->in_flight = false;
     }
+    if (completion->qwen38_projection_pack2 &&
+        completion->qwen38_projection_pack2_plan != nullptr) {
+      completion->qwen38_projection_pack2_plan->in_flight = false;
+    }
     if (completion->matmul && completion->matmul_plan != nullptr) {
       completion->matmul_plan->in_flight = false;
     }
@@ -4792,7 +5262,9 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
   bool released = false;
   if (!sllm_public_runtime::FaultInjector::consume(
           sllm_public_runtime::FaultPoint::AccountingFailure)) {
-    if (completion->queue_fence) {
+    if (completion->graph_span) {
+      released = release_graph_span_completion(completion);
+    } else if (completion->queue_fence) {
       released =
           sllm_public_runtime::AccountingState::release_queue_fence_completion(
               completion->context->accounting, completion->queue->accounting);
@@ -4859,6 +5331,15 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
                 completion->mlp_bundle_outputs[2]->accounting,
                 completion->mlp_bundle_activation->accounting);
       }
+    } else if (completion->qwen38_projection_pack2) {
+      released =
+          sllm_public_runtime::AccountingState::release_five_buffer_completion(
+              completion->context->accounting, completion->queue->accounting,
+              completion->qwen38_projection_pack2_activation->accounting,
+              completion->qwen38_projection_pack2_weights[0]->accounting,
+              completion->qwen38_projection_pack2_weights[1]->accounting,
+              completion->qwen38_projection_pack2_outputs[0]->accounting,
+              completion->qwen38_projection_pack2_outputs[1]->accounting);
     } else if (completion->matmul) {
       released =
           sllm_public_runtime::AccountingState::release_rmsnorm_completion(
@@ -4866,6 +5347,9 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
               completion->matmul_activation->accounting,
               completion->matmul_weight->accounting,
               completion->matmul_output->accounting);
+      if (released) {
+        released = release_matmul_f16_staging_workspace_reference(completion);
+      }
     } else if (completion->argmax) {
       released =
           sllm_public_runtime::AccountingState::release_two_buffer_completion(
@@ -5003,6 +5487,17 @@ finalize_completion_semantic_failure(Completion *const completion,
         sink, SLLM_STATUS_INTERNAL_ERROR,
         "completion reference accounting failed; release is disabled");
   }
+  if (completion->causal_attention &&
+      !clear_dependent_append_claim(completion)) {
+    completion->terminal = true;
+    completion->success = false;
+    completion->safe_to_release = false;
+    completion->safety.quarantine();
+    completion->reference_accounting_failed = true;
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "causal attention dependency claim cleanup failed; graph quarantined");
+  }
   completion->semantic_failure_detail = detail;
   completion->terminal = true;
   completion->success = false;
@@ -5050,6 +5545,17 @@ finalize_completion_success(Completion *const completion,
         sink, SLLM_STATUS_INTERNAL_ERROR,
         "linear attention transition finalization failed; context poisoned");
   }
+  if (completion->causal_attention &&
+      !clear_dependent_append_claim(completion)) {
+    completion->terminal = true;
+    completion->success = false;
+    completion->safe_to_release = false;
+    completion->failure_status = hipErrorInvalidValue;
+    completion->safety.quarantine();
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "causal attention dependency claim cleanup failed; context poisoned");
+  }
   completion->terminal = true;
   completion->success = true;
   completion->safety.observe_positive_completion();
@@ -5081,6 +5587,13 @@ sllm_status_t poll_completion(Completion *const completion,
   if (completion->event == nullptr) {
     return SLLM_STATUS_PUBLIC_PENDING;
   }
+  /* A profiled append may finish its own event before the dependent
+   * attention.  Keep the append non-terminal until the chain owner has
+   * observed attention, so publication and cancellation cannot race the
+   * queued consumer. */
+  if (completion->kv_state_append && completion->dependent_attention_claimed) {
+    return SLLM_STATUS_PUBLIC_PENDING;
+  }
   hipError_t status = hipSuccess;
   if (sllm_public_runtime::FaultInjector::consume(
           sllm_public_runtime::FaultPoint::CompletionQueryPending)) {
@@ -5094,9 +5607,10 @@ sllm_status_t poll_completion(Completion *const completion,
   if (status == hipSuccess) {
     if (completion->rmsnorm || completion->elementwise || completion->matmul ||
         completion->gdn_bundle || completion->mlp_bundle ||
-        completion->argmax || completion->token_selector ||
-        completion->array_operation || completion->kv_state_append ||
-        completion->causal_attention || completion->linear_attention) {
+        completion->qwen38_projection_pack2 || completion->argmax ||
+        completion->token_selector || completion->array_operation ||
+        completion->kv_state_append || completion->causal_attention ||
+        completion->linear_attention) {
       if (completion->timing_start_event == nullptr) {
         completion->terminal = true;
         completion->success = false;
@@ -5210,6 +5724,10 @@ sllm_status_t cleanup_failed_submission(
     std::unique_ptr<Completion> &candidate, const uintptr_t token,
     const hipError_t primary_error, const char *const primary_operation,
     Queue *const queue, sllm_error_sink_t *const sink) noexcept {
+  if (candidate != nullptr && candidate->dependent_append != nullptr &&
+      !clear_dependent_append_claim(candidate.get())) {
+    candidate->context->poisoned.store(true);
+  }
   /* The caller never receives this token.  Consume it before any fallible
    * rollback so a failed submission can never leave an unreachable registry
    * entry. */
@@ -5431,6 +5949,10 @@ private:
 sllm_status_t rollback_unpublished_submission(
     std::unique_ptr<Completion> &candidate, NativeEventGuard &event_guard,
     const char *const primary_message, sllm_error_sink_t *const sink) noexcept {
+  if (candidate != nullptr && candidate->dependent_append != nullptr &&
+      !clear_dependent_append_claim(candidate.get())) {
+    candidate->context->poisoned.store(true);
+  }
   /* The event guard owns the native event until this function completes.  A
    * successful destroy consumes it; an ambiguous destroy transfers it to the
    * durable orphan owner and poisons the still-live Context.  Only after that
@@ -6448,12 +6970,23 @@ sllm_context_create(const sllm_context_create_info_t *const info,
     const char *const short_mixed_rocblas_solution_environment =
         std::getenv(::sllm_matmul_kernel::
                         kPhase49Gfx1030ShortMixedRocblasSolutionEnvironment);
+    const char *const fp8_f16_staging_environment = std::getenv(
+        ::sllm_matmul_kernel::kFp8OuterPrefillGfx1030F16StagingEnvironment);
+    const char *const nvfp4_f16_staging_environment = std::getenv(
+        ::sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201F16StagingEnvironment);
+    const bool create_nvfp4_f16_staging_rocblas =
+        matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201") &&
+        nvfp4_f16_staging_environment != nullptr &&
+        std::strcmp(nvfp4_f16_staging_environment, "1") == 0;
     const bool create_matmul_rocblas =
-        matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030") &&
-        ((rocblas_solution_environment == nullptr ||
-          std::strcmp(rocblas_solution_environment, "1") == 0) ||
-         (short_mixed_rocblas_solution_environment == nullptr ||
-          std::strcmp(short_mixed_rocblas_solution_environment, "1") == 0));
+        (matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030") &&
+         ((rocblas_solution_environment == nullptr ||
+           std::strcmp(rocblas_solution_environment, "1") == 0) ||
+          (short_mixed_rocblas_solution_environment == nullptr ||
+           std::strcmp(short_mixed_rocblas_solution_environment, "1") == 0) ||
+          (fp8_f16_staging_environment != nullptr &&
+           std::strcmp(fp8_f16_staging_environment, "1") == 0))) ||
+        create_nvfp4_f16_staging_rocblas;
     if (create_matmul_blas) {
       const hipblasStatus_t blas_status =
           hipblasCreate(&candidate->matmul_blas_handle);
@@ -6469,15 +7002,24 @@ sllm_context_create(const sllm_context_create_info_t *const info,
       if (create_status != rocblas_status_success) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
-            "rocBLAS handle creation failed for the gfx1030 matmul candidate");
+            "rocBLAS handle creation failed for the matmul candidate");
       }
       const rocblas_status pointer_mode_status = rocblas_set_pointer_mode(
           candidate->matmul_rocblas_handle, rocblas_pointer_mode_host);
       if (pointer_mode_status != rocblas_status_success) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
-            "rocBLAS host pointer mode failed for the gfx1030 matmul "
-            "candidate");
+            "rocBLAS host pointer mode failed for the matmul candidate");
+      }
+      if (create_nvfp4_f16_staging_rocblas) {
+        const rocblas_status atomics_status = rocblas_set_atomics_mode(
+            candidate->matmul_rocblas_handle, rocblas_atomics_not_allowed);
+        if (atomics_status != rocblas_status_success) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+              "rocBLAS atomics-not-allowed mode failed for the NVFP4 FP16 "
+              "staging candidate");
+        }
       }
     }
     if (create_matmul_lt) {
@@ -6754,6 +7296,12 @@ sllm_queue_release(sllm_queue_t **const raw_queue,
       }
       std::lock_guard<std::mutex> accounting_lock(
           queue->context->accounting_mutex);
+      if (queue->graph_pins != 0U ||
+          queue->graph_capture_active.load(std::memory_order_acquire)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "queue is owned by an active graph span");
+      }
       if (queue->context->poisoned.load()) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
@@ -7466,6 +8014,7 @@ sllm_queue_fence(const sllm_queue_t *const raw_queue,
           "queue fence input or output is null");
     }
     Queue *queue = nullptr;
+    uint64_t submission_serial = 0U;
     {
       std::lock_guard<std::mutex> registry_lock(registry_mutex);
       queue = lookup<Queue>(raw_queue, HandleKind::Queue);
@@ -7491,6 +8040,13 @@ sllm_queue_fence(const sllm_queue_t *const raw_queue,
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
             "queue fence accounting is exhausted");
       }
+      if (!next_queue_submission_serial(queue, &submission_serial)) {
+        (void)sllm_public_runtime::AccountingState::rollback_queue_fence(
+            queue->context->accounting, queue->accounting);
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "queue fence submission serial is exhausted");
+      }
     }
     const auto rollback = [queue, error_sink]() {
       std::lock_guard<std::mutex> lock(queue->context->accounting_mutex);
@@ -7514,6 +8070,7 @@ sllm_queue_fence(const sllm_queue_t *const raw_queue,
       candidate = std::make_unique<Completion>(
           queue->context, queue, nullptr, 0U, false, std::vector<uint8_t>{});
       candidate->queue_fence = true;
+      candidate->submission_serial = submission_serial;
     } catch (...) {
       (void)rollback();
       return sllm_public_runtime::write_error(
@@ -7610,10 +8167,14 @@ sllm_completion_finalize_after(sllm_completion_t *const raw_completion,
     std::scoped_lock state_locks(completion->state_mutex, fence->state_mutex);
     if (!fence->queue_fence || !fence->terminal || !fence->success ||
         !fence->safe_to_release || completion->context != fence->context ||
-        completion->queue != fence->queue) {
+        completion->queue != fence->queue ||
+        (completion->submission_serial != 0U &&
+         (fence->submission_serial == 0U ||
+          fence->submission_serial < completion->submission_serial))) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_PUBLIC_NOT_READY,
-          "completion fence is not a successful fence on the same queue");
+          "completion fence is stale or is not a successful fence on the same "
+          "queue");
     }
     if (completion->terminal || completion->event != nullptr ||
         completion->timing_start_event != nullptr || completion->queue_fence) {
@@ -7858,9 +8419,10 @@ sllm_completion_timing(sllm_completion_t *const raw_completion,
     }
     if (!completion->rmsnorm && !completion->elementwise &&
         !completion->matmul && !completion->gdn_bundle &&
-        !completion->mlp_bundle && !completion->argmax &&
-        !completion->array_operation && !completion->kv_state_append &&
-        !completion->causal_attention && !completion->linear_attention) {
+        !completion->mlp_bundle && !completion->qwen38_projection_pack2 &&
+        !completion->argmax && !completion->array_operation &&
+        !completion->kv_state_append && !completion->causal_attention &&
+        !completion->linear_attention) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_UNSUPPORTED,
           "completion timing is only available for numeric operations");
@@ -7922,6 +8484,12 @@ sllm_completion_release(sllm_completion_t **const raw_completion,
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_BUSY,
             "completion is pinned or release is already in progress");
+      }
+      if (completion->kv_state_append &&
+          completion->dependent_attention_claimed) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "KV append completion is claimed by dependent attention");
       }
       if (!completion->terminal && completion->kv_state_append &&
           !revoke_kv_append_commit(completion)) {
@@ -8269,10 +8837,10 @@ sllm_rmsnorm_plan_release(sllm_rmsnorm_plan_t **const raw_plan,
       }
       std::lock_guard<std::mutex> accounting_lock(
           plan->context->accounting_mutex);
-      if (plan->release_active) {
+      if (plan->release_active || plan->graph_pins != 0U) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_BUSY,
-            "RMSNorm plan release is already in progress");
+            "RMSNorm plan is releasing or owned by a graph span");
       }
       if (plan->in_flight) {
         return sllm_public_runtime::write_error(
@@ -8780,10 +9348,10 @@ extern "C" sllm_status_t sllm_residual_rmsnorm_plan_release(
       }
       std::lock_guard<std::mutex> accounting_lock(
           plan->context->accounting_mutex);
-      if (plan->release_active || plan->in_flight) {
+      if (plan->release_active || plan->in_flight || plan->graph_pins != 0U) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_BUSY,
-            "residual RMSNorm plan is busy");
+            "residual RMSNorm plan is busy or owned by a graph span");
       }
       plan->release_active = true;
       const bool accounting_released =
@@ -9278,10 +9846,10 @@ sllm_elementwise_plan_release(sllm_elementwise_plan_t **const raw_plan,
       }
       std::lock_guard<std::mutex> accounting_lock(
           plan->context->accounting_mutex);
-      if (plan->release_active) {
+      if (plan->release_active || plan->graph_pins != 0U) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_BUSY,
-            "elementwise plan release is already in progress");
+            "elementwise plan is releasing or owned by a graph span");
       }
       if (plan->in_flight) {
         return sllm_public_runtime::write_error(
@@ -9638,11 +10206,13 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
 #include "causal_attention_runtime.inc"
 #include "embedding_runtime.inc"
 #include "gdn_projection_bundle_runtime.inc"
+#include "graph_span_runtime.inc"
 #include "matmul_runtime.inc"
 #include "ministral3_yarn_runtime.inc"
 #include "mlp_gate_up_silu_bundle_runtime.inc"
 #include "moe_expert_runtime.inc"
 #include "moe_route_runtime.inc"
+#include "qwen38_projection_pack_runtime.inc"
 #include "rotary_runtime.inc"
 #include "token_selector_runtime.inc"
 #include "windowed_attention_runtime.inc"
@@ -10958,6 +11528,7 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
     Buffer *key_input = nullptr;
     Buffer *value_input = nullptr;
     uint64_t dispatch_id = 0U;
+    uint64_t submission_serial = 0U;
     {
       std::lock_guard<std::mutex> registry_lock(registry_mutex);
       state = lookup<KvState>(raw_state, HandleKind::KvState);
@@ -11066,6 +11637,15 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
             "KV append accounting reservation is exhausted");
+      }
+      if (!next_queue_submission_serial(queue, &submission_serial)) {
+        (void)sllm_public_runtime::AccountingState::rollback_kv_append(
+            state->context->accounting, queue->accounting, state->accounting,
+            key_input->accounting, value_input->accounting,
+            state->key_buffer->accounting, state->value_buffer->accounting);
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "KV append submission serial is exhausted");
       }
       state->transition_token = dispatch_id;
       state->transition_start = metadata.start_position;
@@ -11275,6 +11855,7 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
       candidate->kv_append_start = metadata.start_position;
       candidate->kv_append_count = metadata.token_count;
       candidate->kv_append_end = metadata.end_position;
+      candidate->submission_serial = submission_serial;
       execute_guard.candidate_allocated();
     } catch (...) {
       execute_guard.disarm();
@@ -11482,6 +12063,11 @@ sllm_kv_state_append_cancel(const sllm_kv_state_t *const raw_state,
           error_sink, SLLM_STATUS_PUBLIC_BUSY,
           "KV append completion is already terminal");
     }
+    if (completion->dependent_attention_claimed) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "KV append completion is claimed by dependent attention");
+    }
     if (!revoke_kv_append_commit(completion)) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INTERNAL_ERROR,
@@ -11542,5 +12128,22 @@ extern "C" uint32_t sllm_test_matmul_prepared_provider_semantics(
   *inner_product =
       static_cast<uint32_t>(plan->matmul_provider_plan->inner_product);
   return 1U;
+}
+
+extern "C" uint32_t sllm_test_select_fp8_lt_heuristic_rank_policy(
+    const char *const arch_name, const uint32_t fp8_dtype, const uint64_t m,
+    const uint64_t k, const uint64_t n, const char *const rank_environment,
+    uint64_t *const rank, uint32_t *const ranked_query,
+    uint32_t *const explicit_override) noexcept {
+  if (rank == nullptr || ranked_query == nullptr ||
+      explicit_override == nullptr) {
+    return 0U;
+  }
+  const Fp8LtHeuristicRankPolicy policy = select_fp8_lt_heuristic_rank_policy(
+      arch_name, fp8_dtype, m, k, n, rank_environment);
+  *rank = policy.rank;
+  *ranked_query = policy.ranked_query ? 1U : 0U;
+  *explicit_override = policy.explicit_override ? 1U : 0U;
+  return policy.valid ? 1U : 0U;
 }
 #endif

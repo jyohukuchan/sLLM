@@ -47,6 +47,18 @@ constexpr const char *kDecodeGqa4SplitP32LogicalKernelId =
     "causal_attention.decode.gqa4_tiled_split.p32.v1";
 constexpr const char *kDecodeGqa4SplitP32DeviceSymbol =
     "sllm_causal_attention_decode_gqa4_split_p32_v1";
+constexpr const char *kDecodeGqa6SplitP32LogicalKernelId =
+    "causal_attention.decode.gqa6_split_p32.fp16.v1";
+constexpr const char *kDecodeGqa6SplitP32DeviceSymbol =
+    "sllm_causal_attention_decode_gqa6_split_p32_v1";
+constexpr const char *kDecodeGqa6SplitP64LogicalKernelId =
+    "causal_attention.decode.gqa6_split_p64.fp16.v1";
+constexpr const char *kDecodeGqa6SplitP64DeviceSymbol =
+    "sllm_causal_attention_decode_gqa6_split_p64_v1";
+constexpr const char *kDecodeGqa6SplitP128LogicalKernelId =
+    "causal_attention.decode.gqa6_split_p128.fp16.v1";
+constexpr const char *kDecodeGqa6SplitP128DeviceSymbol =
+    "sllm_causal_attention_decode_gqa6_split_p128_v1";
 constexpr const char *kPrefillGqa4LogicalKernelId =
     "causal_attention.prefill.gqa4_shared.v6";
 constexpr const char *kPrefillGqa4DeviceSymbol =
@@ -55,6 +67,34 @@ constexpr const char *kPrefillGqa4QTile4LogicalKernelId =
     "causal_attention.prefill.gqa4_qtile4.v7";
 constexpr const char *kPrefillGqa4QTile4DeviceSymbol =
     "sllm_causal_attention_prefill_gqa4_qtile4_v7";
+constexpr const char *kPrefillGqa6QTile4LogicalKernelId =
+    "causal_attention.prefill.gqa6_qtile4.v1";
+constexpr const char *kPrefillGqa6QTile4DeviceSymbol =
+    "sllm_causal_attention_prefill_gqa6_qtile4_v1";
+constexpr const char *kPrefillGqa6QTile4K4Fp16LogicalKernelId =
+    "causal_attention.prefill.gqa6_qtile4_k4.fp16.v1";
+constexpr const char *kPrefillGqa6QTile4K4Fp16DeviceSymbol =
+    "sllm_causal_attention_prefill_gqa6_qtile4_k4_fp16_v1";
+constexpr const char *kPrefillGqa6QTile4K8Fp16LogicalKernelId =
+    "causal_attention.prefill.gqa6_qtile4_k8.fp16.v1";
+constexpr const char *kPrefillGqa6QTile4K8Fp16DeviceSymbol =
+    "sllm_causal_attention_prefill_gqa6_qtile4_k8_fp16_v1";
+constexpr const char *kPrefillGqa6QTile4K16Fp16LogicalKernelId =
+    "causal_attention.prefill.gqa6_qtile4_k16.fp16.v1";
+constexpr const char *kPrefillGqa6QTile4K16Fp16DeviceSymbol =
+    "sllm_causal_attention_prefill_gqa6_qtile4_k16_fp16_v1";
+constexpr const char *kPrefillGqa6QTile4K32Fp16LogicalKernelId =
+    "causal_attention.prefill.gqa6_qtile4_k32.fp16.v1";
+constexpr const char *kPrefillGqa6QTile4K32Fp16DeviceSymbol =
+    "sllm_causal_attention_prefill_gqa6_qtile4_k32_fp16_v1";
+constexpr const char *kPrefillGqa6BlockSoftmaxFp16LogicalKernelId =
+    "causal_attention.prefill.gqa6_blocksoftmax.fp16.v1";
+constexpr const char *kPrefillGqa6BlockSoftmaxFp16DeviceSymbol =
+    "sllm_causal_attention_prefill_gqa6_blocksoftmax_fp16_v1";
+constexpr const char *kPrefillGqa6BlockSoftmaxQ8Fp16LogicalKernelId =
+    "causal_attention.prefill.gqa6_blocksoftmax_q8.fp16.v1";
+constexpr const char *kPrefillGqa6BlockSoftmaxQ8Fp16DeviceSymbol =
+    "sllm_causal_attention_prefill_gqa6_blocksoftmax_q8_fp16_v1";
 constexpr const char *kPrefillTypedQ4K4LogicalKernelId =
     "causal_attention.prefill.typed_q4k4.v1";
 constexpr const char *kPrefillTypedQ4K4DeviceSymbol =
@@ -71,6 +111,18 @@ constexpr const char *kScaledPrefillGemmLogicalKernelId =
     "causal_attention.prefill.gfx1030_hipblas_scaled_fp16.v1";
 constexpr const char *kScaledPrefillGemmDeviceSymbol =
     "sllm_causal_attention_prefill_gfx1030_hipblas_scaled_fp16_v1";
+constexpr const char *kGqa6RocblasF32LogicalKernelId =
+    "causal_attention.prefill.gfx1030_rocblas_gqa6_f32.v1";
+constexpr const char *kGqa6RocblasF32DeviceSymbol =
+    "sllm_causal_attention_prefill_gfx1030_rocblas_gqa6_f32_v1";
+constexpr const char *kGfx1201Gqa6RocblasF32LogicalKernelId =
+    "causal_attention.prefill.gfx1201_rocblas_gqa6_f32.v1";
+constexpr const char *kGfx1201Gqa6RocblasF32DeviceSymbol =
+    "sllm_causal_attention_prefill_gfx1201_rocblas_gqa6_f32_v1";
+constexpr const char *kGfx1201Gqa6RocblasF16TailLogicalKernelId =
+    "causal_attention.prefill.gfx1201_rocblas_gqa6_f16_tail.v1";
+constexpr const char *kGfx1201Gqa6RocblasF16TailDeviceSymbol =
+    "sllm_causal_attention_prefill_gfx1201_rocblas_gqa6_f16_tail_v1";
 constexpr const char *kLongPrefillV2LogicalKernelId =
     "causal_attention.prefill.gfx1030_qtile8_split.v2";
 constexpr const char *kLongPrefillV2DeviceSymbol =
@@ -96,19 +148,46 @@ hipError_t launch_typed_prefill(
     float static_key_scale, float static_value_scale, PrefillTilePolicy policy,
     hipStream_t stream) noexcept;
 
-hipError_t launch(const uint16_t *query, const void *key, const void *value,
-                  const void *key_scales, const void *value_scales,
-                  const float *key_outer_scales,
-                  const float *value_outer_scales, uint16_t *output,
-                  uint32_t query_count, uint64_t capacity_tokens,
-                  uint64_t start_position, uint64_t committed_kv_length,
-                  uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim,
-                  uint32_t encoding, float static_key_scale,
-                  float static_value_scale, bool use_gfx1201_wave_provider,
-                  bool use_decode_wave_split,
-                  bool use_decode_wave_split_q_preload, bool use_prefill_gqa4,
-                  bool use_prefill_gqa4_qtile4, uint64_t sliding_window,
-                  float score_scale, hipStream_t stream) noexcept;
+hipError_t
+launch(const uint16_t *query, const void *key, const void *value,
+       const void *key_scales, const void *value_scales,
+       const float *key_outer_scales, const float *value_outer_scales,
+       uint16_t *output, uint32_t query_count, uint64_t capacity_tokens,
+       uint64_t start_position, uint64_t committed_kv_length, uint32_t q_heads,
+       uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
+       float static_key_scale, float static_value_scale,
+       bool use_gfx1201_wave_provider, bool use_decode_wave_split,
+       bool use_decode_wave_split_q_preload, bool use_prefill_gqa4,
+       bool use_prefill_gqa4_qtile4, bool use_prefill_gqa6_qtile4_k32_fp16,
+       uint64_t sliding_window, float score_scale, hipStream_t stream) noexcept;
+
+hipError_t
+launch_gqa6_qtile4_fp16(const uint16_t *query, const void *key,
+                        const void *value, const void *key_scales,
+                        const void *value_scales, const float *key_outer_scales,
+                        const float *value_outer_scales, uint16_t *output,
+                        uint32_t query_count, uint64_t start_position,
+                        uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim,
+                        float static_key_scale, float static_value_scale,
+                        uint32_t key_tile, hipStream_t stream) noexcept;
+
+hipError_t launch_gqa6_blocksoftmax_fp16(
+    const uint16_t *query, const void *key, const void *value,
+    const void *key_scales, const void *value_scales,
+    const float *key_outer_scales, const float *value_outer_scales,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim,
+    float static_key_scale, float static_value_scale, uint32_t key_tile,
+    hipStream_t stream) noexcept;
+
+hipError_t launch_gqa6_blocksoftmax_q8_fp16(
+    const uint16_t *query, const void *key, const void *value,
+    const void *key_scales, const void *value_scales,
+    const float *key_outer_scales, const float *value_outer_scales,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim,
+    float static_key_scale, float static_value_scale,
+    hipStream_t stream) noexcept;
 
 constexpr const char *kScaledStaticFp8LogicalKernelId =
     "causal_attention.scaled_static_fp8_gqa.v1";
@@ -124,6 +203,40 @@ hipError_t launch_scaled_prefill_gemm(
     uint32_t head_dim, uint32_t encoding, float static_key_scale,
     float static_value_scale, void *workspace, uint64_t workspace_bytes,
     void *blas_handle, void *blas_mutex, hipStream_t stream) noexcept;
+
+// Qwen3.8 GQA6 FP16-KV prefill feasibility provider for the gfx1030 and
+// gfx1201 literal opt-ins.  The caller owns the persistent rocBLAS handle/mutex
+// and a workspace of at least
+// gqa6_rocblas_f32_workspace_bytes(query_count, committed_kv_length).
+// Workspace layout is query F32 pack, interleaved K/V F32 staging, F32 scores,
+// and F32 PV.  This is intentionally force-only; callers retain qtile4/K32 as
+// the rollback path for every shape outside the exact contract.  gfx1201 uses
+// the separately audited dispatch ID 74 while gfx1030 keeps its original ID.
+uint64_t
+gqa6_rocblas_f32_workspace_bytes(uint32_t query_count,
+                                 uint64_t committed_kv_length) noexcept;
+
+hipError_t launch_gqa6_rocblas_f32(
+    const uint16_t *query, const void *key, const void *value, uint16_t *output,
+    uint32_t query_count, uint64_t start_position, uint64_t committed_kv_length,
+    uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
+    void *workspace, uint64_t workspace_bytes, void *blas_handle,
+    void *blas_mutex, hipStream_t stream) noexcept;
+
+// FP16-score tail variant for gfx1201.  The query is converted from resident
+// BF16 to FP16, QK/PV use FP32 rocBLAS accumulation, and only the score
+// matrix remains FP16.  It is intended solely for start_position>0 chunks;
+// the first self-context chunk stays on the ID74 F32-score provider.
+uint64_t
+gqa6_rocblas_f16_tail_workspace_bytes(uint32_t query_count,
+                                      uint64_t committed_kv_length) noexcept;
+
+hipError_t launch_gqa6_rocblas_f16_tail(
+    const uint16_t *query, const void *key, const void *value, uint16_t *output,
+    uint32_t query_count, uint64_t start_position, uint64_t committed_kv_length,
+    uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
+    void *workspace, uint64_t workspace_bytes, void *blas_handle,
+    void *blas_mutex, hipStream_t stream) noexcept;
 
 hipError_t launch_long_prefill_v2(
     const uint16_t *query, const void *key, const void *value, uint16_t *output,
@@ -151,6 +264,36 @@ hipError_t launch_decode_gqa4_split(
     hipStream_t stream) noexcept;
 
 hipError_t launch_decode_gqa4_split_p32(
+    const uint16_t *query, const void *key, const void *value,
+    const void *key_scales, const void *value_scales,
+    const float *key_outer_scales, const float *value_outer_scales,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, uint32_t encoding, float static_key_scale,
+    float static_value_scale, void *workspace, uint64_t workspace_bytes,
+    hipStream_t stream) noexcept;
+
+hipError_t launch_decode_gqa6_split_p32(
+    const uint16_t *query, const void *key, const void *value,
+    const void *key_scales, const void *value_scales,
+    const float *key_outer_scales, const float *value_outer_scales,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, uint32_t encoding, float static_key_scale,
+    float static_value_scale, void *workspace, uint64_t workspace_bytes,
+    hipStream_t stream) noexcept;
+
+hipError_t launch_decode_gqa6_split_p64(
+    const uint16_t *query, const void *key, const void *value,
+    const void *key_scales, const void *value_scales,
+    const float *key_outer_scales, const float *value_outer_scales,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, uint32_t encoding, float static_key_scale,
+    float static_value_scale, void *workspace, uint64_t workspace_bytes,
+    hipStream_t stream) noexcept;
+
+hipError_t launch_decode_gqa6_split_p128(
     const uint16_t *query, const void *key, const void *value,
     const void *key_scales, const void *value_scales,
     const float *key_outer_scales, const float *value_outer_scales,

@@ -37,6 +37,9 @@ decode、KV、他formatは変更していない。Phase 75ではexact gfx1030の
 この計画はユーザー指示によりPhase番号と順序を割り当てる。Phase 36以前の完了条件を遡及変更せず、
 角括弧で将来項目だったResponses APIとWebUIも後続Phaseへ割り当てる。各Phaseのcorrectness/security条件は必須とする。
 性能値は採用判断と再計画に用いる目標であり、数値未達を隠すために比較条件やモデルを変更しない。
+2026-09-03のユーザー指示により、Phase 76〜79はexact Unsloth Qwen3.8-27B混合NVFP4のsingle-request実用化、
+Phase 80は他精度の残り、Phase 81はNVFP4 batchingとする。詳細は
+[Phase 76〜81計画](../../09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)へ分離する。
 
 ## 正本と基準値
 
@@ -109,6 +112,12 @@ decode、KV、他formatは変更していない。Phase 75ではexact gfx1030の
 | 73 | complete-user-directed | gfx1201 MXFP8 wide-N selector | N<=32768 host／provider contract、追加GPU検証なし |
 | 74 | complete-two-target-scoped-adoption | MXFP6 prefillのllama.cpp比較→実装→benchmarkを3回完了 | gfx1030 ID47／gfx1201 ID48採用、quantizer候補棄却、4B／27B PASS |
 | 75 | completed | gfx1030 MXFP8先行・MXFP6共通half2最適化 | ID55／57限定採用、4B／27B結果整理完了 |
+| 76 | complete-both-targets-r9700-single-visible | exact Unsloth Qwen3.8-27B混合NVFP4 artifact統合、correctness、baseline／profile | pinned artifact、text-only target path、V620/R9700 actual smoke PASS |
+| 77 | complete-functional-speed-carried-to-78 | single-request decode専用経路 | NVFP4 W4A4／FP8 W8A8の両target M=1 dispatchはPASS。whole-model decode速度残差はPhase 78 hard gateへ統合 |
+| 78 | in-progress-speed-gate | single-request最適化 | 実装前にlocal RDNA対応forkの有無を確定し、該当なしなら固定llama.cpp＋operator roofline／vendor provider比較で計画改訂する。correctness／dispatchはPASS済みで、llama.cpp system-equivalent以上のprefillと理論メモリ帯域50%相当のtarget-only decodeを両targetで満たすまで未完了 |
+| 79 | planned | static FP8 KV、MTP、文章生成実用closeout | Phase 76〜78、target-only基準 |
+| 80 | planned | 他精度の未最適化経路を一巡 | Phase 79完了 |
+| 81 | planned | NVFP4 GPU batching最適化 | Phase 79のsingle-request基準、Phase 80完了 |
 
 直近の性能laneの番号上の既定順はPhase 49→50→51→52である。Phase 49の3候補判定と採用経路の退行確認、Phase 50のR9700採否と
 MI300X wave64引継ぎ準備は完了した。Phase 51は一時保留中にR9700限定のPhase 52を先に完了し、2026-08-25のユーザー指示で再開して完了した。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
@@ -116,7 +125,8 @@ MI300X wave64引継ぎ準備は完了した。Phase 51は一時保留中にR9700
 Phase 53のdescriptor v1／v2評価とPhase 54の改善研究は当時の証拠として完了済みである。2026-08-30のユーザー決定により
 block16製品経路は廃止し、両local targetを含むreviewed Qwen3.5-4B BF16 dense textの省略時KVをstandard OCP
 `kv-mxfp8-e4`へ変更した。gfx942のfresh実機証拠は追加のMI300X検証項目がまとまった時点の一括実行候補へ延期する。
-Phase 55〜75は完了済みである。次のlow-precision候補は未計画の独立NVFP4 specializationとする。
+Phase 55〜75は完了済みである。次はPhase 76〜79でQwen3.8-27B混合NVFP4をsingle-requestで実用化し、
+Phase 80で他精度を一巡した後、Phase 81でNVFP4 batchingへ進む。
 Phase 47〜48は内容と番号を保持する。
 
 複数surfaceへ現れる機能の所有権は一つに固定する。Phase 39はresumable transport/replay、Phase 40はsamplerと`n` choice

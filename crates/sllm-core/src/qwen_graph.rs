@@ -13,8 +13,8 @@ use crate::model::{
     TensorDescriptor, reviewed_qwen35_spec,
 };
 use crate::op::{
-    AttentionPreprocessPositionPayloadModeV1, OpError, RmsNormScaleMode, SemanticOpDescriptor,
-    SemanticOpKind, SparseMoeContract,
+    AttentionPreprocessPositionPayloadModeV1, OpError, Qwen38ProjectionPackContractV1,
+    RmsNormScaleMode, SemanticOpDescriptor, SemanticOpKind, SparseMoeContract,
 };
 use crate::qwen35_moe::{
     QWEN35_MOE_LAYER_BLOB_BYTES, QWEN35_MOE_MODEL_FINGERPRINT, VerifiedGgufQwen35Moe,
@@ -28,6 +28,7 @@ use crate::weights::{
 use crate::{DType, Encoding, TensorError, TensorView};
 use crate::{
     Fp8ResidentRepresentation, Fp8ScaleGranularity, VerifiedFp8Sidecar, VerifiedGgufWeightSource,
+    VerifiedUnslothQwen38Nvfp4,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -444,6 +445,132 @@ impl QwenGraphWeightBinding {
     }
 }
 
+/// Metadata-only projection groups whose members can consume one dynamically
+/// packed activation.  This planner contract is deliberately separate from
+/// semantic-op fusion: it neither removes graph nodes nor changes lowering.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Qwen38ProjectionPackKind {
+    Nvfp4MlpGateUp,
+    Fp8MlpGateUp,
+    Fp8FullAttentionQkv,
+    Fp8GdnQkvZ,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Qwen38ProjectionPackVariant {
+    /// One block-16 E2M1 activation pack with the exact stored reciprocal
+    /// input-global scale shared by every projection in the group.
+    Nvfp4W4A4 { input_global_scale_f32_bits: u32 },
+    /// One dynamically quantized OCP E4M3FN per-token activation pack shared
+    /// by FP8 projections with outer-dimension FP32 resident weight scales.
+    Fp8W8A8DynamicPerTokenE4M3Fn,
+}
+
+impl Qwen38ProjectionPackVariant {
+    pub const fn input_global_scale_f32_bits(self) -> Option<u32> {
+        match self {
+            Self::Nvfp4W4A4 {
+                input_global_scale_f32_bits,
+            } => Some(input_global_scale_f32_bits),
+            Self::Fp8W8A8DynamicPerTokenE4M3Fn => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Qwen38ProjectionPackMember {
+    node_index: usize,
+    consumer: WeightConsumerKey,
+    weight_tensor_id: usize,
+    output_tensor_id: usize,
+}
+
+impl Qwen38ProjectionPackMember {
+    pub const fn node_index(&self) -> usize {
+        self.node_index
+    }
+
+    pub const fn consumer(&self) -> WeightConsumerKey {
+        self.consumer
+    }
+
+    pub const fn weight_tensor_id(&self) -> usize {
+        self.weight_tensor_id
+    }
+
+    pub const fn output_tensor_id(&self) -> usize {
+        self.output_tensor_id
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Qwen38ProjectionPack {
+    kind: Qwen38ProjectionPackKind,
+    layer: u32,
+    activation_tensor_id: usize,
+    activation_view: TensorView,
+    variant: Qwen38ProjectionPackVariant,
+    members: Vec<Qwen38ProjectionPackMember>,
+}
+
+impl Qwen38ProjectionPack {
+    pub const fn kind(&self) -> Qwen38ProjectionPackKind {
+        self.kind
+    }
+
+    pub const fn layer(&self) -> u32 {
+        self.layer
+    }
+
+    pub const fn activation_tensor_id(&self) -> usize {
+        self.activation_tensor_id
+    }
+
+    pub fn activation_view(&self) -> &TensorView {
+        &self.activation_view
+    }
+
+    pub const fn variant(&self) -> Qwen38ProjectionPackVariant {
+        self.variant
+    }
+
+    pub fn members(&self) -> &[Qwen38ProjectionPackMember] {
+        &self.members
+    }
+}
+
+pub const QWEN38_PROJECTION_PACK_REUSE_SCHEMA_V1: &str = "qwen38-projection-pack-reuse-plan-v1";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Qwen38ProjectionPackReusePlan {
+    recipe_digest: String,
+    packs: Vec<Qwen38ProjectionPack>,
+}
+
+/// Request-local lowering scope for a verified projection-pack plan.  Keeping
+/// this crate-private prevents the first pair-only rollout from becoming a
+/// general public fusion ABI before the native implementations exist.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Qwen38ProjectionPackLoweringScope {
+    Nvfp4MlpGateUpOnly,
+    Fp8GdnQkvZOnly,
+    Nvfp4MlpGateUpAndFp8GdnQkvZ,
+}
+
+impl Qwen38ProjectionPackReusePlan {
+    pub const fn schema_version(&self) -> &'static str {
+        QWEN38_PROJECTION_PACK_REUSE_SCHEMA_V1
+    }
+
+    pub fn recipe_digest(&self) -> &str {
+        &self.recipe_digest
+    }
+
+    pub fn packs(&self) -> &[Qwen38ProjectionPack] {
+        &self.packs
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QwenGraph {
     model_fingerprint: String,
@@ -553,6 +680,591 @@ impl QwenGraph {
         Err(QwenGraphDispatchError::UnknownWeight(
             tensor_name.to_owned(),
         ))
+    }
+
+    /// Detect projection groups in the exact Unsloth Qwen3.8-27B NVFP4
+    /// graph that may reuse one dynamically packed activation.  The returned
+    /// plan is metadata only: graph nodes, tensor ownership, operation
+    /// descriptors, and lowering remain byte-for-byte unchanged.
+    ///
+    /// Unrelated Qwen graphs return `Ok(None)`. Once the exact model and
+    /// recipe identities match, any structural, encoding, or scale mismatch
+    /// is an error rather than a partially usable plan.
+    pub fn plan_unsloth_qwen38_projection_pack_reuse(
+        &self,
+        artifact: &VerifiedUnslothQwen38Nvfp4,
+    ) -> Result<Option<Qwen38ProjectionPackReusePlan>, QwenGraphError> {
+        if artifact.repository() != crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY
+            || artifact.resolved_revision() != crate::UNSLOTH_QWEN38_NVFP4_REVISION
+            || artifact.recipe().schema_version != "sllm-qwen38-mixed-precision-recipe-v1"
+        {
+            return Ok(None);
+        }
+        self.plan_qwen38_projection_pack_reuse_with(artifact.recipe_digest(), |logical_name| {
+            artifact.nvfp4_input_global_scale_f32_bits(logical_name)
+        })
+    }
+
+    fn plan_qwen38_projection_pack_reuse_with<F>(
+        &self,
+        recipe_digest: &str,
+        mut nvfp4_input_scale_bits: F,
+    ) -> Result<Option<Qwen38ProjectionPackReusePlan>, QwenGraphError>
+    where
+        F: FnMut(&str) -> Option<u32>,
+    {
+        if self.model_fingerprint != crate::model::QWEN35_27B_FINGERPRINT
+            || self.fp8_sidecar_fingerprint.as_deref() != Some(recipe_digest)
+            || self.mtp
+            || self.multimodal
+        {
+            return Ok(None);
+        }
+        if self.layer_types.len() != 64
+            || self.layer_types.iter().enumerate().any(|(layer, &actual)| {
+                let expected = if (layer + 1) % 4 == 0 {
+                    LayerType::FullAttention
+                } else {
+                    LayerType::LinearAttention
+                };
+                actual != expected
+            })
+            || self.weight_bindings.len() != 851
+        {
+            return Err(QwenGraphError::InvalidPlan(
+                "Qwen3.8 projection-pack graph topology differs".to_owned(),
+            ));
+        }
+
+        let mut packs = Vec::with_capacity(128);
+        for layer in 0..64_u32 {
+            let (kind, expected_dtype, expected_encoding) = if layer < 56 {
+                (
+                    Qwen38ProjectionPackKind::Nvfp4MlpGateUp,
+                    DType::U8,
+                    Encoding::Nvfp4W4A4 {
+                        block_size: 16,
+                        scale_dtype: DType::F8E4M3Fn,
+                    },
+                )
+            } else {
+                (
+                    Qwen38ProjectionPackKind::Fp8MlpGateUp,
+                    DType::F8E4M3Fn,
+                    qwen38_fp8_projection_encoding(),
+                )
+            };
+            packs.push(self.build_qwen38_projection_pack(
+                layer,
+                kind,
+                &[WeightConsumer::MlpGate, WeightConsumer::MlpUp],
+                expected_dtype,
+                expected_encoding,
+                &mut nvfp4_input_scale_bits,
+            )?);
+
+            if (layer + 1) % 4 == 0 {
+                packs.push(self.build_qwen38_projection_pack(
+                    layer,
+                    Qwen38ProjectionPackKind::Fp8FullAttentionQkv,
+                    &[
+                        WeightConsumer::AttentionQ,
+                        WeightConsumer::AttentionK,
+                        WeightConsumer::AttentionV,
+                    ],
+                    DType::F8E4M3Fn,
+                    qwen38_fp8_projection_encoding(),
+                    &mut nvfp4_input_scale_bits,
+                )?);
+            } else {
+                packs.push(self.build_qwen38_projection_pack(
+                    layer,
+                    Qwen38ProjectionPackKind::Fp8GdnQkvZ,
+                    &[WeightConsumer::GdnInProjQkv, WeightConsumer::GdnInProjZ],
+                    DType::F8E4M3Fn,
+                    qwen38_fp8_projection_encoding(),
+                    &mut nvfp4_input_scale_bits,
+                )?);
+            }
+        }
+
+        let counts = packs.iter().fold([0_usize; 4], |mut counts, pack| {
+            let index = match pack.kind {
+                Qwen38ProjectionPackKind::Nvfp4MlpGateUp => 0,
+                Qwen38ProjectionPackKind::Fp8MlpGateUp => 1,
+                Qwen38ProjectionPackKind::Fp8FullAttentionQkv => 2,
+                Qwen38ProjectionPackKind::Fp8GdnQkvZ => 3,
+            };
+            counts[index] += 1;
+            counts
+        });
+        if counts != [56, 8, 16, 48] {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "Qwen3.8 projection-pack counts differ: {counts:?}"
+            )));
+        }
+        Ok(Some(Qwen38ProjectionPackReusePlan {
+            recipe_digest: recipe_digest.to_owned(),
+            packs,
+        }))
+    }
+
+    fn build_qwen38_projection_pack<F>(
+        &self,
+        layer: u32,
+        kind: Qwen38ProjectionPackKind,
+        roles: &[WeightConsumer],
+        expected_weight_dtype: DType,
+        expected_weight_encoding: Encoding,
+        nvfp4_input_scale_bits: &mut F,
+    ) -> Result<Qwen38ProjectionPack, QwenGraphError>
+    where
+        F: FnMut(&str) -> Option<u32>,
+    {
+        let mut members = Vec::with_capacity(roles.len());
+        let mut activation_tensor_id = None;
+        let mut activation_view = None;
+        let mut input_global_scale_f32_bits = None;
+
+        for &role in roles {
+            let consumer = key(layer, role);
+            let (node_index, node) = self.qwen38_projection_node(consumer)?;
+            let activation_id = node.inputs[0];
+            let weight_id = node.inputs[1];
+            let output_id = node.outputs[0];
+            let activation = self.tensors.get(activation_id).ok_or_else(|| {
+                QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 projection activation is absent: {consumer:?}"
+                ))
+            })?;
+            let weight = self.tensors.get(weight_id).ok_or_else(|| {
+                QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 projection weight is absent: {consumer:?}"
+                ))
+            })?;
+            let output = self.tensors.get(output_id).ok_or_else(|| {
+                QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 projection output is absent: {consumer:?}"
+                ))
+            })?;
+            let operation = node.operation.as_ref().ok_or_else(|| {
+                QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 projection operation is absent: {consumer:?}"
+                ))
+            })?;
+            if operation.kind() != SemanticOpKind::Matmul
+                || operation.inputs().len() != 2
+                || operation.outputs().len() != 1
+                || operation.inputs()[0] != activation.view
+                || operation.inputs()[1] != weight.view
+                || operation.outputs()[0] != output.view
+            {
+                return Err(QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 projection operation/view differs: {consumer:?}"
+                )));
+            }
+            if activation.view.dtype() != DType::Bf16
+                || activation.view.encoding() != Encoding::Unquantized
+                || activation.view.shape() != [self.token_count as usize, 5120]
+                || weight.view.dtype() != expected_weight_dtype
+                || weight.view.encoding() != expected_weight_encoding
+            {
+                return Err(QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 projection encoding or activation view differs: {consumer:?}"
+                )));
+            }
+            if let Some(expected_id) = activation_tensor_id {
+                if activation_id != expected_id
+                    || activation_view.as_ref() != Some(&activation.view)
+                {
+                    return Err(QwenGraphError::InvalidPlan(format!(
+                        "Qwen3.8 projection pack does not share one activation/view: layer {layer}"
+                    )));
+                }
+            } else {
+                activation_tensor_id = Some(activation_id);
+                activation_view = Some(activation.view.clone());
+            }
+
+            if kind == Qwen38ProjectionPackKind::Nvfp4MlpGateUp {
+                let bits = nvfp4_input_scale_bits(weight.name()).ok_or_else(|| {
+                    QwenGraphError::InvalidPlan(format!(
+                        "Qwen3.8 NVFP4 input-global scale is absent: {}",
+                        weight.name()
+                    ))
+                })?;
+                let scale = f32::from_bits(bits);
+                if !scale.is_finite() || scale <= 0.0 {
+                    return Err(QwenGraphError::InvalidPlan(format!(
+                        "Qwen3.8 NVFP4 input-global scale is invalid: {}",
+                        weight.name()
+                    )));
+                }
+                if input_global_scale_f32_bits.is_some_and(|expected| expected != bits) {
+                    return Err(QwenGraphError::InvalidPlan(format!(
+                        "Qwen3.8 NVFP4 projection pack input-global scales differ: layer {layer}"
+                    )));
+                }
+                input_global_scale_f32_bits = Some(bits);
+            }
+            members.push(Qwen38ProjectionPackMember {
+                node_index,
+                consumer,
+                weight_tensor_id: weight_id,
+                output_tensor_id: output_id,
+            });
+        }
+
+        let variant = match kind {
+            Qwen38ProjectionPackKind::Nvfp4MlpGateUp => Qwen38ProjectionPackVariant::Nvfp4W4A4 {
+                input_global_scale_f32_bits: input_global_scale_f32_bits.ok_or_else(|| {
+                    QwenGraphError::InvalidPlan(
+                        "Qwen3.8 NVFP4 projection pack has no input-global scale".to_owned(),
+                    )
+                })?,
+            },
+            Qwen38ProjectionPackKind::Fp8MlpGateUp
+            | Qwen38ProjectionPackKind::Fp8FullAttentionQkv
+            | Qwen38ProjectionPackKind::Fp8GdnQkvZ => {
+                Qwen38ProjectionPackVariant::Fp8W8A8DynamicPerTokenE4M3Fn
+            }
+        };
+        Ok(Qwen38ProjectionPack {
+            kind,
+            layer,
+            activation_tensor_id: activation_tensor_id.ok_or_else(|| {
+                QwenGraphError::InvalidPlan("Qwen3.8 projection pack is empty".to_owned())
+            })?,
+            activation_view: activation_view.ok_or_else(|| {
+                QwenGraphError::InvalidPlan("Qwen3.8 projection pack has no view".to_owned())
+            })?,
+            variant,
+            members,
+        })
+    }
+
+    fn qwen38_projection_node(
+        &self,
+        consumer: WeightConsumerKey,
+    ) -> Result<(usize, &QwenGraphNode), QwenGraphError> {
+        let mut matches = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.weights.contains(&consumer));
+        let (node_index, node) = matches.next().ok_or_else(|| {
+            QwenGraphError::InvalidPlan(format!("Qwen3.8 projection node is absent: {consumer:?}"))
+        })?;
+        if matches.next().is_some()
+            || node.weights.as_slice() != [consumer]
+            || node.kind != QwenGraphNodeKind::Semantic(SemanticOpKind::Matmul)
+            || node.inputs.len() != 2
+            || node.outputs.len() != 1
+        {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "Qwen3.8 projection node role/arity differs: {consumer:?}"
+            )));
+        }
+        let binding = self
+            .weight_bindings
+            .iter()
+            .find(|binding| binding.consumer == consumer)
+            .ok_or_else(|| {
+                QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 projection binding is absent: {consumer:?}"
+                ))
+            })?;
+        let weight = self.tensors.get(node.inputs[1]).ok_or_else(|| {
+            QwenGraphError::InvalidPlan(format!(
+                "Qwen3.8 projection weight tensor is absent: {consumer:?}"
+            ))
+        })?;
+        if weight.name != binding.tensor_name {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "Qwen3.8 projection node role is bound to the wrong weight: {consumer:?}"
+            )));
+        }
+        Ok((node_index, node))
+    }
+
+    /// Rewrites the selected members of a freshly verified Qwen3.8
+    /// projection-pack plan into fixed semantic nodes.  Tensor allocation and
+    /// output identity are unchanged. NVFP4 gate/up and FP8 GDN qkv/z may be
+    /// selected together so callers can verify the plan once and lower both
+    /// disjoint scopes without re-indexing a stale plan between passes.
+    pub(crate) fn with_qwen38_projection_pack_reuse(
+        &self,
+        plan: &Qwen38ProjectionPackReusePlan,
+        scope: Qwen38ProjectionPackLoweringScope,
+    ) -> Result<Self, QwenGraphError> {
+        if self.model_fingerprint != crate::model::QWEN35_27B_FINGERPRINT
+            || self.fp8_sidecar_fingerprint.as_deref() != Some(plan.recipe_digest())
+            || self.mtp
+            || self.multimodal
+        {
+            return Err(QwenGraphError::InvalidPlan(
+                "Qwen3.8 projection-pack plan identity differs from the request graph".to_owned(),
+            ));
+        }
+
+        let selected = plan
+            .packs()
+            .iter()
+            .filter(|pack| {
+                matches!(
+                    (scope, pack.kind()),
+                    (
+                        Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpOnly,
+                        Qwen38ProjectionPackKind::Nvfp4MlpGateUp
+                    ) | (
+                        Qwen38ProjectionPackLoweringScope::Fp8GdnQkvZOnly,
+                        Qwen38ProjectionPackKind::Fp8GdnQkvZ
+                    ) | (
+                        Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpAndFp8GdnQkvZ,
+                        Qwen38ProjectionPackKind::Nvfp4MlpGateUp
+                            | Qwen38ProjectionPackKind::Fp8GdnQkvZ
+                    )
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected_counts = match scope {
+            Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpOnly => {
+                BTreeMap::from([(Qwen38ProjectionPackKind::Nvfp4MlpGateUp, 56_usize)])
+            }
+            Qwen38ProjectionPackLoweringScope::Fp8GdnQkvZOnly => {
+                BTreeMap::from([(Qwen38ProjectionPackKind::Fp8GdnQkvZ, 48_usize)])
+            }
+            Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpAndFp8GdnQkvZ => BTreeMap::from([
+                (Qwen38ProjectionPackKind::Nvfp4MlpGateUp, 56_usize),
+                (Qwen38ProjectionPackKind::Fp8GdnQkvZ, 48_usize),
+            ]),
+        };
+        let actual_counts = selected.iter().fold(BTreeMap::new(), |mut counts, pack| {
+            *counts.entry(pack.kind()).or_insert(0_usize) += 1;
+            counts
+        });
+        if actual_counts != expected_counts {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "Qwen3.8 projection-pack lowering counts differ: expected {expected_counts:?}, got {actual_counts:?}"
+            )));
+        }
+        for (kind, expected_count) in expected_counts {
+            let expected_layers = match kind {
+                Qwen38ProjectionPackKind::Nvfp4MlpGateUp => (0..56_u32).collect::<BTreeSet<_>>(),
+                Qwen38ProjectionPackKind::Fp8GdnQkvZ => (0..64_u32)
+                    .filter(|layer| (layer + 1) % 4 != 0)
+                    .collect::<BTreeSet<_>>(),
+                _ => unreachable!("only pair scopes are lowerable"),
+            };
+            let actual_layers = selected
+                .iter()
+                .filter(|pack| pack.kind() == kind)
+                .map(|pack| pack.layer())
+                .collect::<BTreeSet<_>>();
+            if actual_layers != expected_layers || actual_layers.len() != expected_count {
+                return Err(QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 projection-pack lowering expected {expected_count} unique {kind:?} layers, got {}",
+                    actual_layers.len()
+                )));
+            }
+        }
+
+        let mut packs_by_first_node = BTreeMap::new();
+        let mut selected_nodes = BTreeSet::new();
+        for pack in selected {
+            let members = pack.members();
+            let expected_roles = match pack.kind() {
+                Qwen38ProjectionPackKind::Nvfp4MlpGateUp => {
+                    [WeightConsumer::MlpGate, WeightConsumer::MlpUp]
+                }
+                Qwen38ProjectionPackKind::Fp8GdnQkvZ => {
+                    [WeightConsumer::GdnInProjQkv, WeightConsumer::GdnInProjZ]
+                }
+                _ => {
+                    return Err(QwenGraphError::InvalidPlan(
+                        "Qwen3.8 projection-pack lowering selected an unsupported pack kind"
+                            .to_owned(),
+                    ));
+                }
+            };
+            if members.len() != 2
+                || members[0].consumer().layer != Some(u64::from(pack.layer()))
+                || members[0].consumer().role != expected_roles[0]
+                || members[1].consumer().layer != Some(u64::from(pack.layer()))
+                || members[1].consumer().role != expected_roles[1]
+                || members[1].node_index() != members[0].node_index().saturating_add(1)
+            {
+                return Err(QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 {:?} projection-pack member topology differs: layer {}",
+                    pack.kind(),
+                    pack.layer()
+                )));
+            }
+            let first = members[0].node_index();
+            let second = members[1].node_index();
+            if second >= self.nodes.len()
+                || !selected_nodes.insert(first)
+                || !selected_nodes.insert(second)
+                || packs_by_first_node.insert(first, pack).is_some()
+            {
+                return Err(QwenGraphError::InvalidPlan(
+                    "Qwen3.8 NVFP4 projection-pack members overlap or are absent".to_owned(),
+                ));
+            }
+            let gate = &self.nodes[first];
+            let up = &self.nodes[second];
+            for (node, member) in [(gate, &members[0]), (up, &members[1])] {
+                let operation = node.operation.as_ref().ok_or_else(|| {
+                    QwenGraphError::InvalidPlan(
+                        "Qwen3.8 NVFP4 projection-pack member operation is absent".to_owned(),
+                    )
+                })?;
+                if node.kind != QwenGraphNodeKind::Semantic(SemanticOpKind::Matmul)
+                    || operation.kind() != SemanticOpKind::Matmul
+                    || node.inputs.as_slice()
+                        != [pack.activation_tensor_id(), member.weight_tensor_id()]
+                    || node.outputs.as_slice() != [member.output_tensor_id()]
+                    || operation.inputs()[0] != pack.activation_view().clone()
+                    || operation.inputs()[1] != self.tensors[member.weight_tensor_id()].view
+                    || operation.outputs()[0] != self.tensors[member.output_tensor_id()].view
+                {
+                    return Err(QwenGraphError::InvalidPlan(format!(
+                        "Qwen3.8 NVFP4 projection-pack member differs from the verified plan: layer {}",
+                        pack.layer()
+                    )));
+                }
+            }
+        }
+
+        let mut lowered = Vec::with_capacity(self.nodes.len() - selected_nodes.len() / 2);
+        let mut old_to_new = vec![None; self.nodes.len()];
+        let mut cursor = 0usize;
+        let mut pack_count = 0usize;
+        while cursor < self.nodes.len() {
+            if let Some(pack) = packs_by_first_node.get(&cursor).copied() {
+                let members = pack.members();
+                let gate = &self.nodes[cursor];
+                let up = &self.nodes[cursor + 1];
+                let nvfp4_bits = match pack.variant() {
+                    Qwen38ProjectionPackVariant::Nvfp4W4A4 {
+                        input_global_scale_f32_bits,
+                    } => Some(input_global_scale_f32_bits),
+                    Qwen38ProjectionPackVariant::Fp8W8A8DynamicPerTokenE4M3Fn => None,
+                };
+                let contract = match pack.kind() {
+                    Qwen38ProjectionPackKind::Nvfp4MlpGateUp => {
+                        Qwen38ProjectionPackContractV1::nvfp4_mlp_gate_up(nvfp4_bits.ok_or_else(
+                            || {
+                                QwenGraphError::InvalidPlan(
+                                    "Qwen3.8 NVFP4 projection-pack variant differs".to_owned(),
+                                )
+                            },
+                        )?)?
+                    }
+                    Qwen38ProjectionPackKind::Fp8GdnQkvZ => Qwen38ProjectionPackContractV1::fp8(
+                        crate::Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ,
+                    )
+                    .ok_or_else(|| {
+                        QwenGraphError::InvalidPlan(
+                            "Qwen3.8 FP8 GDN projection-pack contract is unavailable".to_owned(),
+                        )
+                    })?,
+                    _ => {
+                        return Err(QwenGraphError::InvalidPlan(
+                            "Qwen3.8 projection-pack lowering selected an unsupported pack kind"
+                                .to_owned(),
+                        ));
+                    }
+                };
+                let operation = SemanticOpDescriptor::new_qwen38_projection_pack2(
+                    vec![
+                        self.tensors[pack.activation_tensor_id()].view.clone(),
+                        self.tensors[members[0].weight_tensor_id()].view.clone(),
+                        self.tensors[members[1].weight_tensor_id()].view.clone(),
+                    ],
+                    vec![
+                        self.tensors[members[0].output_tensor_id()].view.clone(),
+                        self.tensors[members[1].output_tensor_id()].view.clone(),
+                    ],
+                    contract,
+                )?;
+                let new_index = lowered.len();
+                old_to_new[cursor] = Some(new_index);
+                old_to_new[cursor + 1] = Some(new_index);
+                lowered.push(QwenGraphNode {
+                    label: format!("{}.qwen38_projection_pack2", gate.label),
+                    kind: QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2),
+                    operation: Some(operation),
+                    inputs: vec![
+                        pack.activation_tensor_id(),
+                        members[0].weight_tensor_id(),
+                        members[1].weight_tensor_id(),
+                    ],
+                    outputs: vec![members[0].output_tensor_id(), members[1].output_tensor_id()],
+                    dependencies: gate
+                        .dependencies
+                        .iter()
+                        .chain(up.dependencies.iter())
+                        .copied()
+                        .filter(|dependency| *dependency != cursor && *dependency != cursor + 1)
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                    weights: gate
+                        .weights
+                        .iter()
+                        .chain(up.weights.iter())
+                        .copied()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                });
+                pack_count += 1;
+                cursor += 2;
+                continue;
+            }
+            if selected_nodes.contains(&cursor) {
+                return Err(QwenGraphError::InvalidPlan(
+                    "Qwen3.8 NVFP4 projection-pack lowering reached an orphan member".to_owned(),
+                ));
+            }
+            old_to_new[cursor] = Some(lowered.len());
+            lowered.push(self.nodes[cursor].clone());
+            cursor += 1;
+        }
+        if pack_count != selected_nodes.len() / 2 {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "Qwen3.8 projection-pack lowering emitted {pack_count} packs"
+            )));
+        }
+
+        for (new_index, node) in lowered.iter_mut().enumerate() {
+            for dependency in &mut node.dependencies {
+                *dependency = old_to_new
+                    .get(*dependency)
+                    .and_then(|mapped| *mapped)
+                    .ok_or_else(|| {
+                        QwenGraphError::InvalidPlan(
+                            "Qwen3.8 projection-pack dependency refers to a removed node"
+                                .to_owned(),
+                        )
+                    })?;
+            }
+            node.dependencies.sort_unstable();
+            node.dependencies.dedup();
+            if node
+                .dependencies
+                .iter()
+                .any(|dependency| *dependency >= new_index)
+            {
+                return Err(QwenGraphError::InvalidPlan(
+                    "Qwen3.8 projection-pack dependency is not topologically prior".to_owned(),
+                ));
+            }
+        }
+        let mut graph = self.clone();
+        graph.nodes = lowered;
+        Ok(graph)
     }
 
     /// Returns a request-local graph with the 32 attention residual-add and
@@ -1116,6 +1828,7 @@ fn build_qwen35_graph_with_kv_cache_descriptor_and_position_payload_mode(
         fp8_tensor_names: BTreeSet::new(),
         fp8_dtype: None,
         quantized_weight_encoding: None,
+        quantized_weight_encodings: BTreeMap::new(),
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding,
         mtp: false,
@@ -1283,6 +1996,7 @@ fn build_qwen35_moe_execution_graph_config(
         fp8_tensor_names: BTreeSet::new(),
         fp8_dtype: None,
         quantized_weight_encoding: None,
+        quantized_weight_encodings: BTreeMap::new(),
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         mtp: false,
@@ -1372,6 +2086,7 @@ pub fn build_qwen35_multimodal_graph(
         fp8_tensor_names: BTreeSet::new(),
         fp8_dtype: None,
         quantized_weight_encoding: None,
+        quantized_weight_encodings: BTreeMap::new(),
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         mtp: false,
@@ -1415,6 +2130,7 @@ pub fn build_qwen35_mtp_graph(
         fp8_tensor_names: BTreeSet::new(),
         fp8_dtype: None,
         quantized_weight_encoding: None,
+        quantized_weight_encodings: BTreeMap::new(),
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         mtp: true,
@@ -1562,6 +2278,7 @@ pub fn build_qwen35_gguf_fp8_graph(
             scale_dtype: DType::F32,
             resident: Fp8ResidentRepresentation::PackedBytes,
         }),
+        quantized_weight_encodings: BTreeMap::new(),
         fp8_sidecar_fingerprint: source.recipe_digest().map(ToOwned::to_owned),
         kv_cache_encoding,
         mtp: false,
@@ -1689,6 +2406,7 @@ pub fn build_qwen35_gguf_mx_weight_activation_graph(
         fp8_tensor_names: tensor_names,
         fp8_dtype: Some(dtype),
         quantized_weight_encoding: Some(encoding),
+        quantized_weight_encodings: BTreeMap::new(),
         fp8_sidecar_fingerprint: source.recipe_digest().map(ToOwned::to_owned),
         kv_cache_encoding,
         mtp: false,
@@ -1697,6 +2415,278 @@ pub fn build_qwen35_gguf_mx_weight_activation_graph(
         position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
     })?
     .build()
+}
+
+/// Build a dense Qwen graph from a GGUF recipe that intentionally mixes
+/// resident formats.  This is the container-neutral form of the Unsloth
+/// Qwen3.8 recipe: NVFP4 W4A4 for the first MLP layers, OCP FP8 W8A8 for
+/// attention/GDN projections and the final MLP layers/lm_head, and ordinary
+/// BF16 for the remaining tensors.
+pub fn build_qwen35_gguf_mixed_graph(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    source: &VerifiedGgufWeightSource,
+    token_count: u64,
+    state_capacity: u64,
+    kv_cache_encoding: crate::KvCacheEncoding,
+) -> Result<QwenGraph, QwenGraphError> {
+    if source.lock_fingerprint() != lock.fingerprint()
+        || !source.has_quantized_linear_recipe()
+        || !source.has_mixed_quantized_linear_recipe()
+    {
+        return Err(QwenGraphError::InvalidModel(
+            "GGUF mixed recipe differs from the reviewed Qwen identity".to_owned(),
+        ));
+    }
+    let spec = validate_reviewed_model(lock)?;
+    let dimensions = QwenGraphDimensions::from_spec(spec)?;
+    if token_count == 0 {
+        return Err(QwenGraphError::ZeroTokenCount);
+    }
+    if state_capacity == 0 {
+        return Err(QwenGraphError::ZeroStateCapacity);
+    }
+    if token_count > state_capacity {
+        return Err(QwenGraphError::TokenCountExceedsCapacity {
+            token_count,
+            capacity: state_capacity,
+        });
+    }
+    if state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
+        return Err(QwenGraphError::CapacityExceedsMax {
+            capacity: state_capacity,
+            max_position: QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
+        });
+    }
+    let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
+    let by_name: BTreeMap<_, _> = bindings
+        .iter()
+        .map(|binding| (binding.tensor_name.as_str(), binding))
+        .collect();
+    let mut tensor_names = BTreeSet::new();
+    let mut encodings = BTreeMap::new();
+    for recipe in source
+        .gguf()
+        .extension()
+        .expect("has_quantized_linear_recipe requires an extension")
+        .recipe
+        .bindings
+        .iter()
+    {
+        let binding = by_name.get(recipe.logical_tensor.as_str()).ok_or_else(|| {
+            QwenGraphError::InvalidPlan(format!(
+                "GGUF mixed tensor is not a required Qwen weight: {}",
+                recipe.logical_tensor
+            ))
+        })?;
+        if recipe.logical_shape.as_slice() != binding.shape.as_slice()
+            || !is_quantized_linear_consumer(binding.consumer.role)
+            || !tensor_names.insert(recipe.logical_tensor.clone())
+        {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "GGUF mixed recipe differs from its graph binding: {}",
+                recipe.logical_tensor
+            )));
+        }
+        let encoding = match recipe.encoding {
+            crate::GgufRecipeEncoding::Fp8E4m3fnChannelBf16Scale
+            | crate::GgufRecipeEncoding::Fp8E4m3fnChannelF32Scale => Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: DType::F32,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            },
+            crate::GgufRecipeEncoding::Nvfp4E2m1Block16E4m3fnF32Outer => {
+                let w4a4 = recipe
+                    .scales
+                    .iter()
+                    .any(|scale| scale.role == crate::GgufScaleRole::Input);
+                if w4a4 {
+                    Encoding::Nvfp4W4A4 {
+                        block_size: 16,
+                        scale_dtype: DType::F8E4M3Fn,
+                    }
+                } else {
+                    Encoding::Nvfp4 {
+                        block_size: 16,
+                        scale_dtype: DType::F8E4M3Fn,
+                    }
+                }
+            }
+            _ => {
+                return Err(QwenGraphError::InvalidPlan(format!(
+                    "GGUF mixed recipe has an unsupported encoding: {}",
+                    recipe.logical_tensor
+                )));
+            }
+        };
+        encodings.insert(recipe.logical_tensor.clone(), encoding);
+    }
+    if tensor_names.is_empty() {
+        return Err(QwenGraphError::InvalidPlan(
+            "GGUF mixed recipe contains no quantized linear weights".to_owned(),
+        ));
+    }
+    GraphBuilder::new(GraphBuilderConfig {
+        layer_types: lock.model.architecture.text_config.layer_types.clone(),
+        dimensions,
+        token_count,
+        state_capacity,
+        bindings,
+        known_unconsumed,
+        model_fingerprint: lock.fingerprint().to_owned(),
+        plan_digest: *plan.digest(),
+        fp8_tensor_names: tensor_names,
+        fp8_dtype: Some(DType::F8E4M3Fn),
+        quantized_weight_encoding: None,
+        quantized_weight_encodings: encodings,
+        fp8_sidecar_fingerprint: source.recipe_digest().map(ToOwned::to_owned),
+        kv_cache_encoding,
+        mtp: false,
+        multimodal: false,
+        moe: false,
+        position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
+    })?
+    .build()
+}
+
+/// Build the direct-file resident graph for the exact Unsloth Qwen3.8-27B
+/// mixed artifact.  The semantic lock remains the reviewed Qwen3.5-27B
+/// contract; the verified artifact supplies the mixed FP8/NVFP4 recipe and
+/// immutable source identity.
+pub fn build_qwen35_unsloth_qwen38_nvfp4_graph(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    artifact: &VerifiedUnslothQwen38Nvfp4,
+    token_count: u64,
+    state_capacity: u64,
+    kv_cache_encoding: crate::KvCacheEncoding,
+) -> Result<QwenGraph, QwenGraphError> {
+    if artifact.repository() != crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY
+        || artifact.resolved_revision() != crate::UNSLOTH_QWEN38_NVFP4_REVISION
+        || plan.schema_version != "qwen38-nvfp4-model-plan-v1"
+    {
+        return Err(QwenGraphError::InvalidModel(
+            "Qwen3.8 artifact or direct load-plan identity differs".to_owned(),
+        ));
+    }
+    let spec = validate_reviewed_model(lock)?;
+    if spec.repo_id != crate::model::QWEN35_27B_REPO_ID {
+        return Err(QwenGraphError::InvalidModel(
+            "Qwen3.8 NVFP4 requires the reviewed Qwen3.5-27B semantic lock".to_owned(),
+        ));
+    }
+    let dimensions = QwenGraphDimensions::from_spec(spec)?;
+    if token_count == 0 {
+        return Err(QwenGraphError::ZeroTokenCount);
+    }
+    if state_capacity == 0 {
+        return Err(QwenGraphError::ZeroStateCapacity);
+    }
+    if token_count > state_capacity {
+        return Err(QwenGraphError::TokenCountExceedsCapacity {
+            token_count,
+            capacity: state_capacity,
+        });
+    }
+    if state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
+        return Err(QwenGraphError::CapacityExceedsMax {
+            capacity: state_capacity,
+            max_position: QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
+        });
+    }
+    let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
+    let by_name: BTreeMap<_, _> = bindings
+        .iter()
+        .map(|binding| (binding.tensor_name.as_str(), binding))
+        .collect();
+    let mut tensor_names = BTreeSet::new();
+    let mut encodings = BTreeMap::new();
+    for tensor in artifact.tensors() {
+        let Some(encoding) = (match tensor.encoding {
+            crate::QuantizedTensorEncoding::Nvfp4E2M1Block16E4M3FnF32Outer => {
+                Some(Encoding::Nvfp4W4A4 {
+                    block_size: 16,
+                    scale_dtype: DType::F8E4M3Fn,
+                })
+            }
+            crate::QuantizedTensorEncoding::OcpFp8E4M3FnChannelBf16Scale => {
+                Some(Encoding::Fp8Scaled {
+                    granularity: Fp8ScaleGranularity::OuterDimension,
+                    scale_dtype: DType::F32,
+                    resident: Fp8ResidentRepresentation::PackedBytes,
+                })
+            }
+            _ => None,
+        }) else {
+            continue;
+        };
+        let binding = by_name.get(tensor.logical_name.as_str()).ok_or_else(|| {
+            QwenGraphError::InvalidPlan(format!(
+                "Qwen3.8 quantized tensor is not a required graph weight: {}",
+                tensor.logical_name
+            ))
+        })?;
+        if tensor.logical_shape.as_slice() != binding.shape.as_slice()
+            || !is_quantized_linear_consumer(binding.consumer.role)
+            || !tensor_names.insert(tensor.logical_name.clone())
+        {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "Qwen3.8 quantized tensor differs from its graph binding: {}",
+                tensor.logical_name
+            )));
+        }
+        encodings.insert(tensor.logical_name.clone(), encoding);
+    }
+    let expected: BTreeSet<_> = bindings
+        .iter()
+        .filter(|binding| is_qwen38_quantized_consumer(binding.consumer.role))
+        .map(|binding| binding.tensor_name.clone())
+        .collect();
+    if tensor_names.len() != 401 || tensor_names != expected {
+        return Err(QwenGraphError::InvalidPlan(format!(
+            "Qwen3.8 mixed recipe coverage differs: {} / {}",
+            tensor_names.len(),
+            expected.len()
+        )));
+    }
+    GraphBuilder::new(GraphBuilderConfig {
+        layer_types: lock.model.architecture.text_config.layer_types.clone(),
+        dimensions,
+        token_count,
+        state_capacity,
+        bindings,
+        known_unconsumed,
+        model_fingerprint: lock.fingerprint().to_owned(),
+        plan_digest: *plan.digest(),
+        fp8_tensor_names: tensor_names,
+        fp8_dtype: Some(DType::F8E4M3Fn),
+        quantized_weight_encoding: None,
+        quantized_weight_encodings: encodings,
+        fp8_sidecar_fingerprint: Some(artifact.recipe_digest().to_owned()),
+        kv_cache_encoding,
+        mtp: false,
+        multimodal: false,
+        moe: false,
+        position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
+    })?
+    .build()
+}
+
+fn is_qwen38_quantized_consumer(consumer: WeightConsumer) -> bool {
+    matches!(
+        consumer,
+        WeightConsumer::MlpGate
+            | WeightConsumer::MlpUp
+            | WeightConsumer::MlpDown
+            | WeightConsumer::GdnInProjQkv
+            | WeightConsumer::GdnInProjZ
+            | WeightConsumer::GdnOutProj
+            | WeightConsumer::AttentionQ
+            | WeightConsumer::AttentionK
+            | WeightConsumer::AttentionV
+            | WeightConsumer::AttentionO
+            | WeightConsumer::OutputProjection
+    )
 }
 
 /// Build the CDNA3 resident form of the Phase 10 sidecar. Values are expected
@@ -1821,6 +2811,7 @@ pub fn build_qwen35_nvfp4_graph_with_kv_cache_encoding(
             block_size: 16,
             scale_dtype: DType::F8E4M3Fn,
         }),
+        quantized_weight_encodings: BTreeMap::new(),
         fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
         kv_cache_encoding,
         mtp: false,
@@ -1914,6 +2905,7 @@ fn build_qwen35_fp8_graph_with_dtype(
             scale_dtype: DType::F32,
             resident: Fp8ResidentRepresentation::PackedBytes,
         }),
+        quantized_weight_encodings: BTreeMap::new(),
         fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
         kv_cache_encoding,
         mtp: false,
@@ -1940,6 +2932,10 @@ fn is_fp8_linear_consumer(consumer: WeightConsumer) -> bool {
             | WeightConsumer::AttentionV
             | WeightConsumer::AttentionO
     )
+}
+
+fn is_quantized_linear_consumer(consumer: WeightConsumer) -> bool {
+    is_fp8_linear_consumer(consumer) || matches!(consumer, WeightConsumer::OutputProjection)
 }
 
 fn validate_reviewed_model(lock: &ModelLock) -> Result<Qwen35ReviewedSpec, QwenGraphError> {
@@ -2081,11 +3077,12 @@ fn validate_plan(
     plan: &WeightLoadPlan,
     dimensions: QwenGraphDimensions,
 ) -> Result<(Vec<QwenGraphWeightBinding>, BTreeSet<String>), QwenGraphError> {
+    let direct_plan = plan.schema_version == "qwen38-nvfp4-model-plan-v1";
     let gguf_plan = matches!(
         plan.schema_version.as_str(),
         "gguf-model-plan-v1" | "gguf-quantized-model-plan-v1"
     );
-    if (!gguf_plan && plan.schema_version != lock.schema_version)
+    if (!gguf_plan && !direct_plan && plan.schema_version != lock.schema_version)
         || plan.repo_id != lock.model.repo_id
         || plan.resolved_revision != lock.model.resolved_revision
         || plan.lock_fingerprint != lock.fingerprint()
@@ -2137,6 +3134,25 @@ fn validate_plan(
         }) {
             return Err(QwenGraphError::InvalidPlan(
                 "GGUF plan entries do not share one bounded verified source".to_owned(),
+            ));
+        }
+    } else if direct_plan {
+        if !plan
+            .has_valid_digest()
+            .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?
+        {
+            return Err(QwenGraphError::InvalidPlan(
+                "Qwen3.8 direct plan digest is not canonical".to_owned(),
+            ));
+        }
+        if plan.entries.iter().any(|entry| {
+            entry.source_range[0] >= entry.source_range[1]
+                || entry.source_range[1] > entry.locked_file_size
+                || entry.classification == WeightClassification::Required
+                    && !entry.chunks.is_empty()
+        }) {
+            return Err(QwenGraphError::InvalidPlan(
+                "Qwen3.8 direct plan has malformed source metadata".to_owned(),
             ));
         }
     } else {
@@ -2195,7 +3211,7 @@ fn validate_plan(
                     || entry.dtype != expected_dtype
                     || entry.shape != expected_shape
                     || entry.destination_start.is_none()
-                    || (!gguf_plan && entry.chunks.is_empty())
+                    || (!gguf_plan && !direct_plan && entry.chunks.is_empty())
                 {
                     return Err(QwenGraphError::InvalidPlan(format!(
                         "required tensor metadata differs from its consumer: {}",
@@ -2727,6 +3743,10 @@ struct GraphBuilderConfig {
     fp8_tensor_names: BTreeSet<String>,
     fp8_dtype: Option<DType>,
     quantized_weight_encoding: Option<Encoding>,
+    /// Per-tensor override used by mixed-format artifacts such as the
+    /// Unsloth Qwen3.8 NVFP4 checkpoint.  The legacy fields remain the
+    /// compatibility path for homogeneous sidecars/recipes.
+    quantized_weight_encodings: BTreeMap<String, Encoding>,
     fp8_sidecar_fingerprint: Option<String>,
     kv_cache_encoding: crate::KvCacheEncoding,
     mtp: bool,
@@ -2782,6 +3802,7 @@ struct GraphBuilder {
     fp8_tensor_names: BTreeSet<String>,
     fp8_dtype: Option<DType>,
     quantized_weight_encoding: Option<Encoding>,
+    quantized_weight_encodings: BTreeMap<String, Encoding>,
     fp8_sidecar_fingerprint: Option<String>,
     kv_cache_encoding: crate::KvCacheEncoding,
     kv_fp8_block16_descriptor: Option<crate::KvFp8Block16Descriptor>,
@@ -2812,6 +3833,7 @@ impl GraphBuilder {
             fp8_tensor_names,
             fp8_dtype,
             quantized_weight_encoding,
+            quantized_weight_encodings,
             fp8_sidecar_fingerprint,
             kv_cache_encoding,
             mtp,
@@ -2847,6 +3869,7 @@ impl GraphBuilder {
             fp8_tensor_names,
             fp8_dtype,
             quantized_weight_encoding,
+            quantized_weight_encodings,
             fp8_sidecar_fingerprint,
             kv_cache_encoding,
             kv_fp8_block16_descriptor: crate::KvFp8Block16Descriptor::canonical_for_encoding(
@@ -4483,17 +5506,35 @@ impl GraphBuilder {
         let shape = binding.shape.clone();
         let name = binding.tensor_name.clone();
         let view = if self.fp8_tensor_names.contains(&name) {
-            fp8_weight_view(
-                &shape,
-                self.fp8_dtype.ok_or_else(|| {
-                    QwenGraphError::InvalidPlan("FP8 tensor set has no resident dtype".to_owned())
-                })?,
-                self.quantized_weight_encoding.ok_or_else(|| {
+            let encoding = self
+                .quantized_weight_encodings
+                .get(&name)
+                .copied()
+                .or(self.quantized_weight_encoding)
+                .ok_or_else(|| {
                     QwenGraphError::InvalidPlan(
                         "quantized tensor set has no resident encoding".to_owned(),
                     )
-                })?,
-            )?
+                })?;
+            let dtype = match encoding {
+                Encoding::Nvfp4 { .. }
+                | Encoding::Nvfp4W4A4 { .. }
+                | Encoding::Mxfp4W4A4 { .. }
+                | Encoding::Mxfp6W6A6 { .. } => DType::U8,
+                Encoding::Mxfp8W8A8 { .. } | Encoding::Fp8Scaled { .. } => {
+                    self.fp8_dtype.ok_or_else(|| {
+                        QwenGraphError::InvalidPlan(
+                            "quantized tensor set has no resident dtype".to_owned(),
+                        )
+                    })?
+                }
+                Encoding::Unquantized => {
+                    return Err(QwenGraphError::InvalidPlan(
+                        "quantized tensor map contains an unquantized encoding".to_owned(),
+                    ));
+                }
+            };
+            fp8_weight_view(&shape, dtype, encoding)?
         } else {
             view(to_dtype(binding.dtype)?, &shape)?
         };
@@ -4515,6 +5556,14 @@ fn fp8_weight_view(
         })
         .collect::<Result<_, _>>()?;
     Ok(TensorView::with_encoding(dtype, encoding, &shape)?)
+}
+
+const fn qwen38_fp8_projection_encoding() -> Encoding {
+    Encoding::Fp8Scaled {
+        granularity: Fp8ScaleGranularity::OuterDimension,
+        scale_dtype: DType::F32,
+        resident: Fp8ResidentRepresentation::PackedBytes,
+    }
 }
 
 fn key(layer: u32, role: WeightConsumer) -> WeightConsumerKey {
@@ -4586,6 +5635,27 @@ pub(crate) fn qwen35_execution_fixture_with_token_count(
 #[cfg(test)]
 pub(crate) fn qwen35_mtp_execution_fixture() -> (QwenGraph, WeightLoadPlan) {
     tests::mtp_execution_fixture()
+}
+
+#[cfg(test)]
+pub(crate) fn qwen38_projection_pack_execution_fixture(
+    token_count: u64,
+) -> (QwenGraph, WeightLoadPlan) {
+    tests::projection_pack_execution_fixture(token_count)
+}
+
+#[cfg(test)]
+pub(crate) fn qwen38_fp8_gdn_projection_pack_execution_fixture(
+    token_count: u64,
+) -> (QwenGraph, WeightLoadPlan) {
+    tests::projection_pack_execution_fixture_fp8_gdn(token_count)
+}
+
+#[cfg(test)]
+pub(crate) fn qwen38_coexisting_projection_pack_execution_fixture(
+    token_count: u64,
+) -> (QwenGraph, WeightLoadPlan) {
+    tests::projection_pack_execution_fixture_coexisting(token_count)
 }
 
 #[cfg(test)]
@@ -4867,6 +5937,7 @@ mod tests {
             fp8_tensor_names: BTreeSet::new(),
             fp8_dtype: None,
             quantized_weight_encoding: None,
+            quantized_weight_encodings: BTreeMap::new(),
             fp8_sidecar_fingerprint: None,
             kv_cache_encoding: crate::KvCacheEncoding::Fp16,
             mtp: false,
@@ -4877,6 +5948,182 @@ mod tests {
         .expect("fixture bindings")
         .build()
         .expect("fixture graph")
+    }
+
+    fn qwen38_projection_pack_fixture() -> (QwenGraph, BTreeMap<String, u32>) {
+        qwen38_projection_pack_fixture_with_token_count(3)
+    }
+
+    fn qwen38_projection_pack_fixture_with_token_count(
+        token_count: u64,
+    ) -> (QwenGraph, BTreeMap<String, u32>) {
+        let lock = read_model_lock(repository_path("docs/models/locks/qwen3.5-27b-bf16.json"))
+            .expect("Qwen3.5-27B lock parses");
+        let dimensions = QwenGraphDimensions::from_spec(
+            reviewed_qwen35_spec(&lock).expect("reviewed Qwen3.5-27B spec"),
+        )
+        .expect("Qwen3.5-27B dimensions");
+        let schedule = (0..64)
+            .map(|layer| {
+                if (layer + 1) % 4 == 0 {
+                    LayerType::FullAttention
+                } else {
+                    LayerType::LinearAttention
+                }
+            })
+            .collect::<Vec<_>>();
+        let bindings = expected_consumers(&schedule, false)
+            .into_iter()
+            .map(|consumer| {
+                let (tensor_name, dtype, shape) =
+                    expected_weight(consumer, &schedule, dimensions).expect("Qwen3.8 role");
+                QwenGraphWeightBinding {
+                    consumer,
+                    tensor_name,
+                    classification: WeightClassification::Required,
+                    dtype,
+                    shape,
+                    source_range: [0, 1],
+                    destination_start: 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bindings.len(), 851);
+
+        let mut quantized_names = BTreeSet::new();
+        let mut quantized_encodings = BTreeMap::new();
+        let mut input_scale_bits = BTreeMap::new();
+        for binding in &bindings {
+            if !is_qwen38_quantized_consumer(binding.consumer.role) {
+                continue;
+            }
+            let nvfp4 = binding.consumer.layer.is_some_and(|layer| layer < 56)
+                && matches!(
+                    binding.consumer.role,
+                    WeightConsumer::MlpGate | WeightConsumer::MlpUp | WeightConsumer::MlpDown
+                );
+            let encoding = if nvfp4 {
+                let layer = binding.consumer.layer.expect("NVFP4 layer");
+                input_scale_bits.insert(
+                    binding.tensor_name.clone(),
+                    (512.0_f32 + layer as f32).to_bits(),
+                );
+                Encoding::Nvfp4W4A4 {
+                    block_size: 16,
+                    scale_dtype: DType::F8E4M3Fn,
+                }
+            } else {
+                qwen38_fp8_projection_encoding()
+            };
+            quantized_names.insert(binding.tensor_name.clone());
+            quantized_encodings.insert(binding.tensor_name.clone(), encoding);
+        }
+        assert_eq!(quantized_names.len(), 401);
+        assert_eq!(input_scale_bits.len(), 168);
+        let graph = GraphBuilder::new(GraphBuilderConfig {
+            layer_types: schedule,
+            dimensions,
+            token_count,
+            state_capacity: token_count.max(17),
+            bindings,
+            known_unconsumed: BTreeSet::new(),
+            model_fingerprint: crate::model::QWEN35_27B_FINGERPRINT.to_owned(),
+            plan_digest: [38; 32],
+            fp8_tensor_names: quantized_names,
+            fp8_dtype: Some(DType::F8E4M3Fn),
+            quantized_weight_encoding: None,
+            quantized_weight_encodings: quantized_encodings,
+            fp8_sidecar_fingerprint: Some("qwen38-projection-pack-fixture".to_owned()),
+            kv_cache_encoding: crate::KvCacheEncoding::Fp16,
+            mtp: false,
+            multimodal: false,
+            moe: false,
+            position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
+        })
+        .expect("Qwen3.8 fixture bindings")
+        .build()
+        .expect("Qwen3.8 fixture graph");
+        (graph, input_scale_bits)
+    }
+
+    pub(super) fn projection_pack_execution_fixture(
+        token_count: u64,
+    ) -> (QwenGraph, WeightLoadPlan) {
+        projection_pack_execution_fixture_with_scope(
+            token_count,
+            Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpOnly,
+        )
+    }
+
+    pub(super) fn projection_pack_execution_fixture_fp8_gdn(
+        token_count: u64,
+    ) -> (QwenGraph, WeightLoadPlan) {
+        projection_pack_execution_fixture_with_scope(
+            token_count,
+            Qwen38ProjectionPackLoweringScope::Fp8GdnQkvZOnly,
+        )
+    }
+
+    pub(super) fn projection_pack_execution_fixture_coexisting(
+        token_count: u64,
+    ) -> (QwenGraph, WeightLoadPlan) {
+        projection_pack_execution_fixture_with_scope(
+            token_count,
+            Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpAndFp8GdnQkvZ,
+        )
+    }
+
+    fn projection_pack_execution_fixture_with_scope(
+        token_count: u64,
+        scope: Qwen38ProjectionPackLoweringScope,
+    ) -> (QwenGraph, WeightLoadPlan) {
+        let (mut graph, input_scale_bits) =
+            qwen38_projection_pack_fixture_with_token_count(token_count);
+        let entries = graph
+            .weight_bindings()
+            .iter()
+            .map(|binding| crate::weights::WeightLoadEntry {
+                tensor_name: binding.tensor_name().to_owned(),
+                classification: binding.classification(),
+                consumer: Some(binding.consumer()),
+                dtype: binding.dtype(),
+                shape: binding.shape().to_vec(),
+                source_file: "qwen38-projection-pack-fixture.safetensors".to_owned(),
+                locked_file_size: 1,
+                locked_file_sha256: "00".repeat(32),
+                source_range: binding.source_range(),
+                destination_start: Some(binding.destination_start()),
+                chunks: vec![crate::weights::WeightLoadChunk {
+                    source_offset: binding.source_range()[0],
+                    destination_offset: binding.destination_start(),
+                    byte_length: binding.source_range()[1] - binding.source_range()[0],
+                }],
+            })
+            .collect();
+        let plan = WeightLoadPlan::from_verified_entries(
+            crate::weights::VerifiedWeightPlanMetadata {
+                schema_version: "qwen38-projection-pack-test-plan-v1".to_owned(),
+                repo_id: "fixture/qwen38-projection-pack".to_owned(),
+                resolved_revision: "fixture".to_owned(),
+                lock_fingerprint: graph.model_fingerprint().to_owned(),
+                tied_embeddings: false,
+                chunk_size: 1,
+                total_destination_bytes: 1,
+            },
+            entries,
+        )
+        .expect("Qwen3.8 projection-pack fixture plan");
+        graph.plan_digest = *plan.digest();
+        let reuse_plan = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .unwrap()
+            .unwrap();
+        let graph = graph
+            .with_qwen38_projection_pack_reuse(&reuse_plan, scope)
+            .unwrap();
+        (graph, plan)
     }
 
     fn node_id(graph: &QwenGraph, label: &str) -> usize {
@@ -4967,6 +6214,377 @@ mod tests {
             assert!(graph.weight_binding("model.visual.synthetic_0").is_err());
             assert!(graph.weight_binding("not-a-weight").is_err());
         }
+    }
+
+    #[test]
+    fn qwen38_projection_pack_planner_finds_only_reusable_projection_roles() {
+        let (graph, input_scale_bits) = qwen38_projection_pack_fixture();
+        let unchanged = graph.clone();
+        let plan = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .expect("Qwen3.8 projection-pack plan")
+            .expect("exact Qwen3.8 graph applies");
+        assert_eq!(graph, unchanged, "planner must not rewrite the graph");
+        assert_eq!(
+            plan.schema_version(),
+            QWEN38_PROJECTION_PACK_REUSE_SCHEMA_V1
+        );
+        assert_eq!(plan.recipe_digest(), "qwen38-projection-pack-fixture");
+        assert_eq!(plan.packs().len(), 128);
+
+        let mut counts = BTreeMap::new();
+        for pack in plan.packs() {
+            *counts.entry(pack.kind()).or_insert(0_usize) += 1;
+            assert_eq!(
+                &graph.tensor_metadata()[pack.activation_tensor_id()].view,
+                pack.activation_view()
+            );
+            let expected_members = match pack.kind() {
+                Qwen38ProjectionPackKind::Fp8FullAttentionQkv => 3,
+                _ => 2,
+            };
+            assert_eq!(pack.members().len(), expected_members);
+            for member in pack.members() {
+                assert_eq!(member.consumer().layer, Some(u64::from(pack.layer())));
+                assert!(!matches!(
+                    member.consumer().role,
+                    WeightConsumer::MlpDown
+                        | WeightConsumer::AttentionO
+                        | WeightConsumer::GdnOutProj
+                        | WeightConsumer::GdnInProjB
+                        | WeightConsumer::GdnInProjA
+                        | WeightConsumer::OutputProjection
+                ));
+                let node = &graph.nodes()[member.node_index()];
+                assert_eq!(node.inputs()[0], pack.activation_tensor_id());
+                assert_eq!(node.inputs()[1], member.weight_tensor_id());
+                assert_eq!(node.outputs()[0], member.output_tensor_id());
+            }
+            match pack.kind() {
+                Qwen38ProjectionPackKind::Nvfp4MlpGateUp => {
+                    let bits = pack
+                        .variant()
+                        .input_global_scale_f32_bits()
+                        .expect("NVFP4 scale bits");
+                    assert!(f32::from_bits(bits).is_finite());
+                }
+                _ => assert_eq!(
+                    pack.variant(),
+                    Qwen38ProjectionPackVariant::Fp8W8A8DynamicPerTokenE4M3Fn
+                ),
+            }
+        }
+        assert_eq!(
+            counts,
+            BTreeMap::from([
+                (Qwen38ProjectionPackKind::Nvfp4MlpGateUp, 56),
+                (Qwen38ProjectionPackKind::Fp8MlpGateUp, 8),
+                (Qwen38ProjectionPackKind::Fp8FullAttentionQkv, 16),
+                (Qwen38ProjectionPackKind::Fp8GdnQkvZ, 48),
+            ])
+        );
+    }
+
+    #[test]
+    fn qwen38_nvfp4_pair_lowering_rewrites_exactly_56_gate_up_pairs() {
+        let (graph, input_scale_bits) = qwen38_projection_pack_fixture();
+        let plan = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .unwrap()
+            .unwrap();
+        let lowered = graph
+            .with_qwen38_projection_pack_reuse(
+                &plan,
+                Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpOnly,
+            )
+            .expect("verified pair-only lowering");
+
+        assert_eq!(lowered.nodes().len(), graph.nodes().len() - 56);
+        assert_eq!(lowered.tensor_metadata(), graph.tensor_metadata());
+        assert_eq!(lowered.weight_bindings(), graph.weight_bindings());
+        assert_eq!(lowered.states(), graph.states());
+        let packs = lowered
+            .nodes()
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(packs.len(), 56);
+        for (node_index, node) in &packs {
+            assert!(node.label().ends_with(".qwen38_projection_pack2"));
+            assert_eq!(node.inputs().len(), 3);
+            assert_eq!(node.outputs().len(), 2);
+            assert_eq!(node.weight_consumers().len(), 2);
+            let operation = node.operation().expect("projection-pack descriptor");
+            assert_eq!(operation.arity(), (3, 2));
+            assert_eq!(
+                operation
+                    .qwen38_projection_pack_contract()
+                    .expect("projection-pack contract")
+                    .role(),
+                crate::Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp
+            );
+            assert!(
+                node.dependencies()
+                    .iter()
+                    .all(|dependency| dependency < node_index)
+            );
+        }
+        assert!(
+            lowered
+                .nodes()
+                .iter()
+                .enumerate()
+                .all(|(node_index, node)| {
+                    node.dependencies()
+                        .iter()
+                        .all(|dependency| *dependency < node_index)
+                })
+        );
+
+        for layer in [0_u32, 17, 55] {
+            let pack = node_id(
+                &lowered,
+                &format!("layer.{layer}.mlp_gate_matmul.qwen38_projection_pack2"),
+            );
+            let silu = node_id(&lowered, &format!("layer.{layer}.mlp_silu_mul"));
+            assert_eq!(lowered.nodes()[silu].dependencies(), &[pack]);
+        }
+        for layer in 56..64_u32 {
+            for suffix in ["mlp_gate_matmul", "mlp_up_matmul"] {
+                let node = &lowered.nodes()[node_id(&lowered, &format!("layer.{layer}.{suffix}"))];
+                assert_eq!(
+                    node.kind(),
+                    QwenGraphNodeKind::Semantic(SemanticOpKind::Matmul)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qwen38_fp8_gdn_pair_lowering_rewrites_exactly_48_unique_layers() {
+        let (graph, input_scale_bits) = qwen38_projection_pack_fixture();
+        let plan = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .unwrap()
+            .unwrap();
+        let lowered = graph
+            .with_qwen38_projection_pack_reuse(
+                &plan,
+                Qwen38ProjectionPackLoweringScope::Fp8GdnQkvZOnly,
+            )
+            .expect("verified FP8 GDN pair-only lowering");
+
+        assert_eq!(lowered.nodes().len(), graph.nodes().len() - 48);
+        assert_eq!(lowered.tensor_metadata(), graph.tensor_metadata());
+        assert_eq!(lowered.weight_bindings(), graph.weight_bindings());
+        assert_eq!(lowered.states(), graph.states());
+        let packs = lowered
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(packs.len(), 48);
+        let mut layers = BTreeSet::new();
+        for node in packs {
+            let operation = node
+                .operation()
+                .expect("FP8 GDN projection-pack descriptor");
+            assert_eq!(
+                operation
+                    .qwen38_projection_pack_contract()
+                    .expect("projection-pack contract")
+                    .role(),
+                crate::Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ
+            );
+            assert_eq!(node.inputs().len(), 3);
+            assert_eq!(node.outputs().len(), 2);
+            let layer = node
+                .label()
+                .strip_prefix("layer.")
+                .and_then(|rest| rest.split('.').next())
+                .and_then(|layer| layer.parse::<u32>().ok())
+                .expect("FP8 GDN layer label");
+            assert!(layers.insert(layer), "duplicate FP8 GDN layer {layer}");
+            assert_ne!((layer + 1) % 4, 0, "full-attention layer was lowered");
+
+            let original_qkv =
+                &graph.nodes()[node_id(&graph, &format!("layer.{layer}.linear.qkv_matmul"))];
+            let original_z =
+                &graph.nodes()[node_id(&graph, &format!("layer.{layer}.linear.z_matmul"))];
+            assert_eq!(node.inputs()[0], original_qkv.inputs()[0]);
+            assert_eq!(node.inputs()[1], original_qkv.inputs()[1]);
+            assert_eq!(node.inputs()[2], original_z.inputs()[1]);
+            assert_eq!(node.outputs()[0], original_qkv.outputs()[0]);
+            assert_eq!(node.outputs()[1], original_z.outputs()[0]);
+        }
+        assert_eq!(
+            layers,
+            (0..64_u32)
+                .filter(|layer| (layer + 1) % 4 != 0)
+                .collect::<BTreeSet<_>>()
+        );
+        for layer in [3_u32, 63] {
+            let qkv = &lowered.nodes()[node_id(&lowered, &format!("layer.{layer}.full.q_matmul"))];
+            assert_eq!(
+                qkv.kind(),
+                QwenGraphNodeKind::Semantic(SemanticOpKind::Matmul)
+            );
+        }
+    }
+
+    #[test]
+    fn qwen38_projection_pack_lowering_can_coexist_without_replanning() {
+        let (graph, input_scale_bits) = qwen38_projection_pack_fixture();
+        let plan = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .unwrap()
+            .unwrap();
+        let lowered = graph
+            .with_qwen38_projection_pack_reuse(
+                &plan,
+                Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpAndFp8GdnQkvZ,
+            )
+            .expect("one verified composite lowering pass");
+        assert_eq!(lowered.nodes().len(), graph.nodes().len() - 104);
+        let mut roles = [0_usize; 4];
+        for node in lowered.nodes().iter().filter(|node| {
+            node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+        }) {
+            let role = node
+                .operation()
+                .and_then(|operation| operation.qwen38_projection_pack_contract())
+                .expect("composite projection-pack contract")
+                .role();
+            match role {
+                crate::Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp => roles[0] += 1,
+                crate::Qwen38ProjectionPackRoleV1::Fp8MlpGateUp => roles[1] += 1,
+                crate::Qwen38ProjectionPackRoleV1::Fp8FullAttentionQkv => roles[2] += 1,
+                crate::Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ => roles[3] += 1,
+            }
+        }
+        assert_eq!(roles, [56, 0, 0, 48]);
+        assert_eq!(lowered.tensor_metadata(), graph.tensor_metadata());
+        assert_eq!(lowered.weight_bindings(), graph.weight_bindings());
+        assert_eq!(lowered.states(), graph.states());
+    }
+
+    #[test]
+    fn qwen38_nvfp4_pair_lowering_rejects_a_stale_verified_plan() {
+        let (graph, input_scale_bits) = qwen38_projection_pack_fixture();
+        let plan = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .unwrap()
+            .unwrap();
+        let mut changed = graph.clone();
+        let gate = node_id(&changed, "layer.0.mlp_gate_matmul");
+        changed.nodes[gate].outputs[0] =
+            changed.nodes[node_id(&changed, "layer.1.mlp_gate_matmul")].outputs[0];
+        let error = changed
+            .with_qwen38_projection_pack_reuse(
+                &plan,
+                Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpOnly,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("differs from the verified plan"));
+    }
+
+    #[test]
+    fn qwen38_projection_pack_planner_rejects_scale_and_encoding_mismatch() {
+        let (graph, mut input_scale_bits) = qwen38_projection_pack_fixture();
+        let up = &graph.nodes()[node_id(&graph, "layer.0.mlp_up_matmul")];
+        let up_weight = graph.tensor_metadata()[up.inputs()[1]].name().to_owned();
+        input_scale_bits.insert(up_weight, 1024.0_f32.to_bits());
+        let error = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("input-global scales differ"));
+
+        let (mut graph, input_scale_bits) = qwen38_projection_pack_fixture();
+        let up = node_id(&graph, "layer.0.mlp_up_matmul");
+        let weight = graph.nodes()[up].inputs()[1];
+        graph.tensors[weight].view = TensorView::with_encoding(
+            DType::U8,
+            Encoding::Nvfp4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            },
+            &[17408, 5120],
+        )
+        .unwrap();
+        let error = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("operation/view differs") || error.contains("encoding"));
+    }
+
+    #[test]
+    fn qwen38_projection_pack_planner_rejects_different_input_and_role_mixing() {
+        let (mut graph, input_scale_bits) = qwen38_projection_pack_fixture();
+        let up = node_id(&graph, "layer.0.mlp_up_matmul");
+        let other_activation =
+            graph.nodes()[node_id(&graph, "layer.1.mlp_gate_matmul")].inputs()[0];
+        assert_eq!(
+            graph.tensors[other_activation].view,
+            graph.tensors[graph.nodes()[up].inputs()[0]].view
+        );
+        graph.nodes[up].inputs[0] = other_activation;
+        let error = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("share one activation/view"));
+
+        let (mut graph, input_scale_bits) = qwen38_projection_pack_fixture();
+        let gate = node_id(&graph, "layer.0.mlp_gate_matmul");
+        graph.nodes[gate]
+            .weights
+            .push(key(0, WeightConsumer::MlpDown));
+        let error = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("role/arity differs"));
+    }
+
+    #[test]
+    fn qwen38_projection_pack_planner_does_not_apply_to_general_models() {
+        let graph = tiny_fixture(&[
+            LayerType::LinearAttention,
+            LayerType::FullAttention,
+            LayerType::LinearAttention,
+        ]);
+        let plan = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |_| {
+                panic!("non-applicable graph must not request scale metadata")
+            })
+            .expect("general model is non-applicable");
+        assert!(plan.is_none());
     }
 
     #[test]
@@ -5753,6 +7371,7 @@ mod tests {
             fp8_tensor_names: BTreeSet::new(),
             fp8_dtype: None,
             quantized_weight_encoding: None,
+            quantized_weight_encodings: BTreeMap::new(),
             fp8_sidecar_fingerprint: None,
             kv_cache_encoding: crate::KvCacheEncoding::Fp16,
             mtp: false,

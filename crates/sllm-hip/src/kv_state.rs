@@ -933,6 +933,126 @@ impl KvStateResource {
         };
         Ok((completion, evidence))
     }
+
+    /// Enqueues causal attention behind an already-submitted append on the
+    /// same queue. The append completion remains a separate owner; callers
+    /// must retain it until this attention completion reaches a terminal
+    /// state because native claim/release accounting is request-local.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn causal_attention_after_kv_append(
+        &self,
+        queue: &Queue,
+        append: &KvAppendCompletion,
+        query: &TensorBinding,
+        output: &TensorBinding,
+        start_position: u64,
+        expected_kv_length: u64,
+        sliding_window: Option<u64>,
+        score_scale: Option<f32>,
+    ) -> Result<(CausalAttentionCompletion, CausalAttentionEvidence), RuntimeError> {
+        if append.state.inner.raw != self.inner.raw
+            || append.context.raw_handle()?.as_ptr() != self.inner.context.raw_handle()?.as_ptr()
+            || append.queue.raw_handle()?.as_ptr() != queue.raw_handle()?.as_ptr()
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::Busy,
+                "KV append dependency does not belong to this state and queue",
+            ));
+        }
+        if sliding_window != self.inner.descriptor.sliding_window() {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidCausalAttentionDescriptor,
+                "causal attention sliding window differs from the KV state descriptor",
+            ));
+        }
+        validate_causal_attention_binding(query, self.inner.descriptor)?;
+        validate_causal_attention_binding(output, self.inner.descriptor)?;
+        let mut reserved = [0_u32; 4];
+        if let Some(window) = sliding_window {
+            reserved[0] = window as u32;
+            reserved[1] = (window >> 32) as u32;
+        }
+        if let Some(scale) = score_scale {
+            if !scale.is_finite() || scale <= 0.0 {
+                return Err(RuntimeError::local(
+                    RuntimeStatus::InvalidCausalAttentionDescriptor,
+                    "causal attention score scale must be finite and positive",
+                ));
+            }
+            reserved[2] = scale.to_bits();
+        }
+        let descriptor = sys::sllm_causal_attention_desc_t {
+            struct_size: size_of::<sys::sllm_causal_attention_desc_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            op_version: if score_scale.is_some() {
+                sys::SLLM_HIP_CAUSAL_ATTENTION_EXPLICIT_SCALE_VERSION
+            } else if sliding_window.is_some() {
+                sys::SLLM_HIP_CAUSAL_ATTENTION_SLIDING_VERSION
+            } else {
+                sys::SLLM_HIP_CAUSAL_ATTENTION_VERSION
+            },
+            reserved0: 0,
+            start_position,
+            expected_kv_length,
+            kv_state: self.raw_handle()?.as_ptr(),
+            query: query.raw()?,
+            output: output.raw()?,
+            reserved,
+        };
+        let mut dispatch_info = empty_causal_attention_info();
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut raw_completion = std::ptr::null_mut();
+        let raw = unsafe {
+            sys::sllm_causal_attention_execute_after_kv_append(
+                self.inner.context.raw_handle()?.as_ptr(),
+                queue.raw_handle()?.as_ptr(),
+                append.raw_handle()?.as_ptr(),
+                &descriptor,
+                &mut raw_completion,
+                &mut dispatch_info,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(raw, &error_buffer, error_sink.message_length)?;
+        let raw_completion = NonNull::new(raw_completion).ok_or_else(|| {
+            RuntimeError::local(
+                RuntimeStatus::InternalError,
+                "native chained causal attention returned a null completion on success",
+            )
+        })?;
+        let completion = CausalAttentionCompletion {
+            raw: Some(raw_completion.as_ptr() as usize),
+            context: self.inner.context.clone(),
+            queue: queue.clone(),
+            _query: query.buffer().clone(),
+            _output: output.buffer().clone(),
+            state: self.clone(),
+            terminal: false,
+        };
+        let evidence = match validate_causal_attention_info(
+            &dispatch_info,
+            &self.inner.context,
+            start_position,
+            expected_kv_length,
+            self.inner.descriptor,
+            u32::try_from(query.view().shape()[1]).map_err(|_| {
+                RuntimeError::local(
+                    RuntimeStatus::InvalidCausalAttentionDescriptor,
+                    "causal attention query head count does not fit u32",
+                )
+            })?,
+            sliding_window,
+            score_scale,
+        ) {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                drop(completion);
+                return Err(error);
+            }
+        };
+        Ok((completion, evidence))
+    }
 }
 
 pub(crate) fn resource_for_evidence(session_id: u64, state_id: u64) -> Option<KvStateResource> {
@@ -1830,6 +1950,76 @@ fn decode_gqa4_split_p32_target_enabled(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn decode_gqa6_split_p64_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    committed_kv_length: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    !force_baseline
+        && matches!(expected_target, Some("gfx1030" | "gfx1201"))
+        && opt_in.is_some_and(|value| value == "1")
+        && query_count == 1
+        && ((expected_target == Some("gfx1030") && committed_kv_length >= 8192)
+            || (expected_target == Some("gfx1201") && committed_kv_length >= 4096))
+        && query_heads == 24
+        && kv_heads == 4
+        && head_dim == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_gqa6_split_p128_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    committed_kv_length: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    !force_baseline
+        && expected_target == Some("gfx1030")
+        && opt_in.is_some_and(|value| value == "1")
+        && query_count == 1
+        && committed_kv_length >= 8192
+        && query_heads == 24
+        && kv_heads == 4
+        && head_dim == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_gqa6_split_p32_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    committed_kv_length: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    !force_baseline
+        && matches!(expected_target, Some("gfx1030" | "gfx1201"))
+        && opt_in.is_some_and(|value| value == "1")
+        && query_count == 1
+        && committed_kv_length >= 4096
+        && query_heads == 24
+        && kv_heads == 4
+        && head_dim == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+#[allow(clippy::too_many_arguments)]
 fn decode_wave_split_short_enabled(
     expected_target: Option<&str>,
     query_count: u64,
@@ -1900,6 +2090,109 @@ fn long_prefill_v2_enabled(
         && kv_heads == 4
         && head_dim == 256
         && encoding == KvCacheEncoding::Fp16
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gqa6_qtile4_fp16_key_tile_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    opt_ins: [Option<&std::ffi::OsStr>; 4],
+    force_baseline: bool,
+) -> Option<u32> {
+    // Force baseline has precedence over every candidate opt-in.  Candidate
+    // precedence for several enabled variables is the explicit K4 > K8 >
+    // K16 > K32 order below.
+    if force_baseline
+        || !matches!(expected_target, Some("gfx1030" | "gfx1201"))
+        || query_count < 128
+        || query_heads != 24
+        || kv_heads != 4
+        || head_dim != 256
+        || encoding != KvCacheEncoding::Fp16
+    {
+        return None;
+    }
+    for (key_tile, opt_in) in [4_u32, 8, 16, 32].into_iter().zip(opt_ins) {
+        if opt_in.is_some_and(|value| value == "1") {
+            return Some(key_tile);
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gqa6_blocksoftmax_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    gfx1030_opt_in: Option<&std::ffi::OsStr>,
+    gfx1201_opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    let target_opt_in = match expected_target {
+        Some("gfx1030") => gfx1030_opt_in.is_some_and(|value| value == "1"),
+        Some("gfx1201") => gfx1201_opt_in.is_some_and(|value| value == "1"),
+        _ => false,
+    };
+    !force_baseline
+        && target_opt_in
+        && query_count >= 128
+        && query_heads == 24
+        && kv_heads == 4
+        && head_dim == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gqa6_blocksoftmax_q8_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    !force_baseline
+        && expected_target == Some("gfx1201")
+        && opt_in.is_some_and(|value| value == "1")
+        && query_count >= 128
+        && query_heads == 24
+        && kv_heads == 4
+        && head_dim == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+fn gqa6_qtile4_k32_fp16_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    gqa6_qtile4_fp16_key_tile_enabled(
+        expected_target,
+        query_count,
+        query_heads,
+        kv_heads,
+        head_dim,
+        encoding,
+        [None, None, None, opt_in],
+        force_baseline,
+    ) == Some(32)
 }
 
 fn implicit_attention_scale_evidence(head_dim: u32) -> (u32, u32, [u32; 8]) {
@@ -2115,6 +2408,55 @@ fn validate_causal_attention_info(
         std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT_P32");
     let gfx1201_gqa4_split_p32_opt_in =
         std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1201_DECODE_GQA4_SPLIT_P32");
+    let gqa6_split_p64_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P64");
+    let gqa6_split_p128_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P128");
+    let gqa6_split_p32_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P32");
+    let gqa6_blocksoftmax_gfx1030_opt_in =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1030");
+    let gqa6_blocksoftmax_gfx1201_opt_in =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1201");
+    let gqa6_blocksoftmax_q8_gfx1201_opt_in =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_Q8_GFX1201");
+    let gqa6_rocblas_f32_opt_in =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1030_ROCBLAS_F32");
+    let gfx1201_gqa6_rocblas_f32_opt_in =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1201_ROCBLAS_F32");
+    let gfx1201_gqa6_rocblas_f16_tail_opt_in =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1201_ROCBLAS_F16_TAIL");
+    let use_gqa6_rocblas_f32 = expected_target == Some("gfx1030")
+        && !force_baseline
+        && gqa6_rocblas_f32_opt_in
+            .as_deref()
+            .is_some_and(|value| value == "1")
+        && query_count > 1
+        && query_count <= u64::from(u32::MAX)
+        && start_position
+            .checked_add(query_count)
+            .is_some_and(|end| end == committed_kv_length)
+        && query_heads == 24
+        && descriptor.layout().heads() == 4
+        && descriptor.layout().head_dim() == 256
+        && descriptor.cache_encoding() == KvCacheEncoding::Fp16;
+    let use_gfx1201_gqa6_rocblas_f32 = expected_target == Some("gfx1201")
+        && !force_baseline
+        && gfx1201_gqa6_rocblas_f32_opt_in
+            .as_deref()
+            .is_some_and(|value| value == "1")
+        && query_count > 1
+        && query_count <= u64::from(u32::MAX)
+        && start_position
+            .checked_add(query_count)
+            .is_some_and(|end| end == committed_kv_length)
+        && query_heads == 24
+        && descriptor.layout().heads() == 4
+        && descriptor.layout().head_dim() == 256
+        && descriptor.cache_encoding() == KvCacheEncoding::Fp16;
+    let use_gfx1201_gqa6_rocblas_f16_tail = use_gfx1201_gqa6_rocblas_f32
+        && start_position > 0
+        && gfx1201_gqa6_rocblas_f16_tail_opt_in
+            .as_deref()
+            .is_some_and(|value| value == "1");
+    let use_any_gqa6_rocblas_f32 = use_gqa6_rocblas_f32 || use_gfx1201_gqa6_rocblas_f32;
     let use_decode_gqa4_split_p32 = decode_gqa4_split_p32_target_enabled(
         expected_target,
         query_count,
@@ -2127,6 +2469,62 @@ fn validate_causal_attention_info(
         gfx1201_gqa4_split_p32_opt_in.as_deref(),
         force_baseline,
     );
+    let use_decode_gqa6_split_p128 = decode_gqa6_split_p128_enabled(
+        expected_target,
+        query_count,
+        committed_kv_length,
+        query_heads,
+        descriptor.layout().heads() as u32,
+        descriptor.layout().head_dim() as u32,
+        descriptor.cache_encoding(),
+        gqa6_split_p128_opt_in.as_deref(),
+        force_baseline,
+    );
+    let use_decode_gqa6_split_p64 = decode_gqa6_split_p64_enabled(
+        expected_target,
+        query_count,
+        committed_kv_length,
+        query_heads,
+        descriptor.layout().heads() as u32,
+        descriptor.layout().head_dim() as u32,
+        descriptor.cache_encoding(),
+        gqa6_split_p64_opt_in.as_deref(),
+        force_baseline,
+    ) && !use_decode_gqa6_split_p128;
+    let use_decode_gqa6_split_p32 = decode_gqa6_split_p32_enabled(
+        expected_target,
+        query_count,
+        committed_kv_length,
+        query_heads,
+        descriptor.layout().heads() as u32,
+        descriptor.layout().head_dim() as u32,
+        descriptor.cache_encoding(),
+        gqa6_split_p32_opt_in.as_deref(),
+        force_baseline,
+    ) && !use_decode_gqa6_split_p128
+        && !use_decode_gqa6_split_p64;
+    let use_prefill_gqa6_blocksoftmax_q8 = gqa6_blocksoftmax_q8_enabled(
+        expected_target,
+        query_count,
+        query_heads,
+        descriptor.layout().heads() as u32,
+        descriptor.layout().head_dim() as u32,
+        descriptor.cache_encoding(),
+        gqa6_blocksoftmax_q8_gfx1201_opt_in.as_deref(),
+        force_baseline,
+    );
+    let use_prefill_gqa6_blocksoftmax = gqa6_blocksoftmax_enabled(
+        expected_target,
+        query_count,
+        query_heads,
+        descriptor.layout().heads() as u32,
+        descriptor.layout().head_dim() as u32,
+        descriptor.cache_encoding(),
+        gqa6_blocksoftmax_gfx1030_opt_in.as_deref(),
+        gqa6_blocksoftmax_gfx1201_opt_in.as_deref(),
+        force_baseline,
+    ) && !use_prefill_gqa6_blocksoftmax_q8
+        && !use_any_gqa6_rocblas_f32;
     let use_decode_gqa4_split = decode_gqa4_split_enabled(
         expected_target,
         query_count,
@@ -2137,7 +2535,9 @@ fn validate_causal_attention_info(
         descriptor.cache_encoding(),
         gqa4_split_opt_in.as_deref(),
         force_baseline,
-    ) && !use_decode_gqa4_split_p32;
+    ) && !use_decode_gqa4_split_p32
+        && !use_decode_gqa6_split_p32
+        && !use_decode_gqa6_split_p64;
     let use_decode_wave_split_fp16_pair = decode_wave_split_fp16_pair_enabled(
         expected_target,
         query_count,
@@ -2149,7 +2549,9 @@ fn validate_causal_attention_info(
         fp16_pair_opt_in.as_deref(),
         force_baseline,
     ) && !use_decode_gqa4_split
-        && !use_decode_gqa4_split_p32;
+        && !use_decode_gqa4_split_p32
+        && !use_decode_gqa6_split_p32
+        && !use_decode_gqa6_split_p64;
     let q_preload_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_Q_PRELOAD");
     let use_decode_wave_split_q_preload_long = decode_wave_split_q_preload_enabled(
         expected_target,
@@ -2168,6 +2570,42 @@ fn validate_causal_attention_info(
         && query_count >= 64
         && query_heads as usize / descriptor.layout().heads() == 4
         && descriptor.layout().head_dim() == 256;
+    let gqa6_qtile4_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_QTILE4");
+    let use_prefill_gqa6_qtile4 = use_phase33_common_provider
+        && query_count >= 128
+        && query_heads as usize / descriptor.layout().heads() == 6
+        && descriptor.layout().head_dim() == 256
+        && gqa6_qtile4_opt_in
+            .as_deref()
+            .is_some_and(|value| value == "1")
+        && !force_baseline
+        && !use_prefill_gqa6_blocksoftmax_q8
+        && !use_any_gqa6_rocblas_f32;
+    let gqa6_qtile4_k4_fp16_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K4_FP16");
+    let gqa6_qtile4_k8_fp16_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K8_FP16");
+    let gqa6_qtile4_k16_fp16_opt_in =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K16_FP16");
+    let gqa6_qtile4_k32_fp16_opt_in =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K32_FP16");
+    let gqa6_qtile4_fp16_key_tile = gqa6_qtile4_fp16_key_tile_enabled(
+        expected_target,
+        query_count,
+        query_heads,
+        descriptor.layout().heads() as u32,
+        descriptor.layout().head_dim() as u32,
+        descriptor.cache_encoding(),
+        [
+            gqa6_qtile4_k4_fp16_opt_in.as_deref(),
+            gqa6_qtile4_k8_fp16_opt_in.as_deref(),
+            gqa6_qtile4_k16_fp16_opt_in.as_deref(),
+            gqa6_qtile4_k32_fp16_opt_in.as_deref(),
+        ],
+        force_baseline || use_prefill_gqa6_blocksoftmax_q8 || use_any_gqa6_rocblas_f32,
+    );
+    let use_prefill_gqa6_qtile4_k4_fp16 = gqa6_qtile4_fp16_key_tile == Some(4);
+    let use_prefill_gqa6_qtile4_k8_fp16 = gqa6_qtile4_fp16_key_tile == Some(8);
+    let use_prefill_gqa6_qtile4_k16_fp16 = gqa6_qtile4_fp16_key_tile == Some(16);
+    let use_prefill_gqa6_qtile4_k32_fp16 = gqa6_qtile4_fp16_key_tile == Some(32);
     let scaled_prefill_opt_in =
         std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM");
     let long_prefill_v2_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_LONG_PREFILL_V2");
@@ -2227,12 +2665,38 @@ fn validate_causal_attention_info(
             4_u64
         }
     });
-    let use_prefill_gqa4_qtile4 = use_prefill_gqa4
-        && (query_count >= 128 || phase66_q4k1_control)
-        && !force_baseline
-        && !use_scaled_prefill_gemm;
+    let use_prefill_gqa4_qtile4 = !use_any_gqa6_rocblas_f32
+        && ((use_prefill_gqa4
+            && (query_count >= 128 || phase66_q4k1_control)
+            && !force_baseline
+            && !use_scaled_prefill_gemm)
+            || use_prefill_gqa6_qtile4
+            || use_prefill_gqa6_qtile4_k4_fp16
+            || use_prefill_gqa6_qtile4_k8_fp16
+            || use_prefill_gqa6_qtile4_k16_fp16
+            || use_prefill_gqa6_qtile4_k32_fp16
+            || use_prefill_gqa6_blocksoftmax
+            || use_prefill_gqa6_blocksoftmax_q8);
     let (expected_kernel_id, baseline_kernel, baseline_device) =
-        if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
+        if use_gfx1201_gqa6_rocblas_f16_tail {
+            (
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F16_TAIL_GFX1201_V1,
+                "causal_attention.online_softmax_gqa.v2",
+                "sllm_causal_attention_online_softmax_gqa_v2",
+            )
+        } else if use_gfx1201_gqa6_rocblas_f32 {
+            (
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F32_GFX1201_V1,
+                "causal_attention.online_softmax_gqa.v2",
+                "sllm_causal_attention_online_softmax_gqa_v2",
+            )
+        } else if use_decode_gqa6_split_p128 {
+            (
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_SPLIT_P128_GFX1030_V1,
+                "causal_attention.online_softmax_gqa.v2",
+                "sllm_causal_attention_online_softmax_gqa_v2",
+            )
+        } else if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
             (
                 sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2,
                 "causal_attention.online_softmax_gqa.v2",
@@ -2245,7 +2709,32 @@ fn validate_causal_attention_info(
                 "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
             )
         };
-    let (expected_kernel, expected_device) = if use_decode_gqa4_split_p32 {
+    let (expected_kernel, expected_device) = if use_decode_gqa6_split_p128 {
+        (
+            "causal_attention.decode.gqa6_split_p128.fp16.v1",
+            "sllm_causal_attention_decode_gqa6_split_p128_v1",
+        )
+    } else if use_decode_gqa6_split_p64 {
+        (
+            "causal_attention.decode.gqa6_split_p64.fp16.v1",
+            "sllm_causal_attention_decode_gqa6_split_p64_v1",
+        )
+    } else if use_decode_gqa6_split_p32 {
+        (
+            "causal_attention.decode.gqa6_split_p32.fp16.v1",
+            "sllm_causal_attention_decode_gqa6_split_p32_v1",
+        )
+    } else if use_prefill_gqa6_blocksoftmax_q8 {
+        (
+            "causal_attention.prefill.gqa6_blocksoftmax_q8.fp16.v1",
+            "sllm_causal_attention_prefill_gqa6_blocksoftmax_q8_fp16_v1",
+        )
+    } else if use_prefill_gqa6_blocksoftmax {
+        (
+            "causal_attention.prefill.gqa6_blocksoftmax.fp16.v1",
+            "sllm_causal_attention_prefill_gqa6_blocksoftmax_fp16_v1",
+        )
+    } else if use_decode_gqa4_split_p32 {
         (
             "causal_attention.decode.gqa4_tiled_split.p32.v1",
             "sllm_causal_attention_decode_gqa4_split_p32_v1",
@@ -2277,6 +2766,21 @@ fn validate_causal_attention_info(
             "causal_attention.prefill.gfx1030_qtile8_split.v2",
             "sllm_causal_attention_prefill_gfx1030_qtile8_split_v2",
         )
+    } else if use_gfx1201_gqa6_rocblas_f16_tail {
+        (
+            "causal_attention.prefill.gfx1201_rocblas_gqa6_f16_tail.v1",
+            "sllm_causal_attention_prefill_gfx1201_rocblas_gqa6_f16_tail_v1",
+        )
+    } else if use_gfx1201_gqa6_rocblas_f32 {
+        (
+            "causal_attention.prefill.gfx1201_rocblas_gqa6_f32.v1",
+            "sllm_causal_attention_prefill_gfx1201_rocblas_gqa6_f32_v1",
+        )
+    } else if use_gqa6_rocblas_f32 {
+        (
+            "causal_attention.prefill.gfx1030_rocblas_gqa6_f32.v1",
+            "sllm_causal_attention_prefill_gfx1030_rocblas_gqa6_f32_v1",
+        )
     } else if use_scaled_prefill_gemm {
         (
             "causal_attention.prefill.gfx1030_hipblas_scaled_fp16.v1",
@@ -2298,10 +2802,37 @@ fn validate_causal_attention_info(
             "sllm_causal_attention_prefill_typed_q8k8_v1",
         )
     } else if use_prefill_gqa4_qtile4 {
-        (
-            "causal_attention.prefill.gqa4_qtile4.v7",
-            "sllm_causal_attention_prefill_gqa4_qtile4_v7",
-        )
+        if use_prefill_gqa6_qtile4_k4_fp16 {
+            (
+                "causal_attention.prefill.gqa6_qtile4_k4.fp16.v1",
+                "sllm_causal_attention_prefill_gqa6_qtile4_k4_fp16_v1",
+            )
+        } else if use_prefill_gqa6_qtile4_k8_fp16 {
+            (
+                "causal_attention.prefill.gqa6_qtile4_k8.fp16.v1",
+                "sllm_causal_attention_prefill_gqa6_qtile4_k8_fp16_v1",
+            )
+        } else if use_prefill_gqa6_qtile4_k16_fp16 {
+            (
+                "causal_attention.prefill.gqa6_qtile4_k16.fp16.v1",
+                "sllm_causal_attention_prefill_gqa6_qtile4_k16_fp16_v1",
+            )
+        } else if use_prefill_gqa6_qtile4_k32_fp16 {
+            (
+                "causal_attention.prefill.gqa6_qtile4_k32.fp16.v1",
+                "sllm_causal_attention_prefill_gqa6_qtile4_k32_fp16_v1",
+            )
+        } else if use_prefill_gqa6_qtile4 {
+            (
+                "causal_attention.prefill.gqa6_qtile4.v1",
+                "sllm_causal_attention_prefill_gqa6_qtile4_v1",
+            )
+        } else {
+            (
+                "causal_attention.prefill.gqa4_qtile4.v7",
+                "sllm_causal_attention_prefill_gqa4_qtile4_v7",
+            )
+        }
     } else if use_prefill_gqa4 {
         (
             "causal_attention.prefill.gqa4_shared.v6",
@@ -2330,23 +2861,46 @@ fn validate_causal_attention_info(
         || info.backend != sys::SLLM_BACKEND_HIP
         || info.dispatch_id == 0
         || info.dispatch_count
-            != if use_decode_gqa4_split || use_decode_gqa4_split_p32 || use_long_prefill_v2 {
+            != if use_gfx1201_gqa6_rocblas_f16_tail {
+                5
+            } else if use_any_gqa6_rocblas_f32 {
+                7
+            } else if use_decode_gqa4_split
+                || use_decode_gqa4_split_p32
+                || use_decode_gqa6_split_p128
+                || use_decode_gqa6_split_p64
+                || use_decode_gqa6_split_p32
+                || use_long_prefill_v2
+            {
                 2
             } else {
                 1
             }
         || info.kernel_id != expected_kernel_id
         || info.workgroup_size_x
-            != if use_decode_gqa4_split || use_decode_gqa4_split_p32 {
+            != if use_decode_gqa6_split_p128
+                || use_decode_gqa6_split_p64
+                || use_decode_gqa6_split_p32
+            {
+                192
+            } else if use_decode_gqa4_split || use_decode_gqa4_split_p32 {
                 128
             } else {
                 sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE
             }
         || Some(info.grid_size_x)
-            != if use_decode_gqa4_split_p32 {
+            != if use_decode_gqa6_split_p128 {
+                Some(512)
+            } else if use_decode_gqa6_split_p64 {
+                Some(256)
+            } else if use_decode_gqa6_split_p32 || use_decode_gqa4_split_p32 {
                 Some(128)
             } else if use_decode_gqa4_split {
                 Some(64)
+            } else if use_any_gqa6_rocblas_f32 {
+                query_count
+                    .checked_mul(24)
+                    .and_then(|value| u32::try_from(value).ok())
             } else if use_scaled_prefill_gemm {
                 query_count
                     .checked_add(255)
@@ -2367,7 +2921,12 @@ fn validate_causal_attention_info(
                         (value / query_tile).checked_mul(descriptor.layout().heads() as u64)
                     })
                     .and_then(|value| u32::try_from(value).ok())
-            } else if use_prefill_gqa4_qtile4 {
+            } else if use_prefill_gqa6_blocksoftmax_q8 {
+                query_count
+                    .checked_add(7)
+                    .and_then(|value| (value / 8).checked_mul(descriptor.layout().heads() as u64))
+                    .and_then(|value| u32::try_from(value).ok())
+            } else if use_prefill_gqa4_qtile4 || use_prefill_gqa6_blocksoftmax {
                 query_count
                     .checked_add(3)
                     .and_then(|value| (value / 4).checked_mul(descriptor.layout().heads() as u64))
@@ -3282,6 +3841,283 @@ mod tests {
     }
 
     #[test]
+    fn decode_gqa6_split_p32_guard_is_explicit_opt_in_target_scoped_and_force_safe() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        assert!(decode_gqa6_split_p32_enabled(
+            Some("gfx1030"),
+            1,
+            4096,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(decode_gqa6_split_p32_enabled(
+            Some("gfx1201"),
+            1,
+            8192,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        for opt_in in [
+            None,
+            Some(std::ffi::OsStr::new("0")),
+            Some(std::ffi::OsStr::new("unknown")),
+        ] {
+            assert!(!decode_gqa6_split_p32_enabled(
+                Some("gfx1030"),
+                1,
+                4096,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                opt_in,
+                false,
+            ));
+        }
+        assert!(!decode_gqa6_split_p32_enabled(
+            Some("gfx1030"),
+            1,
+            4096,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            true,
+        ));
+        for (target, query_count, committed_kv_length, query_heads, kv_heads, head_dim, encoding) in [
+            (Some("gfx942"), 1, 4096, 24, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 2, 4096, 24, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 4095, 24, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 4096, 16, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 4096, 24, 8, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 4096, 24, 4, 128, KvCacheEncoding::Fp16),
+            (
+                Some("gfx1030"),
+                1,
+                4096,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp8E4M3Fn,
+            ),
+        ] {
+            assert!(!decode_gqa6_split_p32_enabled(
+                target,
+                query_count,
+                committed_kv_length,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                enabled,
+                false,
+            ));
+        }
+    }
+
+    #[test]
+    fn decode_gqa6_split_p64_guard_is_explicit_opt_in_target_scoped_and_force_safe() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        assert!(decode_gqa6_split_p64_enabled(
+            Some("gfx1030"),
+            1,
+            8192,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(decode_gqa6_split_p64_enabled(
+            Some("gfx1201"),
+            1,
+            8192,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(!decode_gqa6_split_p64_enabled(
+            Some("gfx1030"),
+            1,
+            8191,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        for opt_in in [
+            None,
+            Some(std::ffi::OsStr::new("0")),
+            Some(std::ffi::OsStr::new("unknown")),
+        ] {
+            assert!(!decode_gqa6_split_p64_enabled(
+                Some("gfx1030"),
+                1,
+                4096,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                opt_in,
+                false,
+            ));
+        }
+        assert!(!decode_gqa6_split_p64_enabled(
+            Some("gfx1030"),
+            1,
+            4096,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            true,
+        ));
+        for (target, query_count, committed_kv_length, query_heads, kv_heads, head_dim, encoding) in [
+            (Some("gfx942"), 1, 4096, 24, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 2, 4096, 24, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 4095, 24, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 4096, 16, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 4096, 24, 8, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 4096, 24, 4, 128, KvCacheEncoding::Fp16),
+            (
+                Some("gfx1030"),
+                1,
+                4096,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp8E4M3Fn,
+            ),
+        ] {
+            assert!(!decode_gqa6_split_p64_enabled(
+                target,
+                query_count,
+                committed_kv_length,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                enabled,
+                false,
+            ));
+        }
+        let p32 = decode_gqa6_split_p32_enabled(
+            Some("gfx1030"),
+            1,
+            4096,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        );
+        let p64 = decode_gqa6_split_p64_enabled(
+            Some("gfx1030"),
+            1,
+            8192,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        );
+        assert!(p32);
+        assert!(p64);
+        assert!(!(p32 && !p64));
+    }
+
+    #[test]
+    fn decode_gqa6_split_p128_guard_is_gfx1030_long_context_opt_in_only() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        assert!(decode_gqa6_split_p128_enabled(
+            Some("gfx1030"),
+            1,
+            8192,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        for (target, length, query_count, query_heads, kv_heads, head_dim, encoding) in [
+            (Some("gfx1201"), 8192, 1, 24, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 8191, 1, 24, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 8192, 2, 24, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 8192, 1, 16, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 8192, 1, 24, 8, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 8192, 1, 24, 4, 128, KvCacheEncoding::Fp16),
+            (
+                Some("gfx1030"),
+                8192,
+                1,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp8E4M3Fn,
+            ),
+        ] {
+            assert!(!decode_gqa6_split_p128_enabled(
+                target,
+                query_count,
+                length,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                enabled,
+                false,
+            ));
+        }
+        for opt_in in [
+            None,
+            Some(std::ffi::OsStr::new("0")),
+            Some(std::ffi::OsStr::new("unknown")),
+        ] {
+            assert!(!decode_gqa6_split_p128_enabled(
+                Some("gfx1030"),
+                1,
+                8192,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                opt_in,
+                false,
+            ));
+        }
+        assert!(!decode_gqa6_split_p128_enabled(
+            Some("gfx1030"),
+            1,
+            8192,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            true,
+        ));
+    }
+
+    #[test]
     fn decode_gqa4_split_p32_gfx1201_is_default_on_and_target_scoped() {
         let enabled = Some(std::ffi::OsStr::new("1"));
         let disabled = Some(std::ffi::OsStr::new("0"));
@@ -3705,6 +4541,287 @@ mod tests {
                 false,
             ));
         }
+    }
+
+    #[test]
+    fn gqa6_blocksoftmax_guard_is_target_scoped_and_force_safe() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        let disabled = Some(std::ffi::OsStr::new("0"));
+        assert!(gqa6_blocksoftmax_enabled(
+            Some("gfx1030"),
+            128,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            None,
+            false,
+        ));
+        assert!(gqa6_blocksoftmax_enabled(
+            Some("gfx1201"),
+            129,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            None,
+            enabled,
+            false,
+        ));
+        assert!(!gqa6_blocksoftmax_enabled(
+            Some("gfx1030"),
+            128,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            None,
+            true,
+        ));
+        for (target, gfx1030, gfx1201) in [
+            (Some("gfx942"), enabled, enabled),
+            (Some("gfx1030"), disabled, enabled),
+            (Some("gfx1201"), enabled, disabled),
+        ] {
+            assert!(!gqa6_blocksoftmax_enabled(
+                target,
+                128,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                gfx1030,
+                gfx1201,
+                false,
+            ));
+        }
+        for (query_count, query_heads, kv_heads, head_dim, encoding) in [
+            (127, 24, 4, 256, KvCacheEncoding::Fp16),
+            (128, 16, 4, 256, KvCacheEncoding::Fp16),
+            (128, 24, 8, 256, KvCacheEncoding::Fp16),
+            (128, 24, 4, 128, KvCacheEncoding::Fp16),
+            (128, 24, 4, 256, KvCacheEncoding::Mxfp8E4),
+        ] {
+            assert!(!gqa6_blocksoftmax_enabled(
+                Some("gfx1030"),
+                query_count,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                enabled,
+                None,
+                false,
+            ));
+        }
+    }
+
+    #[test]
+    fn gqa6_blocksoftmax_q8_guard_is_gfx1201_only_and_exact() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        assert!(gqa6_blocksoftmax_q8_enabled(
+            Some("gfx1201"),
+            128,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(!gqa6_blocksoftmax_q8_enabled(
+            Some("gfx1030"),
+            128,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(!gqa6_blocksoftmax_q8_enabled(
+            Some("gfx1201"),
+            128,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            true,
+        ));
+        for (query_count, query_heads, kv_heads, head_dim, encoding) in [
+            (127, 24, 4, 256, KvCacheEncoding::Fp16),
+            (128, 16, 4, 256, KvCacheEncoding::Fp16),
+            (128, 24, 8, 256, KvCacheEncoding::Fp16),
+            (128, 24, 4, 128, KvCacheEncoding::Fp16),
+            (128, 24, 4, 256, KvCacheEncoding::Mxfp8E4),
+        ] {
+            assert!(!gqa6_blocksoftmax_q8_enabled(
+                Some("gfx1201"),
+                query_count,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                enabled,
+                false,
+            ));
+        }
+    }
+
+    #[test]
+    fn gqa6_qtile4_k32_fp16_guard_is_exact_and_force_rollback() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        for target in [Some("gfx1030"), Some("gfx1201")] {
+            for query_count in [128, 129, 4096, 9435] {
+                assert!(gqa6_qtile4_k32_fp16_enabled(
+                    target,
+                    query_count,
+                    24,
+                    4,
+                    256,
+                    KvCacheEncoding::Fp16,
+                    enabled,
+                    false,
+                ));
+            }
+        }
+        assert!(!gqa6_qtile4_k32_fp16_enabled(
+            Some("gfx1030"),
+            127,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        for (target, query_heads, kv_heads, head_dim, encoding) in [
+            (Some("gfx942"), 24, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 16, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 24, 8, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 24, 4, 128, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 24, 4, 256, KvCacheEncoding::Mxfp8E4),
+        ] {
+            assert!(!gqa6_qtile4_k32_fp16_enabled(
+                target,
+                128,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                enabled,
+                false,
+            ));
+        }
+        for opt_in in [
+            None,
+            Some(std::ffi::OsStr::new("0")),
+            Some(std::ffi::OsStr::new("unknown")),
+        ] {
+            assert!(!gqa6_qtile4_k32_fp16_enabled(
+                Some("gfx1201"),
+                128,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                opt_in,
+                false,
+            ));
+        }
+        assert!(!gqa6_qtile4_k32_fp16_enabled(
+            Some("gfx1030"),
+            9435,
+            24,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            true,
+        ));
+    }
+
+    #[test]
+    fn gqa6_qtile4_fp16_key_tile_precedence_is_explicit() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        let disabled = Some(std::ffi::OsStr::new("0"));
+        for target in [Some("gfx1030"), Some("gfx1201")] {
+            for (key_tile, opt_ins) in [
+                (4, [enabled, None, None, None]),
+                (8, [None, enabled, None, None]),
+                (16, [None, None, enabled, None]),
+                (32, [None, None, None, enabled]),
+            ] {
+                assert_eq!(
+                    gqa6_qtile4_fp16_key_tile_enabled(
+                        target,
+                        128,
+                        24,
+                        4,
+                        256,
+                        KvCacheEncoding::Fp16,
+                        opt_ins,
+                        false,
+                    ),
+                    Some(key_tile)
+                );
+            }
+        }
+        assert_eq!(
+            gqa6_qtile4_fp16_key_tile_enabled(
+                Some("gfx1030"),
+                128,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                [enabled, enabled, enabled, enabled],
+                false,
+            ),
+            Some(4)
+        );
+        assert_eq!(
+            gqa6_qtile4_fp16_key_tile_enabled(
+                Some("gfx1030"),
+                128,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                [disabled, disabled, disabled, disabled],
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            gqa6_qtile4_fp16_key_tile_enabled(
+                Some("gfx1030"),
+                128,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                [enabled, enabled, enabled, enabled],
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            gqa6_qtile4_fp16_key_tile_enabled(
+                Some("gfx942"),
+                128,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                [enabled, enabled, enabled, enabled],
+                false,
+            ),
+            None
+        );
     }
 
     #[test]

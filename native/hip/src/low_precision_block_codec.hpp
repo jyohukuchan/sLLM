@@ -118,6 +118,90 @@ e4m3fn_to_fp16_bits(const uint8_t bits) noexcept {
       static_cast<uint16_t>(mantissa) << 7U);
 }
 
+// Convert four adjacent E4M3FN bytes loaded as one dword into the two packed
+// FP16 half2 operands consumed by the gfx1030 dword8 decode path.  Keeping
+// this as a constexpr integer transform makes the ingress independently
+// testable and preserves all 256 codes, including signed zero, subnormals,
+// and the signed NaN encodings 0x7f/0xff.
+struct E4M3FnFp16x4Bits {
+  uint32_t low;
+  uint32_t high;
+};
+
+__host__ __device__ constexpr bool
+e4m3fnx4_has_zero_byte(const uint32_t value) noexcept {
+  return ((value - UINT32_C(0x01010101)) & ~value & UINT32_C(0x80808080)) != 0U;
+}
+
+// Expand two normal E4M3FN bytes into packed FP16 lanes.  Spreading the input
+// bytes into independent 16-bit lanes makes the exponent-bias addition safe:
+// the largest finite normal result cannot carry into its neighbouring lane.
+__host__ __device__ constexpr uint32_t
+e4m3fnx2_normal_to_fp16_bits(const uint32_t packed) noexcept {
+  const uint32_t lanes =
+      (packed & UINT32_C(0x000000ff)) | ((packed & UINT32_C(0x0000ff00)) << 8U);
+  const uint32_t signs = (lanes & UINT32_C(0x00800080)) << 8U;
+  const uint32_t magnitudes =
+      ((lanes & UINT32_C(0x007f007f)) << 7U) + UINT32_C(0x20002000);
+  return signs | magnitudes;
+}
+
+__host__ __device__ constexpr uint16_t
+e4m3fn_to_fp16_bits_no_table(const uint8_t bits) noexcept {
+  const uint16_t sign =
+      static_cast<uint16_t>(static_cast<uint16_t>(bits & UINT8_C(0x80)) << 8U);
+  const uint8_t magnitude = bits & UINT8_C(0x7f);
+  const uint8_t exponent = magnitude >> 3U;
+  const uint8_t mantissa = magnitude & UINT8_C(0x07);
+  if (exponent == 0U) {
+    // The seven finite E4M3FN subnormals are exact FP16 values.  A ternary
+    // map keeps this hot dword ingress in VALU/bit operations rather than
+    // issuing a serialized constant-memory ushort load per byte.
+    const uint16_t subnormal = mantissa == 0U   ? UINT16_C(0x0000)
+                               : mantissa == 1U ? UINT16_C(0x1800)
+                               : mantissa == 2U ? UINT16_C(0x1c00)
+                               : mantissa == 3U ? UINT16_C(0x1e00)
+                               : mantissa == 4U ? UINT16_C(0x2000)
+                               : mantissa == 5U ? UINT16_C(0x2100)
+                               : mantissa == 6U ? UINT16_C(0x2200)
+                                                : UINT16_C(0x2300);
+    return static_cast<uint16_t>(sign | subnormal);
+  }
+  if (magnitude == UINT8_C(0x7f)) {
+    return static_cast<uint16_t>(sign | UINT16_C(0x7e00));
+  }
+  return static_cast<uint16_t>(
+      sign | static_cast<uint16_t>(exponent + UINT8_C(8)) << 10U |
+      static_cast<uint16_t>(mantissa) << 7U);
+}
+
+__host__ __device__ constexpr E4M3FnFp16x4Bits
+e4m3fnx4_to_fp16x2_bits(const uint32_t packed) noexcept {
+  const uint32_t exponent_fields = packed & UINT32_C(0x78787878);
+  const uint32_t nan_fields =
+      (packed & UINT32_C(0x7f7f7f7f)) ^ UINT32_C(0x7f7f7f7f);
+  if (!e4m3fnx4_has_zero_byte(exponent_fields) &&
+      !e4m3fnx4_has_zero_byte(nan_fields)) {
+    return {e4m3fnx2_normal_to_fp16_bits(packed),
+            e4m3fnx2_normal_to_fp16_bits(packed >> 16U)};
+  }
+
+  // Zero/subnormal and signed-NaN encodings are rare in quantized model
+  // payloads.  Keep their exact scalar mapping behind one whole-dword branch
+  // rather than paying the branchy conversion cost for every normal byte.
+  const uint16_t first = e4m3fn_to_fp16_bits_no_table(
+      static_cast<uint8_t>(packed & UINT32_C(0xff)));
+  const uint16_t second = e4m3fn_to_fp16_bits_no_table(
+      static_cast<uint8_t>((packed >> 8U) & UINT32_C(0xff)));
+  const uint16_t third = e4m3fn_to_fp16_bits_no_table(
+      static_cast<uint8_t>((packed >> 16U) & UINT32_C(0xff)));
+  const uint16_t fourth = e4m3fn_to_fp16_bits_no_table(
+      static_cast<uint8_t>((packed >> 24U) & UINT32_C(0xff)));
+  return {static_cast<uint32_t>(first) | (static_cast<uint32_t>(second) << 16U),
+          static_cast<uint32_t>(third) |
+              (static_cast<uint32_t>(fourth) << 16U)};
+}
+
 __device__ __forceinline__ __half e4m3fn_to_half(const uint8_t bits) noexcept {
   __half_raw half_bits{};
   half_bits.x = e4m3fn_to_fp16_bits(bits);
@@ -127,6 +211,23 @@ __device__ __forceinline__ __half e4m3fn_to_half(const uint8_t bits) noexcept {
 __device__ __forceinline__ __half2
 e4m3fnx2_to_half2(const uint8_t first, const uint8_t second) noexcept {
   return __halves2half2(e4m3fn_to_half(first), e4m3fn_to_half(second));
+}
+
+__device__ __forceinline__ __half2
+fp16x2_bits_to_half2(const uint32_t packed) noexcept {
+  __half_raw first_bits{};
+  __half_raw second_bits{};
+  first_bits.x = static_cast<uint16_t>(packed & UINT32_C(0xffff));
+  second_bits.x = static_cast<uint16_t>(packed >> 16U);
+  return __halves2half2(__half{first_bits}, __half{second_bits});
+}
+
+__device__ __forceinline__ void
+e4m3fnx4_to_half2x2(const uint32_t packed, __half2 *const first,
+                    __half2 *const second) noexcept {
+  const E4M3FnFp16x4Bits bits = e4m3fnx4_to_fp16x2_bits(packed);
+  *first = fp16x2_bits_to_half2(bits.low);
+  *second = fp16x2_bits_to_half2(bits.high);
 }
 
 template <> struct ScalarCodec<E4M3Fn> {

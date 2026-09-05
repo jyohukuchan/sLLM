@@ -209,6 +209,41 @@ pub struct MatmulDispatchInfo {
     pub gcn_arch_name: String,
 }
 
+const FP8_ID82_DEVICE_SYMBOL: &str = "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_wave4col32_v1";
+const FP8_ID82_TUPLE_K5120N17408_DEVICE_SYMBOL: &str =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k5120n17408_v1";
+const FP8_ID82_TUPLE_K6144N5120_DEVICE_SYMBOL: &str =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k6144n5120_v1";
+const FP8_ID82_TUPLE_K5120N10240_DEVICE_SYMBOL: &str =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k5120n10240_v1";
+const FP8_ID82_TUPLE_K5120N6144_DEVICE_SYMBOL: &str =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k5120n6144_v1";
+const FP8_ID82_KERNEL_ID: u32 = 82;
+
+fn is_gfx1030_target(target: &str) -> bool {
+    target.split(':').next() == Some("gfx1030")
+}
+
+fn fp8_id82_expected_device_symbol(info: &MatmulDispatchInfo) -> &'static str {
+    if !is_gfx1030_target(&info.gcn_arch_name) || info.m != 1 {
+        return FP8_ID82_DEVICE_SYMBOL;
+    }
+    match (info.k, info.n) {
+        (5120, 17408) => FP8_ID82_TUPLE_K5120N17408_DEVICE_SYMBOL,
+        (6144, 5120) => FP8_ID82_TUPLE_K6144N5120_DEVICE_SYMBOL,
+        (5120, 10240) => FP8_ID82_TUPLE_K5120N10240_DEVICE_SYMBOL,
+        (5120, 6144) => FP8_ID82_TUPLE_K5120N6144_DEVICE_SYMBOL,
+        _ => FP8_ID82_DEVICE_SYMBOL,
+    }
+}
+
+fn matmul_dispatch_symbol_is_valid(info: &MatmulDispatchInfo) -> bool {
+    if info.kernel_id != FP8_ID82_KERNEL_ID {
+        return true;
+    }
+    info.device_symbol == fp8_id82_expected_device_symbol(info)
+}
+
 fn read_c_string(value: &[core::ffi::c_char]) -> String {
     let length = value
         .iter()
@@ -315,6 +350,10 @@ impl HipBackend {
 }
 
 impl PreparedMatmul {
+    pub(crate) fn raw_plan_handle(&self) -> *const sys::sllm_matmul_plan_t {
+        self.state.raw.as_ptr()
+    }
+
     pub fn execute(
         &self,
         queue: &Queue,
@@ -368,6 +407,13 @@ impl PreparedMatmul {
             0,
             false,
         );
+        if !matmul_dispatch_symbol_is_valid(&dispatch_info) {
+            drop(completion);
+            return Err(RuntimeError::local(
+                RuntimeStatus::InternalError,
+                "native matmul dispatch reported an ID82 device symbol inconsistent with its shape",
+            ));
+        }
         Ok((
             MatmulSubmission {
                 completion,
@@ -474,6 +520,92 @@ mod tests {
         assert!(!dispatch.fallback_used);
         assert_eq!(dispatch.kernel_symbol, "k");
         assert_eq!(dispatch.gcn_arch_name, "g");
+    }
+
+    #[test]
+    fn id82_exact_tuples_require_shape_specific_device_symbols() {
+        let mut info = sys::sllm_matmul_dispatch_info_t {
+            struct_size: size_of::<sys::sllm_matmul_dispatch_info_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            info_version: sys::SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION,
+            backend: sys::SLLM_BACKEND_HIP,
+            dispatch_id: 10,
+            dispatch_count: 1,
+            kernel_id: FP8_ID82_KERNEL_ID,
+            workgroup_size_x: sys::SLLM_HIP_MATMUL_WORKGROUP_SIZE,
+            grid_size_x: 544,
+            fallback_allowed: 0,
+            fallback_used: 0,
+            m: 1,
+            k: 5120,
+            n: 17408,
+            output_elements: 17408,
+            kernel_symbol: [0; 64],
+            device_symbol: [0; 64],
+            gcn_arch_name: [0; 64],
+            reserved: [0; 8],
+        };
+        for (slot, byte) in info
+            .gcn_arch_name
+            .iter_mut()
+            .zip(b"gfx1030".iter().copied())
+        {
+            *slot = byte as core::ffi::c_char;
+        }
+        let tuples = [
+            (5120, 17408, FP8_ID82_TUPLE_K5120N17408_DEVICE_SYMBOL),
+            (6144, 5120, FP8_ID82_TUPLE_K6144N5120_DEVICE_SYMBOL),
+            (5120, 10240, FP8_ID82_TUPLE_K5120N10240_DEVICE_SYMBOL),
+            (5120, 6144, FP8_ID82_TUPLE_K5120N6144_DEVICE_SYMBOL),
+        ];
+        for (k, n, symbol) in tuples {
+            info.m = 1;
+            info.k = k;
+            info.n = n;
+            info.device_symbol = [0; 64];
+            for (slot, byte) in info
+                .device_symbol
+                .iter_mut()
+                .zip(symbol.as_bytes().iter().copied())
+            {
+                *slot = byte as core::ffi::c_char;
+            }
+            let exact = dispatch_info_from_raw(&info);
+            assert!(matmul_dispatch_symbol_is_valid(&exact));
+
+            info.device_symbol = [0; 64];
+            for (slot, byte) in info
+                .device_symbol
+                .iter_mut()
+                .zip(FP8_ID82_DEVICE_SYMBOL.as_bytes().iter().copied())
+            {
+                *slot = byte as core::ffi::c_char;
+            }
+            let stale_exact = dispatch_info_from_raw(&info);
+            assert!(!matmul_dispatch_symbol_is_valid(&stale_exact));
+        }
+
+        for n in [6143, 6145] {
+            let mut adjacent = dispatch_info_from_raw(&info);
+            adjacent.k = 5120;
+            adjacent.n = n;
+            adjacent.device_symbol = FP8_ID82_DEVICE_SYMBOL.to_owned();
+            assert!(matmul_dispatch_symbol_is_valid(&adjacent));
+            adjacent.device_symbol = FP8_ID82_TUPLE_K5120N6144_DEVICE_SYMBOL.to_owned();
+            assert!(!matmul_dispatch_symbol_is_valid(&adjacent));
+        }
+
+        let mut featured = dispatch_info_from_raw(&info);
+        featured.gcn_arch_name = "gfx1030:xnack-".to_owned();
+        featured.n = 10240;
+        featured.device_symbol = FP8_ID82_TUPLE_K5120N10240_DEVICE_SYMBOL.to_owned();
+        assert!(matmul_dispatch_symbol_is_valid(&featured));
+        featured.gcn_arch_name = "gfx10300".to_owned();
+        assert!(!matmul_dispatch_symbol_is_valid(&featured));
+
+        info.m = 2;
+        let broad = dispatch_info_from_raw(&info);
+        assert!(matmul_dispatch_symbol_is_valid(&broad));
     }
 
     #[test]

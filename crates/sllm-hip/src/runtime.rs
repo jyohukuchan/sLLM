@@ -5,6 +5,7 @@
 //! mutable completion state through `&mut self`.  An in-flight completion keeps the context, queue, and
 //! buffer `Arc`s alive until the caller observes a terminal result.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void};
 use std::fmt;
@@ -507,6 +508,12 @@ enum PendingCleanup {
         context: Arc<ContextInner>,
         queue: Arc<QueueInner>,
         buffer: Option<Arc<BufferInner>>,
+        disposition: CleanupDisposition,
+    },
+    GraphSpan {
+        raw: Option<NonNull<sys::sllm_graph_span_t>>,
+        queue: Queue,
+        owners: Vec<crate::GraphSpanPlan>,
         disposition: CleanupDisposition,
     },
     KvState {
@@ -1590,6 +1597,7 @@ impl PendingCleanup {
             | Self::Buffer { disposition, .. }
             | Self::Event { disposition, .. }
             | Self::Completion { disposition, .. }
+            | Self::GraphSpan { disposition, .. }
             | Self::KvState { disposition, .. }
             | Self::KvView { disposition, .. }
             | Self::KvCompletion { disposition, .. }
@@ -1754,6 +1762,31 @@ pub(crate) fn completion_from_opaque_token(
     NonNull::new(address as *mut sys::sllm_completion_t).ok_or_else(|| {
         RuntimeError::local(RuntimeStatus::InvalidHandle, "queue fence token was null")
     })
+}
+
+pub(crate) fn release_graph_span_once(
+    raw: NonNull<sys::sllm_graph_span_t>,
+) -> (RuntimeStatus, Option<NonNull<sys::sllm_graph_span_t>>) {
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut native = raw.as_ptr();
+    let status = unsafe { sys::sllm_graph_span_release(&mut native, &mut error_sink) };
+    (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn enqueue_graph_span_cleanup(
+    raw: NonNull<sys::sllm_graph_span_t>,
+    queue: Queue,
+    owners: Vec<crate::GraphSpanPlan>,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::GraphSpan {
+        raw: Some(raw),
+        queue,
+        owners,
+        disposition,
+    });
 }
 
 pub(crate) fn release_kv_state_once(
@@ -2412,6 +2445,45 @@ impl PendingCleanup {
                         context,
                         queue,
                         buffer,
+                        disposition,
+                    })
+                }
+            }
+            Self::GraphSpan {
+                raw,
+                queue,
+                owners,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::GraphSpan {
+                            raw,
+                            queue,
+                            owners,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::GraphSpan {
+                        raw: Some(raw_handle),
+                        queue,
+                        owners,
+                        disposition,
+                    });
+                }
+                let (status, remaining) = release_graph_span_once(raw_handle);
+                let (remaining, disposition, done) = classify_release(status, remaining);
+                if done {
+                    None
+                } else {
+                    Some(Self::GraphSpan {
+                        raw: remaining,
+                        queue,
+                        owners,
                         disposition,
                     })
                 }
@@ -3710,6 +3782,7 @@ impl Queue {
             _context: Arc::clone(&self.inner.context),
             _queue: Arc::clone(&self.inner),
             _buffer: Some(Arc::clone(&destination.inner)),
+            _keepalive: None,
             transfer_size_bytes: size_bytes,
             d2h: false,
             terminal: false,
@@ -3920,6 +3993,7 @@ pub struct Completion {
     _context: Arc<ContextInner>,
     _queue: Arc<QueueInner>,
     _buffer: Option<Arc<BufferInner>>,
+    _keepalive: Option<Arc<dyn Any + Send + Sync>>,
     transfer_size_bytes: u64,
     d2h: bool,
     terminal: bool,
@@ -3957,6 +4031,7 @@ impl Completion {
             _context: Arc::clone(&context.inner),
             _queue: Arc::clone(&queue.inner),
             _buffer: Some(Arc::clone(&buffer.inner)),
+            _keepalive: None,
             transfer_size_bytes,
             d2h,
             terminal: false,
@@ -3964,12 +4039,34 @@ impl Completion {
         }
     }
 
-    fn from_queue_fence(raw: NonNull<sys::sllm_completion_t>, queue: &Queue) -> Self {
+    pub(crate) fn from_queue_fence(raw: NonNull<sys::sllm_completion_t>, queue: &Queue) -> Self {
         Self {
             raw: Some(raw),
             _context: Arc::clone(&queue.inner.context),
             _queue: Arc::clone(&queue.inner),
             _buffer: None,
+            _keepalive: None,
+            transfer_size_bytes: 0,
+            d2h: false,
+            terminal: false,
+            safe_to_release: false,
+        }
+    }
+
+    pub(crate) fn from_native_with_keepalive<T>(
+        raw: NonNull<sys::sllm_completion_t>,
+        queue: &Queue,
+        keepalive: Arc<T>,
+    ) -> Self
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        Self {
+            raw: Some(raw),
+            _context: Arc::clone(&queue.inner.context),
+            _queue: Arc::clone(&queue.inner),
+            _buffer: None,
+            _keepalive: Some(keepalive),
             transfer_size_bytes: 0,
             d2h: false,
             terminal: false,
@@ -4261,6 +4358,7 @@ fn submit_copy(
         _context: Arc::clone(&queue.inner.context),
         _queue: Arc::clone(&queue.inner),
         _buffer: Some(Arc::clone(&buffer.inner)),
+        _keepalive: None,
         transfer_size_bytes: size_bytes_u64,
         d2h,
         terminal: false,
@@ -4691,6 +4789,7 @@ mod tests {
                     _context: Arc::clone(&context),
                     _queue: Arc::clone(&queue),
                     _buffer: Some(Arc::clone(&buffer)),
+                    _keepalive: None,
                     transfer_size_bytes: 1,
                     d2h: false,
                     terminal: false,

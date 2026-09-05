@@ -127,6 +127,7 @@ sha2.workspace = true
 sllm-core.workspace = true
 sllm-hip-sys.workspace = true
 sllm-frontend.workspace = true
+tokenizers.workspace = true
 
 [dev-dependencies]
 static_assertions = "1.1.0"

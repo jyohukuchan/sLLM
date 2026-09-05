@@ -9,6 +9,10 @@ pub enum SemanticOpKind {
     ScalarMul,
     Embedding,
     Matmul,
+    /// Two exact Qwen3.8 projections sharing one dynamically quantized
+    /// activation.  Inputs are activation, member-0 weight, member-1 weight;
+    /// outputs retain the two independent BF16 projection tensors.
+    Qwen38ProjectionPack2,
     /// Fixed Qwen3.5 GDN projection bundle. This is intentionally not a
     /// generic multi-column matmul: four independent BF16 outputs and weight
     /// roles are part of the contract.
@@ -266,6 +270,7 @@ impl SemanticOpKind {
             Self::ScalarMul => "scalar_mul",
             Self::Embedding => "embedding",
             Self::Matmul => "matmul",
+            Self::Qwen38ProjectionPack2 => "qwen38_projection_pack2",
             Self::GdnProjectionBundle => "gdn_projection_bundle",
             Self::MlpGateUpSiluBundle => "mlp_gate_up_silu_bundle",
             Self::SiluMul => "silu_mul",
@@ -296,6 +301,7 @@ impl SemanticOpKind {
             Self::ScalarMul => (2, 1),
             Self::Embedding => (2, 1),
             Self::Matmul => (2, 1),
+            Self::Qwen38ProjectionPack2 => (3, 2),
             Self::GdnProjectionBundle => (5, 4),
             Self::MlpGateUpSiluBundle => (3, 3),
             Self::SiluMul => (2, 1),
@@ -1381,6 +1387,69 @@ impl MlpGateUpSiluBundleContractV1 {
     }
 }
 
+/// Fixed roles for the exact Qwen3.8 projection packs.  The first lowering
+/// milestone only emits `Nvfp4MlpGateUp`; the remaining values reserve one
+/// stable semantic contract for the later FP8 pair/triple rollout.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Qwen38ProjectionPackRoleV1 {
+    Nvfp4MlpGateUp,
+    Fp8MlpGateUp,
+    Fp8FullAttentionQkv,
+    Fp8GdnQkvZ,
+}
+
+/// Numerical contract for projections which reuse one quantized activation.
+/// NVFP4 keeps the verified raw binary32 input-global scale bits so the
+/// prepared-operation cache and native descriptor cannot conflate different
+/// activation quantizers.  FP8 roles require the field to be zero.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Qwen38ProjectionPackContractV1 {
+    role: Qwen38ProjectionPackRoleV1,
+    input_global_scale_f32_bits: u32,
+}
+
+impl Qwen38ProjectionPackContractV1 {
+    pub const HIDDEN_SIZE: u32 = 5_120;
+    pub const MLP_INTERMEDIATE_SIZE: u32 = 17_408;
+    pub const FULL_ATTENTION_Q_WIDTH: u32 = 12_288;
+    pub const FULL_ATTENTION_KV_WIDTH: u32 = 1_024;
+    pub const GDN_QKV_WIDTH: u32 = 10_240;
+    pub const GDN_Z_WIDTH: u32 = 6_144;
+
+    pub fn nvfp4_mlp_gate_up(input_global_scale_f32_bits: u32) -> Result<Self, OpError> {
+        let scale = f32::from_bits(input_global_scale_f32_bits);
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(OpError::Qwen38ProjectionPackInvalidInputGlobalScale {
+                bits: input_global_scale_f32_bits,
+            });
+        }
+        Ok(Self {
+            role: Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp,
+            input_global_scale_f32_bits,
+        })
+    }
+
+    pub const fn fp8(role: Qwen38ProjectionPackRoleV1) -> Option<Self> {
+        match role {
+            Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp => None,
+            Qwen38ProjectionPackRoleV1::Fp8MlpGateUp
+            | Qwen38ProjectionPackRoleV1::Fp8FullAttentionQkv
+            | Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ => Some(Self {
+                role,
+                input_global_scale_f32_bits: 0,
+            }),
+        }
+    }
+
+    pub const fn role(self) -> Qwen38ProjectionPackRoleV1 {
+        self.role
+    }
+
+    pub const fn input_global_scale_f32_bits(self) -> u32 {
+        self.input_global_scale_f32_bits
+    }
+}
+
 /// A backend-independent operation contract containing only tensor metadata.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SemanticOpDescriptor {
@@ -1398,6 +1467,7 @@ pub struct SemanticOpDescriptor {
     minimax_m3_moe_route_contract: Option<MiniMaxM3MoeRouteContractV1>,
     gdn_projection_bundle_contract: Option<GdnProjectionBundleContractV1>,
     mlp_gate_up_silu_bundle_contract: Option<MlpGateUpSiluBundleContractV1>,
+    qwen38_projection_pack_contract: Option<Qwen38ProjectionPackContractV1>,
 }
 
 /// Short name for the semantic operation descriptor used by backend traits.
@@ -1424,6 +1494,7 @@ impl SemanticOpDescriptor {
             minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
+            qwen38_projection_pack_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1461,6 +1532,7 @@ impl SemanticOpDescriptor {
             minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
+            qwen38_projection_pack_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1500,6 +1572,7 @@ impl SemanticOpDescriptor {
             minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
+            qwen38_projection_pack_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1525,6 +1598,7 @@ impl SemanticOpDescriptor {
             minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
+            qwen38_projection_pack_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1550,6 +1624,7 @@ impl SemanticOpDescriptor {
             minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
+            qwen38_projection_pack_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1575,6 +1650,7 @@ impl SemanticOpDescriptor {
             minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
+            qwen38_projection_pack_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1602,6 +1678,7 @@ impl SemanticOpDescriptor {
             minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
+            qwen38_projection_pack_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1636,6 +1713,7 @@ impl SemanticOpDescriptor {
             minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
+            qwen38_projection_pack_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1668,6 +1746,7 @@ impl SemanticOpDescriptor {
             minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
+            qwen38_projection_pack_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1694,6 +1773,7 @@ impl SemanticOpDescriptor {
             minimax_m3_moe_route_contract: Some(contract),
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
+            qwen38_projection_pack_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1719,6 +1799,7 @@ impl SemanticOpDescriptor {
             minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: Some(contract),
             mlp_gate_up_silu_bundle_contract: None,
+            qwen38_projection_pack_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1744,6 +1825,33 @@ impl SemanticOpDescriptor {
             minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: Some(contract),
+            qwen38_projection_pack_contract: None,
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    pub fn new_qwen38_projection_pack2(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: Qwen38ProjectionPackContractV1,
+    ) -> Result<Self, OpError> {
+        let descriptor = Self {
+            kind: SemanticOpKind::Qwen38ProjectionPack2,
+            inputs,
+            outputs,
+            rms_norm_contract: None,
+            residual_rms_norm_contract: None,
+            rotary_contract: None,
+            causal_attention_contract: None,
+            attention_preprocess_contract: None,
+            token_selector_contract: None,
+            sparse_moe_contract: None,
+            deepseek_v4_moe_route_contract: None,
+            minimax_m3_moe_route_contract: None,
+            gdn_projection_bundle_contract: None,
+            mlp_gate_up_silu_bundle_contract: None,
+            qwen38_projection_pack_contract: Some(contract),
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1809,6 +1917,10 @@ impl SemanticOpDescriptor {
         self.mlp_gate_up_silu_bundle_contract
     }
 
+    pub const fn qwen38_projection_pack_contract(&self) -> Option<Qwen38ProjectionPackContractV1> {
+        self.qwen38_projection_pack_contract
+    }
+
     /// Returns the zero-copy rank-2 view consumed by the existing `o_proj`
     /// matmul path. Only the validated C3c sigmoid output gate has this
     /// handoff: `[M, H, 256]` is the same contiguous storage as `[M, H * 256]`.
@@ -1864,6 +1976,12 @@ impl SemanticOpDescriptor {
             }
             SemanticOpKind::Matmul => {
                 validate_matmul(&self.inputs, &self.outputs)?;
+            }
+            SemanticOpKind::Qwen38ProjectionPack2 => {
+                let contract = self
+                    .qwen38_projection_pack_contract
+                    .ok_or(OpError::Qwen38ProjectionPackContractRequired)?;
+                validate_qwen38_projection_pack2(&self.inputs, &self.outputs, contract)?;
             }
             SemanticOpKind::GdnProjectionBundle => {
                 let contract = self
@@ -2264,6 +2382,92 @@ const GEMMA4_MOE_SELECTED_EXPERT_COUNT: usize = 8;
 const GEMMA4_MOE_HIDDEN_SIZE: usize = 2_816;
 const GEMMA4_MOE_LAYER_BLOB_BYTES: usize = 428_215_552;
 const GEMMA4_MOE_MAX_TOKENS: usize = 65_536;
+
+fn validate_qwen38_projection_pack2(
+    inputs: &[TensorView],
+    outputs: &[TensorView],
+    contract: Qwen38ProjectionPackContractV1,
+) -> Result<(), OpError> {
+    let activation = &inputs[0];
+    if activation.shape().contains(&0) || outputs.iter().any(|view| view.shape().contains(&0)) {
+        return Err(OpError::Qwen38ProjectionPackZeroExtent);
+    }
+    if inputs
+        .iter()
+        .chain(outputs)
+        .any(|view| !view.is_contiguous())
+    {
+        return Err(OpError::Qwen38ProjectionPackNonContiguous);
+    }
+    if activation.dtype() != DType::Bf16
+        || activation.encoding() != Encoding::Unquantized
+        || outputs
+            .iter()
+            .any(|view| view.dtype() != DType::Bf16 || view.encoding() != Encoding::Unquantized)
+    {
+        return Err(OpError::Qwen38ProjectionPackActivationOutputContract);
+    }
+    let expected_widths = match contract.role() {
+        Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp | Qwen38ProjectionPackRoleV1::Fp8MlpGateUp => [
+            Qwen38ProjectionPackContractV1::MLP_INTERMEDIATE_SIZE as usize,
+            Qwen38ProjectionPackContractV1::MLP_INTERMEDIATE_SIZE as usize,
+        ],
+        Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ => [
+            Qwen38ProjectionPackContractV1::GDN_QKV_WIDTH as usize,
+            Qwen38ProjectionPackContractV1::GDN_Z_WIDTH as usize,
+        ],
+        Qwen38ProjectionPackRoleV1::Fp8FullAttentionQkv => {
+            return Err(OpError::Qwen38ProjectionPackRoleArityMismatch);
+        }
+    };
+    let m = activation.shape().first().copied().unwrap_or(0);
+    let hidden = Qwen38ProjectionPackContractV1::HIDDEN_SIZE as usize;
+    if activation.shape() != [m, hidden]
+        || outputs
+            .iter()
+            .zip(expected_widths)
+            .any(|(output, width)| output.shape() != [m, width])
+        || inputs[1..]
+            .iter()
+            .zip(expected_widths)
+            .any(|(weight, width)| weight.shape() != [width, hidden])
+    {
+        return Err(OpError::Qwen38ProjectionPackShapeMismatch);
+    }
+    let weight_contract_matches = match contract.role() {
+        Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp => {
+            let bits = contract.input_global_scale_f32_bits();
+            let scale = f32::from_bits(bits);
+            scale.is_finite()
+                && scale > 0.0
+                && inputs[1..].iter().all(|weight| {
+                    weight.dtype() == DType::U8
+                        && weight.encoding()
+                            == (Encoding::Nvfp4W4A4 {
+                                block_size: 16,
+                                scale_dtype: DType::F8E4M3Fn,
+                            })
+                })
+        }
+        Qwen38ProjectionPackRoleV1::Fp8MlpGateUp | Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ => {
+            contract.input_global_scale_f32_bits() == 0
+                && inputs[1..].iter().all(|weight| {
+                    weight.dtype() == DType::F8E4M3Fn
+                        && weight.encoding()
+                            == (Encoding::Fp8Scaled {
+                                granularity: Fp8ScaleGranularity::OuterDimension,
+                                scale_dtype: DType::F32,
+                                resident: Fp8ResidentRepresentation::PackedBytes,
+                            })
+                })
+        }
+        Qwen38ProjectionPackRoleV1::Fp8FullAttentionQkv => false,
+    };
+    if !weight_contract_matches {
+        return Err(OpError::Qwen38ProjectionPackWeightContract);
+    }
+    Ok(())
+}
 
 fn gemma4_moe_route_metadata_bytes(token_count: usize) -> Option<usize> {
     token_count
@@ -2684,6 +2888,109 @@ mod mxfp_weight_activation_matmul_tests {
                 Err(OpError::MatmulWeightContract)
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod qwen38_projection_pack_tests {
+    use super::*;
+
+    fn nvfp4_view(shape: &[usize]) -> TensorView {
+        TensorView::with_encoding(
+            DType::U8,
+            Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            },
+            shape,
+        )
+        .unwrap()
+    }
+
+    fn descriptor(rows: usize) -> Result<SemanticOpDescriptor, OpError> {
+        SemanticOpDescriptor::new_qwen38_projection_pack2(
+            vec![
+                TensorView::contiguous(
+                    DType::Bf16,
+                    &[rows, Qwen38ProjectionPackContractV1::HIDDEN_SIZE as usize],
+                )
+                .unwrap(),
+                nvfp4_view(&[
+                    Qwen38ProjectionPackContractV1::MLP_INTERMEDIATE_SIZE as usize,
+                    Qwen38ProjectionPackContractV1::HIDDEN_SIZE as usize,
+                ]),
+                nvfp4_view(&[
+                    Qwen38ProjectionPackContractV1::MLP_INTERMEDIATE_SIZE as usize,
+                    Qwen38ProjectionPackContractV1::HIDDEN_SIZE as usize,
+                ]),
+            ],
+            vec![
+                TensorView::contiguous(
+                    DType::Bf16,
+                    &[
+                        rows,
+                        Qwen38ProjectionPackContractV1::MLP_INTERMEDIATE_SIZE as usize,
+                    ],
+                )
+                .unwrap(),
+                TensorView::contiguous(
+                    DType::Bf16,
+                    &[
+                        rows,
+                        Qwen38ProjectionPackContractV1::MLP_INTERMEDIATE_SIZE as usize,
+                    ],
+                )
+                .unwrap(),
+            ],
+            Qwen38ProjectionPackContractV1::nvfp4_mlp_gate_up(512.0_f32.to_bits()).unwrap(),
+        )
+    }
+
+    #[test]
+    fn nvfp4_pair_contract_accepts_decode_and_non_aligned_prefill_rows() {
+        for rows in [1, 3, 17] {
+            let descriptor = descriptor(rows).expect("valid Qwen3.8 NVFP4 pair");
+            assert_eq!(descriptor.kind(), SemanticOpKind::Qwen38ProjectionPack2);
+            assert_eq!(descriptor.arity(), (3, 2));
+            assert_eq!(
+                descriptor
+                    .qwen38_projection_pack_contract()
+                    .expect("fixed contract")
+                    .input_global_scale_f32_bits(),
+                512.0_f32.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn nvfp4_pair_contract_fails_closed_on_scale_shape_and_generic_construction() {
+        for scale in [0.0_f32, -1.0, f32::INFINITY, f32::NAN] {
+            assert!(matches!(
+                Qwen38ProjectionPackContractV1::nvfp4_mlp_gate_up(scale.to_bits()),
+                Err(OpError::Qwen38ProjectionPackInvalidInputGlobalScale { .. })
+            ));
+        }
+
+        let valid = descriptor(3).unwrap();
+        assert!(matches!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Qwen38ProjectionPack2,
+                valid.inputs().to_vec(),
+                valid.outputs().to_vec(),
+            ),
+            Err(OpError::Qwen38ProjectionPackContractRequired)
+        ));
+
+        let mut wrong_outputs = valid.outputs().to_vec();
+        wrong_outputs[1] = TensorView::contiguous(DType::Bf16, &[3, 17_407]).unwrap();
+        assert!(matches!(
+            SemanticOpDescriptor::new_qwen38_projection_pack2(
+                valid.inputs().to_vec(),
+                wrong_outputs,
+                valid.qwen38_projection_pack_contract().unwrap(),
+            ),
+            Err(OpError::Qwen38ProjectionPackShapeMismatch)
+        ));
     }
 }
 
@@ -3175,6 +3482,16 @@ pub enum OpError {
     },
     MatmulActivationOutputContract,
     MatmulWeightContract,
+    Qwen38ProjectionPackContractRequired,
+    Qwen38ProjectionPackInvalidInputGlobalScale {
+        bits: u32,
+    },
+    Qwen38ProjectionPackRoleArityMismatch,
+    Qwen38ProjectionPackZeroExtent,
+    Qwen38ProjectionPackNonContiguous,
+    Qwen38ProjectionPackActivationOutputContract,
+    Qwen38ProjectionPackWeightContract,
+    Qwen38ProjectionPackShapeMismatch,
     RmsNormContractRequired,
     RmsNormRankZero {
         tensor: RmsNormTensor,
@@ -3531,6 +3848,28 @@ impl fmt::Display for OpError {
             ),
             Self::MatmulWeightContract => formatter.write_str(
                 "matmul weight must use a supported BF16, FP8, NVFP4, MXFP4, MXFP6, or MXFP8 resident contract",
+            ),
+            Self::Qwen38ProjectionPackContractRequired => formatter
+                .write_str("qwen38_projection_pack2 requires an explicit contract"),
+            Self::Qwen38ProjectionPackInvalidInputGlobalScale { bits } => write!(
+                formatter,
+                "qwen38_projection_pack2 input-global scale must be finite and positive (bits 0x{bits:08x})"
+            ),
+            Self::Qwen38ProjectionPackRoleArityMismatch => formatter.write_str(
+                "qwen38_projection_pack2 cannot represent the three-member full-attention role",
+            ),
+            Self::Qwen38ProjectionPackZeroExtent => formatter
+                .write_str("qwen38_projection_pack2 tensors must have non-zero extents"),
+            Self::Qwen38ProjectionPackNonContiguous => formatter
+                .write_str("qwen38_projection_pack2 tensors must be row-major contiguous"),
+            Self::Qwen38ProjectionPackActivationOutputContract => formatter.write_str(
+                "qwen38_projection_pack2 activation and outputs must be unquantized BF16",
+            ),
+            Self::Qwen38ProjectionPackWeightContract => formatter.write_str(
+                "qwen38_projection_pack2 weights do not match the fixed NVFP4/FP8 role contract",
+            ),
+            Self::Qwen38ProjectionPackShapeMismatch => formatter.write_str(
+                "qwen38_projection_pack2 tensors do not match the fixed Qwen3.8 projection shapes",
             ),
             Self::RmsNormContractRequired => {
                 formatter.write_str("rms_norm requires an explicit contract")

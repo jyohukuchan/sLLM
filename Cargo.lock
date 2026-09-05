@@ -1286,6 +1286,7 @@ dependencies = [
  "sllm-frontend",
  "sllm-hip-sys",
  "static_assertions",
+ "tokenizers",
 ]
 
 [[package]]

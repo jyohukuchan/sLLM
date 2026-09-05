@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,9 +21,9 @@ use crate::adapter::{
 };
 use crate::context_window::{ContextShiftDecisionV1, ContextWindowStateV1};
 use crate::execution::{
-    ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, ExecutionStateImageV1,
-    KvState, KvStateAppendSubmission, LinearAttentionBindings, LinearAttentionState,
-    OwnedTensorBinding, PrepareSupport, Submission,
+    ExecutionBuffer, ExecutionError, ExecutionGraphSpan, ExecutionQueue, ExecutionSession,
+    ExecutionStateImageV1, KvState, KvStateAppendSubmission, LinearAttentionBindings,
+    LinearAttentionState, OwnedTensorBinding, PrepareSupport, PreparedOperation, Submission,
 };
 use crate::final_output::QWEN35_VOCAB_SIZE;
 #[cfg(feature = "phase54-research")]
@@ -31,7 +32,9 @@ use crate::kv_state::{
     CausalAttentionDescriptor, KvCacheEncoding, KvPhysicalMemorySnapshot, KvStateDescriptor,
 };
 use crate::linear_attention::{LinearAttentionDescriptor, LinearAttentionStateDescriptor};
-use crate::model::{QWEN35_4B_FINGERPRINT, TensorDType, VerifiedCache};
+use crate::model::{
+    LayerType, QWEN35_4B_FINGERPRINT, QWEN35_27B_FINGERPRINT, TensorDType, VerifiedCache,
+};
 use crate::op::{
     AttentionPreprocessContract, AttentionPreprocessPositionMode, OpError, SemanticOpDescriptor,
     SemanticOpKind, TokenSelectorContractV1,
@@ -58,9 +61,9 @@ use crate::prepared_execution::{
     PreparedPlanNode, PreparedSemanticCache, PreparedTransition, require_terminal_success,
 };
 use crate::qwen_graph::{
-    QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES, QwenGraph,
-    QwenGraphNode, QwenGraphNodeKind, QwenGraphStateDescriptor, QwenGraphStateKind,
-    QwenGraphTensorBacking, QwenGraphWeightBinding,
+    QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES,
+    Qwen38ProjectionPackLoweringScope, QwenGraph, QwenGraphNode, QwenGraphNodeKind,
+    QwenGraphStateDescriptor, QwenGraphStateKind, QwenGraphTensorBacking, QwenGraphWeightBinding,
 };
 use crate::session_checkpoint::{
     CheckpointIdentity, CheckpointPayload, SessionCheckpoint, StateOwnerKindV1, StatePlaneKindV1,
@@ -666,6 +669,14 @@ fn should_skip_derived_position_upload(
 }
 
 const QWEN_DEFERRED_COMPLETION_ENV: &str = "SLLM_QWEN_DEFERRED_COMPLETION";
+const QWEN38_GFX1030_DEFERRED_COMPLETION_ENV: &str = "SLLM_QWEN38_GFX1030_DEFERRED_COMPLETION";
+const QWEN38_GFX1201_DEFERRED_COMPLETION_ENV: &str = "SLLM_QWEN38_GFX1201_DEFERRED_COMPLETION";
+const QWEN38_GFX1030_KV_APPEND_ATTENTION_CHAIN_ENV: &str =
+    "SLLM_QWEN38_GFX1030_KV_APPEND_ATTENTION_CHAIN";
+const QWEN38_GFX1201_KV_APPEND_ATTENTION_CHAIN_ENV: &str =
+    "SLLM_QWEN38_GFX1201_KV_APPEND_ATTENTION_CHAIN";
+const QWEN38_NVFP4_PROJECTION_PACK2_ENV: &str = "SLLM_QWEN38_NVFP4_PROJECTION_PACK2";
+const QWEN38_FP8_GDN_PROJECTION_PACK2_ENV: &str = "SLLM_QWEN38_FP8_GDN_PROJECTION_PACK2";
 const QWEN_RESIDUAL_RMSNORM_FUSION_ENV: &str = "SLLM_QWEN_GFX1030_RESIDUAL_RMSNORM_FUSION";
 const QWEN_RESIDUAL_RMSNORM_FUSION_GFX1201_ENV: &str = "SLLM_QWEN_GFX1201_RESIDUAL_RMSNORM_FUSION";
 const QWEN_GDN_PROJECTION_BUNDLE_ENV: &str = "SLLM_QWEN_GFX1030_GDN_PROJECTION_BUNDLE";
@@ -858,6 +869,240 @@ fn qwen_deferred_completion_enabled(
         && !graph.is_multimodal()
         && !graph.is_mtp()
         && graph.layer_types().len() == 32
+}
+
+fn qwen38_deferred_completion_env_name(expected_target: Option<&str>) -> Option<&'static str> {
+    match expected_target {
+        Some("gfx1030") => Some(QWEN38_GFX1030_DEFERRED_COMPLETION_ENV),
+        Some("gfx1201") => Some(QWEN38_GFX1201_DEFERRED_COMPLETION_ENV),
+        _ => None,
+    }
+}
+
+fn qwen38_deferred_completion_topology_is_exact(layer_types: &[LayerType]) -> bool {
+    layer_types.len() == 64
+        && layer_types.iter().enumerate().all(|(layer, &actual)| {
+            let expected = if (layer + 1) % 4 == 0 {
+                LayerType::FullAttention
+            } else {
+                LayerType::LinearAttention
+            };
+            actual == expected
+        })
+}
+
+fn qwen38_mixed_weight_inventory_counts_are_exact(
+    binding_count: usize,
+    unique_binding_count: usize,
+    nvfp4_w4a4_count: usize,
+    fp8_outer_count: usize,
+    unquantized_count: usize,
+) -> bool {
+    binding_count == 851
+        && unique_binding_count == 851
+        && nvfp4_w4a4_count == 168
+        && fp8_outer_count == 233
+        && unquantized_count == 450
+        && nvfp4_w4a4_count + fp8_outer_count == 401
+}
+
+fn qwen38_mixed_weight_inventory_is_exact(graph: &QwenGraph) -> bool {
+    let mut names = BTreeSet::new();
+    let mut nvfp4_w4a4_count = 0;
+    let mut fp8_outer_count = 0;
+    let mut unquantized_count = 0;
+    for binding in graph.weight_bindings() {
+        if !names.insert(binding.tensor_name()) {
+            return false;
+        }
+        let Some(tensor) = graph
+            .tensor_metadata()
+            .iter()
+            .find(|tensor| tensor.name() == binding.tensor_name())
+        else {
+            return false;
+        };
+        match tensor.view().encoding() {
+            Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            } => nvfp4_w4a4_count += 1,
+            Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: DType::F32,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            } => fp8_outer_count += 1,
+            Encoding::Unquantized => unquantized_count += 1,
+            _ => return false,
+        }
+    }
+    qwen38_mixed_weight_inventory_counts_are_exact(
+        graph.weight_bindings().len(),
+        names.len(),
+        nvfp4_w4a4_count,
+        fp8_outer_count,
+        unquantized_count,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Explicit fields keep the exact opt-in scope auditable.
+fn qwen38_nvfp4_projection_pack2_scope_enabled(
+    backend_name: &str,
+    expected_target: Option<&str>,
+    model_fingerprint: &str,
+    has_fp8_sidecar: bool,
+    is_multimodal: bool,
+    is_mtp: bool,
+    layer_types: &[LayerType],
+    mixed_weight_inventory_is_exact: bool,
+    adapters_empty: bool,
+    has_verified_artifact: bool,
+    env_value: Option<&OsStr>,
+) -> bool {
+    // Rollback is fail-closed: only the literal value "1" opts a request in.
+    // Unset, "0", and malformed values preserve the baseline Matmul graph.
+    env_value == Some(OsStr::new("1"))
+        && backend_name == "hip"
+        && matches!(expected_target, Some("gfx1030" | "gfx1201"))
+        && model_fingerprint == QWEN35_27B_FINGERPRINT
+        && has_fp8_sidecar
+        && !is_multimodal
+        && !is_mtp
+        && qwen38_deferred_completion_topology_is_exact(layer_types)
+        && mixed_weight_inventory_is_exact
+        && adapters_empty
+        && has_verified_artifact
+}
+
+fn qwen38_nvfp4_projection_pack2_enabled(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &AdapterRequestSetV1,
+    artifact: Option<&crate::VerifiedUnslothQwen38Nvfp4>,
+) -> bool {
+    let artifact_matches = artifact
+        .is_some_and(|artifact| graph.fp8_sidecar_fingerprint() == Some(artifact.recipe_digest()));
+    qwen38_nvfp4_projection_pack2_scope_enabled(
+        session.backend_name(),
+        session.expected_target().as_deref(),
+        graph.model_fingerprint(),
+        graph.fp8_sidecar_fingerprint().is_some(),
+        graph.is_multimodal(),
+        graph.is_mtp(),
+        graph.layer_types(),
+        qwen38_mixed_weight_inventory_is_exact(graph),
+        adapters.adapters().is_empty() && adapters.controls().is_empty(),
+        artifact_matches,
+        std::env::var_os(QWEN38_NVFP4_PROJECTION_PACK2_ENV).as_deref(),
+    )
+}
+
+fn qwen38_fp8_gdn_projection_pack2_enabled(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &AdapterRequestSetV1,
+    artifact: Option<&crate::VerifiedUnslothQwen38Nvfp4>,
+) -> bool {
+    let artifact_matches = artifact
+        .is_some_and(|artifact| graph.fp8_sidecar_fingerprint() == Some(artifact.recipe_digest()));
+    // Keep this selector structurally identical to the NVFP4 candidate while
+    // reading a separate literal opt-in. The independent environment switch
+    // allows both pair roles to be lowered in one verified composite pass.
+    qwen38_nvfp4_projection_pack2_scope_enabled(
+        session.backend_name(),
+        session.expected_target().as_deref(),
+        graph.model_fingerprint(),
+        graph.fp8_sidecar_fingerprint().is_some(),
+        graph.is_multimodal(),
+        graph.is_mtp(),
+        graph.layer_types(),
+        qwen38_mixed_weight_inventory_is_exact(graph),
+        adapters.adapters().is_empty() && adapters.controls().is_empty(),
+        artifact_matches,
+        std::env::var_os(QWEN38_FP8_GDN_PROJECTION_PACK2_ENV).as_deref(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Explicit fields keep the exact opt-in scope auditable.
+fn qwen38_deferred_completion_scope_enabled(
+    backend_name: &str,
+    expected_target: Option<&str>,
+    model_fingerprint: &str,
+    has_fp8_sidecar: bool,
+    is_multimodal: bool,
+    is_mtp: bool,
+    layer_types: &[LayerType],
+    mixed_weight_inventory_is_exact: bool,
+    adapters_empty: bool,
+    env_value: Option<&OsStr>,
+) -> bool {
+    // This candidate is deliberately opt-in: a missing value is OFF and only
+    // the exact value "1" enables it.  In particular, the legacy generic
+    // Qwen deferred-completion variable must not enable this mixed graph.
+    env_value == Some(OsStr::new("1"))
+        && backend_name == "hip"
+        && matches!(expected_target, Some("gfx1030" | "gfx1201"))
+        && model_fingerprint == QWEN35_27B_FINGERPRINT
+        && has_fp8_sidecar
+        && !is_multimodal
+        && !is_mtp
+        && qwen38_deferred_completion_topology_is_exact(layer_types)
+        && mixed_weight_inventory_is_exact
+        && adapters_empty
+}
+
+fn qwen38_deferred_completion_enabled(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &QwenAdapterRuntime,
+) -> bool {
+    let expected_target = session.expected_target();
+    let env_value =
+        qwen38_deferred_completion_env_name(expected_target.as_deref()).and_then(std::env::var_os);
+    qwen38_deferred_completion_scope_enabled(
+        session.backend_name(),
+        expected_target.as_deref(),
+        graph.model_fingerprint(),
+        graph.fp8_sidecar_fingerprint().is_some(),
+        graph.is_multimodal(),
+        graph.is_mtp(),
+        graph.layer_types(),
+        qwen38_mixed_weight_inventory_is_exact(graph),
+        adapters.lora.is_empty() && adapters.controls.is_empty(),
+        env_value.as_deref(),
+    )
+}
+
+fn qwen38_kv_append_attention_chain_env_name(
+    expected_target: Option<&str>,
+) -> Option<&'static str> {
+    match expected_target {
+        Some("gfx1030") => Some(QWEN38_GFX1030_KV_APPEND_ATTENTION_CHAIN_ENV),
+        Some("gfx1201") => Some(QWEN38_GFX1201_KV_APPEND_ATTENTION_CHAIN_ENV),
+        _ => None,
+    }
+}
+
+fn qwen38_kv_append_attention_chain_enabled(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &QwenAdapterRuntime,
+) -> bool {
+    let expected_target = session.expected_target();
+    let env_value = qwen38_kv_append_attention_chain_env_name(expected_target.as_deref())
+        .and_then(std::env::var_os);
+    qwen38_deferred_completion_scope_enabled(
+        session.backend_name(),
+        expected_target.as_deref(),
+        graph.model_fingerprint(),
+        graph.fp8_sidecar_fingerprint().is_some(),
+        graph.is_multimodal(),
+        graph.is_mtp(),
+        graph.layer_types(),
+        qwen38_mixed_weight_inventory_is_exact(graph),
+        adapters.lora.is_empty() && adapters.controls.is_empty(),
+        env_value.as_deref(),
+    )
 }
 
 #[cfg(feature = "phase54-research")]
@@ -1072,8 +1317,17 @@ pub struct QwenExecutionAudit {
     all_dispatches_hip: bool,
     segment_count: u64,
     boundary_count: u64,
+    physical_queue_fence_count: u64,
+    graph_replay_count: u64,
+    graph_span_count: u64,
+    graph_capture_kernel_node_count: u64,
+    kv_append_attention_chain_count: u64,
     sparse_moe_submission_count: u64,
     sparse_moe_active_pair_count: u64,
+    projection_pack_submission_count: u64,
+    projection_pack_member_count: u64,
+    projection_pack_activation_quantize_count: u64,
+    request_local_deferred_completion: bool,
     kernel_dispatches_by_identity: BTreeMap<(u32, String), u64>,
     #[cfg(feature = "phase54-research")]
     phase54_kv_attribution_semantics: Option<&'static str>,
@@ -1124,12 +1378,48 @@ impl QwenExecutionAudit {
         self.boundary_count
     }
 
+    pub const fn physical_queue_fence_count(&self) -> u64 {
+        self.physical_queue_fence_count
+    }
+
+    pub const fn graph_replay_count(&self) -> u64 {
+        self.graph_replay_count
+    }
+    pub const fn graph_span_count(&self) -> u64 {
+        self.graph_span_count
+    }
+    pub const fn graph_capture_kernel_node_count(&self) -> u64 {
+        self.graph_capture_kernel_node_count
+    }
+
+    pub const fn kv_append_attention_chain_count(&self) -> u64 {
+        self.kv_append_attention_chain_count
+    }
+
     pub const fn sparse_moe_submission_count(&self) -> u64 {
         self.sparse_moe_submission_count
     }
 
     pub const fn sparse_moe_active_pair_count(&self) -> u64 {
         self.sparse_moe_active_pair_count
+    }
+
+    pub const fn projection_pack_submission_count(&self) -> u64 {
+        self.projection_pack_submission_count
+    }
+
+    pub const fn projection_pack_member_count(&self) -> u64 {
+        self.projection_pack_member_count
+    }
+
+    pub const fn projection_pack_activation_quantize_count(&self) -> u64 {
+        self.projection_pack_activation_quantize_count
+    }
+
+    /// Whether this request froze the exact Qwen3.8 eventless completion
+    /// policy and therefore executes on a request-local queue.
+    pub const fn request_local_deferred_completion(&self) -> bool {
+        self.request_local_deferred_completion
     }
 
     /// Returns the accepted dispatch count for one exact backend kernel
@@ -1652,6 +1942,50 @@ impl QwenResidentModel {
             ));
         }
         let source = Nvfp4ProvisionSource { cache, sidecar };
+        let inner =
+            QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Provision the exact Unsloth Qwen3.8-27B mixed NVFP4 artifact. The
+    /// direct safetensors source is hash- and header-verified before this
+    /// constructor is called; upload converts BF16 scale planes and packs
+    /// NVFP4 value/block/global planes into the resident ABI.
+    pub fn new_unsloth_qwen38_nvfp4(
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        artifact: Arc<crate::VerifiedUnslothQwen38Nvfp4>,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        if completion_timeout.is_zero()
+            || plan.schema_version != "qwen38-nvfp4-model-plan-v1"
+            || graph.fp8_sidecar_fingerprint() != Some(artifact.recipe_digest())
+            || plan.lock_fingerprint != graph.model_fingerprint()
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Qwen3.8 artifact, graph, and load-plan identities differ".to_owned(),
+            ));
+        }
+        for binding in graph.weight_bindings() {
+            let descriptor = artifact.tensor(binding.tensor_name()).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "Qwen3.8 artifact is missing graph weight {}",
+                    binding.tensor_name()
+                ))
+            })?;
+            if descriptor.logical_shape.as_slice() != binding.shape()
+                || descriptor.value_range != binding.source_range()
+            {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "Qwen3.8 artifact and graph source binding differ: {}",
+                    binding.tensor_name()
+                )));
+            }
+        }
+        let source = Qwen38Nvfp4ProvisionSource { artifact };
         let inner =
             QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
         Ok(Self {
@@ -2478,18 +2812,69 @@ struct QwenResidentInner {
     session: Arc<ExecutionSession>,
     model_fingerprint: String,
     fp8_sidecar_fingerprint: Option<String>,
-    plan: WeightLoadPlan,
+    plan: Arc<WeightLoadPlan>,
     queue: ExecutionQueue,
     static_tensors: BTreeMap<String, TensorAllocation>,
     scales: BTreeMap<String, CachedScale>,
+    qwen38_artifact: Option<Arc<crate::VerifiedUnslothQwen38Nvfp4>>,
     completion_timeout: Duration,
 }
 
+fn qwen38_graph_node_layer(node: &QwenGraphNode) -> Option<u32> {
+    node.label()
+        .strip_prefix("layer.")?
+        .split_once('.')?
+        .0
+        .parse()
+        .ok()
+}
+
+fn qwen38_graph_node_is_stateless(node: &QwenGraphNode) -> bool {
+    matches!(
+        node.kind(),
+        QwenGraphNodeKind::Semantic(
+            SemanticOpKind::Add
+                | SemanticOpKind::ScalarMul
+                | SemanticOpKind::SiluMul
+                | SemanticOpKind::SigmoidMul
+                | SemanticOpKind::RmsNorm
+                | SemanticOpKind::ResidualRmsNorm
+                | SemanticOpKind::Matmul
+                | SemanticOpKind::Qwen38ProjectionPack2
+                | SemanticOpKind::GdnProjectionBundle
+        )
+    )
+}
+
+#[derive(Default)]
+struct QwenGraphReplayState {
+    ready: bool,
+    warm_members: Vec<QwenGraphWarmMember>,
+    spans: Arc<BTreeMap<u64, QwenGraphReplaySpan>>,
+}
+
+struct QwenGraphWarmMember {
+    ordinal: u64,
+    layer: u32,
+    label: String,
+    operation: PreparedOperation,
+    dispatch: crate::DispatchEvidence,
+}
+
+struct QwenGraphReplaySpan {
+    last_ordinal: u64,
+    graph: ExecutionGraphSpan,
+}
+
 struct QwenExecutionCore {
+    // Graph payloads release before cached plans, buffers and the queue.
+    graph_replay: Mutex<QwenGraphReplayState>,
+    graph_collect_node: AtomicBool,
+    qwen38_graph_spans_enabled: bool,
     session: Arc<ExecutionSession>,
     graph: QwenGraph,
     execution_plan: PreparedExecutionPlan<QwenGraphNode>,
-    plan: WeightLoadPlan,
+    plan: Arc<WeightLoadPlan>,
     queue: ExecutionQueue,
     tensors: Vec<TensorAllocation>,
     tensor_ids: BTreeMap<String, usize>,
@@ -2508,6 +2893,14 @@ struct QwenExecutionCore {
     pending_speculative: Option<PendingSpeculativeBlock>,
     adapters: QwenAdapterRuntime,
     short_terminal_last_row: bool,
+    qwen38_deferred_completion: bool,
+    qwen38_kv_append_attention_chain: bool,
+    // Set for the current graph execution only.  The resident selector is
+    // frozen at request construction, while device-selector requests must
+    // keep the ordinary fence route even when the chain opt-in is present.
+    chain_active: AtomicBool,
+    pending_kv_append: Mutex<Option<KvStateAppendSubmission>>,
+    current_node_ordinal: AtomicU64,
     #[cfg(feature = "phase54-research")]
     phase54_kv_attribution: Phase54KvAttributionConfig,
     #[cfg(feature = "phase54-research")]
@@ -2888,6 +3281,10 @@ fn validate_lora_target_graph(
 }
 
 trait QwenProvisionSource {
+    fn qwen38_artifact(&self) -> Option<Arc<crate::VerifiedUnslothQwen38Nvfp4>> {
+        None
+    }
+
     fn upload_weight(
         &self,
         plan: &WeightLoadPlan,
@@ -2953,6 +3350,10 @@ struct Fp8ConvertedProvisionSource {
 struct Nvfp4ProvisionSource {
     cache: Arc<VerifiedCache>,
     sidecar: Arc<VerifiedNvfp4Sidecar>,
+}
+
+struct Qwen38Nvfp4ProvisionSource {
+    artifact: Arc<crate::VerifiedUnslothQwen38Nvfp4>,
 }
 
 struct Qwen35MoeProvisionSource {
@@ -3420,6 +3821,114 @@ impl QwenProvisionSource for GgufProvisionSource {
         completion_timeout: Duration,
     ) -> Result<(), QwenExecutionError> {
         if let Some(recipe) = self.source.recipe_binding(binding.tensor_name()) {
+            if recipe.encoding == crate::GgufRecipeEncoding::Nvfp4E2m1Block16E4m3fnF32Outer {
+                if resident_dtype != DType::U8 {
+                    return Err(QwenExecutionError::InvalidRequest(
+                        "GGUF NVFP4 recipe requires U8 packed resident values".to_owned(),
+                    ));
+                }
+                let value = self
+                    .source
+                    .gguf()
+                    .tensor(&recipe.value_tensor)
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "GGUF NVFP4 value tensor is absent after verification".to_owned(),
+                        )
+                    })?;
+                let value_len = usize::try_from(value.byte_length()).map_err(|_| {
+                    QwenExecutionError::InvalidRequest("GGUF NVFP4 value is too large".to_owned())
+                })?;
+                let encoded = self
+                    .source
+                    .gguf()
+                    .read_tensor_range(&recipe.value_tensor, 0, value_len)
+                    .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                let (values, block_scales) =
+                    decode_gguf_nvfp4_blocks(&encoded, &recipe.logical_shape)?;
+                let outer = recipe
+                    .scales
+                    .iter()
+                    .find(|scale| scale.role == crate::GgufScaleRole::Outer)
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "GGUF NVFP4 weight outer scale is absent".to_owned(),
+                        )
+                    })?;
+                let outer_info = self.source.gguf().tensor(&outer.tensor).ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "GGUF NVFP4 weight outer scale tensor is absent".to_owned(),
+                    )
+                })?;
+                let outer_len = usize::try_from(outer_info.byte_length()).map_err(|_| {
+                    QwenExecutionError::InvalidRequest(
+                        "GGUF NVFP4 weight outer scale is too large".to_owned(),
+                    )
+                })?;
+                let mut resident = values;
+                resident.extend_from_slice(&block_scales);
+                while resident.len() & 3 != 0 {
+                    resident.push(0);
+                }
+                resident.extend_from_slice(
+                    &self
+                        .source
+                        .gguf()
+                        .read_tensor_range(&outer.tensor, 0, outer_len)
+                        .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?,
+                );
+                let input = recipe
+                    .scales
+                    .iter()
+                    .find(|scale| scale.role == crate::GgufScaleRole::Input);
+                if let Some(input) = input {
+                    let input_info = self.source.gguf().tensor(&input.tensor).ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "GGUF NVFP4 input outer scale tensor is absent".to_owned(),
+                        )
+                    })?;
+                    let input_len = usize::try_from(input_info.byte_length()).map_err(|_| {
+                        QwenExecutionError::InvalidRequest(
+                            "GGUF NVFP4 input outer scale is too large".to_owned(),
+                        )
+                    })?;
+                    resident.extend_from_slice(
+                        &self
+                            .source
+                            .gguf()
+                            .read_tensor_range(&input.tensor, 0, input_len)
+                            .map_err(|error| {
+                                QwenExecutionError::InvalidRequest(error.to_string())
+                            })?,
+                    );
+                }
+                let input_len_valid = input.is_none_or(|input| {
+                    self.source
+                        .gguf()
+                        .tensor(&input.tensor)
+                        .is_some_and(|tensor| tensor.byte_length() == 4)
+                });
+                if outer_len != 4 || !input_len_valid {
+                    return Err(QwenExecutionError::InvalidRequest(format!(
+                        "GGUF NVFP4 resident allocation differs for {}",
+                        binding.tensor_name()
+                    )));
+                }
+                if u64::try_from(resident.len()).ok() != Some(destination.size_bytes()) {
+                    return Err(QwenExecutionError::InvalidRequest(format!(
+                        "GGUF NVFP4 resident allocation differs for {}",
+                        binding.tensor_name()
+                    )));
+                }
+                return upload_buffer_bytes(
+                    session,
+                    queue,
+                    &destination,
+                    &resident,
+                    completion_timeout,
+                    "GGUF NVFP4 weight upload",
+                );
+            }
             if matches!(
                 recipe.encoding,
                 crate::GgufRecipeEncoding::Mxfp8E4m3Block32E8m0
@@ -3637,6 +4146,66 @@ fn gguf_fp8_resident_payload(
     let mut combined = values;
     combined.extend_from_slice(&scales);
     Ok(combined)
+}
+
+/// Convert GGUF's canonical 36-byte NVFP4 block (a little-endian FP32
+/// block-scale followed by 16 packed E2M1 values) into the resident layout
+/// used by the HIP provider: packed values followed by one OCP E4M3FN byte
+/// per block.  Keeping this conversion at the provisioning boundary avoids
+/// making the execution kernels understand a container-specific block ABI.
+fn decode_gguf_nvfp4_blocks(
+    encoded: &[u8],
+    logical_shape: &[u64],
+) -> Result<(Vec<u8>, Vec<u8>), QwenExecutionError> {
+    if logical_shape.len() != 2 {
+        return Err(QwenExecutionError::InvalidRequest(
+            "GGUF NVFP4 logical shape is not rank two".to_owned(),
+        ));
+    }
+    let rows = usize::try_from(logical_shape[0]).map_err(|_| {
+        QwenExecutionError::InvalidRequest("GGUF NVFP4 row count is too large".to_owned())
+    })?;
+    let columns = usize::try_from(logical_shape[1]).map_err(|_| {
+        QwenExecutionError::InvalidRequest("GGUF NVFP4 column count is too large".to_owned())
+    })?;
+    let blocks = rows.checked_mul(columns.div_ceil(16)).ok_or_else(|| {
+        QwenExecutionError::InvalidRequest("GGUF NVFP4 block count overflowed".to_owned())
+    })?;
+    if encoded.len()
+        != blocks.checked_mul(36).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("GGUF NVFP4 value byte count overflowed".to_owned())
+        })?
+    {
+        return Err(QwenExecutionError::InvalidRequest(
+            "GGUF NVFP4 value bytes do not match the block shape".to_owned(),
+        ));
+    }
+    let mut values = Vec::with_capacity(blocks * 8);
+    let mut scales = Vec::with_capacity(blocks);
+    for block in encoded.chunks_exact(36) {
+        let raw_scale = f32::from_le_bytes(block[..4].try_into().expect("four-byte scale"));
+        if !raw_scale.is_finite() || raw_scale <= 0.0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "GGUF NVFP4 block scale is non-positive or non-finite".to_owned(),
+            ));
+        }
+        scales.push(crate::encode_e4m3fn(raw_scale));
+        let standard = &block[4..];
+        for index in (0..16).step_by(2) {
+            let low = if index < 8 {
+                standard[index] & 0x0f
+            } else {
+                standard[index - 8] >> 4
+            };
+            let high = if index + 1 < 8 {
+                standard[index + 1] & 0x0f
+            } else {
+                standard[index - 7] >> 4
+            };
+            values.push(low | (high << 4));
+        }
+    }
+    Ok((values, scales))
 }
 
 fn normalize_gguf_fp8_scales(
@@ -3906,6 +4475,223 @@ impl QwenProvisionSource for Nvfp4ProvisionSource {
     }
 }
 
+impl QwenProvisionSource for Qwen38Nvfp4ProvisionSource {
+    fn qwen38_artifact(&self) -> Option<Arc<crate::VerifiedUnslothQwen38Nvfp4>> {
+        Some(Arc::clone(&self.artifact))
+    }
+
+    fn upload_weight(
+        &self,
+        plan: &WeightLoadPlan,
+        binding: &QwenGraphWeightBinding,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        destination: crate::BufferRange,
+        completion_timeout: Duration,
+    ) -> Result<(), QwenExecutionError> {
+        self.upload_weight_for_resident_dtype(
+            plan,
+            binding,
+            session,
+            queue,
+            destination,
+            DType::Bf16,
+            completion_timeout,
+        )
+    }
+
+    fn upload_weight_for_resident_dtype(
+        &self,
+        _plan: &WeightLoadPlan,
+        binding: &QwenGraphWeightBinding,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        destination: crate::BufferRange,
+        resident_dtype: DType,
+        completion_timeout: Duration,
+    ) -> Result<(), QwenExecutionError> {
+        let descriptor = self.artifact.tensor(binding.tensor_name()).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest(format!(
+                "Qwen3.8 tensor descriptor is absent: {}",
+                binding.tensor_name()
+            ))
+        })?;
+        if descriptor.logical_shape.as_slice() != binding.shape() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "Qwen3.8 tensor shape differs: {}",
+                binding.tensor_name()
+            )));
+        }
+        let bytes = match descriptor.encoding {
+            crate::QuantizedTensorEncoding::OcpFp8E4M3FnChannelBf16Scale => {
+                if !matches!(resident_dtype, DType::F8E4M3Fn | DType::F8E4M3FnuZ) {
+                    return Err(QwenExecutionError::InvalidRequest(
+                        "Qwen3.8 FP8 weight requires an FP8 resident view".to_owned(),
+                    ));
+                }
+                let values = self
+                    .artifact
+                    .read_source_range(&descriptor.source_name, descriptor.value_range)
+                    .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                let scale = descriptor
+                    .scale_planes
+                    .iter()
+                    .find(|plane| plane.role == crate::ScalePlaneRole::WeightChannel)
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "Qwen3.8 FP8 channel scale is absent".to_owned(),
+                        )
+                    })?;
+                let scale_bytes = self
+                    .artifact
+                    .read_source_range(&scale.source_name, scale.source_range)
+                    .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                let mut normalized = Vec::with_capacity(scale_bytes.len() / 2 * 4);
+                for chunk in scale_bytes.chunks_exact(2) {
+                    let bf16 = u16::from_le_bytes([chunk[0], chunk[1]]);
+                    normalized
+                        .extend_from_slice(&f32::from_bits(u32::from(bf16) << 16).to_le_bytes());
+                }
+                if scale_bytes.len() % 2 != 0 {
+                    return Err(QwenExecutionError::InvalidRequest(
+                        "Qwen3.8 FP8 channel scale is not BF16-aligned".to_owned(),
+                    ));
+                }
+                gguf_fp8_resident_payload(&values, &normalized, resident_dtype)?
+            }
+            crate::QuantizedTensorEncoding::Nvfp4E2M1Block16E4M3FnF32Outer => {
+                if resident_dtype != DType::U8 {
+                    return Err(QwenExecutionError::InvalidRequest(
+                        "Qwen3.8 NVFP4 weight requires a U8 resident view".to_owned(),
+                    ));
+                }
+                let values = self
+                    .artifact
+                    .read_source_range(&descriptor.source_name, descriptor.value_range)
+                    .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                let block = descriptor
+                    .scale_planes
+                    .iter()
+                    .find(|plane| plane.role == crate::ScalePlaneRole::WeightBlock)
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "Qwen3.8 NVFP4 block scale is absent".to_owned(),
+                        )
+                    })?;
+                let block_bytes = self
+                    .artifact
+                    .read_source_range(&block.source_name, block.source_range)
+                    .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                let weight_outer = descriptor
+                    .scale_planes
+                    .iter()
+                    .find(|plane| plane.role == crate::ScalePlaneRole::WeightOuter)
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "Qwen3.8 NVFP4 weight outer scale is absent".to_owned(),
+                        )
+                    })?;
+                let input_outer = descriptor
+                    .scale_planes
+                    .iter()
+                    .find(|plane| plane.role == crate::ScalePlaneRole::InputOuter)
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "Qwen3.8 NVFP4 input outer scale is absent".to_owned(),
+                        )
+                    })?;
+                let weight_scale = self
+                    .artifact
+                    .read_f32_reciprocal(weight_outer)
+                    .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                let input_scale = self
+                    .artifact
+                    .read_f32_reciprocal(input_outer)
+                    .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                let mut combined = values;
+                combined.extend_from_slice(&block_bytes);
+                while combined.len() & 3 != 0 {
+                    combined.push(0);
+                }
+                combined.extend_from_slice(&weight_scale.to_le_bytes());
+                combined.extend_from_slice(&input_scale.to_le_bytes());
+                combined
+            }
+            crate::QuantizedTensorEncoding::UnquantizedBf16 => {
+                let values = self
+                    .artifact
+                    .read_source_range(&descriptor.source_name, descriptor.value_range)
+                    .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                if resident_dtype == DType::Bf16 {
+                    values
+                } else if resident_dtype == DType::F32 {
+                    if values.len() % 2 != 0 {
+                        return Err(QwenExecutionError::InvalidRequest(
+                            "Qwen3.8 BF16 source is not word-aligned".to_owned(),
+                        ));
+                    }
+                    let mut converted = Vec::with_capacity(values.len() * 2);
+                    for chunk in values.chunks_exact(2) {
+                        converted.extend_from_slice(
+                            &f32::from_bits(
+                                u32::from(u16::from_le_bytes([chunk[0], chunk[1]])) << 16,
+                            )
+                            .to_le_bytes(),
+                        );
+                    }
+                    converted
+                } else {
+                    return Err(QwenExecutionError::InvalidRequest(
+                        "Qwen3.8 BF16 source has an unsupported resident dtype".to_owned(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "Qwen3.8 tensor has unsupported encoding: {}",
+                    binding.tensor_name()
+                )));
+            }
+        };
+        if u64::try_from(bytes.len()).ok() != Some(destination.size_bytes()) {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "Qwen3.8 resident allocation differs for {}",
+                binding.tensor_name()
+            )));
+        }
+        upload_buffer_bytes(
+            session,
+            queue,
+            &destination,
+            &bytes,
+            completion_timeout,
+            "Qwen3.8 mixed weight upload",
+        )
+    }
+
+    fn read_scale_bytes(
+        &self,
+        tensor_name: &str,
+        expected_length: usize,
+    ) -> Result<Arc<[u8]>, QwenExecutionError> {
+        let descriptor = self.artifact.tensor(tensor_name).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest(format!(
+                "Qwen3.8 scale tensor is absent: {tensor_name}"
+            ))
+        })?;
+        let bytes = self
+            .artifact
+            .read_source_range(&descriptor.source_name, descriptor.value_range)
+            .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        if bytes.len() != expected_length {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "Qwen3.8 scale length differs: {tensor_name}"
+            )));
+        }
+        Ok(Arc::from(bytes))
+    }
+}
+
 impl QwenProvisionSource for Fp8ConvertedProvisionSource {
     fn upload_weight(
         &self,
@@ -4046,6 +4832,7 @@ impl QwenResidentInner {
         completion_timeout: Duration,
         source: &S,
     ) -> Result<Self, QwenExecutionError> {
+        let qwen38_artifact = source.qwen38_artifact();
         let layout = validate_graph_plan(&graph, &plan)?;
         preflight_semantic_support(session.as_ref(), &graph)?;
         preflight_device_memory(session.as_ref(), &graph, &layout, false)?;
@@ -4101,10 +4888,11 @@ impl QwenResidentInner {
             session,
             model_fingerprint: graph.model_fingerprint().to_owned(),
             fp8_sidecar_fingerprint: graph.fp8_sidecar_fingerprint().map(str::to_owned),
-            plan,
+            plan: Arc::new(plan),
             queue,
             static_tensors,
             scales,
+            qwen38_artifact,
             completion_timeout,
         })
     }
@@ -4384,27 +5172,92 @@ impl QwenExecutionCore {
         graph: QwenGraph,
         adapters: AdapterRequestSetV1,
     ) -> Result<Self, QwenExecutionError> {
-        let graph = graph
-            .with_residual_rmsnorm_fusion(qwen_residual_rmsnorm_fusion_enabled(
-                resident.session.as_ref(),
-                &graph,
-                &adapters,
-            ))
-            .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?;
-        let graph = graph
-            .with_gdn_projection_bundle(qwen_gdn_projection_bundle_enabled(
-                resident.session.as_ref(),
-                &graph,
-                &adapters,
-            ))
-            .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?;
-        let graph = graph
-            .with_mlp_gate_up_silu_bundle(qwen_mlp_gate_up_silu_bundle_enabled(
-                resident.session.as_ref(),
-                &graph,
-                &adapters,
-            ))
-            .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?;
+        // The graph is already owned by this request. Disabled rewrites must
+        // pass it through without the borrowed rewrite API's deep clone.
+        let graph =
+            if qwen_residual_rmsnorm_fusion_enabled(resident.session.as_ref(), &graph, &adapters) {
+                graph
+                    .with_residual_rmsnorm_fusion(true)
+                    .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?
+            } else {
+                graph
+            };
+        let graph =
+            if qwen_gdn_projection_bundle_enabled(resident.session.as_ref(), &graph, &adapters) {
+                graph
+                    .with_gdn_projection_bundle(true)
+                    .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?
+            } else {
+                graph
+            };
+        let graph =
+            if qwen_mlp_gate_up_silu_bundle_enabled(resident.session.as_ref(), &graph, &adapters) {
+                graph
+                    .with_mlp_gate_up_silu_bundle(true)
+                    .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?
+            } else {
+                graph
+            };
+        let projection_pack2_enabled = qwen38_nvfp4_projection_pack2_enabled(
+            resident.session.as_ref(),
+            &graph,
+            &adapters,
+            resident.qwen38_artifact.as_deref(),
+        );
+        let fp8_gdn_projection_pack2_enabled = qwen38_fp8_gdn_projection_pack2_enabled(
+            resident.session.as_ref(),
+            &graph,
+            &adapters,
+            resident.qwen38_artifact.as_deref(),
+        );
+        let projection_pack2_scope =
+            match (projection_pack2_enabled, fp8_gdn_projection_pack2_enabled) {
+                (false, false) => None,
+                (true, false) => Some(Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpOnly),
+                (false, true) => Some(Qwen38ProjectionPackLoweringScope::Fp8GdnQkvZOnly),
+                (true, true) => {
+                    Some(Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpAndFp8GdnQkvZ)
+                }
+            };
+        let graph = if let Some(scope) = projection_pack2_scope {
+            let artifact = resident.qwen38_artifact.as_deref().ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "Qwen3.8 projection-pack opt-in lacks its verified artifact".to_owned(),
+                )
+            })?;
+            let reuse_plan = graph
+                .plan_unsloth_qwen38_projection_pack_reuse(artifact)
+                .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph(
+                        "Qwen3.8 projection-pack plan does not apply to the request graph"
+                            .to_owned(),
+                    )
+                })?;
+            let lowered = graph
+                .with_qwen38_projection_pack_reuse(&reuse_plan, scope)
+                .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?;
+            for node in lowered.nodes().iter().filter(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+            }) {
+                let operation = node.operation().ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph(format!(
+                        "Qwen3.8 projection-pack node {} has no descriptor",
+                        node.label()
+                    ))
+                })?;
+                if let PrepareSupport::Unsupported { reason } = resident.session.supports(operation)
+                {
+                    return Err(QwenExecutionError::InvalidRequest(format!(
+                        "Qwen3.8 projection-pack node {} is unsupported at request construction: {reason}",
+                        node.label()
+                    )));
+                }
+            }
+            lowered
+        } else {
+            graph
+        };
         let short_terminal_last_row =
             qwen_short_terminal_last_row_enabled(resident.session.as_ref(), &graph, &adapters);
         let layout = validate_graph_plan_with_terminal_mode(
@@ -4468,6 +5321,25 @@ impl QwenExecutionCore {
             adapters,
             resident.completion_timeout,
         )?;
+        // Freeze the exact Qwen3.8 completion policy when the request is
+        // created.  A selected request receives its own queue: changing an
+        // environment variable between tokens cannot move a shared resident
+        // queue into deferred mode, and two requests cannot race that mode.
+        let qwen38_deferred_completion =
+            qwen38_deferred_completion_enabled(resident.session.as_ref(), &graph, &adapters);
+        let qwen38_kv_append_attention_chain = qwen38_kv_append_attention_chain_enabled(resident.session.as_ref(), &graph, &adapters)
+                // The chain candidate currently has only the FP16-KV kernel
+                // contract.  Keep the resident selector closed for graphs
+                // carrying any quantized KV state; those requests use the
+                // ordinary append/fence/attention route.
+                && kv_states
+                    .values()
+                    .all(|state| state.descriptor().cache_encoding() == KvCacheEncoding::Fp16);
+        let queue = if qwen38_deferred_completion || qwen38_kv_append_attention_chain {
+            resident.session.create_queue()?
+        } else {
+            resident.queue.clone()
+        };
         #[cfg(feature = "phase54-research")]
         let phase54_kv_attribution = phase54_request_config(resident.session.as_ref())?;
         #[cfg(feature = "phase54-research")]
@@ -4507,12 +5379,22 @@ impl QwenExecutionCore {
             phase54_vo_transform,
         )?;
         let execution_plan = qwen_prepared_execution_plan(&graph)?;
+        let graph_span_env = match resident.session.expected_target().as_deref() {
+            Some("gfx1030") => Some("SLLM_QWEN38_GFX1030_GRAPH_SPANS"),
+            Some("gfx1201") => Some("SLLM_QWEN38_GFX1201_GRAPH_SPANS"),
+            _ => None,
+        };
+        let qwen38_graph_spans_enabled = qwen38_deferred_completion
+            && graph_span_env.and_then(std::env::var_os).as_deref() == Some(OsStr::new("1"));
         let core = Self {
+            graph_replay: Mutex::new(QwenGraphReplayState::default()),
+            graph_collect_node: AtomicBool::new(false),
+            qwen38_graph_spans_enabled,
             session: Arc::clone(&resident.session),
             graph,
             execution_plan,
-            plan: resident.plan.clone(),
-            queue: resident.queue.clone(),
+            plan: Arc::clone(&resident.plan),
+            queue,
             tensors,
             tensor_ids: layout.tensor_ids,
             dynamic_tensors: layout.dynamic_tensors,
@@ -4530,6 +5412,11 @@ impl QwenExecutionCore {
             pending_speculative: None,
             adapters,
             short_terminal_last_row,
+            qwen38_deferred_completion,
+            qwen38_kv_append_attention_chain,
+            chain_active: AtomicBool::new(false),
+            pending_kv_append: Mutex::new(None),
+            current_node_ordinal: AtomicU64::new(0),
             #[cfg(feature = "phase54-research")]
             phase54_kv_attribution,
             #[cfg(feature = "phase54-research")]
@@ -5316,7 +6203,7 @@ impl QwenExecutionCore {
             session,
             graph,
             execution_plan,
-            plan,
+            plan: Arc::new(plan),
             queue,
             tensors,
             tensor_ids: layout.tensor_ids,
@@ -5335,6 +6222,14 @@ impl QwenExecutionCore {
             pending_speculative: None,
             adapters: QwenAdapterRuntime::disabled(),
             short_terminal_last_row: false,
+            graph_replay: Mutex::new(QwenGraphReplayState::default()),
+            graph_collect_node: AtomicBool::new(false),
+            qwen38_graph_spans_enabled: false,
+            qwen38_deferred_completion: false,
+            qwen38_kv_append_attention_chain: false,
+            chain_active: AtomicBool::new(false),
+            pending_kv_append: Mutex::new(None),
+            current_node_ordinal: AtomicU64::new(0),
             #[cfg(feature = "phase54-research")]
             phase54_kv_attribution,
             #[cfg(feature = "phase54-research")]
@@ -6107,6 +7002,7 @@ impl QwenExecutionCore {
             .then(|| self.read_hidden_states(token_count))
             .transpose()?;
         self.ensure_state_lengths(expected_length)?;
+        self.finish_graph_warmup()?;
 
         let output = QwenExecutionOutput {
             token_ids: output.token_ids,
@@ -6158,146 +7054,217 @@ impl QwenExecutionCore {
         device_selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<TerminalSelection, QwenExecutionError> {
         let plan = self.execution_plan.clone();
+        self.chain_active.store(false, Ordering::Release);
         let transition = PreparedTransition::new(token_count, start_position, 0, start_position)?;
         if transition.expected_length() != expected_length {
             return Err(QwenExecutionError::InvalidRequest(
                 "prepared transition length differs from the Qwen admission result".to_owned(),
             ));
         }
+        // The chain is a decode-only request route.  In particular, a caller
+        // that supplies an explicit device selector is outside the exact
+        // initial scope and must retain the ordinary fence path.
+        let chain_active = self.qwen38_kv_append_attention_chain
+            && token_count == 1
+            && emit_terminal
+            && device_selector.is_none()
+            && matches!(
+                position_mode,
+                AttentionPreprocessPositionMode::DecodeContinuation
+            );
+        self.chain_active.store(chain_active, Ordering::Release);
+        let graph_active = self.qwen38_graph_spans_enabled
+            && token_count == 1
+            && emit_terminal
+            && device_selector.is_none()
+            && matches!(
+                position_mode,
+                AttentionPreprocessPositionMode::DecodeContinuation
+            );
+        let (graph_collecting, replay_spans) = {
+            let state = self
+                .graph_replay
+                .lock()
+                .map_err(|_| QwenExecutionError::Poisoned)?;
+            (
+                graph_active && !state.ready,
+                if graph_active && state.ready {
+                    Some(Arc::clone(&state.spans))
+                } else {
+                    None
+                },
+            )
+        };
+        let mut replay_skip_through = None;
         let mut argmax: Option<TerminalSelection> = None;
         let deferred = qwen_deferred_completion_enabled(
             self.session.as_ref(),
             &self.graph,
             std::env::var_os(QWEN_DEFERRED_COMPLETION_ENV).as_deref(),
-        );
+        ) || self.qwen38_deferred_completion
+            || chain_active;
         let mut pending = if deferred {
             ExecutionSegment::deferred(self.session.as_ref(), &self.queue, self.completion_timeout)?
         } else {
             ExecutionSegment::profiled(self.completion_timeout)
         };
-        let execute_result = plan.execute(transition, |planned, transition| {
-            let node = planned.operation();
-            (|| -> Result<(), QwenExecutionError> {
-                match node.kind() {
-                    QwenGraphNodeKind::Semantic(_) => {
-                        if !emit_terminal
-                            && (matches!(
-                                node.kind(),
-                                QwenGraphNodeKind::Semantic(SemanticOpKind::Argmax)
-                            ) || self.is_terminal_projection(node)?)
-                        {
-                            return Ok(());
-                        }
-                        let output = self.execute_semantic(
-                            node,
-                            transition.token_count(),
-                            planned.boundary_after(),
-                            terminal_rows,
-                            device_selector,
-                            &mut pending,
-                        )?;
-                        if let Some(output) = output {
-                            if argmax.replace(output).is_some() {
-                                return Err(QwenExecutionError::InvalidGraph(
-                                    "graph contains more than one argmax result".to_owned(),
-                                ));
+        let execute_result =
+            plan.execute_with_ordinal(transition, |planned, transition, node_ordinal| {
+                self.current_node_ordinal
+                    .store(node_ordinal, Ordering::Release);
+                let node = planned.operation();
+                self.graph_collect_node.store(false, Ordering::Release);
+                if let Some(spans) = replay_spans.as_ref() {
+                    if replay_skip_through.is_some_and(|last| node_ordinal <= last) {
+                        return Ok(());
+                    }
+                    if let Some(span) = spans.get(&node_ordinal) {
+                        let submission = self.session.submit_graph_span(&span.graph)?;
+                        pending.retain_semantic("qwen38.graph_span", submission);
+                        replay_skip_through = Some(span.last_ordinal);
+                        return Ok(());
+                    }
+                }
+                self.graph_collect_node.store(
+                    graph_collecting
+                        && planned.boundary_after().is_none()
+                        && qwen38_graph_node_layer(node).is_some()
+                        && qwen38_graph_node_is_stateless(node),
+                    Ordering::Release,
+                );
+                (|| -> Result<(), QwenExecutionError> {
+                    match node.kind() {
+                        QwenGraphNodeKind::Semantic(_) => {
+                            if !emit_terminal
+                                && (matches!(
+                                    node.kind(),
+                                    QwenGraphNodeKind::Semantic(SemanticOpKind::Argmax)
+                                ) || self.is_terminal_projection(node)?)
+                            {
+                                return Ok(());
+                            }
+                            let output = self.execute_semantic(
+                                node,
+                                transition.token_count(),
+                                planned.boundary_after(),
+                                terminal_rows,
+                                device_selector,
+                                &mut pending,
+                            )?;
+                            if let Some(output) = output {
+                                if argmax.replace(output).is_some() {
+                                    return Err(QwenExecutionError::InvalidGraph(
+                                        "graph contains more than one argmax result".to_owned(),
+                                    ));
+                                }
                             }
                         }
-                    }
-                    QwenGraphNodeKind::AttentionScaleMaterialization {
-                        heads, head_dim, ..
-                    } => self.validate_cached_scale(node, heads, head_dim)?,
-                    QwenGraphNodeKind::AttentionPreprocess {
-                        layer,
-                        q_heads,
-                        kv_heads,
-                        head_dim,
-                        ..
-                    } => self.execute_attention_preprocess(
-                        node,
-                        AttentionPreprocessExecution {
+                        QwenGraphNodeKind::AttentionScaleMaterialization {
+                            heads,
+                            head_dim,
+                            ..
+                        } => self.validate_cached_scale(node, heads, head_dim)?,
+                        QwenGraphNodeKind::AttentionPreprocess {
                             layer,
                             q_heads,
                             kv_heads,
                             head_dim,
-                            token_count: transition.token_count(),
-                            start_position: if self.graph.position_payload_mode()
-                                == crate::AttentionPreprocessPositionPayloadModeV1::Explicit
-                                && matches!(position_mode, AttentionPreprocessPositionMode::Prefill)
-                            {
-                                0
-                            } else {
-                                rope_start_position
-                            },
-                            position_mode,
-                        },
-                        &mut pending,
-                    )?,
-                    QwenGraphNodeKind::MultimodalEmbeddingSelect => self
-                        .execute_multimodal_embedding_select(
+                            ..
+                        } => self.execute_attention_preprocess(
                             node,
-                            transition.token_count(),
-                            position_mode,
-                            &mut pending,
-                        )?,
-                    QwenGraphNodeKind::FullKvAppend { layer, state } => self.execute_kv_append(
-                        node,
-                        layer,
-                        state,
-                        StatefulExecution {
-                            token_count: transition.token_count(),
-                            start_position: transition.start_position(),
-                            expected_length: transition.expected_length(),
-                        },
-                        planned.boundary_after(),
-                        &mut pending,
-                    )?,
-                    QwenGraphNodeKind::FullCausalAttention { layer, state, .. } => self
-                        .execute_causal_attention(
-                            node,
-                            layer,
-                            state,
-                            StatefulExecution {
+                            AttentionPreprocessExecution {
+                                layer,
+                                q_heads,
+                                kv_heads,
+                                head_dim,
                                 token_count: transition.token_count(),
-                                start_position: transition.start_position(),
-                                expected_length: transition.expected_length(),
+                                start_position: if self.graph.position_payload_mode()
+                                    == crate::AttentionPreprocessPositionPayloadModeV1::Explicit
+                                    && matches!(
+                                        position_mode,
+                                        AttentionPreprocessPositionMode::Prefill
+                                    ) {
+                                    0
+                                } else {
+                                    rope_start_position
+                                },
+                                position_mode,
                             },
                             &mut pending,
                         )?,
-                    QwenGraphNodeKind::LinearAttentionState { layer, state, .. } => self
-                        .execute_linear_attention(
-                            node,
-                            layer,
-                            state,
-                            StatefulExecution {
-                                token_count: transition.token_count(),
-                                start_position: transition.start_position(),
-                                expected_length: transition.expected_length(),
-                            },
-                            &mut pending,
-                        )?,
-                }
-                Ok(())
-            })()
-            .map_err(|error| {
-                if matches!(
-                    &error,
-                    QwenExecutionError::Execution(
-                        ExecutionError::Busy
-                            | ExecutionError::BackendStatus { .. }
-                            | ExecutionError::AsyncFailure { .. }
-                    )
-                ) {
-                    QwenExecutionError::NodeExecution {
-                        node: node.label().to_owned(),
-                        error: Box::new(error),
+                        QwenGraphNodeKind::MultimodalEmbeddingSelect => self
+                            .execute_multimodal_embedding_select(
+                                node,
+                                transition.token_count(),
+                                position_mode,
+                                &mut pending,
+                            )?,
+                        QwenGraphNodeKind::FullKvAppend { layer, state } => self
+                            .execute_kv_append(
+                                node,
+                                layer,
+                                state,
+                                StatefulExecution {
+                                    token_count: transition.token_count(),
+                                    start_position: transition.start_position(),
+                                    expected_length: transition.expected_length(),
+                                },
+                                planned.boundary_after(),
+                                &mut pending,
+                            )?,
+                        QwenGraphNodeKind::FullCausalAttention { layer, state, .. } => self
+                            .execute_causal_attention(
+                                node,
+                                layer,
+                                state,
+                                StatefulExecution {
+                                    token_count: transition.token_count(),
+                                    start_position: transition.start_position(),
+                                    expected_length: transition.expected_length(),
+                                },
+                                &mut pending,
+                            )?,
+                        QwenGraphNodeKind::LinearAttentionState { layer, state, .. } => self
+                            .execute_linear_attention(
+                                node,
+                                layer,
+                                state,
+                                StatefulExecution {
+                                    token_count: transition.token_count(),
+                                    start_position: transition.start_position(),
+                                    expected_length: transition.expected_length(),
+                                },
+                                &mut pending,
+                            )?,
                     }
-                } else {
-                    error
-                }
-            })
-        });
+                    Ok(())
+                })()
+                .map_err(|error| {
+                    if matches!(
+                        &error,
+                        QwenExecutionError::Execution(
+                            ExecutionError::Busy
+                                | ExecutionError::BackendStatus { .. }
+                                | ExecutionError::AsyncFailure { .. }
+                        )
+                    ) {
+                        QwenExecutionError::NodeExecution {
+                            node: node.label().to_owned(),
+                            error: Box::new(error),
+                        }
+                    } else {
+                        error
+                    }
+                })
+            });
+        // Chain selection is request-local; prevent a later lowering call
+        // from observing this request's decode-only route.
+        self.chain_active.store(false, Ordering::Release);
+        self.graph_collect_node.store(false, Ordering::Release);
         if let Err(error) = execute_result {
+            if let Ok(mut pending_append) = self.pending_kv_append.lock() {
+                drop(pending_append.take());
+            }
             let cleanup = pending.abort();
             return Err(preserve_primary_execution_error(error, cleanup));
         }
@@ -6314,7 +7281,26 @@ impl QwenExecutionCore {
             });
         }
         if let Some(argmax) = argmax {
+            let dangling_append = self
+                .pending_kv_append
+                .lock()
+                .map_err(|_| QwenExecutionError::Poisoned)?
+                .take();
+            if dangling_append.is_some() {
+                // A valid decode graph consumes every append immediately in
+                // its following causal-attention node.  Drop the unclaimed
+                // owner before reporting malformed graph structure so its
+                // native transition is revoked and cannot leak into the next
+                // request.
+                drop(dangling_append);
+                return Err(QwenExecutionError::InvalidGraph(
+                    "graph has a KV append without its causal attention dependent".to_owned(),
+                ));
+            }
             return Ok(argmax);
+        }
+        if let Ok(mut pending_append) = self.pending_kv_append.lock() {
+            drop(pending_append.take());
         }
         if !pending.is_empty() {
             self.close_boundary(&mut pending, ExecutionBoundaryKind::Error)?;
@@ -6773,6 +7759,70 @@ impl QwenExecutionCore {
         Ok(None)
     }
 
+    /// Prefill keeps the baseline numerical route.  Only M=1 reaches the
+    /// projection-pack semantic/native ABI; larger row counts are submitted
+    /// as the original gate then up NVFP4 matmuls with independent outputs.
+    fn execute_qwen38_projection_pack2_decomposed(
+        &self,
+        node: &QwenGraphNode,
+        token_count: u64,
+        boundary_after: Option<ExecutionBoundaryKind>,
+        pending: &mut ExecutionSegment,
+    ) -> Result<Option<TerminalSelection>, QwenExecutionError> {
+        if token_count <= 1
+            || boundary_after.is_some()
+            || node.inputs().len() != 3
+            || node.outputs().len() != 2
+        {
+            return Err(QwenExecutionError::InvalidGraph(format!(
+                "Qwen3.8 projection pack {} has an invalid row count, boundary, or arity",
+                node.label()
+            )));
+        }
+        let inputs = self.views(node.inputs(), token_count)?;
+        let outputs = self.views(node.outputs(), token_count)?;
+        let activation = inputs.first().cloned().ok_or_else(|| {
+            QwenExecutionError::InvalidGraph(
+                "Qwen3.8 projection-pack activation is absent".to_owned(),
+            )
+        })?;
+        for role in 0..2 {
+            let weight = inputs.get(role + 1).cloned().ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "Qwen3.8 projection-pack weight is absent".to_owned(),
+                )
+            })?;
+            let output = outputs.get(role).cloned().ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "Qwen3.8 projection-pack output is absent".to_owned(),
+                )
+            })?;
+            let descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![activation.clone(), weight],
+                vec![output],
+            )?;
+            let submission = self.submit_semantic(
+                descriptor,
+                vec![
+                    self.bind(node.inputs()[0], token_count, AccessMode::Read)?,
+                    self.bind(node.inputs()[role + 1], token_count, AccessMode::Read)?,
+                ],
+                vec![self.bind(node.outputs()[role], token_count, AccessMode::Write)?],
+                PreparedCachePolicy::Reusable(PreparedDynamicIdentity::stateless(token_count, 0)),
+            )?;
+            pending.retain_semantic(
+                if role == 0 {
+                    "qwen38_projection_pack2.decomposed.gate"
+                } else {
+                    "qwen38_projection_pack2.decomposed.up"
+                },
+                submission,
+            );
+        }
+        Ok(None)
+    }
+
     fn execute_semantic(
         &self,
         node: &QwenGraphNode,
@@ -6806,6 +7856,14 @@ impl QwenExecutionCore {
         }
         if operation.kind() == SemanticOpKind::MlpGateUpSiluBundle && token_count != 1 {
             return self.execute_mlp_gate_up_silu_bundle_decomposed(
+                node,
+                token_count,
+                boundary_after,
+                pending,
+            );
+        }
+        if operation.kind() == SemanticOpKind::Qwen38ProjectionPack2 && token_count != 1 {
+            return self.execute_qwen38_projection_pack2_decomposed(
                 node,
                 token_count,
                 boundary_after,
@@ -6939,6 +7997,18 @@ impl QwenExecutionCore {
                                 node.label()
                             ))
                         })?,
+                )?
+            }
+            SemanticOpKind::Qwen38ProjectionPack2 => {
+                SemanticOpDescriptor::new_qwen38_projection_pack2(
+                    inputs,
+                    outputs,
+                    operation.qwen38_projection_pack_contract().ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(format!(
+                            "Qwen3.8 projection-pack node {} has no contract",
+                            node.label()
+                        ))
+                    })?,
                 )?
             }
             kind => SemanticOpDescriptor::new(kind, inputs, outputs)?,
@@ -7603,6 +8673,14 @@ impl QwenExecutionCore {
                 pending,
             );
         }
+        if operation.kind() == SemanticOpKind::Qwen38ProjectionPack2 && token_count != 1 {
+            return self.execute_qwen38_projection_pack2_decomposed(
+                node,
+                token_count,
+                boundary_after,
+                pending,
+            );
+        }
         if operation.kind() == SemanticOpKind::Matmul
             && self
                 .node_weight_name(node)
@@ -7679,6 +8757,18 @@ impl QwenExecutionCore {
                                 node.label()
                             ))
                         })?,
+                )?
+            }
+            SemanticOpKind::Qwen38ProjectionPack2 => {
+                SemanticOpDescriptor::new_qwen38_projection_pack2(
+                    inputs,
+                    outputs,
+                    operation.qwen38_projection_pack_contract().ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(format!(
+                            "Qwen3.8 projection-pack node {} has no contract",
+                            node.label()
+                        ))
+                    })?,
                 )?
             }
             kind => SemanticOpDescriptor::new(kind, inputs, outputs)?,
@@ -7863,6 +8953,23 @@ impl QwenExecutionCore {
             execution.start_position,
             execution.start_position,
         )?;
+        if self.chain_active.load(Ordering::Acquire) {
+            if boundary_after != Some(ExecutionBoundaryKind::StatePublication) {
+                return Err(QwenExecutionError::InvalidGraph(format!(
+                    "KV append node {} lacks its state-publication boundary",
+                    node.label()
+                )));
+            }
+            let mut pending_append = self
+                .pending_kv_append
+                .lock()
+                .map_err(|_| QwenExecutionError::Poisoned)?;
+            if pending_append.is_some() {
+                return Err(QwenExecutionError::Busy);
+            }
+            *pending_append = Some(submission);
+            return Ok(());
+        }
         // KV publication is an unavoidable state boundary. The append event
         // is after all earlier work on the stream, so drain the preceding
         // segment now and then publish this state transition.
@@ -7907,10 +9014,32 @@ impl QwenExecutionCore {
         let output = self.bind(node.outputs()[0], execution.token_count, AccessMode::Write)?;
         #[cfg(feature = "phase54-research")]
         let phase54_output = output.clone();
-        let submission =
-            self.session
-                .causal_attention(state, &self.queue, query, output, descriptor)?;
-        pending.retain_causal_attention(node.label(), submission);
+        if self.chain_active.load(Ordering::Acquire) {
+            let mut append = self
+                .pending_kv_append
+                .lock()
+                .map_err(|_| QwenExecutionError::Poisoned)?
+                .take()
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph(format!(
+                        "causal attention node {} has no preceding KV append",
+                        node.label()
+                    ))
+                })?;
+            let submission = self.session.causal_attention_after_kv_append(
+                &mut append,
+                query,
+                output,
+                descriptor,
+            )?;
+            pending.retain_kv_append(format!("{}.kv_append", node.label()), append)?;
+            pending.retain_causal_attention(node.label(), submission);
+        } else {
+            let submission =
+                self.session
+                    .causal_attention(state, &self.queue, query, output, descriptor)?;
+            pending.retain_causal_attention(node.label(), submission);
+        }
         // Retain the accepted attention submission before the research-only
         // queue readback waits for it. The synchronous companion upload is
         // complete before the following SigmoidMul node is submitted.
@@ -7965,6 +9094,7 @@ impl QwenExecutionCore {
         pending: &mut ExecutionSegment,
         boundary: ExecutionBoundaryKind,
     ) -> Result<(), QwenExecutionError> {
+        let mut physical_fence_recorded = false;
         if boundary == ExecutionBoundaryKind::PrefillChunkCompletion
             && !pending.is_empty()
             && !pending.is_deferred()
@@ -7974,11 +9104,15 @@ impl QwenExecutionCore {
                 "prefill chunk completion fence",
                 fence.wait(self.completion_timeout)?,
             )?;
+            physical_fence_recorded = true;
         }
         let mut audit = self
             .audit
             .lock()
             .map_err(|_| QwenExecutionError::Poisoned)?;
+        if physical_fence_recorded {
+            audit.record_queue_fence()?;
+        }
         pending.flush(boundary, &mut audit).map_err(Into::into)
     }
 
@@ -8025,6 +9159,16 @@ impl QwenExecutionCore {
                 "Qwen dispatch audit is not HIP-only and fallback-free".to_owned(),
             ));
         }
+        let graph_state = self
+            .graph_replay
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        let graph_span_count = graph_state.spans.len() as u64;
+        let graph_capture_kernel_node_count = graph_state
+            .spans
+            .values()
+            .map(|span| span.graph.native_kernel_nodes())
+            .sum();
         Ok(QwenExecutionAudit {
             selected_backend: "hip",
             target: audit.target().to_owned(),
@@ -8034,8 +9178,19 @@ impl QwenExecutionCore {
             all_dispatches_hip: true,
             segment_count: audit.segment_count(),
             boundary_count: audit.boundary_count(),
+            physical_queue_fence_count: audit.physical_queue_fence_count(),
+            graph_replay_count: audit.graph_replay_count(),
+            graph_span_count,
+            graph_capture_kernel_node_count,
+            kv_append_attention_chain_count: audit.kv_append_attention_chain_count(),
             sparse_moe_submission_count: audit.sparse_moe_submission_count(),
             sparse_moe_active_pair_count: audit.sparse_moe_active_pair_count(),
+            projection_pack_submission_count: audit.projection_pack_submission_count(),
+            projection_pack_member_count: audit.projection_pack_member_count(),
+            projection_pack_activation_quantize_count: audit
+                .projection_pack_activation_quantize_count(),
+            request_local_deferred_completion: self.qwen38_deferred_completion
+                || self.qwen38_kv_append_attention_chain,
             kernel_dispatches_by_identity: audit.kernel_dispatches_by_identity().clone(),
             #[cfg(feature = "phase54-research")]
             phase54_kv_attribution_semantics: self
@@ -8133,6 +9288,12 @@ impl QwenExecutionCore {
                 }));
             }
         }
+        let cache_policy = match cache_policy {
+            PreparedCachePolicy::Transient => PreparedCachePolicy::Transient,
+            PreparedCachePolicy::Reusable(dynamic) => PreparedCachePolicy::Reusable(
+                dynamic.with_node_ordinal(self.current_node_ordinal.load(Ordering::Acquire)),
+            ),
+        };
         let prepared = self.prepared_semantics.prepare(
             self.session.as_ref(),
             descriptor,
@@ -8140,7 +9301,98 @@ impl QwenExecutionCore {
             outputs,
             cache_policy,
         )?;
-        Ok(self.session.submit(&prepared, &self.queue)?)
+        let submission = self.session.submit(&prepared, &self.queue)?;
+        if self.graph_collect_node.load(Ordering::Acquire) {
+            let ordinal = self.current_node_ordinal.load(Ordering::Acquire);
+            let node = self.execution_plan.nodes()[ordinal as usize].operation();
+            let layer = qwen38_graph_node_layer(node).ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("captured operation has no layer".to_owned())
+            })?;
+            self.graph_replay
+                .lock()
+                .map_err(|_| QwenExecutionError::Poisoned)?
+                .warm_members
+                .push(QwenGraphWarmMember {
+                    ordinal,
+                    layer,
+                    label: node.label().to_owned(),
+                    operation: prepared,
+                    dispatch: submission.dispatch().clone(),
+                });
+        }
+        Ok(submission)
+    }
+
+    /// Capture once, after eager decode completed and its queue fence drained.
+    fn finish_graph_warmup(&self) -> Result<(), QwenExecutionError> {
+        if !self.qwen38_graph_spans_enabled {
+            return Ok(());
+        }
+        let members = {
+            let mut state = self
+                .graph_replay
+                .lock()
+                .map_err(|_| QwenExecutionError::Poisoned)?;
+            if state.ready || state.warm_members.is_empty() {
+                return Ok(());
+            }
+            std::mem::take(&mut state.warm_members)
+        };
+        self.session
+            .set_queue_completion_mode(&self.queue, crate::QueueCompletionMode::Deferred)?;
+        let capture = (|| -> Result<BTreeMap<u64, QwenGraphReplaySpan>, QwenExecutionError> {
+            let mut spans = BTreeMap::new();
+            let mut begin = 0;
+            while begin < members.len() {
+                let mut end = begin + 1;
+                while end < members.len()
+                    && members[end].layer == members[begin].layer
+                    && members[end].ordinal <= members[end - 1].ordinal + 1
+                {
+                    end += 1;
+                }
+                let group = &members[begin..end];
+                if group.len() >= 2 {
+                    let operations = group
+                        .iter()
+                        .map(|x| x.operation.clone())
+                        .collect::<Vec<_>>();
+                    let evidence = group
+                        .iter()
+                        .map(|x| (x.label.clone(), x.dispatch.clone()))
+                        .collect::<Vec<_>>();
+                    let graph =
+                        self.session
+                            .create_graph_span(&self.queue, &operations, &evidence)?;
+                    spans.insert(
+                        group[0].ordinal,
+                        QwenGraphReplaySpan {
+                            last_ordinal: group.last().expect("nonempty graph group").ordinal,
+                            graph,
+                        },
+                    );
+                }
+                begin = end;
+            }
+            if spans.is_empty() {
+                return Err(QwenExecutionError::InvalidGraph(
+                    "enabled graph route captured zero spans".to_owned(),
+                ));
+            }
+            Ok(spans)
+        })();
+        let restore = self
+            .session
+            .set_queue_completion_mode(&self.queue, crate::QueueCompletionMode::Profiled);
+        let spans = capture?;
+        restore?;
+        let mut state = self
+            .graph_replay
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        state.spans = Arc::new(spans);
+        state.ready = true;
+        Ok(())
     }
 
     fn upload_runtime_inputs(
@@ -9275,11 +10527,16 @@ fn is_fp8_weight_view(view: &TensorView) -> bool {
 
 fn is_nvfp4_weight_view(view: &TensorView) -> bool {
     view.dtype() == DType::U8
-        && view.encoding()
-            == Encoding::Nvfp4 {
+        && matches!(
+            view.encoding(),
+            Encoding::Nvfp4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            } | Encoding::Nvfp4W4A4 {
                 block_size: 16,
                 scale_dtype: DType::F8E4M3Fn,
             }
+        )
         && view.shape().len() == 2
 }
 
@@ -9339,10 +10596,17 @@ fn resident_weight_bytes(view: &TensorView) -> Result<u64, QwenExecutionError> {
         let unaligned = view.payload_bytes().checked_add(blocks).ok_or_else(|| {
             QwenExecutionError::InvalidGraph("NVFP4 resident bytes overflowed".to_owned())
         })?;
+        let global_scales = matches!(
+            view.encoding(),
+            Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            }
+        );
         return unaligned
             .checked_add(3)
             .map(|bytes| bytes & !3)
-            .and_then(|bytes| bytes.checked_add(4))
+            .and_then(|bytes| bytes.checked_add(if global_scales { 8 } else { 4 }))
             .ok_or_else(|| {
                 QwenExecutionError::InvalidGraph("NVFP4 resident bytes overflowed".to_owned())
             });
@@ -10859,6 +12123,32 @@ mod tests {
         }
     }
 
+    struct ProjectionPackTestProvisionSource;
+
+    impl QwenProvisionSource for ProjectionPackTestProvisionSource {
+        fn upload_weight(
+            &self,
+            _plan: &WeightLoadPlan,
+            _binding: &QwenGraphWeightBinding,
+            _session: &ExecutionSession,
+            _queue: &ExecutionQueue,
+            _destination: crate::BufferRange,
+            _completion_timeout: Duration,
+        ) -> Result<(), QwenExecutionError> {
+            // The graph/plan fixture validates all metadata; this fake source
+            // deliberately owns no model payload and performs no CPU math.
+            Ok(())
+        }
+
+        fn read_scale_bytes(
+            &self,
+            _tensor_name: &str,
+            expected_length: usize,
+        ) -> Result<Arc<[u8]>, QwenExecutionError> {
+            Ok(Arc::from(vec![0_u8; expected_length]))
+        }
+    }
+
     #[derive(Default)]
     struct RecorderState {
         events: Vec<String>,
@@ -11082,6 +12372,13 @@ mod tests {
             self.event(format!("submit:{kind:?}"));
             let mut dispatch = dispatch_evidence();
             dispatch.target = self.target();
+            if kind == SemanticOpKind::Qwen38ProjectionPack2 {
+                // The semantic completion owns one activation quantizer and
+                // two ordered projection dispatches.
+                dispatch.dispatch_count = 3;
+                dispatch.kernel_symbol = "recorder_qwen38_projection_pack2".to_owned();
+                dispatch.device_symbol = "recorder_qwen38_projection_pack2".to_owned();
+            }
             Ok((
                 Box::new(RecorderSubmission {
                     recorder: Arc::new(self.clone_for_submission()),
@@ -11802,6 +13099,295 @@ mod tests {
     }
 
     #[test]
+    fn qwen38_deferred_completion_selector_is_opt_in_and_fail_closed() {
+        let exact_topology: Vec<_> = (0..64)
+            .map(|layer| {
+                if (layer + 1) % 4 == 0 {
+                    LayerType::FullAttention
+                } else {
+                    LayerType::LinearAttention
+                }
+            })
+            .collect();
+        let enabled = |target, env_value| {
+            qwen38_deferred_completion_scope_enabled(
+                "hip",
+                Some(target),
+                QWEN35_27B_FINGERPRINT,
+                true,
+                false,
+                false,
+                &exact_topology,
+                true,
+                true,
+                env_value,
+            )
+        };
+
+        assert_eq!(
+            qwen38_deferred_completion_env_name(Some("gfx1030")),
+            Some(QWEN38_GFX1030_DEFERRED_COMPLETION_ENV)
+        );
+        assert_eq!(
+            qwen38_deferred_completion_env_name(Some("gfx1201")),
+            Some(QWEN38_GFX1201_DEFERRED_COMPLETION_ENV)
+        );
+        assert_eq!(qwen38_deferred_completion_env_name(Some("gfx942")), None);
+        assert_eq!(qwen38_deferred_completion_env_name(None), None);
+
+        // Missing and non-canonical values are OFF by default; each exact
+        // target has its own explicit opt-in switch.
+        assert!(!enabled("gfx1030", None));
+        assert!(!enabled("gfx1201", Some(OsStr::new("0"))));
+        assert!(!enabled("gfx1030", Some(OsStr::new("true"))));
+        assert!(enabled("gfx1030", Some(OsStr::new("1"))));
+        assert!(enabled("gfx1201", Some(OsStr::new("1"))));
+
+        assert!(qwen38_mixed_weight_inventory_counts_are_exact(
+            851, 851, 168, 233, 450
+        ));
+        // A sidecar carrying one wrong resident encoding must not be treated
+        // as the fixed mixed artifact merely because its total is close.
+        assert!(!qwen38_mixed_weight_inventory_counts_are_exact(
+            851, 851, 168, 232, 451
+        ));
+        assert!(!qwen38_mixed_weight_inventory_counts_are_exact(
+            851, 851, 167, 233, 451
+        ));
+        assert!(!qwen38_mixed_weight_inventory_counts_are_exact(
+            851, 850, 168, 233, 450
+        ));
+
+        for (backend, target, fingerprint, sidecar, multimodal, mtp, adapters) in [
+            (
+                "cpu",
+                Some("gfx1030"),
+                QWEN35_27B_FINGERPRINT,
+                true,
+                false,
+                false,
+                true,
+            ),
+            (
+                "hip",
+                Some("gfx942"),
+                QWEN35_27B_FINGERPRINT,
+                true,
+                false,
+                false,
+                true,
+            ),
+            (
+                "hip",
+                Some("gfx1030"),
+                QWEN35_4B_FINGERPRINT,
+                true,
+                false,
+                false,
+                true,
+            ),
+            (
+                "hip",
+                Some("gfx1030"),
+                QWEN35_27B_FINGERPRINT,
+                false,
+                false,
+                false,
+                true,
+            ),
+            (
+                "hip",
+                Some("gfx1030"),
+                QWEN35_27B_FINGERPRINT,
+                true,
+                true,
+                false,
+                true,
+            ),
+            (
+                "hip",
+                Some("gfx1030"),
+                QWEN35_27B_FINGERPRINT,
+                true,
+                false,
+                true,
+                true,
+            ),
+            (
+                "hip",
+                Some("gfx1030"),
+                QWEN35_27B_FINGERPRINT,
+                true,
+                false,
+                false,
+                false,
+            ),
+        ] {
+            assert!(!qwen38_deferred_completion_scope_enabled(
+                backend,
+                target,
+                fingerprint,
+                sidecar,
+                multimodal,
+                mtp,
+                &exact_topology,
+                true,
+                adapters,
+                Some(OsStr::new("1")),
+            ));
+        }
+
+        let mut wrong_length = exact_topology.clone();
+        wrong_length.pop();
+        assert!(!qwen38_deferred_completion_scope_enabled(
+            "hip",
+            Some("gfx1030"),
+            QWEN35_27B_FINGERPRINT,
+            true,
+            false,
+            false,
+            &wrong_length,
+            true,
+            true,
+            Some(OsStr::new("1")),
+        ));
+        let mut wrong_schedule = exact_topology;
+        wrong_schedule.swap(0, 3);
+        assert!(!qwen38_deferred_completion_scope_enabled(
+            "hip",
+            Some("gfx1030"),
+            QWEN35_27B_FINGERPRINT,
+            true,
+            false,
+            false,
+            &wrong_schedule,
+            true,
+            true,
+            Some(OsStr::new("1")),
+        ));
+
+        // The real Qwen3.5-4B graph remains outside this selector even when
+        // the new environment variable would be set.
+        let (qwen35_graph, _) = crate::qwen_graph::qwen35_execution_fixture();
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        let session = ExecutionSession::new("hip", recorder);
+        assert!(!qwen38_deferred_completion_enabled(
+            &session,
+            &qwen35_graph,
+            &QwenAdapterRuntime::disabled(),
+        ));
+    }
+
+    #[test]
+    fn qwen38_nvfp4_projection_pack2_selector_is_literal_opt_in_only() {
+        let exact_topology = (0..64)
+            .map(|layer| {
+                if (layer + 1) % 4 == 0 {
+                    LayerType::FullAttention
+                } else {
+                    LayerType::LinearAttention
+                }
+            })
+            .collect::<Vec<_>>();
+        let enabled = |env_value, has_verified_artifact| {
+            qwen38_nvfp4_projection_pack2_scope_enabled(
+                "hip",
+                Some("gfx1030"),
+                QWEN35_27B_FINGERPRINT,
+                true,
+                false,
+                false,
+                &exact_topology,
+                true,
+                true,
+                has_verified_artifact,
+                env_value,
+            )
+        };
+
+        assert!(!enabled(None, true));
+        assert!(!enabled(Some(OsStr::new("0")), true));
+        assert!(!enabled(Some(OsStr::new("true")), true));
+        assert!(!enabled(Some(OsStr::new("1 ")), true));
+        assert!(!enabled(Some(OsStr::new("1")), false));
+        assert!(enabled(Some(OsStr::new("1")), true));
+
+        assert!(!qwen38_nvfp4_projection_pack2_scope_enabled(
+            "hip",
+            Some("gfx942"),
+            QWEN35_27B_FINGERPRINT,
+            true,
+            false,
+            false,
+            &exact_topology,
+            true,
+            true,
+            true,
+            Some(OsStr::new("1")),
+        ));
+    }
+
+    #[test]
+    fn qwen38_fp8_gdn_projection_pack2_selector_is_independent_and_fail_closed() {
+        let exact_topology = (0..64)
+            .map(|layer| {
+                if (layer + 1) % 4 == 0 {
+                    LayerType::FullAttention
+                } else {
+                    LayerType::LinearAttention
+                }
+            })
+            .collect::<Vec<_>>();
+        let enabled = |env_value| {
+            qwen38_nvfp4_projection_pack2_scope_enabled(
+                "hip",
+                Some("gfx1201"),
+                QWEN35_27B_FINGERPRINT,
+                true,
+                false,
+                false,
+                &exact_topology,
+                true,
+                true,
+                true,
+                env_value,
+            )
+        };
+
+        assert!(!enabled(None));
+        assert!(!enabled(Some(OsStr::new("0"))));
+        assert!(!enabled(Some(OsStr::new("true"))));
+        assert!(!enabled(Some(OsStr::new("1 "))));
+        assert!(enabled(Some(OsStr::new("1"))));
+        assert!(!qwen38_nvfp4_projection_pack2_scope_enabled(
+            "hip",
+            Some("gfx1201"),
+            QWEN35_27B_FINGERPRINT,
+            true,
+            false,
+            false,
+            &exact_topology,
+            true,
+            true,
+            true,
+            None,
+        ));
+        assert!(!qwen38_nvfp4_projection_pack2_scope_enabled(
+            "hip",
+            Some("gfx942"),
+            QWEN35_27B_FINGERPRINT,
+            true,
+            false,
+            false,
+            &exact_topology,
+            true,
+            true,
+            true,
+            Some(OsStr::new("1")),
+        ));
+    }
+
+    #[test]
     fn phase50_candidate_env_selector_is_target_scoped() {
         let one = Some(OsStr::new("1"));
         let zero = Some(OsStr::new("0"));
@@ -12337,6 +13923,231 @@ mod tests {
             0
         );
         decode_pending.abort().expect("decode cleanup");
+    }
+
+    #[test]
+    fn qwen38_projection_pack2_decomposes_m3_and_uses_one_m1_semantic_owner() {
+        let (graph, plan) = crate::qwen_graph::qwen38_projection_pack_execution_fixture(3);
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        let adapter: Arc<dyn ExecutionSessionAdapter> = recorder.clone();
+        let session = Arc::new(ExecutionSession::new("hip", adapter));
+        let core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &ProjectionPackTestProvisionSource,
+        )
+        .expect("Qwen3.8 projection-pack fixture provisions");
+        let pack_node = core
+            .graph
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+            })
+            .expect("projection-pack node");
+
+        let before_prefill = recorder.events().len();
+        let mut prefill = ExecutionSegment::profiled(Duration::from_millis(1));
+        core.execute_semantic(
+            pack_node,
+            3,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut prefill,
+        )
+        .expect("M=3 projection pack decomposes");
+        let events = recorder.events();
+        let prefill_events = &events[before_prefill..];
+        assert_eq!(
+            prefill_events
+                .iter()
+                .filter(|event| event.as_str() == "submit:Matmul")
+                .count(),
+            2
+        );
+        assert!(
+            !prefill_events
+                .iter()
+                .any(|event| event == "submit:Qwen38ProjectionPack2")
+        );
+        prefill.abort().expect("decomposed-owner cleanup");
+
+        let before_decode = recorder.events().len();
+        let mut decode = ExecutionSegment::profiled(Duration::from_millis(1));
+        core.execute_semantic(
+            pack_node,
+            1,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut decode,
+        )
+        .expect("M=1 projection pack uses its semantic route");
+        let events = recorder.events();
+        let decode_events = &events[before_decode..];
+        assert_eq!(
+            decode_events
+                .iter()
+                .filter(|event| event.as_str() == "submit:Qwen38ProjectionPack2")
+                .count(),
+            1
+        );
+        assert!(!decode_events.iter().any(|event| event == "submit:Matmul"));
+        let mut audit = ExecutionAuditAccumulator::new(1);
+        decode
+            .flush(ExecutionBoundaryKind::TerminalReadback, &mut audit)
+            .expect("one semantic completion owns all three dispatches");
+        let snapshot = audit.snapshot().unwrap();
+        assert_eq!(snapshot.projection_pack_submission_count(), 1);
+        assert_eq!(snapshot.projection_pack_member_count(), 2);
+        assert_eq!(snapshot.projection_pack_activation_quantize_count(), 1);
+        assert_eq!(snapshot.kernel_dispatch_count(), 3);
+    }
+
+    #[test]
+    fn qwen38_fp8_gdn_projection_pack2_keeps_prefill_decomposed_and_lowers_m1() {
+        let (graph, plan) = crate::qwen_graph::qwen38_fp8_gdn_projection_pack_execution_fixture(3);
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1201"));
+        let adapter: Arc<dyn ExecutionSessionAdapter> = recorder.clone();
+        let session = Arc::new(ExecutionSession::new("hip", adapter));
+        let core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &ProjectionPackTestProvisionSource,
+        )
+        .expect("Qwen3.8 FP8 GDN fixture provisions");
+        let pack_node = core
+            .graph
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+                    && node
+                        .operation()
+                        .and_then(|operation| operation.qwen38_projection_pack_contract())
+                        .is_some_and(|contract| {
+                            contract.role() == crate::Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ
+                        })
+            })
+            .expect("FP8 GDN projection-pack node");
+
+        let before_prefill = recorder.events().len();
+        let mut prefill = ExecutionSegment::profiled(Duration::from_millis(1));
+        core.execute_semantic(
+            pack_node,
+            3,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut prefill,
+        )
+        .expect("M=3 FP8 GDN projection pack decomposes");
+        let events = recorder.events();
+        let prefill_events = &events[before_prefill..];
+        assert_eq!(
+            prefill_events
+                .iter()
+                .filter(|event| event.as_str() == "submit:Matmul")
+                .count(),
+            2
+        );
+        assert!(
+            !prefill_events
+                .iter()
+                .any(|event| event == "submit:Qwen38ProjectionPack2")
+        );
+        prefill.abort().expect("FP8 GDN prefill cleanup");
+
+        let before_decode = recorder.events().len();
+        let mut decode = ExecutionSegment::profiled(Duration::from_millis(1));
+        core.execute_semantic(
+            pack_node,
+            1,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut decode,
+        )
+        .expect("M=1 FP8 GDN projection pack uses native semantic operation");
+        let events = recorder.events();
+        let decode_events = &events[before_decode..];
+        assert_eq!(
+            decode_events
+                .iter()
+                .filter(|event| event.as_str() == "submit:Qwen38ProjectionPack2")
+                .count(),
+            1
+        );
+        assert!(!decode_events.iter().any(|event| event == "submit:Matmul"));
+        decode.abort().expect("FP8 GDN decode cleanup");
+    }
+
+    #[test]
+    fn qwen38_projection_pack2_coexisting_fixture_has_both_roles() {
+        let (graph, _) = crate::qwen_graph::qwen38_coexisting_projection_pack_execution_fixture(1);
+        let mut counts = [0_usize; 2];
+        for node in graph.nodes().iter().filter(|node| {
+            node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+        }) {
+            let role = node
+                .operation()
+                .and_then(|operation| operation.qwen38_projection_pack_contract())
+                .expect("coexisting projection-pack contract")
+                .role();
+            match role {
+                crate::Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp => counts[0] += 1,
+                crate::Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ => counts[1] += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(counts, [56, 48]);
+    }
+
+    #[test]
+    fn qwen38_projection_pack2_failure_drains_owner_without_audit_publication() {
+        let (graph, plan) = crate::qwen_graph::qwen38_projection_pack_execution_fixture(3);
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        recorder.set_failure(SemanticOpKind::Qwen38ProjectionPack2);
+        let adapter: Arc<dyn ExecutionSessionAdapter> = recorder.clone();
+        let session = Arc::new(ExecutionSession::new("hip", adapter));
+        let core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &ProjectionPackTestProvisionSource,
+        )
+        .expect("Qwen3.8 projection-pack fixture provisions");
+        let pack_node = core
+            .graph
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+            })
+            .expect("projection-pack node");
+        let mut pending = ExecutionSegment::profiled(Duration::from_millis(1));
+        core.execute_semantic(
+            pack_node,
+            1,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut pending,
+        )
+        .expect("submission itself is asynchronous");
+        let mut audit = ExecutionAuditAccumulator::new(1);
+        assert!(matches!(
+            pending.flush(ExecutionBoundaryKind::Error, &mut audit),
+            Err(PreparedExecutionError::CompletionFailure { .. })
+        ));
+        assert!(pending.is_empty());
+        assert!(audit.snapshot().is_err());
     }
 
     #[test]

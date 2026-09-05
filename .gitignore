@@ -35,3 +35,6 @@ __pycache__/
 
 # Generated test fixtures
 /tests/fixtures/generated/
+
+# Raw rocprof counter scratch; keep local only.
+/.rocprofv3/

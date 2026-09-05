@@ -1,6 +1,6 @@
 # ソフトウェア互換性方針
 
-> 最終更新: 2026-09-01
+> 最終更新: 2026-09-03
 
 ## 目的
 
@@ -116,6 +116,13 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 - Phase 15Oは同じlocal ROCm 7.14.0 tupleでexact `gfx1030`/`gfx1201`のNVFP4 decode/prefill providerと、exact
   `gfx1201`のFP8 dynamic量子化を実機検証した。target別release build、operator、full model、OpenAI service、cleanupを
   PASSした範囲だけを`project-verified`とし、別ROCm、別SKU、未実行のexact `gfx942`へ一般化しない。
+- 2026-09-03のQwen3.8-27B NVFP4優先laneでは、同じROCm 7.14.0／amdgpu `6.16.13`／kernel `6.17.0-35`の
+  R9700 `gfx1201`を全GPU可視のphysical index 2で起動すると、最小HIP kernelを含む新規Code Object V6 binaryが
+  HIP status 200の`device kernel image is invalid`（sLLM backend status 260）となった。一方、
+  `ROCR_VISIBLE_DEVICES=2`または`HIP_VISIBLE_DEVICES=2`でR9700だけを可視化すると同じkernel、さらに
+  Qwen3.8実モデルがHIP-onlyで完了した。rocBLASのSGEMMも同じdeviceで完了したため、前者はモデル実装やGPU故障ではなく、
+  現行runtimeのmulti-architecture device enumeration条件として扱う。Qwen3.8 Phase 76/77のR9700 evidenceは
+  single-visible条件を明記して採用し、全GPU可視physical index 2の失敗は別のcompatibility caveatとして残す。
 - Phase 15Qも同じROCm 7.14.0、Code Object V6、wave32のtarget別release buildを使い、R9700/V620でGemma 4 12B-it
   BF16/S0/U0/O0のfull logits 96位置とlayer subsetを実行した。Unsloth artifactの取得・独立decodeはhost上で行い、model codeや
   Python runtimeをproduction GPU processへloadしていない。この証拠をROCm release、GPU SKU、W4A4/FP8 KVへ一般化しない。

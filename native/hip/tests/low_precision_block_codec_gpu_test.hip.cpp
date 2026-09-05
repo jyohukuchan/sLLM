@@ -21,6 +21,45 @@ namespace {
 
 static_assert(!std::is_copy_assignable_v<sllm_lowp::PreparedProviderPlan>);
 
+constexpr bool e4m3fnx4_fp16_bits_match_scalar(const uint32_t packed) {
+  const sllm_lowp::E4M3FnFp16x4Bits converted =
+      sllm_lowp::e4m3fnx4_to_fp16x2_bits(packed);
+  for (uint32_t lane = 0U; lane < 4U; ++lane) {
+    const uint32_t half2 = lane < 2U ? converted.low : converted.high;
+    const uint16_t actual = static_cast<uint16_t>(half2 >> ((lane & 1U) * 16U));
+    const uint16_t expected = sllm_lowp::e4m3fn_to_fp16_bits(
+        static_cast<uint8_t>(packed >> (lane * 8U)));
+    if (actual != expected) {
+      return false;
+    }
+  }
+  return true;
+}
+
+constexpr bool e4m3fnx4_fp16_bits_are_lane_exact() {
+  constexpr uint32_t all_normal = UINT32_C(0xcd453d35);
+  for (uint32_t code = 0U; code < 256U; ++code) {
+    // Replication exercises the SWAR normal path for every normal code and
+    // the scalar fallback for every exceptional code.
+    if (!e4m3fnx4_fp16_bits_match_scalar(code * UINT32_C(0x01010101))) {
+      return false;
+    }
+    // Put every exceptional class in every byte position so the whole-dword
+    // detector cannot accidentally omit one lane.
+    for (uint32_t lane = 0U; lane < 4U; ++lane) {
+      const uint32_t shift = lane * 8U;
+      const uint32_t packed =
+          (all_normal & ~(UINT32_C(0xff) << shift)) | (code << shift);
+      if (!e4m3fnx4_fp16_bits_match_scalar(packed)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+static_assert(e4m3fnx4_fp16_bits_are_lane_exact());
+
 constexpr auto kMxfp8Provider =
     sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
         sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8, sllm_lowp::ExactTarget::Gfx1201,

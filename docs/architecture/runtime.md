@@ -298,6 +298,11 @@ NVFP4と同一packingへ畳み込まない。NVFP4／MXFP4 W4A4は既存device k
 同期比較用の別kernelを作らない。MXFP8／MXFP6のK非32倍はfail-closeし、NVFP4／MXFP4は既存masked tail kernelと同じceil-block
 契約を保持する。
 
+上記Phase 66のW4A4記述は実装済み契約と証拠の履歴である。2026-09-03以降のMXFP4対応方針はW4A8だけに限定し、
+既存W4A4 ABI／providerを新規対応形式として拡張しない。W4A8 providerが実装されるまでは方針とruntime実装に差分があり、
+既存W4A4をW4A8として報告または自動選択してはならない。MXFP4 weightはOCP E2M1／block 32／E8M0 scale、
+ActivationはOCP MXFP8 E4M3／K-axis block 32／E8M0 scaleとし、この組合せを新しいversioned W4A8 provider contractで固定する。
+
 MXFP8のID37はID36の独立output列をN128へ広げ、各outputのFP32 treeを変えない。exact gfx1201かつPhase 65 direct-both family、
 N%128=0へ限定採用し、N64、small-K、tail、vocabulary、別targetは既存providerへ戻す。causal attentionはweight形式と分離し、
 Q/K/V、KV encoding、head geometry、query/context長、`sliding_window`、明示`score_scale`からFP16／MXFP8 E4のtyped

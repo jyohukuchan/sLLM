@@ -409,6 +409,20 @@ typedef uint32_t sllm_deepseek_v4_moe_route_mode_t;
 #define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3 UINT32_C(3)
 #define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1 UINT32_C(4)
 #define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1 UINT32_C(5)
+/* Phase 78 gfx1201 GQA6 rocBLAS F32 attention is a separately audited
+ * force-only provider.  74 follows the existing cross-provider ID ledger
+ * (ID73 is the NVFP4 activation-shared matmul provider). */
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F32_GFX1201_V1        \
+  UINT32_C(74)
+/* Phase 78 gfx1201 GQA6 rocBLAS FP16-score tail provider.  The first
+ * prefill chunk remains on ID74 F32-score; this ID is selected only for
+ * explicitly opted-in start_position>0 chunks. */
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F16_TAIL_GFX1201_V1   \
+  UINT32_C(77)
+/* Phase 78 gfx1030-only GQA6 P128 decode provider.  This remains an
+ * explicit opt-in and is never selected for gfx1201. */
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_SPLIT_P128_GFX1030_V1         \
+  UINT32_C(78)
 #define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE UINT32_C(256)
@@ -423,6 +437,10 @@ typedef uint32_t sllm_deepseek_v4_moe_route_mode_t;
 #define SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1 UINT32_C(1)
 #define SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1 UINT32_C(2)
+/* Phase 78 gfx1030 Qwen3.8 M=1 row32-LDS recurrent provider.  Explicit
+ * opt-in only; exact shape is qk16/value48/head128. */
+#define SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_ROW32_LDS_V1  \
+  UINT32_C(79)
 #define SLLM_HIP_LINEAR_ATTENTION_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_LINEAR_ATTENTION_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE UINT32_C(128)
@@ -508,11 +526,14 @@ typedef struct sllm_queue_t sllm_queue_t;
 typedef struct sllm_buffer_t sllm_buffer_t;
 typedef struct sllm_event_t sllm_event_t;
 typedef struct sllm_completion_t sllm_completion_t;
+typedef struct sllm_graph_span_t sllm_graph_span_t;
 typedef struct sllm_rmsnorm_plan_t sllm_rmsnorm_plan_t;
 typedef struct sllm_residual_rmsnorm_plan_t sllm_residual_rmsnorm_plan_t;
 typedef struct sllm_elementwise_plan_t sllm_elementwise_plan_t;
 typedef struct sllm_embedding_plan_t sllm_embedding_plan_t;
 typedef struct sllm_matmul_plan_t sllm_matmul_plan_t;
+typedef struct sllm_qwen38_projection_pack2_plan_t
+    sllm_qwen38_projection_pack2_plan_t;
 typedef struct sllm_gdn_projection_bundle_plan_t
     sllm_gdn_projection_bundle_plan_t;
 typedef struct sllm_mlp_gate_up_silu_bundle_plan_t
@@ -857,6 +878,59 @@ typedef struct sllm_matmul_dispatch_info_t {
   char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
   uint32_t reserved[8];
 } sllm_matmul_dispatch_info_t;
+
+/* Exact Qwen3.8 NVFP4 MLP gate/up projection pair.  The M=1 activation is
+ * quantized once into a plan-owned 2880-byte block16 workspace, then the
+ * packed values and scales are consumed by the two ordered projection
+ * dispatches. */
+#define SLLM_HIP_QWEN38_PROJECTION_PACK2_VERSION UINT32_C(1)
+#define SLLM_HIP_QWEN38_PROJECTION_PACK2_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_NVFP4_MLP_GATE_UP UINT32_C(1)
+#define SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_FP8_GDN_QKV_Z UINT32_C(2)
+#define SLLM_HIP_QWEN38_PROJECTION_PACK2_KERNEL_ID_NVFP4_SHARED_ACTIVATION_V1  \
+  UINT32_C(1)
+#define SLLM_HIP_QWEN38_PROJECTION_PACK2_KERNEL_ID_FP8_GDN_SHARED_ACTIVATION_V1 \
+  UINT32_C(2)
+#define SLLM_HIP_QWEN38_PROJECTION_PACK2_WORKSPACE_BYTES UINT64_C(2880)
+#define SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES UINT64_C(5124)
+typedef struct sllm_qwen38_projection_pack2_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t role;
+  uint32_t input_global_scale_f32_bits;
+  uint32_t reserved[3];
+  sllm_tensor_binding_t activation;
+  sllm_tensor_binding_t gate_weight;
+  sllm_tensor_binding_t up_weight;
+  sllm_tensor_binding_t gate_output;
+  sllm_tensor_binding_t up_output;
+} sllm_qwen38_projection_pack2_desc_t;
+
+typedef struct sllm_qwen38_projection_pack2_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  uint64_t m;
+  uint64_t k;
+  uint64_t n;
+  uint64_t output_elements;
+  uint64_t workspace_bytes;
+  uint32_t role;
+  uint32_t reserved0;
+  char kernel_symbol[SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_qwen38_projection_pack2_dispatch_info_t;
 
 /* Fixed-role Qwen3.5 GDN projection bundle. The four BF16 matmuls share one
  * activation but retain independent weights and outputs (qkv,z,b,a). */
@@ -1680,10 +1754,12 @@ typedef struct sllm_state_image_info_t {
   uint32_t reserved[7];
 } sllm_state_image_info_t;
 
-/* Projected inputs use qkv BF16 [M,8192], z BF16 [M,4096], b/a BF16
- * [M,32]. Convolution weight is BF16 [8192,1,4], A_log is F32 [32],
- * dt_bias is BF16 [32], norm_weight is raw F32 [128], and output is BF16
- * [M,4096]. All bindings are contiguous, unquantized and pairwise disjoint. */
+/* Projected inputs use qkv BF16 [M, (2*qk_heads+value_heads)*head_dim], z
+ * BF16 [M,value_heads*head_dim], b/a BF16 [M,value_heads]. Convolution
+ * weight is BF16 [qkv_width,1,conv_kernel_size], A_log is F32 [value_heads],
+ * dt_bias is BF16 [value_heads], norm_weight is raw F32 [head_dim], and
+ * output is BF16 [M,value_heads*head_dim]. All bindings are contiguous,
+ * unquantized and pairwise disjoint. */
 typedef struct sllm_linear_attention_desc_t {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -1820,6 +1896,35 @@ SLLM_HIP_API sllm_status_t
 sllm_queue_fence(const sllm_queue_t *queue, sllm_completion_t **completion,
                  sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
+/* A request-owned, immutable HIP Graph span over an ordered list of already
+ * prepared stateless M=1 plans.  The native implementation captures the
+ * plans once on an idle DEFERRED queue; callers must retain the prepared plan
+ * owners until graph-span release.  The list is deliberately untyped so the
+ * ABI can accept the bounded RMSNorm, residual RMSNorm, elementwise, direct
+ * matmul, and Qwen3.8 projection-pack plan handles without exposing native
+ * layouts.  Library-backed, staging, stateful, copy, and selector plans are
+ * rejected during creation. */
+SLLM_HIP_API sllm_status_t sllm_graph_span_create(
+    const sllm_queue_t *queue, const void *const *prepared_plan_handles,
+    uint64_t plan_count, sllm_graph_span_t **span,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+/* Launches the instantiated graph once.  The returned completion is an
+ * eventless aggregate marker and must be finalized by a later successful
+ * queue fence on the same queue. */
+SLLM_HIP_API sllm_status_t sllm_graph_span_execute(
+    const sllm_graph_span_t *span, sllm_completion_t **completion,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_graph_span_release(
+    sllm_graph_span_t **span, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+/* Returns the actual HIP graph node count.  It is separate from the logical
+ * prepared-plan count because one provider may enqueue multiple kernels. */
+SLLM_HIP_API sllm_status_t
+sllm_graph_span_node_count(const sllm_graph_span_t *span, uint64_t *node_count,
+                           sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
 /* Finalizes an eventless numeric completion after a successful fence on the
  * same context, queue, and stream. */
 SLLM_HIP_API sllm_status_t sllm_completion_finalize_after(
@@ -1925,6 +2030,22 @@ SLLM_HIP_API sllm_status_t sllm_matmul_plan_release(
 SLLM_HIP_API sllm_status_t sllm_matmul_execute(
     const sllm_matmul_plan_t *plan, const sllm_queue_t *queue,
     sllm_completion_t **completion, sllm_matmul_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_qwen38_projection_pack2_prepare(
+    const sllm_context_t *context,
+    const sllm_qwen38_projection_pack2_desc_t *descriptor,
+    sllm_qwen38_projection_pack2_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_qwen38_projection_pack2_plan_release(
+    sllm_qwen38_projection_pack2_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_qwen38_projection_pack2_execute(
+    const sllm_qwen38_projection_pack2_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
+    sllm_qwen38_projection_pack2_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_gdn_projection_bundle_prepare(
@@ -2198,6 +2319,17 @@ SLLM_HIP_API sllm_status_t sllm_kv_state_import_finalize(
 
 SLLM_HIP_API sllm_status_t sllm_causal_attention_execute(
     const sllm_context_t *context, const sllm_queue_t *queue,
+    const sllm_causal_attention_desc_t *descriptor,
+    sllm_completion_t **completion,
+    sllm_causal_attention_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+/* Additive decode path: enqueue causal attention after one pending append on
+ * the same queue.  The append completion is separately observable and must
+ * remain owned until this dependent completion reaches a terminal state. */
+SLLM_HIP_API sllm_status_t sllm_causal_attention_execute_after_kv_append(
+    const sllm_context_t *context, const sllm_queue_t *queue,
+    sllm_completion_t *append_completion,
     const sllm_causal_attention_desc_t *descriptor,
     sllm_completion_t **completion,
     sllm_causal_attention_dispatch_info_t *dispatch_info,

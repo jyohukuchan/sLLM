@@ -31,6 +31,26 @@ bool short_column_state_shape_opt_in(
          head_dim == ::sllm_linear_attention_kernel::kHeadDim;
 }
 
+// The row32-LDS provider is deliberately opt-in. Unlike the historical short
+// column route, an unset variable must not change the production default: the
+// provider is an exact gfx1030 Qwen3.8 M=1 contract and has an explicit
+// rollback switch (set the variable to anything other than "1", or force the
+// generic path with SLLM_GDN_FORCE_BASELINE=1).
+bool row32_lds_state_opt_in(const uint64_t token_count, const uint32_t qk_heads,
+                            const uint32_t value_heads, const uint32_t head_dim,
+                            const char *const arch_name,
+                            const char *const force_baseline) noexcept {
+  const char *const opt_in =
+      std::getenv("SLLM_LINEAR_ATTENTION_GFX1030_ROW32_LDS");
+  return (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0) &&
+         opt_in != nullptr && std::strcmp(opt_in, "1") == 0 &&
+         token_count == 1U &&
+         qk_heads == ::sllm_linear_attention_kernel::kRow32LdsQkHeads &&
+         value_heads == ::sllm_linear_attention_kernel::kRow32LdsValueHeads &&
+         head_dim == ::sllm_linear_attention_kernel::kRow32LdsHeadDim &&
+         arch_name != nullptr && std::strcmp(arch_name, "gfx1030") == 0;
+}
+
 bool gfx942_wave64_column_state_opt_in(
     const uint64_t token_count, const uint32_t qk_heads,
     const uint32_t value_heads, const uint32_t head_dim,
@@ -206,7 +226,8 @@ void fill_linear_attention_dispatch_info(
     const sllm_linear_attention::DescriptorMetadata &metadata,
     const char *const arch_name, const bool use_column_provider,
     const bool use_gfx942_wave64_column_provider,
-    const bool use_decode_pair_provider) noexcept {
+    const bool use_decode_pair_provider,
+    const bool use_row32_lds_provider) noexcept {
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
   std::memset(info, 0, sizeof(*info));
@@ -219,9 +240,13 @@ void fill_linear_attention_dispatch_info(
   info->conv_kernel_id =
       SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1;
   info->recurrent_kernel_id =
-      SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1;
+      use_row32_lds_provider
+          ? SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_ROW32_LDS_V1
+          : SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1;
   info->workgroup_size_x =
-      use_gfx942_wave64_column_provider
+      use_row32_lds_provider
+          ? ::sllm_linear_attention_kernel::kRow32LdsWorkgroupSize
+      : use_gfx942_wave64_column_provider
           ? ::sllm_linear_attention_kernel::kGfx942Wave64ColumnWorkgroupSize
       : use_decode_pair_provider
           ? ::sllm_linear_attention_kernel::kDecodePairWorkgroupSize
@@ -233,7 +258,8 @@ void fill_linear_attention_dispatch_info(
       (conv_elements + SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE - 1U) /
       SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE);
   info->recurrent_grid_size_x =
-      use_column_provider        ? metadata.value_heads * metadata.head_dim / 4U
+      use_row32_lds_provider     ? metadata.value_heads
+      : use_column_provider      ? metadata.value_heads * metadata.head_dim / 4U
       : use_decode_pair_provider ? metadata.qk_heads
                                  : metadata.value_heads;
   info->token_count = metadata.token_count;
@@ -246,7 +272,9 @@ void fill_linear_attention_dispatch_info(
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_LINEAR_ATTENTION_KERNEL_SYMBOL_MAX,
-      use_gfx942_wave64_column_provider
+      use_row32_lds_provider
+          ? ::sllm_linear_attention_kernel::kRow32LdsLogicalKernelId
+      : use_gfx942_wave64_column_provider
           ? ::sllm_linear_attention_kernel::kGfx942Wave64ColumnLogicalKernelId
       : use_column_provider
           ? ::sllm_linear_attention_kernel::kColumnLogicalKernelId
@@ -259,7 +287,9 @@ void fill_linear_attention_dispatch_info(
   sllm_public_runtime::copy_fixed_string(
       info->recurrent_device_symbol,
       SLLM_HIP_LINEAR_ATTENTION_DEVICE_SYMBOL_MAX,
-      use_gfx942_wave64_column_provider
+      use_row32_lds_provider
+          ? ::sllm_linear_attention_kernel::kRow32LdsDeviceSymbol
+      : use_gfx942_wave64_column_provider
           ? ::sllm_linear_attention_kernel::
                 kGfx942Wave64ColumnRecurrentDeviceSymbol
       : use_column_provider
@@ -279,7 +309,8 @@ hipError_t cleanup_linear_allocations(Context *const context,
     if (allocations[index] == nullptr) {
       continue;
     }
-    const hipError_t status = hipFree(allocations[index]);
+    const hipError_t status =
+        free_allocation_with_fault_injection(allocations[index]);
     if (status != hipSuccess) {
       if (first_error == hipSuccess) {
         first_error = status;
@@ -300,6 +331,24 @@ void *linear_binding_pointer(Buffer *const buffer,
 } // namespace
 
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+// The host runtime links the fake HIP launchers from public_runtime.hip.cpp.
+// Keep the new provider's stub beside its selector so host-only contract tests
+// do not need to link a device kernel object.
+namespace sllm_linear_attention_kernel {
+hipError_t launch_row32_lds(const uint16_t *const, const uint16_t *const,
+                            const uint16_t *const, const uint16_t *const,
+                            const float *const, const uint16_t *const,
+                            const float *const, const float *const,
+                            float *const, uint16_t *const, const uint32_t,
+                            const uint32_t, const uint32_t, const uint32_t,
+                            const uint32_t, const uint32_t,
+                            const hipStream_t) noexcept {
+  return hipSuccess;
+}
+} // namespace sllm_linear_attention_kernel
+#endif
+
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 extern "C" uint32_t sllm_test_select_linear_attention_gfx942_wave64_column(
     const uint64_t token_count, const uint32_t qk_heads,
     const uint32_t value_heads, const uint32_t head_dim,
@@ -307,6 +356,17 @@ extern "C" uint32_t sllm_test_select_linear_attention_gfx942_wave64_column(
   return gfx942_wave64_column_state_opt_in(
              token_count, qk_heads, value_heads, head_dim, arch_name,
              std::getenv("SLLM_GDN_FORCE_BASELINE"))
+             ? 1U
+             : 0U;
+}
+
+extern "C" uint32_t sllm_test_select_linear_attention_gfx1030_row32_lds(
+    const uint64_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const char *const arch_name) noexcept {
+  return row32_lds_state_opt_in(token_count, qk_heads, value_heads, head_dim,
+                                arch_name,
+                                std::getenv("SLLM_GDN_FORCE_BASELINE"))
              ? 1U
              : 0U;
 }
@@ -385,37 +445,38 @@ extern "C" sllm_status_t sllm_linear_attention_state_create(
     const std::size_t conv_bytes =
         static_cast<std::size_t>(conv_kernel_size - 1U) * qkv_width *
         sizeof(uint16_t);
-    const std::size_t recurrent_bytes =
-        static_cast<std::size_t>(value_heads) * head_dim * head_dim *
-        sizeof(float);
+    const std::size_t recurrent_bytes = static_cast<std::size_t>(value_heads) *
+                                        head_dim * head_dim * sizeof(float);
     void *allocations[4] = {};
-    for (std::size_t index = 0U; index != 4U; ++index) {
-      const std::size_t bytes = index < 2U ? conv_bytes : recurrent_bytes;
+    std::array<void *, 2> conv_views{};
+    std::array<void *, 2> recurrent_views{};
+    const bool compact_phase78_state = qk_heads == 16U && value_heads == 48U &&
+                                       head_dim == 128U &&
+                                       conv_kernel_size == 4U;
+    if (compact_phase78_state) {
+      const std::size_t total_bytes =
+          (conv_bytes * 2U) + (recurrent_bytes * 2U);
       const hipError_t allocation_status =
           sllm_public_runtime::FaultInjector::consume(
               sllm_public_runtime::FaultPoint::NativeCreationFailure)
               ? hipErrorUnknown
-              : hipMalloc(&allocations[index], bytes);
+              : hipMalloc(&allocations[0], total_bytes);
       if (allocation_status != hipSuccess) {
-        const hipError_t cleanup_status =
-            cleanup_linear_allocations(context, allocations, index);
         (void)rollback_child(
             context, error_sink,
             "linear attention provisional accounting rollback failed");
-        return hip_failure(error_sink,
-                           cleanup_status == hipSuccess ? allocation_status
-                                                        : cleanup_status,
-                           "hipMalloc linear attention state");
+        return hip_failure(error_sink, allocation_status,
+                           "hipMalloc compact linear attention state");
       }
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      std::memset(allocations[index], 0, bytes);
+      std::memset(allocations[0], 0, total_bytes);
       const hipError_t zero_status = hipSuccess;
 #else
-      const hipError_t zero_status = hipMemset(allocations[index], 0, bytes);
+      const hipError_t zero_status = hipMemset(allocations[0], 0, total_bytes);
 #endif
       if (zero_status != hipSuccess) {
         const hipError_t cleanup_status =
-            cleanup_linear_allocations(context, allocations, index + 1U);
+            cleanup_linear_allocations(context, allocations, 4U);
         (void)rollback_child(
             context, error_sink,
             "linear attention provisional accounting rollback failed");
@@ -424,15 +485,59 @@ extern "C" sllm_status_t sllm_linear_attention_state_create(
                                                         : cleanup_status,
                            "hipMemset linear attention state");
       }
+      auto *const base = static_cast<char *>(allocations[0]);
+      conv_views = {base, base + conv_bytes};
+      auto *const recurrent_base = base + (conv_bytes * 2U);
+      recurrent_views = {recurrent_base, recurrent_base + recurrent_bytes};
+    } else {
+      for (std::size_t index = 0U; index != 4U; ++index) {
+        const std::size_t bytes = index < 2U ? conv_bytes : recurrent_bytes;
+        const hipError_t allocation_status =
+            sllm_public_runtime::FaultInjector::consume(
+                sllm_public_runtime::FaultPoint::NativeCreationFailure)
+                ? hipErrorUnknown
+                : hipMalloc(&allocations[index], bytes);
+        if (allocation_status != hipSuccess) {
+          const hipError_t cleanup_status =
+              cleanup_linear_allocations(context, allocations, index);
+          (void)rollback_child(
+              context, error_sink,
+              "linear attention provisional accounting rollback failed");
+          return hip_failure(error_sink,
+                             cleanup_status == hipSuccess ? allocation_status
+                                                          : cleanup_status,
+                             "hipMalloc linear attention state");
+        }
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+        std::memset(allocations[index], 0, bytes);
+        const hipError_t zero_status = hipSuccess;
+#else
+        const hipError_t zero_status = hipMemset(allocations[index], 0, bytes);
+#endif
+        if (zero_status != hipSuccess) {
+          const hipError_t cleanup_status =
+              cleanup_linear_allocations(context, allocations, index + 1U);
+          (void)rollback_child(
+              context, error_sink,
+              "linear attention provisional accounting rollback failed");
+          return hip_failure(error_sink,
+                             cleanup_status == hipSuccess ? zero_status
+                                                          : cleanup_status,
+                             "hipMemset linear attention state");
+        }
+      }
+      conv_views = {allocations[0], allocations[1]};
+      recurrent_views = {allocations[2], allocations[3]};
     }
 
     std::unique_ptr<LinearAttentionState> candidate;
     try {
       candidate = std::make_unique<LinearAttentionState>(
           context, info->session_id, info->layer_id, info->capacity_tokens,
-          qk_heads, value_heads, head_dim, conv_kernel_size,
-          std::array<void *, 2>{allocations[0], allocations[1]},
-          std::array<void *, 2>{allocations[2], allocations[3]}, context_token);
+          qk_heads, value_heads, head_dim, conv_kernel_size, conv_views,
+          recurrent_views, context_token);
+      candidate->state_backing =
+          compact_phase78_state ? allocations[0] : nullptr;
     } catch (...) {
       (void)cleanup_linear_allocations(context, allocations, 4U);
       (void)rollback_child(
@@ -547,13 +652,23 @@ extern "C" sllm_status_t sllm_linear_attention_state_release(
       state->release_active = false;
       return device_status;
     }
-    void *allocations[] = {state->conv_state[0], state->conv_state[1],
-                           state->recurrent_state[0], state->recurrent_state[1],
-                           state->scratch};
-    const hipError_t cleanup_status =
-        cleanup_linear_allocations(state->context, allocations, 5U);
+    void *allocations[5] = {};
+    std::size_t allocation_count = 0U;
+    if (state->state_backing != nullptr) {
+      allocations[allocation_count++] = state->state_backing;
+      allocations[allocation_count++] = state->scratch;
+    } else {
+      allocations[allocation_count++] = state->conv_state[0];
+      allocations[allocation_count++] = state->conv_state[1];
+      allocations[allocation_count++] = state->recurrent_state[0];
+      allocations[allocation_count++] = state->recurrent_state[1];
+      allocations[allocation_count++] = state->scratch;
+    }
+    const hipError_t cleanup_status = cleanup_linear_allocations(
+        state->context, allocations, allocation_count);
     state->conv_state = {nullptr, nullptr};
     state->recurrent_state = {nullptr, nullptr};
+    state->state_backing = nullptr;
     state->scratch = nullptr;
     state->scratch_bytes = 0U;
     if (cleanup_status != hipSuccess) {
@@ -669,7 +784,8 @@ extern "C" sllm_status_t sllm_linear_attention_state_rewind_last(
         state->generation == std::numeric_limits<uint64_t>::max()) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-          "linear attention rewind does not identify the most recent published transition");
+          "linear attention rewind does not identify the most recent published "
+          "transition");
     }
     state->active_slot = 1U - state->active_slot;
     state->published_length = rewind_length;
@@ -929,6 +1045,9 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
         metadata.token_count == 1U && metadata.qk_heads == 16U &&
         metadata.value_heads == 32U && metadata.head_dim == 128U &&
         std::strcmp(arch_name, "gfx1030") == 0;
+    const bool use_row32_lds_provider = row32_lds_state_opt_in(
+        metadata.token_count, metadata.qk_heads, metadata.value_heads,
+        metadata.head_dim, arch_name, force_baseline);
     try {
       candidate = std::make_unique<Completion>(context, queue, nullptr, 0U,
                                                false, std::vector<uint8_t>{});
@@ -946,19 +1065,20 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
           "linear attention completion allocation failed");
     }
     hipEvent_t native_event = nullptr;
-    const hipError_t event_status = queue_profiles_completions(queue)
-                                        ? hipEventCreateWithFlags(&native_event, 0U)
-                                        : hipSuccess;
+    const hipError_t event_status =
+        queue_profiles_completions(queue)
+            ? hipEventCreateWithFlags(&native_event, 0U)
+            : hipSuccess;
     if (event_status != hipSuccess) {
       return hip_failure(error_sink, event_status, "hipEventCreateWithFlags");
     }
     event_guard.adopt(context, native_event);
     candidate->event = native_event;
     hipEvent_t timing_start_event = nullptr;
-    const hipError_t timing_status = queue_profiles_completions(queue)
-                                         ? hipEventCreateWithFlags(
-                                               &timing_start_event, 0U)
-                                         : hipSuccess;
+    const hipError_t timing_status =
+        queue_profiles_completions(queue)
+            ? hipEventCreateWithFlags(&timing_start_event, 0U)
+            : hipSuccess;
     if (timing_status != hipSuccess) {
       return rollback_unpublished_submission(
           candidate, event_guard,
@@ -1025,7 +1145,22 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
                                        "linear attention convolution launch",
                                        queue, error_sink);
     }
-    if (use_decode_pair_provider) {
+    if (use_row32_lds_provider) {
+      const hipError_t recurrent_status =
+          ::sllm_linear_attention_kernel::launch_row32_lds(
+              static_cast<const uint16_t *>(state->scratch), z, b_input,
+              a_input, a_log, dt_bias, norm_weight,
+              static_cast<const float *>(state->recurrent_state[active_slot]),
+              static_cast<float *>(state->recurrent_state[inactive_slot]),
+              output, static_cast<uint32_t>(metadata.token_count),
+              metadata.qk_heads, metadata.value_heads, metadata.head_dim,
+              metadata.qkv_width, metadata.output_width, queue->stream);
+      if (recurrent_status != hipSuccess) {
+        return cleanup_failed_submission(
+            candidate, token, recurrent_status,
+            "linear attention row32-LDS recurrent launch", queue, error_sink);
+      }
+    } else if (use_decode_pair_provider) {
       const hipError_t recurrent_status =
           ::sllm_linear_attention_kernel::launch_decode_pair(
               static_cast<const uint16_t *>(state->scratch), z, b_input,
@@ -1038,8 +1173,7 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
       if (recurrent_status != hipSuccess) {
         return cleanup_failed_submission(
             candidate, token, recurrent_status,
-            "linear attention decode-pair recurrent launch", queue,
-            error_sink);
+            "linear attention decode-pair recurrent launch", queue, error_sink);
       }
     } else if (use_gfx942_wave64_column_provider) {
       auto *const scalar_base = reinterpret_cast<float *>(
@@ -1151,7 +1285,8 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
     }
     fill_linear_attention_dispatch_info(
         dispatch_info, dispatch_id, metadata, arch_name, use_column_provider,
-        use_gfx942_wave64_column_provider, use_decode_pair_provider);
+        use_gfx942_wave64_column_provider, use_decode_pair_provider,
+        use_row32_lds_provider);
     *completion_output = reinterpret_cast<sllm_completion_t *>(token);
     (void)candidate.release();
     execute_guard.disarm();

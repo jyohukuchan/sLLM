@@ -1,0 +1,74 @@
+{
+  "schema_version": "phase78-accepted-closeout-evidence-v1",
+  "date": "2026-09-05",
+  "phase_status": "complete-by-user-approved-target-change",
+  "original_performance_acceptance_pass": false,
+  "source_manifest_sha256": "f975dc4af8fc93b3dd19501084fbd30e6672284f060275f096e2ef207f8715e9",
+  "source_file_count": 447,
+  "checks": {
+    "workspace_host_tests": {
+      "passed": 1415,
+      "failed": 0,
+      "ignored": 28
+    },
+    "post_fix_hip_library_tests": "PASS",
+    "workspace_clippy_all_targets_all_features": "PASS",
+    "rustfmt": "PASS",
+    "cpp_format": "PASS",
+    "markdown_links": "PASS",
+    "native_public_runtime_host_test": "PASS",
+    "environment_host": "PASS",
+    "tracked_hygiene": "PASS",
+    "local_hygiene": "PASS"
+  },
+  "targets": {
+    "gfx1030": {
+      "binary_sha256": "282aaafbeaca70368f512f7cef1b327e3a29be87bf4be1a96194f3adf8b81c96",
+      "archive_sha256": "2343f50cde58c51071c9c4dc255b785b108524d94cde5efa91b61758576c7bc2",
+      "public_projection_g1": {
+        "passed": true,
+        "source_sha256": "e2719e0f437cbb5d9706a301318689e97750eacc9e6ef38322c9da1f6abbf354",
+        "execution_report_sha256": "0495cd6a82214ef1346863699af1c6a0d51ebdc4cfc4dcf9a67307ae4399e61c"
+      },
+      "long_model_smoke": {
+        "prompt_tokens": 9435,
+        "output_tokens": 128,
+        "warmups": 0,
+        "measured": 1,
+        "tokens_text_stop_audit_match": true,
+        "hip_only": true,
+        "nonfinite": 0,
+        "cleanup_zero": true,
+        "report_sha256": "0a388532dae744a408777d30fb192f3e20aa3e65424977cd7e45a530de7bb346"
+      }
+    },
+    "gfx1201": {
+      "binary_sha256": "8f258f3bd42c0e6e249d287ea59b1d63ebe2420061846152c9af160fd72609f5",
+      "archive_sha256": "5b28f89d62e9998cdd03c0b1f412a4cd64556fc953eaa57cd09e1a1243bdb40b",
+      "public_projection_g1": {
+        "passed": true,
+        "source_sha256": "e2719e0f437cbb5d9706a301318689e97750eacc9e6ef38322c9da1f6abbf354",
+        "execution_report_sha256": "c979f7be61109a62c9dc8e39ee6562ea9471d7c27e858991ccf3107d83ebf797"
+      },
+      "long_model_smoke": {
+        "prompt_tokens": 9435,
+        "output_tokens": 128,
+        "warmups": 0,
+        "measured": 1,
+        "tokens_text_stop_audit_match": true,
+        "hip_only": true,
+        "nonfinite": 0,
+        "cleanup_zero": true,
+        "report_sha256": "6fc67179e2ea29718f4e70d6ff35dbd9c94e8cba3b5c10e1b764ef683e3c6746"
+      }
+    }
+  },
+  "limitations": [
+    "Original V620 prefill and R9700 decode targets were not met; accepted by user at phase closeout.",
+    "Final sLLM four-row 3 warmup + 10 measured protocol was not executed.",
+    "ID72 N2 remains explicit opt-in with default adoption unresolved.",
+    "Publication smoke uses zero warmups and one measured run, not a performance comparison.",
+    "Hardware counters belong to the earlier r25 binary; final rebuild is validated separately and is not asserted byte-identical.",
+    "Physical DRAM utilization is not directly measured."
+  ]
+}

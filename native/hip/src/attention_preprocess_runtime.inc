@@ -1,18 +1,26 @@
 namespace {
 
-bool use_gfx1030_wave32_attention_preprocess(
+bool use_rdna_wave32_attention_preprocess(
     const sllm_attention_preprocess::DescriptorMetadata &metadata,
     const char *const arch_name) noexcept {
-  const char *const opt_in =
-      std::getenv("SLLM_ATTENTION_PREPROCESS_GFX1030_WAVE32");
-  // The exact gfx1030/Qwen shape is the profiled production path.  Keep an
-  // explicit zero (and unknown values) as a fail-closed rollback while an
-  // unset variable selects the accepted default.
+  constexpr uint32_t kQwen27QHeads = 24U;
+  const bool gfx1030 = std::strcmp(arch_name, "gfx1030") == 0;
+  const bool gfx1201 = std::strcmp(arch_name, "gfx1201") == 0;
+  const bool existing_gfx1030_shape =
+      gfx1030 && metadata.q_heads == SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS;
+  const bool qwen27_shape = metadata.q_heads == kQwen27QHeads;
+  if ((!existing_gfx1030_shape && !qwen27_shape) || (!gfx1030 && !gfx1201)) {
+    return false;
+  }
+  const char *const rollback_name =
+      gfx1030 ? "SLLM_ATTENTION_PREPROCESS_GFX1030_WAVE32"
+              : "SLLM_ATTENTION_PREPROCESS_GFX1201_WAVE32";
+  const char *const opt_in = std::getenv(rollback_name);
+  // Each exact RDNA target has an independent fail-closed rollback. An unset
+  // variable selects the accepted default; explicit zero and unknown values
+  // retain the scalar baseline.
   const bool enabled = opt_in == nullptr || std::strcmp(opt_in, "1") == 0;
-  return enabled &&
-         std::strcmp(arch_name, "gfx1030") == 0 &&
-         metadata.q_heads == SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS &&
-         metadata.k_heads == SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS &&
+  return enabled && metadata.k_heads == SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS &&
          metadata.head_dim == SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM &&
          (metadata.position_components == 1U ||
           metadata.position_components == 3U);
@@ -332,8 +340,8 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
       return device_status;
     }
     hipDeviceProp_t properties = {};
-    const sllm_status_t property_status = get_context_device_properties(
-        plan->context, &properties, error_sink);
+    const sllm_status_t property_status =
+        get_context_device_properties(plan->context, &properties, error_sink);
     if (property_status != SLLM_STATUS_OK) {
       return property_status;
     }
@@ -362,48 +370,49 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
         byte_pointer(plan->buffers[4], plan->metadata.positions.byte_offset));
     if (plan->metadata.position_payload_mode !=
         SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1) {
-    std::vector<int32_t> host_positions(
-        static_cast<std::size_t>(plan->metadata.m) *
-        plan->metadata.position_components);
-    const hipError_t position_copy_status =
-        hipMemcpyAsync(host_positions.data(), positions,
-                       host_positions.size() * sizeof(int32_t),
-                       hipMemcpyDeviceToHost, queue->stream);
-    if (position_copy_status != hipSuccess) {
-      return hip_failure(error_sink, position_copy_status,
-                         "attention preprocess position validation copy");
-    }
-    const hipError_t position_sync_status = hipStreamSynchronize(queue->stream);
-    if (position_sync_status != hipSuccess) {
-      return hip_failure(
-          error_sink, position_sync_status,
-          "attention preprocess position validation synchronize");
-    }
-    for (std::size_t index = 0U; index != host_positions.size(); ++index) {
-      const int64_t expected =
-          static_cast<int64_t>(plan->metadata.start_position) +
-          static_cast<int64_t>(index / plan->metadata.position_components);
-      const bool valid =
-          plan->metadata.position_payload_mode ==
-                  SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1
-              ? host_positions[index] >= 0 &&
-                    static_cast<uint64_t>(host_positions[index]) <
-                        static_cast<uint64_t>(
-                            SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION)
-          : plan->metadata.position_components == 1U
-              ? host_positions[index] == static_cast<int32_t>(expected)
-              // The mRoPE ABI carries signed I32 components while its
-              // public exclusive upper bound is UINT32_MAX. Every
-              // non-negative I32 value is therefore representable and
-              // below that bound.
-              : host_positions[index] >= 0;
-      if (!valid) {
-        return sllm_public_runtime::write_error(
-            error_sink, SLLM_STATUS_POSITION_PAYLOAD_MISMATCH,
-          "attention preprocess position payload does not equal the "
-          "requested contiguous range");
+      std::vector<int32_t> host_positions(
+          static_cast<std::size_t>(plan->metadata.m) *
+          plan->metadata.position_components);
+      const hipError_t position_copy_status =
+          hipMemcpyAsync(host_positions.data(), positions,
+                         host_positions.size() * sizeof(int32_t),
+                         hipMemcpyDeviceToHost, queue->stream);
+      if (position_copy_status != hipSuccess) {
+        return hip_failure(error_sink, position_copy_status,
+                           "attention preprocess position validation copy");
       }
-    }
+      const hipError_t position_sync_status =
+          hipStreamSynchronize(queue->stream);
+      if (position_sync_status != hipSuccess) {
+        return hip_failure(
+            error_sink, position_sync_status,
+            "attention preprocess position validation synchronize");
+      }
+      for (std::size_t index = 0U; index != host_positions.size(); ++index) {
+        const int64_t expected =
+            static_cast<int64_t>(plan->metadata.start_position) +
+            static_cast<int64_t>(index / plan->metadata.position_components);
+        const bool valid =
+            plan->metadata.position_payload_mode ==
+                    SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1
+                ? host_positions[index] >= 0 &&
+                      static_cast<uint64_t>(host_positions[index]) <
+                          static_cast<uint64_t>(
+                              SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION)
+            : plan->metadata.position_components == 1U
+                ? host_positions[index] == static_cast<int32_t>(expected)
+                // The mRoPE ABI carries signed I32 components while its
+                // public exclusive upper bound is UINT32_MAX. Every
+                // non-negative I32 value is therefore representable and
+                // below that bound.
+                : host_positions[index] >= 0;
+        if (!valid) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_POSITION_PAYLOAD_MISMATCH,
+              "attention preprocess position payload does not equal the "
+              "requested contiguous range");
+        }
+      }
     }
 
     try {
@@ -486,7 +495,7 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
     uint16_t *const k_output = static_cast<uint16_t *>(
         byte_pointer(plan->buffers[7], plan->metadata.k_output.byte_offset));
     const bool use_wave32 =
-        use_gfx1030_wave32_attention_preprocess(plan->metadata, arch_name);
+        use_rdna_wave32_attention_preprocess(plan->metadata, arch_name);
     status = ::sllm_attention_preprocess_kernel::launch(
         packed_q_gate, k, q_raw_scale, k_raw_scale, positions, q_output,
         gate_output, k_output, static_cast<uint32_t>(plan->metadata.m),

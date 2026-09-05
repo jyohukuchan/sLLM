@@ -33,6 +33,10 @@ const DECODE_PAIR_KERNEL_SYMBOL: &str = "linear_attention.gdn.decode_pair.v1";
 const DECODE_PAIR_RECURRENT_DEVICE_SYMBOL: &str =
     "sllm_linear_attention_recurrent_gated_norm_decode_pair_v1";
 const DECODE_PAIR_WORKGROUP_SIZE: u32 = 256;
+const ROW32_LDS_KERNEL_SYMBOL: &str = "linear_attention.gdn.row32_lds.v1";
+const ROW32_LDS_RECURRENT_DEVICE_SYMBOL: &str =
+    "sllm_linear_attention_recurrent_gated_norm_row32_lds_v1";
+const ROW32_LDS_WORKGROUP_SIZE: u32 = 128;
 const COLUMN_KERNEL_SYMBOL: &str = "linear_attention.gdn.column_state.v2";
 const COLUMN_RECURRENT_DEVICE_SYMBOL: &str = "sllm_linear_attention_recurrent_column_state_v2";
 const GFX942_WAVE64_COLUMN_KERNEL_SYMBOL: &str =
@@ -740,13 +744,15 @@ fn validate_dispatch(
 ) -> Result<LinearAttentionEvidence, RuntimeError> {
     let short_opt_in = std::env::var_os("SLLM_LINEAR_ATTENTION_GFX1030_SHORT_COLUMN_STATE");
     let gfx942_wave64_opt_in = std::env::var_os("SLLM_LINEAR_ATTENTION_GFX942_WAVE64_COLUMN_STATE");
-    validate_dispatch_with_opt_ins(
+    let row32_lds_opt_in = std::env::var_os("SLLM_LINEAR_ATTENTION_GFX1030_ROW32_LDS");
+    validate_dispatch_with_all_opt_ins(
         info,
         descriptor,
         layout,
         expected_target,
         short_opt_in.as_deref(),
         gfx942_wave64_opt_in.as_deref(),
+        row32_lds_opt_in.as_deref(),
     )
 }
 
@@ -768,6 +774,7 @@ fn validate_dispatch_with_short_opt_in(
     )
 }
 
+#[cfg(test)]
 fn validate_dispatch_with_opt_ins(
     info: &sys::sllm_linear_attention_dispatch_info_t,
     descriptor: sllm_core::LinearAttentionDescriptor,
@@ -775,6 +782,27 @@ fn validate_dispatch_with_opt_ins(
     expected_target: Option<&str>,
     short_opt_in: Option<&std::ffi::OsStr>,
     gfx942_wave64_opt_in: Option<&std::ffi::OsStr>,
+) -> Result<LinearAttentionEvidence, RuntimeError> {
+    validate_dispatch_with_all_opt_ins(
+        info,
+        descriptor,
+        layout,
+        expected_target,
+        short_opt_in,
+        gfx942_wave64_opt_in,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_dispatch_with_all_opt_ins(
+    info: &sys::sllm_linear_attention_dispatch_info_t,
+    descriptor: sllm_core::LinearAttentionDescriptor,
+    layout: LinearAttentionLayout,
+    expected_target: Option<&str>,
+    short_opt_in: Option<&std::ffi::OsStr>,
+    gfx942_wave64_opt_in: Option<&std::ffi::OsStr>,
+    row32_lds_opt_in: Option<&std::ffi::OsStr>,
 ) -> Result<LinearAttentionEvidence, RuntimeError> {
     let observed_target = read_c_string(&info.gcn_arch_name);
     let target = logical_gcn_arch_name(&observed_target).to_owned();
@@ -809,6 +837,15 @@ fn validate_dispatch_with_opt_ins(
         && layout.value_heads() == 32
         && layout.head_dim() == 128
         && logical_gcn_arch_name(&observed_target) == "gfx1030";
+    let use_row32_lds_provider = row32_lds_enabled(
+        Some(&observed_target),
+        descriptor.token_count(),
+        layout.qk_heads() as u32,
+        layout.value_heads() as u32,
+        layout.head_dim() as u32,
+        force_baseline,
+        row32_lds_opt_in,
+    );
     let valid = info.struct_size as usize
         == size_of::<sys::sllm_linear_attention_dispatch_info_t>()
         && info.abi_version == sys::SLLM_HIP_ABI_VERSION
@@ -818,9 +855,15 @@ fn validate_dispatch_with_opt_ins(
         && info.dispatch_count == if use_column_provider { 4 } else { 2 }
         && info.conv_kernel_id == sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1
         && info.recurrent_kernel_id
-            == sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1
+            == if use_row32_lds_provider {
+                sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_ROW32_LDS_V1
+            } else {
+                sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1
+            }
         && info.workgroup_size_x
-            == if use_gfx942_wave64_column_provider {
+            == if use_row32_lds_provider {
+                ROW32_LDS_WORKGROUP_SIZE
+            } else if use_gfx942_wave64_column_provider {
                 GFX942_WAVE64_COLUMN_WORKGROUP_SIZE
             } else if use_decode_pair_provider {
                 DECODE_PAIR_WORKGROUP_SIZE
@@ -829,7 +872,9 @@ fn validate_dispatch_with_opt_ins(
             }
         && expected_conv_grid == Some(info.conv_grid_size_x)
         && info.recurrent_grid_size_x
-            == if use_column_provider {
+            == if use_row32_lds_provider {
+                layout.value_heads() as u32
+            } else if use_column_provider {
                 (layout.value_heads() * layout.head_dim() / 4) as u32
             } else if use_decode_pair_provider {
                 layout.qk_heads() as u32
@@ -845,7 +890,9 @@ fn validate_dispatch_with_opt_ins(
         && info.fallback_allowed == 0
         && info.fallback_used == 0
         && kernel_symbol
-            == if use_gfx942_wave64_column_provider {
+            == if use_row32_lds_provider {
+                ROW32_LDS_KERNEL_SYMBOL
+            } else if use_gfx942_wave64_column_provider {
                 GFX942_WAVE64_COLUMN_KERNEL_SYMBOL
             } else if use_column_provider {
                 COLUMN_KERNEL_SYMBOL
@@ -856,7 +903,9 @@ fn validate_dispatch_with_opt_ins(
             }
         && conv_device_symbol == CONV_DEVICE_SYMBOL
         && recurrent_device_symbol
-            == if use_gfx942_wave64_column_provider {
+            == if use_row32_lds_provider {
+                ROW32_LDS_RECURRENT_DEVICE_SYMBOL
+            } else if use_gfx942_wave64_column_provider {
                 GFX942_WAVE64_COLUMN_RECURRENT_DEVICE_SYMBOL
             } else if use_column_provider {
                 COLUMN_RECURRENT_DEVICE_SYMBOL
@@ -936,6 +985,24 @@ fn short_column_state_enabled(
         && qk_heads == sys::SLLM_HIP_LINEAR_ATTENTION_QK_HEADS
         && value_heads == sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS
         && head_dim == sys::SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM
+}
+
+fn row32_lds_enabled(
+    observed_target: Option<&str>,
+    token_count: u64,
+    qk_heads: u32,
+    value_heads: u32,
+    head_dim: u32,
+    force_baseline: bool,
+    opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    !force_baseline
+        && observed_target == Some("gfx1030")
+        && opt_in.is_some_and(|value| value == "1")
+        && token_count == 1
+        && qk_heads == 16
+        && value_heads == 48
+        && head_dim == 128
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1188,6 +1255,98 @@ mod tests {
         let two_info = valid_dispatch(two, "gfx1030");
         assert!(validate_dispatch(&two_info, two, layout, Some("gfx1030")).is_ok());
         assert_eq!(two_info.recurrent_grid_size_x, layout.value_heads() as u32);
+    }
+
+    #[test]
+    fn row32_lds_provider_is_exact_opt_in_shape_and_metadata() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        let disabled = Some(std::ffi::OsStr::new("0"));
+        let row_layout = LinearAttentionLayout::new(16, 48, 128, 4).unwrap();
+        let descriptor = sllm_core::LinearAttentionDescriptor::new(9, 1, 10).unwrap();
+        assert!(row32_lds_enabled(
+            Some("gfx1030"),
+            1,
+            16,
+            48,
+            128,
+            false,
+            enabled,
+        ));
+        for (target, tokens, qk_heads, value_heads, head_dim) in [
+            (Some("gfx1201"), 1, 16, 48, 128),
+            (Some("gfx1030"), 2, 16, 48, 128),
+            (Some("gfx1030"), 1, 16, 32, 128),
+            (Some("gfx1030"), 1, 16, 48, 64),
+            (None, 1, 16, 48, 128),
+        ] {
+            assert!(!row32_lds_enabled(
+                target,
+                tokens,
+                qk_heads,
+                value_heads,
+                head_dim,
+                false,
+                enabled,
+            ));
+        }
+        assert!(!row32_lds_enabled(
+            Some("gfx1030"),
+            1,
+            16,
+            48,
+            128,
+            true,
+            enabled,
+        ));
+        assert!(!row32_lds_enabled(
+            Some("gfx1030"),
+            1,
+            16,
+            48,
+            128,
+            false,
+            disabled,
+        ));
+
+        let mut info = valid_dispatch(descriptor, "gfx1030");
+        info.conv_grid_size_x = convolution_grid_size(1, row_layout).unwrap();
+        info.recurrent_kernel_id =
+            sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_ROW32_LDS_V1;
+        info.workgroup_size_x = ROW32_LDS_WORKGROUP_SIZE;
+        info.recurrent_grid_size_x = 48;
+        info.value_heads = 48;
+        put(&mut info.kernel_symbol, ROW32_LDS_KERNEL_SYMBOL);
+        put(
+            &mut info.recurrent_device_symbol,
+            ROW32_LDS_RECURRENT_DEVICE_SYMBOL,
+        );
+        assert!(
+            validate_dispatch_with_all_opt_ins(
+                &info,
+                descriptor,
+                row_layout,
+                Some("gfx1030"),
+                None,
+                None,
+                enabled,
+            )
+            .is_ok()
+        );
+
+        // The same metadata is rejected when the provider is not explicitly
+        // enabled, which keeps rollback on the generic route fail-closed.
+        assert!(
+            validate_dispatch_with_all_opt_ins(
+                &info,
+                descriptor,
+                row_layout,
+                Some("gfx1030"),
+                None,
+                None,
+                disabled,
+            )
+            .is_err()
+        );
     }
 
     #[test]

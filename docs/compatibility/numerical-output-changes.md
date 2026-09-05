@@ -55,6 +55,412 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-09-05-P78-FP8-PREFILL-LOAD64: V620 FP8 prefill協調load（N0）
+
+- scope: exact gfx1030 ID71、M1024/K6144/N5120およびM1024/K5120/N10240。
+- change: 各threadへ隣接8-byteのFP8値を割り当て、2本の32-bit loadを1本の64-bit loadへまとめる。
+  low/high wordを同じ変換helperへ渡し、LDSの最終配置・half2 dot順・FP32加算・scale・BF16 RNEを維持する**N0**。
+  A/Wが8-byte非整列の場合は既存full-tile body、それ以外の形状も既存経路を使う。
+- correctness: 両形状4-copy全BF16出力・repeat・FP64 tile境界期待値と、A/W offset1/2/3/4/7 fallback、
+  guard／finite／checked cleanupをPASS。本番matmul TUの直接compile G1でも同じ比較をPASSし、実行前後SHAは不変。
+  両target release buildを確認した。gfx1201に新経路を選択する変更はない。
+- performance: private copy別中央値平均は`3826.618→3569.996 us`と`6134.939→5683.695 us`。
+  r25 V620長文1 warm＋3 measuredはr24と全token／文章／停止理由／audit一致、HIP-only／cleanup0。
+  prefill `308.308→312.115 tok/s`、TTFT約373 ms短縮、E2E約401 ms短縮を確認したが、Phase78目標は未達。
+- identity: source manifest `12d409672170b2d3bbfa5db90a8afaf4d879a7b62463972796f668c3553514c3`、
+  gfx1030 archive `f30b4921c755f2e3297ab069cff1dc696c355b0b933a0f8afba8c35a26c26aa7`。
+- rollback: r24のfull-tile body。既存ID71 opt-in内に限定する。
+- 詳細: [Phase 76〜81計画](../plans/active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)。
+
+### OUT-2026-09-05-P78-FP8-GDN-Z-TUPLE: V620 GDN z投影の形状定数化（N0）
+
+- scope: exact gfx1030、Qwen3.8 GDN zのM1/K5120/N6144、既存ID82 opt-in内だけ。
+- change: 既存rolled P2 tuple bodyへ形状を定数として渡し、generic bodyの境界判定・address計算を削減する。
+  LUT ingress、各laneのK順、4つのdot2、FP32加算・wave reduction、scaleとBF16 RNEを維持するため**N0**。
+- correctness: private 4-copy比較で全6144出力一致、各copy64境界点の独立FP64期待値、両provider repeat、
+  guard／finite／checked cleanupをPASS。本番r24 archiveのGDN共有・個別matmul・Graph replay数値比較もPASS。
+  source／binaryの実行前後SHA不変、native host testと両target release buildをPASS。
+- performance: privateのcopy別中央値平均は`0.090251→0.081091 ms`。VGPRは57→170、active blocksは8→2だが、
+  実測時間は約10.1%短縮した。実モデルの効果は別途記録し、private速度をwhole-modelへ読み替えない。
+  r24短文／長文は各1 warm＋3 measuredでr23と全token／文章／停止理由／audit一致、HIP-only／cleanup 0。
+  長文decode `15.402→15.412 tok/s`はMAD範囲内であり、whole-model改善を確定せずopt-in候補に留める。
+- identity: source manifest `65a600a23cb5be3bc52f1ddf490f6234364ef5b7744b85a9dc7137ce843ce4c7`、
+  gfx1030 archive `0bb737e39826cd17a358fff757f56c7c60ecea0eb6b46e36ce9b20bf07400a1b`。
+- rollback: r23のgeneric ID82 body。既存ID82 opt-in自体の省略も従来どおり利用できる。
+- 詳細: [Phase 76〜81計画](../plans/active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)。
+
+### OUT-2026-09-05-P78-FP8-GDN-SHARED: GDN qkv/zの量子化共有（N0・opt-in）
+
+- scope: exact Qwen3.8のGDN 48 pair、gfx1030／gfx1201、M1 K5120、N10240／6144。
+- change: 同じBF16 input viewを既存FP8 quantizerで一度だけ量子化し、bytesとrow scaleを2つの既存matmulで共有する。
+  member別weight scale、provider／hipBLASLt algorithm、演算順とBF16出力丸めを維持する。
+- 分類: **N0**。quantizerはweight非依存であり、全Kのmax／448とE4M3FN丸めを変更しない。
+  request-owned workspaceは5124 bytes、M>1は従来どおり2 matmulへ分解する。
+- correctness: r23の両target G1でmember別weight・scaleの独立期待値、全BF16出力一致、入力変更後比較、
+  実repeat、3-node HIP Graph capture／replay、cleanup 0をPASS。共有3 dispatch、個別合計4 dispatch。
+  source／archive／binaryの実行前後SHA一致を確認した。短文17/17と長文9435/128は両target各1 warm＋3 measuredで
+  baselineと全token／文章／停止理由一致、HIP-only／cleanup 0。長文decodeはV620 `15.266→15.402 tok/s`、
+  R9700 `18.719→18.828 tok/s`。最終4行3 warm＋10 measuredの性能比較は未完了。
+- identity: source manifest `75c0177bb01da93e1efaaa4a6944eebccd7d89840c0f5f4881573c6aa518fe53`。
+  archiveはgfx1030 `402a213f60731a59b453af6985b1f4551f9103db6fd974c94cc1950ac5551d35`、
+  gfx1201 `50da39102fbdd5093c8a173fa4d65d37e7e91d7a12bd148cfa2a67a743d99c71`。
+- 決定: `SLLM_QWEN38_FP8_GDN_PROJECTION_PACK2=1`のopt-in候補。省略がrollbackで、既存NVFP4 opt-inとは独立。
+- 詳細: [Phase 76〜81計画](../plans/active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)。
+
+### OUT-2026-09-05-P78-V620-PIPELINE: NVFP4次stage先読み（N0）
+
+- scope: exact gfx1030、ID62、M1024/K5120/N17408だけ。single LDSの64x64/K32 tileを維持し、
+  次stageのpacked activation／weightとscaleを現在stageのdot4演算中に読む。
+  rawからLDSへの変換、block16演算順、scale乗算、FP32加算、BF16 RNEを維持するため**N0**。
+- private correctness/resource: tiny M32/33/65 K48/N131全点FP64、M1024 wide/down全BF16一致＋
+  64点FP64、sentinel付きrepeat、finite／cleanupをPASS。VGPR86／LDS6144／scratch 0／active 5。
+- performance: 4-copy／128共通prewarm／3 warm＋10交互measuredでwide
+  `8229.996→7391.363 us`（MAD `8.170/44.446 us`）。downは約8.2%遅いため適用しない。
+  独立global symbolとexact shape判定を接続済み。r21 production native launcher G1で
+  tiny M33/65全点FP64、実wide全17,825,792出力一致＋64点FP64、sentinel付きrepeat、finite／cleanupをPASS。
+  exact／neighbor／transposed形状のmetadata判定も確認した。r21長文9435/128は旧r17と全token・文章・audit一致、
+  HIP-only／nonfinite 0／cleanup 0。prefill `300.074→307.808 tok/s`、TTFT `30671.365 ms`。
+  decodeは`15.266 tok/s`、TPOT `65.504 ms`。1 warm＋3 measuredの探索結果で、最終目標は未達。
+  旧Index32 bodyとそれ以外のrouteを維持し、rollbackはr19のgfx1030 provider。
+
+### OUT-2026-09-05-P78-R9700-LOAD-SHARING: 短文load指定とdecode activation共有（N0・短文実モデル確認済み）
+
+- scope: exact gfx1201。ID64はM17/K5120/N17408のpacked A/Wを通常loadへ変更し、
+  128x64/K32 tile、WMMA contribution、scale乗算、FP32加算、BF16 RNEを維持する。
+  M17/K17408/N5120の既存split4 partialも同じload指定変更だけを行い、分割・reduction順は維持する。
+  ID84はM1の(K,N)=(5120,17408)/(17408,5120)だけactivationをLDSへ共有し、
+  P4 weight先読み、dot4順、FMA、wave reduction、tensor scale、BF16 RNEを維持する。双方**N0**。
+- private correctness: ID64はtiny M17K48N37と実shapeの全BF16一致、64点FP64 oracle、
+  repeat／finite／cleanup 56/56をPASS。ID84修正版r4はtiny全点FP64、実2shape全BF16一致、
+  control/candidate双方のrepeat／finite／cleanup 168/168をPASSした。初回r3は測定実装不備で採用証拠から除外。
+- private performance: 4-copy／128共通prewarm／3 warm＋10交互measuredで、ID64実shapeは
+  `928.828→659.646 us`（MAD `3.020/9.301 us`）。ID84は通常中央値で
+  wide `105.401→103.781 us`、down `107.166→105.786 us`。tinyは遅いため適用しない。
+- integration: 独立device symbolとexact shape分岐を接続し、r20 gfx1201 release buildをPASS。
+  r20 binary SHA-256
+  `af92677c86c5c6ddefb1ab9c14f2d45d32b517e26bc504cfca368f76530bbdd1`。
+  ID64 wideのproduction launcher G1はtiny／実shape全BF16一致、FP64／repeat／cleanup 56/56をPASS。
+  ID84のr20 archive単独linkによるnative launcher G1はtiny／neighborの旧symbolと実2shapeの新symbolを確認し、
+  全BF16一致、tiny全点／実shape64点FP64、repeat／finite／cleanup 224/224をPASSした。
+  split4 ordinaryの私有比較も全BF16一致、64点FP64、双方repeat／cleanup 40/40をPASSし、約33%短縮した。
+  r21 split4 native launcher G1も同じcorrectnessをPASS。r21実モデル17/17は旧r19と全token・文章・audit一致、
+  HIP-only／nonfinite 0／cleanup 0。TTFT `236.314→179.119 ms`、prefill `79.325→107.655 tok/s`。
+  長文9435/128も旧r15と全token・文章・audit一致、HIP-only／nonfinite 0／cleanup 0。
+  prefill `1150.989 tok/s`、decode `18.719 tok/s`、TPOT `53.422 ms`。
+  1 warm＋3 measuredの探索結果であり、decode目標と正式反復の確認は残る。
+  rollbackはr19。ID72 N2の採用保留とPhase 78の既存完了条件を維持する。
+
+### OUT-2026-09-05-P78-REQUEST-GRAPH: 要求開始時のhostコピー削減（N0）
+
+- scope: residentからの要求生成。既存の3種類のrewrite gateがfalseなら所有済みgraphをmoveし、
+  無効な変換による深いcloneを省く。WeightLoadPlanはresident/core間で不変のArc共有とする。
+  graph/layoutの検証、adapter・環境条件の評価、要求ごとのstate／queue生成、GPU演算は維持するため**N0**。
+- correctness: resident関連12件とresidual fusion 1件のhost test、両target release buildをPASS。
+  r18/r19の両target短文17/17は旧版と全token一致、HIP-only／nonfinite 0／cleanup 0。
+- performance: r18 gfx1201はsetup `26.255→21.664 ms`、TTFT `241.619→236.740 ms`。
+  r19 gfx1030はsetup `23.431 ms`、TTFT `234.249 ms`、decode `16.186 tok/s`。
+  r19 gfx1201はsetup `22.027 ms`、TTFT `236.314 ms`、decode `19.560 tok/s`。
+  計画共有だけの追加速度差はばらつき内である。各1 warm＋3 measuredの探索値で、
+  V620のhost時間差はばらつきを含み、確定改善率は主張しない。
+  r18 gfx1030途中測定は別buildと重なったためhost性能判断に使わない。
+- rollback: r17の要求開始経路。r19 binary SHA-256はgfx1030
+  `90cf96f3cd5fe3abaa297496e1a73f7a4143651fbbde3143964c51331d76d162`、gfx1201
+  `672a0581c4d389497b30b513a9082c232b45454de052e7fa2fc37b7c134b2dcb`。
+
+### OUT-2026-09-05-P78-FP8-DECODE-TUPLE: gfx1030 ID82の3形状専用経路（N0）
+
+- scope: M1、(K,N)=(5120,17408)/(6144,5120)/(5120,10240)。定数K/Nとrolled loopで
+  境界判定を除き、LUT、load、dot、reduction、FP32 scale、BF16 RNEの順を維持するため**N0**。
+  3つの独立global symbolから共通template bodyを使い、他shapeの旧ID82 bodyは維持する。
+- correctness/resource: r17 production launcherの3形状と非一致K64/N32で、全BF16 bit一致、
+  独立host prefix oracle、全256 E4M3 ingress、repeat、finite、cleanupをPASS。
+  公開dispatch metadataも形状に対応したsymbolを確認。専用kernelはVGPR170／LDS544 bytes／
+  scratch 0／active blocks 2、旧kernelはVGPR57／active blocks 8で、資源増加を専用symbol内に限定する。
+  archive SHA-256は`1d286790bbbd0149de8de3b0623a4c9598556b086689b3287b8d97705b98fee1`。
+- performance: private固定候補のK6144/N5120とK5120/N10240は、各launch前に計測外で128 MiBを
+  読み同期する共通条件で、中央値`169.201→133.881 us`／`229.642→197.641 us`。
+  r17 G1のK5120両形状はMADが差より大きく、その速度比だけでは改善を確定しない。
+  r17実モデル9435/128（1 warm＋3 measured）はr15と全生成token一致、HIP-only／nonfinite 0／cleanup 0。
+  decode `14.793→15.224 tok/s`（約2.9%改善）、TPOT `67.602→65.686 ms`、
+  prefill `299.134→300.074 tok/s`。Phase 78の最終性能条件は未達である。
+  candidate binary SHA-256は`15b3b3ef3ed9bec265a84efd916aadb6b92e01b8002769488b2e7f3079ad52d3`。
+- rollback: r15の旧ID82 body。binary SHA-256
+  `9bd0f0de7293cecb9aecdadd09a2555371ec49ff82093766875a30c872b280aa`。
+
+### OUT-2026-09-05-P78-FP8-FULL-TILE: gfx1030 ID71の境界判定削減（N0）
+
+- scope: M1024、(K,N)=(6144,5120)/(5120,10240)だけ、既存64x64/K32 tileの境界判定を省く。
+  FP8→FP16 ingress、dot2の順、FP32 scale、BF16 RNEを維持するため**N0**。
+  それ以外は旧bodyを使用し、既存ID71 symbolと同じ共有メモリを使う。
+- correctness/resource: r15 production launcher対private旧bodyで、実2shapeとM219の全BF16 bit一致、
+  FP64 oracle、全256 E4M3 ingress、repeat、cleanupをPASS。LDS8704 bytes、VGPR52、spill 0、
+  active blocks 7を確認した。最初の二重LDS案は接続前に修正している。
+  archive SHA-256は`aac223c6c805113ff0011c34aa2178bc1261d279b951ed52608215b18a9c306c`。
+- output/performance: G1は`3581.838→3426.796 us`／`5681.006→5398.762 us`、M219はほぼ同じ。
+  r15長文9435/128はr14 Graph-onと全生成tokenが一致し、HIP-only、nonfinite 0、cleanup 0をPASS。
+  prefill `296.763→299.134 tok/s`、TTFT `31820.643→31565.963 ms`。
+  decodeの観測値は`14.884→14.793 tok/s`であり、decodeの改善は主張しない。
+  各1 warm＋3 measuredの探索値で、Phase 78の最終条件は未達。
+  rollbackはr14 binary `6df7be6c22eb327173c9f0147a86807fd153113e47b3f7ff8e0e9a7841ca065c`。
+
+### OUT-2026-09-05-P78-GRAPH-SPAN: gfx1030 stateless decode Graph（N0・opt-in）
+
+- scope: exact Qwen3.8 M1 decodeの同一layer内stateless区間を、requestが保持する同じprepared plan／bufferで
+  captureする。初回はeager、以後は同じkernel列をreplayし、stateful演算とterminal処理は区間外へ残す。
+  式、dtype、演算順、丸めstageを変えないため**N0**。capture自体は出力を実行・更新しない。
+- correctness: gfx1030 M1K35N37のRMSNorm＋BF16 matmul G1で5入力のeager／graph／数値oracle bit一致、
+  capture時出力不変、1,000 replay、早期解放BUSY、cleanup 0をPASSした。
+  r14 archive SHA-256は`454d1bba2796fdd589c4f8476b06ffc5726c69596fd1cc2058cc7c8c04166aad`。
+- output: 同一r14 binaryの17/17と9435/128 off/onで全生成tokenが一致し、最初の分岐はない。
+  logical submission、kernel identity/countも一致、HIP-only、nonfinite 0、cleanup 0、各build内再現性をPASS。
+  各requestは128 span／1,176 kernel nodeを保持し、replayは短文1,920回、長文16,128回だった。
+  binary SHA-256は`6df7be6c22eb327173c9f0147a86807fd153113e47b3f7ff8e0e9a7841ca065c`。
+- performance: 作成費用込みの短文TPOTは`62.693→63.487 ms`で約1.3%退行、長文は
+  `68.094→67.186 ms`、decode `14.686→14.884 tok/s`で約1.35%改善。各1 warm＋3 measuredの探索値であり、
+  Phase 78の最終性能条件は未達。長文向けopt-in候補とし、短文での速度改善は主張しない。
+  rollbackは`SLLM_QWEN38_GFX1030_GRAPH_SPANS`の省略または`0`。r14時点ではR9700未検証。
+- r15でgfx1201の既存prepared FP8 Lt planへ同じcapture機構を接続した。rank／algorithmは変更しない。
+  M1K6144N5120でcapture時出力不変、7入力のeager bit一致、1,000 replay、cleanup 0をPASS。
+  R9700の17/17 off/onも全token・logical kernel監査が一致し、HIP-only／cleanup 0を確認した。
+  TPOT `51.273→51.260 ms`、decode `19.503→19.508 tok/s`で、短文の速度改善は確認できない。
+  長文9435/128も全token／logical kernel監査が一致し、TPOT `54.993→53.856 ms`、decode
+  `18.184→18.568 tok/s`（約2.1%改善）、HIP-only／cleanup 0を確認した。各1 warm＋3 measuredの探索値。
+  長文は既存ID72条件を保ったGraphのみの比較で、ID72のN2採用判断待ちは維持する。
+  opt-in／rollbackは`SLLM_QWEN38_GFX1201_GRAPH_SPANS`。
+  archive SHA-256は`cb9d40ac30287911f5aceaa35b7e1f5b54b03b3123c01c3b6139f074d1942dab`。
+
+### OUT-2026-09-05-P78-FP8-SCHEDULE: gfx1030短文tileとID82 P2先読み（N0）
+
+- scope: ID71 FP8 outer prefillの実測済みK/N・M=2..32を32x32／32x64 tileへ変更し、
+  ID82 decodeではraw activation/weightを2反復分先読みする。FP16へのexact ingress、
+  各出力のdot2順、wave reduction、FP32 outer scale、BF16 RNEは維持するため**N0**。
+  それ以外のprefill shapeは既存64x64を維持し、公開grid metadataも同じshape判定へ揃えた。
+- correctness: 最新production launch wrapperへ再リンクし、短文M17/31/32/33とtinyの
+  oracle・全BF16一致を確認。ID82 P2は全256 E4M3 code、N37/N67の境界fixture、
+  全8実shape×4 weight copiesで全BF16一致、finite、反復決定性、cleanupをPASSした。
+  r7 archive SHA-256は`ae5e3c362806d9ff320f79a3169c4063d9cbd5fba96f027a0c912d1132e2cf01`。
+  r9では未適用だった6実shapeへ短文tileを拡張し、production wrapper対private referenceの
+  11 shape（M17/31/32/33と非整列tiny）で全BF16一致・oracle・cleanupをPASSした。
+  r9 archive SHA-256は`cab4f8512c40b7563e212d1c1995ddddcea5fe688c1db31881e72cc0a1b39352`。
+- output/performance: v3-r7の全4行でv3-r6と生成tokenが一致し、HIP-only、terminal nonfinite 0、cleanup 0。
+  長文decodeは`13.647→14.658 tok/s`、TPOTは`73.279→68.220 ms`へ改善した。
+  短文tileの効果はv3-r6に含む。いずれも最終3 warm＋10 measuredではなく各1 warm＋3 measuredの探索値。
+  r9の17/17はr8と生成tokenが一致し、prefill `61.497 tok/s`、TTFT `328.600→304.616 ms`。
+  M33以上とwhitelist外のshapeは既存64x64へ戻す。
+- source/rollback: `native/hip/src/fp8_prefill_short_m32.inc`と`matmul_kernel.hip.cpp`。
+  ID82の変更前archiveは`3201f34562edbc334cb37ab4aba1ae53674ec0c848fe0a8c2e83dc168a79dce0`、
+  短文tileの変更前archiveは`a1d7a769ea7268e604f8212e61b1e4ddc96f2f6fee8f91e30d6c79b250c27d9d`。
+  詳細は[Phase 76〜81計画](../plans/active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)。
+
+### OUT-2026-09-05-P78-NVFP4-SCHEDULE: gfx1030短文tileとdecode P2先読み（N0）
+
+- scope: gfx1030 NVFP4 W4A4。ID62のM=2..32では64行tileの無効な後半32行を除き、
+  ID84 decodeではweight/scaleのraw bitsを2反復分先読みする。
+  block16内の整数dot、FP32 scale適用、block間加算、wave reduction、BF16丸めの順序は維持するため**N0**。
+  行同士の加算は存在せず、raw bits先読みも数値変換を追加しない。
+- correctness: 変更前archive `a1d7a769ea7268e604f8212e61b1e4ddc96f2f6fee8f91e30d6c79b250c27d9d`
+  と短文prototypeのM17/31/32/33、wide/down全BF16一致、tiny oracleをPASSした。
+  統合後archive `3201f34562edbc334cb37ab4aba1ae53674ec0c848fe0a8c2e83dc168a79dce0`
+  のproduction launch wrapperへ再リンクし、M2/16/17/31/32/33・K48/N37の全点oracle、
+  実shape全BF16一致、cleanup failure 0を確認。decode P2もscale/tiny oracleとwide/down全BF16一致を確認した。
+  targetはV620 PCI03、ROCR index 1。実モデルtokenと性能はv3-r6で確認中。
+- performance/decision: 短文prototypeのM17 wide/down時間比は`0.746／0.854`。
+  M33は退行するため短文tileを選ばない。P2の既存単体加重改善は約`1.095x`であり、
+  実モデル全体の改善とは扱わない。rollbackは既存64行tileと同include内のbaseline ID73 body。
+- source: `native/hip/src/matmul_kernel.hip.cpp`、`native/hip/src/nvfp4_decode_scale_lut.inc`。
+  詳細は[Phase 76〜81計画](../plans/active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)。
+
+### OUT-2026-09-05-P78-FP8-SHORT-RANK: M17のhipBLASLt選択（N1・combined model checkpoint）
+
+- 対象: gfx1201 E4M3FN、M17/K6144/N5120だけ。zero-workspace heuristicを4件要求しrank3を選ぶ。
+  M1 decodeの32件要求・環境overrideは維持する。
+- 解析: control 123381／candidate 123380は同じCOMPUTE32F、FP32 WMMA、GSU1、LocalSplitU1。
+  ISAでFP16 accumulatorとatomicがないことを確認した。同じFP8積のFP32丸め和として、
+  標準の共通上界`gamma_6143 * sum(abs(products))`を共有するN1とする。
+  tight boundの改善、pointwise誤差非増加、全入力bit一致は主張しない。
+- 根拠: [TensileのGSU定義](https://github.com/ROCm/rocm-libraries/blob/develop/shared/tensile/Tensile/Common.py)、
+  [AMDのTensile解説](https://rocm.blogs.amd.com/artificial-intelligence/reverse-hipblaslt-tensilelite/README.html)。
+  両symbolを確認したROCm 7.14 code object SHA-256は
+  `dfb7d5c735a92e23e3e9fb7ee0c6dc1f350844db22a3c2e92ef8053821ec4526`。
+- 検証: private probeの全BF16 outputはcontrol／CPU oracleと一致、repeat／cleanup成功。
+  単体中央値`0.115561→0.091641 ms`。production rank境界host検証はPASS。
+  R9700 r13の17/17実モデルは1 warm＋3 measuredでPASSし、TTFT `241.01478 ms`、
+  HIP-only、nonfinite 0、cleanup成功、反復生成一致を確認した。BF16 thin／NVFP4 split4も同時に含むため、
+  速度・出力への単独寄与は未分離である。r11との最初の差は15番目の出力token（20→15）。
+  証拠は`.local-artifacts/phase78-resume/fp8-gfx1201-m17-k6144-n5120-run.log`。
+- rollback: 当該M17 policyを従来single-result/rank0へ戻す。r13 archive SHA-256は
+  `9ec38a7c76602d3c162b69d72d29e7a8efd3f36b82d25e413e8ad14e7ec51120`。
+
+### OUT-2026-09-05-P78-LOAD-HINT: prefillの通常load（N0）
+
+- 対象: gfx1030 NVFP4 ID62 Index32 longと、FP8 ID71 long 64x64。
+- 変更: activation／weightのnontemporal load hintを通常loadへ変更する。
+  FP8はpacked/scalar計4箇所、NVFP4はpacked 2箇所。算術・codec・scale・tile・index幅は維持する。
+- 検証: NVFP4は固定r10/r11の別binaryによる7 shape全BF16 dumpが一致し、tiny oracleをPASS。
+  FP8は旧production対private候補、新production対同じprivate候補で7 shapeの全BF16一致とoracleをPASS。
+  r11のV620全4行はr10と生成token一致、HIP-only、nonfinite 0、cleanup成功。
+- identity: r11 gfx1030 archive
+  `7e3e2720f7f238a2df90161fdeb7df572251d24254a7617fc26a77227df2913a`。
+  証拠は`.local-artifacts/phase78-resume/nvfp4-index32-r10-r11-dump-summary.txt`と
+  `fp8-gfx1030-half2-64x64-no-nt-r11-summary.txt`。
+- 性能: r11探索測定の長文prefillは`283.231→296.387 tok/s`。最終性能条件は未達。
+  短文NVFP4と特定shapeのFP8 decodeへ広げたr12はG1・生成token一致をPASSしたが、
+  実モデル改善を確認できず採用を取り消した。このr11の採用範囲には含めない。
+
+### OUT-2026-09-05-P78-NVFP4-INDEX32: 安全な32-bit offset（N0）
+
+- 対象: gfx1030 ID62、M33以上かつ全tensor extentが32-bit内に収まるshape。
+  端数tileのoffset余裕もguardし、対象外は従来64-bit kernelを使用する。
+- 変更: offset/index幅だけを縮小し、tile、codec、scale、積和順、BF16変換を維持する。
+- 検証: guard境界host検証、production GPUのM32/33/65・K48/N131 oracleと
+  4実shapeの全output bit一致をPASS。r10全4行の生成tokenはr8と一致。
+- identity: gfx1030 r10 archive
+  `e7e6ee6e62651d81933e7fe494849ef0b68d7229958d0a2c083d8a2e714d527d`。
+  証拠は`.local-artifacts/phase78-resume/nvfp4-index32-r10-production-g1*`。
+
+### OUT-2026-09-05-P78-GDN-REGISTER: 短文recurrent stateの保持（N0）
+
+- 対象: gfx1030/gfx1201、Qwen qk16/value48/head128、M2..32。
+- 変更: 各threadのFP32 stateをtoken間でregister arrayへ保持する。
+  scalar演算、reduction、物理state index、BF16出力変換は変更しない。
+- 検証: 両GPUのproduction launchでM2/17/32/33 × zero/nonzero、全786,432 FP32 stateと
+  BF16 outputがgeneric referenceとbit一致、cleanup成功。M33のgeneric分岐も確認した。
+  r10のV620全4行とR9700短文で生成token一致、HIP-only、nonfinite 0、cleanup成功。
+- identity: gfx1030 archiveは上記r10、gfx1201は
+  `70f6c56ce2b0b8dd35cda5678bb6a0133abeebf441bb0672f9318b3ccf4acb84`。
+  証拠は`.local-artifacts/phase78-resume/linear-gdn-register-state-r10-production-g1-summary.md`。
+- 性能: 単体M17はV620約4.15倍、R9700約2.9倍。実モデル短文TTFTは
+  V620 `285.236 ms`、R9700 `247.610 ms`。探索測定であり最終速度ゲートは未達。
+
+### OUT-2026-09-05-P78-NVFP4-QUARTER: ID62のscale乗算移動（N0）
+
+- scope: NVFP4 DP4A prefillのactivation scaleをLDSへ置く際に`0.25F`を掛け、
+  各outputのblock sum側にあった同じ係数を除く。整数dot、weight scale、block間加算、BF16丸めは維持する。
+  block16の整数dot絶対値は2304以下で、有限E4M3 scaleとの最初の積はFP32で厳密表現できる。
+  二進の係数移動で後段のoperandは変わらないため**N0**。
+- correctness: dot範囲と全256 E4M3符号の1,179,904組をhostで確認し、非NaN値のbit不一致0。
+  両側NaNは同値扱いで、NaN payloadの一致はこの証明の対象外とする。
+  V620 PCI43ではproduction archiveと旧演算のprivate referenceを比較し、M65/K48/N131の全点oracle、
+  M128/1024のwide/down全BF16一致をPASSした。旧archiveとprivate referenceの比較もPASSし、
+  scale loadのcache修飾とE4M3 decodeを揃えている。
+  gfx1201はstrict compile-onlyをPASSした。これはgfx1201 GPU実行の証拠とは扱わない。
+- identity: r8 gfx1030 archive SHA-256は
+  `063d1001642b67882f15340e8b632b8615aec51a932054fc8b9b7d0e97974778`。
+  ローカル証拠は`.local-artifacts/phase78-resume/nvfp4-quarter-g1-{old,r8}.log`。
+- performance: 実shapeの単体時間は同時比較の旧演算から約3〜4%短縮した。
+  v3-r8の全4行・各1 warm＋3 measuredでr7の生成tokenと一致、HIP-only、nonfinite 0、cleanup 0。
+  長文prefillは`275.307→279.797 tok/s`へ約1.6%改善したが目標未達。decodeは`14.684 tok/s`でほぼ横ばい。
+  rollbackはactivation scale stagingの係数を外し、block sum側へ戻す。
+
+### OUT-2026-09-05-P78-P64-LDS: P64 attentionのFP16 LDSとnative変換（N0）
+
+- scope: gfx1030/gfx1201のQwen3.8 GQA6 FP16 KV decode、partition 64、tile16。
+  K/VをFP32へ変換してからLDSへ置く処理を、元のFP16 bitsをLDSへ置き利用時に同じFP32値へ変換する処理へ変更。
+  FP16の有限値・subnormal・signed zeroはFP32で厳密表現できる。Inf/NaNは既存の符号・payload変換を明示保持する。
+  partition、QK加算、softmax、V加算、merge、BF16丸めの順序は不変なので**N0**とする。
+- correctness: native変換は両targetの全65,536 FP16符号で独立host oracleとbitwise一致。
+  P64 prototypeはL=8191/8192/8193/9435×2 seedでproduction controlとの全BF16一致、
+  FP64 stable-softmax oracle、repeat、nonfinite確認をPASSした。
+- performance/resource: LDSは32 KiBから16 KiB、workspaceは不変。
+  gfx1201 prototypeの8条件合計時間比は`0.820`。gfx1030のproduction実モデルv3-r5は
+  9435/128の生成tokenがcontrolと一致し、decode `13.700 tok/s`、runtime cleanup成功。
+  gfx1201もproduction再リンクG1をPASSし、v3-r6長文decodeは`17.607→18.092 tok/s`へ改善、
+  同一行の生成token一致とruntime cleanup成功を確認した。単体の比率を全体改善とは扱わない。
+- identity/rollback: sourceは`native/hip/src/causal_attention_kernel.hip.cpp`。
+  gfx1201の変更前archive SHA-256は`9fa32e05bdfd764c96ee7085e023771068a60d39871adce0a1b5a290e0f55612`。
+  rollbackは同関数のFP32 LDS branchであり、P128へ切り替えない。
+  詳細は[Phase 76〜81計画](../plans/active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)。
+
+### OUT-2026-09-05-P78-P128: gfx1030 GQA6 decode partition変更（N2・採用保留）
+
+- scope: exact `gfx1030`、Qwen3.8 GQA6（query 24／KV 4 head、head dimension 256）、FP16 KV decode。
+  P64からP128へpartitionを増やし、同じsoftmax／weighted V式のFP32部分和とmerge順序が変わる。
+- classification: **N2**。現行production archiveへリンクした独立FP64 stable-softmax oracleで、
+  L=8191/8192/8193/9435とseed 0/7919の8条件を検証した。P64はFP64 oracleのBF16丸めと全点一致、
+  P128は合計4点で最大1 BF16 ULP差があった。例えばL8193／seed0のL2誤差は
+  `9.752086430e-3→9.752088890e-3`、最大絶対誤差は`2.441160609e-4→2.441651891e-4`となった。
+  この有限な観測誤差をworst-case上限の証明や実文章品質の判定へ一般化しない。
+- numerical/resource: 両providerとも8条件の全反復がbitwise決定的、oracle／actual nonfinite 0、probe exit 0。
+  targetはV620 PCI `0000:03:00.0`。archive SHA-256
+  `af30b49d4dd7f813f3a91f303eab3a4e92a04499a57598cd1208e531ff0d3707`、probe SHA-256
+  `29e305843234c944ddd7ea352f343f834932b1b1825454eb8f64d2367dfa7c1b`。
+- output/decision: 既存長文探索ではP128だけを外すと5個目からの生成token分岐が解消した。
+  P128は採用保留を維持し、Phase 78の継続測定にはP64を使う。P128採用をPhase完了の前提にしない。
+  rollbackは`SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P128`を外し、P64 opt-inを維持する。
+- evidence: `.local-artifacts/phase78-resume/p64-p128-current-pci03-*`。
+  詳細は[Phase 76〜81計画](../plans/active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)。
+
+### OUT-2026-09-05-P78-ID72: gfx1201 NVFP4のFP16 staging（N2・判断待ち）
+
+- scope: exact `gfx1201`、固定Qwen3.8-27B mixed-NVFP4のW4A4 prefill。
+  ID64のblock16 WMMA＋FP32 scale適用から、ID72のexact FP16展開＋full-K FP32 GEMMへ切り替える。
+  E2M1とE4M3 scaleの積はFP16で正確に表現できるが、積和の順序は変わる。
+- classification: **N2**。生成tokenの変化に加え、独立FP64 scalar oracleで誤差増加を確認したためN1とはしない。
+  M=17/127/128/129/219、K/N=5120/17408と17408/5120、rocBLAS solution 0/136321を調べた。
+  positive finite E4M3の全127 codeと符号付きE2M1から合成入力を作り、各caseのBF16不一致点の先頭256点をFP64と比較した。
+  例えばsolution 136321のwide形状では、確認点の最大`abs(error)/sum(abs(terms))`が
+  ID64の`0.000748140701`からID72の`0.000748232564`へ増加した。既存oracleの許容範囲内だが、
+  この差分点を選んだ標本は全出力の平均誤差や実文章品質の評価ではなく、worst-case上限の証明でもない。
+- performance/output: 端数219-token chunkをID64で補完した1 warmup＋3 measuredの長文prefillは
+  `522.150→1134.906 tok/s`、HIP-only／fallback 0／cleanup 0。benchmark v2の長文生成hashは
+  `03a85b481c6a52b8bc029f3959a9b42987a46697a1b048e292ced4944984adf3`から
+  `628ad99500e71de824a1e06fb918ec03a400587f7f9337ecc3225c07cbb591fb`へ変化した。
+- decision: 2026-09-05に、この具体的な速度・丸め差を示してユーザー判断を依頼した。回答待ちで既定採用しない。
+  rollbackは`SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_F16_STAGING`を外し、既存ID64を選ぶ。
+- evidence: Git管理外`.local-artifacts/phase78-resume/id72-short-shapes.cpp`／同`.log`、
+  `r9700-id72-tail.json`。詳細と最終採否は[Phase 76〜81計画](../plans/active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)。
+
+### OUT-2026-09-05-P78-BF16-GDN-THIN: M17 GDN薄型投影のrow-wise reduction（N1・production G1 PASS、combined model checkpoint）
+
+- scope: exact `gfx1030`／`gfx1201`、Qwen GDN thin projectionの`M=17,K=5120,N=48`だけを対象とする。
+  `K=70/71,N=47`のtiny確認はguard外の既存tiled16経路であり、新providerのproduction scopeには含めない。
+- baseline/candidate: baselineは既存`matmul.bf16_fp32.tiled16.v2`の16x16 tile内K逐次FP32 accumulation。
+  candidateは既存`matmul_bf16_decode_body<32U,8U>`を各`(row,column)` blockへ呼ぶ`grid=(N,M)` providerである。
+  BF16 input、paired load、各FP32 product、wave32 tree、8-wave fixed tree、BF16 RNE outputを維持し、runtime ID／public ABIは追加しない。
+- classification: **N1**。`K=5120`のcandidateは各threadが10 paired loads（20 product terms）を処理し、局所加算深さ19、wave32 tree深さ5、8 partialの有効な最終tree深さ3となる。
+  構造上の深さは`27`、zero laneを保守的に含めても`<=29`で、baselineのK逐次深さ`5119`より小さい。
+  同じ入力項、BF16→FP32 product、FP32 accumulator、BF16 RNE stageを維持し、race、atomic、未初期化値、fallbackはない。
+  このboundはworst-case誤差上界の非増加を示すもので、pointwise非増加や全入力bit一致は主張しない。
+- correctness/output: r13 archiveのpublic `PrefillTiled16` launcherを使ったproduction G1をV620 PCI `0000:03:00.0`とR9700 PCI `0000:07:00.0`で実行した。
+  tiny K70/71を含む両target全shapeで独立FP64 oracle mismatch 0、production/reference BF16 diff 0、repeat mismatch 0、finite、cleanupをPASSした。
+  実modelの個別kernel帰属は未分離であり、combined checkpointを下記へ記録する。
+- performance/resource: common prewarm 128、warmup 3、measured 10のmean event時間は、V620が
+  `0.190954→0.016484 ms`、R9700が`0.178870→0.017640 ms`（private tiled16 reference→production row-wise）だった。
+  これは単体meanであり、実model速度の単独帰属ではない。
+- combined model checkpoint: V620 r13（BF16 thinとNVFP4 split4を同時に含む）17/17は1 warm＋3 measuredで
+  prefill `79.749667 tok/s`、`213.167033 ms`、TTFT `240.039708 ms`（r11 `281.070 ms`）、decode `15.826946 tok/s`だった。
+  HIP fallback 0、nonfinite 0、cleanup 0、deterministic true。r11との差はzero-based 14（15番目、`15→20`）から分岐した。
+  R9700 r13も17/17 PASS、prefill `79.014116 tok/s`、`215.151429 ms`、TTFT `241.01478 ms`（r11 `244.851 ms`）、decode `19.538382 tok/s`だった。
+  RもHIP fallback 0、nonfinite 0、cleanup 0、deterministic trueで、r11との差はzero-based 14（15番目、`20→15`）から分岐した。
+  V/Rは同じ位置で逆向きのtoken差になった。この分岐をBF16 thin単体またはsplit4単体へ帰属させず、両targetのcombined N1 output effectとして記録する。
+- source/rollback/identity: sourceは`native/hip/src/matmul_kernel.hip.cpp`。rollbackはexact shape guardを外して既存tiled16へ戻す。
+  r13 gfx1030 archive SHA-256は`9bbec6f8cd40c13934768037c90adb6320f25c4b3a7dba8da0eed9d75e1d0dd7`、
+  gfx1201は`9ec38a7c76602d3c162b69d72d29e7a8efd3f36b82d25e413e8ad14e7ec51120`。
+  evidenceは`.local-artifacts/phase78-resume/bf16-gdn-thin-production-g1-summary.md`と同`*-run-gfx1030.log`／`*-run-gfx1201.log`。
+
+### OUT-2026-09-05-P78-NVFP4-SPLIT4: M17 stage split-K=4 reduction（N1・production G1 PASS、combined model checkpoint）
+
+- scope: exact `gfx1030`ではID62の`M=17,K=5120,N=17408` wideと`M=17,K=17408,N=5120` down、
+  exact `gfx1201`ではID64の`M=17,K=17408,N=5120` downだけを対象とする。tiny `M=17,K=48,N=37`とR9700 wideはguardで拒否する。
+- baseline/candidate: scaled block16 terms、E2M1→E4M3 ingress、FP32 partial、tensor scale、BF16 RNEを維持する。
+  candidateはK stageを4 contiguous partitionsへ分け、`p0,p1,p2,p3`を固定順でpartial-reduceし、最後にtensor scaleを一度だけ適用してBF16 RNEする。
+- classification: **N1**。`B=K/16`、`S=ceil(B/2)`とすると、K5120は各partition 40 stage／80 termsで
+  `79+3=82`、K17408は136 stage／272 termsで`271+3=274`のcandidate加算深さとなる。
+  unsplit baselineはそれぞれ`B-1=319`／`1088-1=1087`、tiny K48はcandidate／baselineとも`2`である。
+  標準boundは`gamma_82`対`gamma_319`、`gamma_274`対`gamma_1087`で非増加だが、pointwise非増加やbitwise equalityは主張しない。
+- correctness/output: production G1はV620 PCI `0000:03:00.0`とR9700 PCI `0000:07:00.0`でPASSした。
+  V620 wide/downはBF16 diff 0、FP64 oracle、repeat、nonfinite、cleanupをPASSした。R9700 downはBF16 diff 30をN1 report-onlyとし、
+  control/candidateともFP64 oracle mismatch 0（max normalized error `0.0001631567`）、repeat、finite、NaN fixture（両方5120 nonfinite）、
+  cleanup 16 alloc/freeをPASSした。bit diff 30は誤差boundを無効にするpointwise主張へ昇格しない。
+- performance/resource: V620 wideは`401.064→392.204 us`、downは`758.727→499.205 us`、R9700 downは
+  `1024.648→905.488 us`（各control→split4 production G1）。V620 split4はVGPR54／LDS4608／scratch0／active blocks 8、
+  R9700 split4はVGPR97／LDS7680／scratch0／active blocks/CU 7、active waves/CU 56、occupancy 0.875だった。
+  V620/R9700のcombined r13 model checkpointは上記BF16 thin entryに記録した。BF16 thin／split4のどちらがtoken分岐へ寄与したかは未分離であり、
+  combined N1 output effectとして扱う。この単体結果だけで個別candidateのmodel帰属や性能採用完了とはしない。
+- source/rollback/evidence: split4は既存ID62/ID64のexact shape guard内に限定し、scope外は従来providerへ戻す。
+  production G1 evidenceは`.local-artifacts/phase78-resume/nvfp4-gfx1030-split4-production-g1-pci03.log`と
+  `nvfp4-gfx1201-split4-production-g1-pci07.log`。tiny拒否、target identity、固定partial reduction、scale一回適用を同ログで確認した。
+
 ### OUT-2026-09-02-P73-GFX1201-MXFP8-WIDE-N: production selectorのN<=32768拡張（N1）
 
 - scope: exact `gfx1201`、OCP MXFP8 E4M3 W8A8 block32/E8M0 prefill。ID31／34／36／37のN上限だけを
