@@ -784,6 +784,81 @@ enum class KernelVariant : uint32_t {
   Fp8OuterPrefillGfx1030F16TileStaging = 86U,
 };
 
+// Selector state is intentionally kept inside the native runtime.  The
+// public dispatch ABI already has a frozen kernel id/symbol audit and its
+// reserved words are required to remain zero, so adding selector text there
+// would be an ABI change.  Prepare stores this small immutable record beside
+// the selected variant; host tests can inspect all fields without adding a
+// per-token log or re-running selection during execute.
+struct SelectorDecision final {
+  KernelVariant variant;
+  bool supported;
+  bool enabled;
+  bool adopted;
+  const char *reason;
+
+  constexpr bool runnable() const noexcept {
+    return supported && enabled;
+  }
+};
+
+constexpr const char *kSelectorReasonBaseline =
+    "baseline selected; optimized candidate is not adopted";
+constexpr const char *kSelectorReasonBaselineFlagOff =
+    "baseline selected; optimized candidate flag is off";
+constexpr const char *kSelectorReasonBaselineUnsupported =
+    "baseline selected; requested candidate is unsupported for target or shape";
+constexpr const char *kSelectorReasonBaselineRequired =
+    "baseline selected; input format requires the baseline path";
+constexpr const char *kSelectorReasonExplicitBaseline =
+    "explicit baseline override selected";
+constexpr const char *kSelectorReasonAdopted =
+    "adopted default for target and shape";
+constexpr const char *kSelectorReasonForced =
+    "explicit force selected supported candidate";
+constexpr const char *kSelectorReasonForcedShape =
+    "explicit force selected supported shape-specific candidate";
+constexpr const char *kSelectorReasonUnsupported =
+    "candidate unsupported for target or shape";
+
+inline bool selector_env_is_one(const char *const name) noexcept {
+  const char *const value = name == nullptr ? nullptr : std::getenv(name);
+  return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+inline bool selector_env_is_present(const char *const name) noexcept {
+  return name != nullptr && std::getenv(name) != nullptr;
+}
+
+// A baseline can be selected for three different reasons that matter when
+// interpreting an opt-in benchmark: no candidate was adopted, a candidate
+// flag was explicitly turned off, or a requested candidate did not support
+// this target/shape. Keep this classification at prepare time so execute does
+// not need to inspect mutable environment state.
+inline const char *baseline_selector_reason(
+    const bool explicit_baseline, const bool format_requires_baseline,
+    const bool candidate_requested, const bool candidate_configured) noexcept {
+  if (explicit_baseline) {
+    return kSelectorReasonExplicitBaseline;
+  }
+  if (format_requires_baseline) {
+    return kSelectorReasonBaselineRequired;
+  }
+  if (candidate_requested) {
+    return kSelectorReasonBaselineUnsupported;
+  }
+  if (candidate_configured) {
+    return kSelectorReasonBaselineFlagOff;
+  }
+  return kSelectorReasonBaseline;
+}
+
+inline SelectorDecision make_selector_decision(
+    const KernelVariant variant, const bool supported, const bool enabled,
+    const bool adopted, const char *const reason) noexcept {
+  return {variant, supported, enabled, adopted, reason};
+}
+
 inline bool target_is(const char *const target,
                       const char *const expected) noexcept {
   if (target == nullptr || expected == nullptr) {
@@ -1537,6 +1612,20 @@ static_assert(
 static_assert(nvfp4_w4a4_decode_activation_shared_lds_bytes(5120U) == 6400U);
 static_assert(nvfp4_w4a4_decode_activation_shared_lds_bytes(17408U) == 21760U);
 
+// Phase79: shared decode adoption is an operator/target range, independent
+// of model identity and KV storage. Tiny projections keep the old provider.
+constexpr bool nvfp4_w4a4_decode_wave4_adopted_shape(
+    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
+  return phase78_nvfp4_w4a4_decode_wave4col32_shape(m, k, n) &&
+         k >= 1024U && n >= 1024U;
+}
+
+static_assert(!nvfp4_w4a4_decode_wave4_adopted_shape(1U, 1008U, 1024U));
+static_assert(!nvfp4_w4a4_decode_wave4_adopted_shape(1U, 1024U, 1023U));
+static_assert(nvfp4_w4a4_decode_wave4_adopted_shape(1U, 1024U, 1024U));
+static_assert(nvfp4_w4a4_decode_wave4_adopted_shape(1U, 17408U, 1025U));
+static_assert(!nvfp4_w4a4_decode_wave4_adopted_shape(1U, 17424U, 1024U));
+
 inline KernelVariant
 select_nvfp4_w4a4_variant(const uint64_t m, const uint64_t k, const uint64_t n,
                           const char *const target) noexcept {
@@ -1581,6 +1670,10 @@ select_nvfp4_w4a4_variant(const uint64_t m, const uint64_t k, const uint64_t n,
         supported_target &&
         phase78_nvfp4_w4a4_decode_columns128_shape(m, k, n)) {
       return KernelVariant::Nvfp4W4A4DecodeColumns128;
+    }
+    if (force_wave4 == nullptr && target_is(target, "gfx1030") &&
+        nvfp4_w4a4_decode_wave4_adopted_shape(m, k, n)) {
+      return KernelVariant::Nvfp4W4A4DecodeWave4Column32;
     }
     return KernelVariant::Nvfp4W4A4Decode;
   }
@@ -1660,6 +1753,152 @@ select_nvfp4_w4a4_variant(const uint64_t m, const uint64_t k, const uint64_t n,
 
 inline KernelVariant select_nvfp4_w4a4_variant(const uint64_t m) noexcept {
   return select_nvfp4_w4a4_variant(m, 0U, 0U, "");
+}
+
+inline SelectorDecision select_nvfp4_w4a4_decision(
+    const uint64_t m, const uint64_t k, const uint64_t n,
+    const char *const target) noexcept {
+  const KernelVariant variant =
+      select_nvfp4_w4a4_variant(m, k, n, target);
+  const bool exact_gfx1030 = target_is(target, "gfx1030");
+  const bool exact_gfx1201 = target_is(target, "gfx1201");
+  const bool known_target = exact_gfx1030 || exact_gfx1201 ||
+                            target_is(target, "gfx942");
+  const bool supported_decode_target = exact_gfx1030 || exact_gfx1201;
+  switch (variant) {
+  case KernelVariant::Nvfp4W4A4DecodeWave4Column32: {
+    const bool supported =
+        supported_decode_target &&
+        phase78_nvfp4_w4a4_decode_wave4col32_shape(m, k, n);
+    const bool adopted = exact_gfx1030 &&
+        !selector_env_is_present(kNvfp4W4A4DecodeWave4Column32Environment) &&
+        nvfp4_w4a4_decode_wave4_adopted_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported, adopted || selector_env_is_one(
+                               kNvfp4W4A4DecodeWave4Column32Environment),
+        adopted, !supported ? kSelectorReasonUnsupported
+                            : adopted ? kSelectorReasonAdopted
+                                      : kSelectorReasonForced);
+  }
+  case KernelVariant::Nvfp4W4A4DecodeColumns128: {
+    const bool supported =
+        supported_decode_target &&
+        phase78_nvfp4_w4a4_decode_columns128_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kNvfp4W4A4DecodeColumns128Environment), false,
+        supported ? kSelectorReasonForced : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Nvfp4W4A4DecodeActivationShared: {
+    const bool supported =
+        exact_gfx1030 &&
+        phase78_nvfp4_w4a4_decode_activation_shared_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kNvfp4W4A4DecodeActivationSharedEnvironment),
+        false, supported ? kSelectorReasonForcedShape
+                         : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Nvfp4W4A4DecodeScaleLut: {
+    const bool supported =
+        (exact_gfx1030 &&
+         phase78_nvfp4_w4a4_decode_activation_shared_shape(m, k, n)) ||
+        (exact_gfx1201 && phase78_nvfp4_w4a4_decode_wave4col32_shape(m, k, n));
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kNvfp4W4A4DecodeScaleLutEnvironment), false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128: {
+    const bool supported =
+        exact_gfx1030 && m > 1U && k != 0U && (k % 16U) == 0U && n != 0U;
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kNvfp4W4A4PrefillDp4a64x64K128Environment), false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Nvfp4W4A4PrefillDp4a64x64: {
+    const bool supported = known_target && k != 0U && (k % 16U) == 0U &&
+                           n != 0U && m > 1U;
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A"), false,
+        supported ? kSelectorReasonForced : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64:
+  case KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32:
+  case KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64: {
+    const bool supported =
+        exact_gfx1201 && phase78_gfx1201_nvfp4_w4a4_wmma128x64_shape(m, k, n);
+    const bool force_wmma =
+        selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA");
+    const bool force_wmma128x32 = selector_env_is_one(
+        kNvfp4W4A4PrefillGfx1201Wmma128x32Environment);
+    const bool force_f16_staging =
+        selector_env_is_one(kNvfp4W4A4PrefillGfx1201F16StagingEnvironment);
+    const bool enabled =
+        (variant == KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+         (force_wmma || force_wmma128x32 || force_f16_staging)) ||
+        (variant == KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32 &&
+         force_wmma128x32) ||
+        (variant == KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64 &&
+         selector_env_is_one(kNvfp4W4A4PrefillGfx1201WmmaF16ScaleEnvironment));
+    return make_selector_decision(
+        variant, supported, enabled, false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging: {
+    const bool supported =
+        exact_gfx1201 &&
+        phase78_gfx1201_nvfp4_w4a4_f16_staging_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kNvfp4W4A4PrefillGfx1201F16StagingEnvironment),
+        false, supported ? kSelectorReasonForcedShape
+                         : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Nvfp4W4A4PrefillRow8Col8Tiled256:
+    return make_selector_decision(
+        variant, known_target && m > 1U && k != 0U && (k % 16U) == 0U &&
+                     n != 0U,
+        selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_COL8"), false,
+        kSelectorReasonForced);
+  case KernelVariant::Nvfp4W4A4PrefillRow8Tiled256: {
+    const bool supported = known_target && m > 1U && k != 0U &&
+                           (k % 16U) == 0U && n != 0U;
+    const bool forced =
+        selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8");
+    return make_selector_decision(
+        variant, supported, true, !forced,
+        forced ? kSelectorReasonForced : kSelectorReasonAdopted);
+  }
+  case KernelVariant::Nvfp4W4A4Packed:
+    return make_selector_decision(
+        variant, known_target,
+        selector_env_is_one("SLLM_NVFP4_W4A4_FORCE_BASELINE"), false,
+        kSelectorReasonExplicitBaseline);
+  case KernelVariant::Nvfp4W4A4Decode: {
+    const bool supported = known_target && m == 1U && k != 0U &&
+                           (k % 16U) == 0U && n != 0U;
+    const bool candidate_requested =
+        selector_env_is_one(kNvfp4W4A4DecodeScaleLutEnvironment) ||
+        selector_env_is_one(kNvfp4W4A4DecodeActivationSharedEnvironment) ||
+        selector_env_is_one(kNvfp4W4A4DecodeWave4Column32Environment) ||
+        selector_env_is_one(kNvfp4W4A4DecodeColumns128Environment);
+    const bool candidate_configured =
+        selector_env_is_present(kNvfp4W4A4DecodeScaleLutEnvironment) ||
+        selector_env_is_present(kNvfp4W4A4DecodeActivationSharedEnvironment) ||
+        selector_env_is_present(kNvfp4W4A4DecodeWave4Column32Environment) ||
+        selector_env_is_present(kNvfp4W4A4DecodeColumns128Environment);
+    return make_selector_decision(
+        variant, supported, true, true,
+        baseline_selector_reason(false, false, candidate_requested,
+                                 candidate_configured));
+  }
+  default:
+    return make_selector_decision(variant, false, false, false,
+                                  kSelectorReasonUnsupported);
+  }
 }
 
 constexpr bool phase34_gfx1030_hipblas_shape(const uint64_t m, const uint64_t k,
@@ -2271,12 +2510,24 @@ static_assert([] {
 }());
 
 // The legacy FP8 outer-vector path uses hipBLASLt on matrix-capable targets
-// and a scalar byte-decode kernel on gfx1030. Decode keeps the scalar provider
-// by default and exposes the exact-E4M3FN half2 wave/column kernel only as an
-// opt-in. For prefill on gfx1030, select the tiled software provider so one
+// and software byte-decode kernels on gfx1030. Phase79 selects dword8 decode
+// in the adopted operator range, with explicit scalar/half2 overrides.
+// For prefill on gfx1030, select the tiled software provider so one
 // workgroup reuses activation/weight tiles across output rows and columns.
 // Each lane of the decode candidate loads one activation pair and shares it
 // across four adjacent weight rows before the wave reduction.
+constexpr bool fp8_outer_decode_dword8_adopted_shape(
+    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
+  return fp8_outer_decode_gfx1030_half2_shape(m, k, n) &&
+         k >= 128U && n >= 64U;
+}
+
+static_assert(!fp8_outer_decode_dword8_adopted_shape(1U, 64U, 64U));
+static_assert(!fp8_outer_decode_dword8_adopted_shape(1U, 128U, 63U));
+static_assert(fp8_outer_decode_dword8_adopted_shape(1U, 128U, 64U));
+static_assert(fp8_outer_decode_dword8_adopted_shape(1U, 192U, 65U));
+static_assert(!fp8_outer_decode_dword8_adopted_shape(1U, 129U, 64U));
+
 inline KernelVariant
 select_fp8_outer_variant(const uint64_t m, const uint64_t k, const uint64_t n,
                          const char *const target,
@@ -2322,10 +2573,15 @@ select_fp8_outer_variant(const uint64_t m, const uint64_t k, const uint64_t n,
         fp8_outer_decode_gfx1030_half2_shape(m, k, n)) {
       return KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32;
     }
-    return force_half2 != nullptr && std::strcmp(force_half2, "1") == 0 &&
-                   fp8_outer_decode_gfx1030_half2_shape(m, k, n)
-               ? KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32
-               : KernelVariant::Fp8Emulation;
+    if (force_half2 != nullptr && std::strcmp(force_half2, "1") == 0 &&
+        fp8_outer_decode_gfx1030_half2_shape(m, k, n)) {
+      return KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32;
+    }
+    if (force_dword8 == nullptr && force_half2 == nullptr &&
+        fp8_outer_decode_dword8_adopted_shape(m, k, n)) {
+      return KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32;
+    }
+    return KernelVariant::Fp8Emulation;
   }
   const char *const force_baseline =
       std::getenv("SLLM_FP8_OUTER_PREFILL_FORCE_BASELINE");
@@ -2370,6 +2626,164 @@ select_fp8_outer_variant(const uint64_t m, const uint64_t k, const uint64_t n,
   // staging path, and ID63 128x64 rollback remain deterministic controls.
   return !fnuz ? KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64
                : KernelVariant::Fp8OuterPrefillTiled16;
+}
+
+inline SelectorDecision select_fp8_outer_decision(
+    const uint64_t m, const uint64_t k, const uint64_t n,
+    const char *const target, const bool fnuz = false) noexcept {
+  const KernelVariant variant =
+      select_fp8_outer_variant(m, k, n, target, fnuz);
+  const bool exact_gfx1030 = target_is(target, "gfx1030");
+  const bool native_target = target_is(target, "gfx1201") ||
+                             target_is(target, "gfx942");
+  switch (variant) {
+  case KernelVariant::Fp8Native:
+    return make_selector_decision(variant, native_target, native_target, true,
+                                  native_target ? kSelectorReasonAdopted
+                                                : kSelectorReasonUnsupported);
+  case KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32: {
+    const bool supported =
+        exact_gfx1030 && !fnuz &&
+        fp8_outer_decode_gfx1030_half2_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kFp8OuterDecodeGfx1030Half2Environment), false,
+        supported ? kSelectorReasonForced : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32: {
+    const bool supported =
+        exact_gfx1030 && !fnuz &&
+        fp8_outer_decode_gfx1030_half2_shape(m, k, n);
+    const bool direct_force =
+        selector_env_is_one(kFp8OuterDecodeGfx1030Dword8Environment);
+    const bool shared_force =
+        selector_env_is_one(kFp8OuterDecodeGfx1030ActivationSharedEnvironment);
+    const bool adopted = supported && !direct_force && !shared_force &&
+        !selector_env_is_present(kFp8OuterDecodeGfx1030Dword8Environment) &&
+        !selector_env_is_present(kFp8OuterDecodeGfx1030Half2Environment) &&
+        fp8_outer_decode_dword8_adopted_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported, adopted || direct_force || shared_force, adopted,
+        !supported ? kSelectorReasonUnsupported
+        : adopted ? kSelectorReasonAdopted
+        : shared_force && !direct_force ? kSelectorReasonForcedShape
+                                        : kSelectorReasonForced);
+  }
+  case KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32: {
+    const bool supported =
+        exact_gfx1030 && !fnuz &&
+        fp8_outer_decode_gfx1030_activation_shared_wave4_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kFp8OuterDecodeGfx1030ActivationSharedEnvironment),
+        false, supported ? kSelectorReasonForcedShape
+                         : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64: {
+    const bool supported =
+        exact_gfx1030 && !fnuz &&
+        fp8_outer_decode_gfx1030_activation_shared_wave8_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kFp8OuterDecodeGfx1030ActivationSharedEnvironment),
+        false, supported ? kSelectorReasonForcedShape
+                         : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32: {
+    const bool supported =
+        exact_gfx1030 && !fnuz && fp8_outer_decode_gfx1030_half2_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kFp8OuterDecodeGfx1030LdsLutEnvironment), false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64: {
+    const bool supported = exact_gfx1030 && !fnuz && m > 1U && k != 0U &&
+                           n != 0U;
+    const bool forced =
+        selector_env_is_one(kFp8OuterPrefillGfx1030Half2_64x64Environment);
+    return make_selector_decision(variant, supported, true, !forced,
+                                  forced ? kSelectorReasonForced
+                                         : kSelectorReasonAdopted);
+  }
+  case KernelVariant::Fp8OuterPrefillGfx1030Half2_128x64: {
+    const bool supported = exact_gfx1030 && !fnuz && m > 1U && k != 0U &&
+                           n != 0U && (k % 2U) == 0U;
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one("SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_HALF2"),
+        false, supported ? kSelectorReasonForced : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Fp8OuterPrefillGfx1030LdsLut: {
+    const bool supported =
+        exact_gfx1030 && !fnuz &&
+        fp8_outer_prefill_gfx1030_lds_lut_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kFp8OuterPrefillGfx1030LdsLutEnvironment), false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Fp8OuterPrefillGfx1030F16Staging: {
+    const bool supported =
+        exact_gfx1030 && !fnuz &&
+        fp8_outer_prefill_gfx1030_f16_staging_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kFp8OuterPrefillGfx1030F16StagingEnvironment),
+        false, supported ? kSelectorReasonForcedShape
+                         : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging: {
+    const bool supported =
+        exact_gfx1030 && !fnuz &&
+        fp8_outer_prefill_gfx1030_f16_tile_staging_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kFp8OuterPrefillGfx1030F16TileStagingEnvironment),
+        false, supported ? kSelectorReasonForcedShape
+                         : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Fp8OuterPrefillTiled16: {
+    const bool supported = exact_gfx1030 && m > 1U && k != 0U && n != 0U;
+    const bool baseline_force =
+        selector_env_is_one("SLLM_FP8_OUTER_PREFILL_FORCE_BASELINE");
+    return make_selector_decision(variant, supported, true, true,
+                                  baseline_force ? kSelectorReasonForced
+                                                 : kSelectorReasonBaseline);
+  }
+  case KernelVariant::Fp8Emulation: {
+    const bool supported = exact_gfx1030;
+    const bool forced_decode =
+        selector_env_is_one(kFp8OuterDecodeBaselineEnvironment);
+    const bool forced_prefill =
+        selector_env_is_one("SLLM_FP8_OUTER_PREFILL_FORCE_BASELINE");
+    const bool decode_candidate_requested =
+        m == 1U &&
+        (selector_env_is_one(kFp8OuterDecodeGfx1030LdsLutEnvironment) ||
+         selector_env_is_one(kFp8OuterDecodeGfx1030ActivationSharedEnvironment) ||
+         selector_env_is_one(kFp8OuterDecodeGfx1030Dword8Environment) ||
+         selector_env_is_one(kFp8OuterDecodeGfx1030Half2Environment));
+    const bool decode_candidate_configured =
+        m == 1U &&
+        (selector_env_is_present(kFp8OuterDecodeGfx1030LdsLutEnvironment) ||
+         selector_env_is_present(
+             kFp8OuterDecodeGfx1030ActivationSharedEnvironment) ||
+         selector_env_is_present(kFp8OuterDecodeGfx1030Dword8Environment) ||
+         selector_env_is_present(kFp8OuterDecodeGfx1030Half2Environment));
+    const char *reason = kSelectorReasonUnsupported;
+    if (exact_gfx1030) {
+      reason = baseline_selector_reason(
+          forced_decode || forced_prefill, fnuz, decode_candidate_requested,
+          decode_candidate_configured);
+    }
+    return make_selector_decision(variant, supported, true,
+                                  !forced_decode && !forced_prefill,
+                                  reason);
+  }
+  default:
+    return make_selector_decision(variant, false, false, false,
+                                  kSelectorReasonUnsupported);
+  }
 }
 
 constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {

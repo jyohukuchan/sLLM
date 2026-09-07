@@ -6,6 +6,7 @@
 //! accounting, and fail-closed request transaction state.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsStr;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -302,6 +303,171 @@ pub struct PreparedExecutionPlan<N> {
     nodes: Arc<[PreparedPlanNode<N>]>,
 }
 
+/// Completion policy shared by prepared model adapters.
+///
+/// The policy only selects how already submitted work is observed.  It does
+/// not relax descriptor, state, or lifetime validation.  Adapters can use the
+/// same policy for FP16 and compatible quantized KV routes while retaining
+/// their format-specific submission contracts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PreparedCompletionMode {
+    Profiled,
+    Deferred,
+}
+
+/// Common opt-in used by adapters that do not have a model-specific
+/// completion switch.  The default remains profiled until a target-specific
+/// measurement opts the shared policy in.
+pub(crate) const PREPARED_DEFERRED_COMPLETION_ENV: &str = "SLLM_PREPARED_DEFERRED_COMPLETION";
+
+/// Common rollback for adapter projection sharing/lowering.
+///
+/// Unset and the literal value `1` keep the reviewed default enabled.  The
+/// literal value `0` disables only projection sharing; malformed values are
+/// fail-closed so a deployment cannot accidentally opt into a lowering by a
+/// typo.  Completion policy, graph replay, and state validation are
+/// intentionally unaffected by this switch.
+pub(crate) const PREPARED_PROJECTION_SHARING_ENV: &str = "SLLM_PREPARED_PROJECTION_SHARING";
+
+pub(crate) fn prepared_projection_sharing_enabled(env_value: Option<&OsStr>) -> bool {
+    match env_value {
+        None => true,
+        Some(value) if value == OsStr::new("1") => true,
+        Some(value) if value == OsStr::new("0") => false,
+        Some(_) => false,
+    }
+}
+
+/// Shared opt-in for deferred completion.  The backend and target are part
+/// of the execution contract; model identity and incidental artifact names
+/// are deliberately absent.  Adapters still supply their own encoding and
+/// state checks before calling this predicate.
+pub(crate) fn prepared_deferred_completion_scope_enabled(
+    backend_name: &str,
+    expected_target: Option<&str>,
+    encoding_compatible: bool,
+    is_multimodal: bool,
+    is_mtp: bool,
+    adapters_empty: bool,
+    env_value: Option<&OsStr>,
+) -> bool {
+    env_value == Some(OsStr::new("1"))
+        && backend_name == "hip"
+        && matches!(expected_target, Some("gfx1030" | "gfx1201"))
+        && encoding_compatible
+        && !is_multimodal
+        && !is_mtp
+        && adapters_empty
+}
+
+/// Returns whether two ordinary matmuls can consume one prepared activation
+/// representation.  This is a metadata predicate only: it does not lower a
+/// pair into a native fused operation and therefore remains valid for
+/// adapters whose backend has no ProjectionPack implementation.
+///
+/// The native Qwen ProjectionPack contract performs stricter role and shape
+/// checks when it is selected.  This common predicate only proves the shared
+/// activation, layout, dtype, and weight-encoding conditions needed before an
+/// adapter can consider a pair.
+pub(crate) fn prepared_projection_pair_compatible(
+    first: &SemanticOpDescriptor,
+    second: &SemanticOpDescriptor,
+) -> bool {
+    if first.kind() != crate::op::SemanticOpKind::Matmul
+        || second.kind() != crate::op::SemanticOpKind::Matmul
+        || first.inputs().len() != 2
+        || second.inputs().len() != 2
+        || first.outputs().len() != 1
+        || second.outputs().len() != 1
+    {
+        return false;
+    }
+    let activation = &first.inputs()[0];
+    let second_activation = &second.inputs()[0];
+    if activation != second_activation
+        || activation.dtype() != crate::DType::Bf16
+        || activation.encoding() != crate::Encoding::Unquantized
+        || !activation.is_contiguous()
+        || activation.shape().len() != 2
+        || activation.shape().iter().any(|extent| *extent == 0)
+    {
+        return false;
+    }
+    let m = activation.shape()[0];
+    let k = activation.shape()[1];
+    let first_weight = &first.inputs()[1];
+    let second_weight = &second.inputs()[1];
+    let first_output = &first.outputs()[0];
+    let second_output = &second.outputs()[0];
+    if first_output.shape().len() != 2
+        || second_output.shape().len() != 2
+        || first_weight.shape().len() != 2
+        || second_weight.shape().len() != 2
+    {
+        return false;
+    }
+    if first_weight.dtype() != second_weight.dtype()
+        || first_weight.encoding() != second_weight.encoding()
+        || !first_weight.is_contiguous()
+        || !second_weight.is_contiguous()
+        || first_weight.shape() != [first_output.shape()[1], k]
+        || second_weight.shape() != [second_output.shape()[1], k]
+    {
+        return false;
+    }
+    first_output.dtype() == crate::DType::Bf16
+        && second_output.dtype() == crate::DType::Bf16
+        && first_output.encoding() == crate::Encoding::Unquantized
+        && second_output.encoding() == crate::Encoding::Unquantized
+        && first_output.is_contiguous()
+        && second_output.is_contiguous()
+        && first_output.shape().len() == 2
+        && second_output.shape().len() == 2
+        && first_output.shape()[0] == m
+        && second_output.shape()[0] == m
+        && first_output.shape()[1] != 0
+        && second_output.shape()[1] != 0
+}
+
+/// A prepared operation collected for one stateless graph span.  `group` is
+/// an adapter supplied semantic grouping key (for example a transformer
+/// layer); the common layer uses it only to prevent spans from crossing an
+/// adapter boundary.
+#[derive(Clone)]
+pub(crate) struct PreparedGraphMember {
+    pub(crate) ordinal: u64,
+    pub(crate) group: u64,
+    pub(crate) label: String,
+    pub(crate) operation: PreparedOperation,
+    pub(crate) dispatch: DispatchEvidence,
+}
+
+/// A captured span keyed by its first prepared-plan ordinal.
+pub(crate) struct PreparedGraphSpan {
+    pub(crate) last_ordinal: u64,
+    pub(crate) graph: crate::execution::ExecutionGraphSpan,
+}
+
+/// Request-local common graph state.  Model adapters retain only the decision
+/// about which nodes are stateless and how those nodes are grouped.
+#[derive(Default)]
+pub(crate) struct PreparedGraphReplayState {
+    pub(crate) ready: bool,
+    pub(crate) warm_members: Vec<PreparedGraphMember>,
+    pub(crate) spans: Arc<BTreeMap<u64, PreparedGraphSpan>>,
+}
+
+impl PreparedGraphReplayState {
+    pub(crate) fn take_warm_members(&mut self) -> Vec<PreparedGraphMember> {
+        std::mem::take(&mut self.warm_members)
+    }
+
+    pub(crate) fn install(&mut self, spans: BTreeMap<u64, PreparedGraphSpan>) {
+        self.spans = Arc::new(spans);
+        self.ready = true;
+    }
+}
+
 impl<N> PreparedExecutionPlan<N> {
     pub fn new(nodes: Vec<PreparedPlanNode<N>>) -> Result<Self, PreparedExecutionError> {
         if nodes.is_empty() {
@@ -486,6 +652,20 @@ pub(crate) struct ExecutionSegment {
 }
 
 impl ExecutionSegment {
+    pub(crate) fn for_mode(
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        timeout: Duration,
+        mode: PreparedCompletionMode,
+    ) -> Result<Self, PreparedExecutionError> {
+        match mode {
+            PreparedCompletionMode::Profiled => Ok(Self::profiled(timeout)),
+            PreparedCompletionMode::Deferred => {
+                Self::deferred(session, queue, timeout).map_err(PreparedExecutionError::from)
+            }
+        }
+    }
+
     pub(crate) fn profiled(timeout: Duration) -> Self {
         Self {
             pending: Vec::new(),
@@ -831,6 +1011,73 @@ impl ExecutionSegment {
         owner: impl SegmentCompletionOwner + 'static,
     ) {
         self.retain(label, owner);
+    }
+}
+
+/// Captures adjacent stateless prepared operations into replayable graph
+/// spans. The adapter chooses candidates by supplying `group`; this common
+/// routine owns queue-mode transitions and restores PROFILED even when a
+/// backend capture or validation fails.
+pub(crate) fn capture_prepared_graph_spans(
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    members: &[PreparedGraphMember],
+) -> Result<BTreeMap<u64, PreparedGraphSpan>, PreparedExecutionError> {
+    if members.is_empty() {
+        return Err(PreparedExecutionError::InvalidPlan(
+            "graph capture requires at least one prepared member".to_owned(),
+        ));
+    }
+    let enter = session
+        .set_queue_completion_mode(queue, QueueCompletionMode::Deferred)
+        .map_err(PreparedExecutionError::from);
+    let capture = enter.and_then(|()| -> Result<_, PreparedExecutionError> {
+        let mut spans = BTreeMap::new();
+        let mut begin = 0;
+        while begin < members.len() {
+            let mut end = begin + 1;
+            while end < members.len()
+                && members[end].group == members[begin].group
+                && members[end - 1].ordinal.checked_add(1) == Some(members[end].ordinal)
+            {
+                end += 1;
+            }
+            let group = &members[begin..end];
+            if group.len() >= 2 {
+                let operations = group
+                    .iter()
+                    .map(|member| member.operation.clone())
+                    .collect::<Vec<_>>();
+                let evidence = group
+                    .iter()
+                    .map(|member| (member.label.clone(), member.dispatch.clone()))
+                    .collect::<Vec<_>>();
+                let graph = session.create_graph_span(queue, &operations, &evidence)?;
+                spans.insert(
+                    group[0].ordinal,
+                    PreparedGraphSpan {
+                        last_ordinal: group.last().expect("nonempty graph group").ordinal,
+                        graph,
+                    },
+                );
+            }
+            begin = end;
+        }
+        if spans.is_empty() {
+            return Err(PreparedExecutionError::InvalidPlan(
+                "graph capture produced zero replayable spans".to_owned(),
+            ));
+        }
+        Ok(spans)
+    });
+    let restore = session
+        .set_queue_completion_mode(queue, QueueCompletionMode::Profiled)
+        .map_err(PreparedExecutionError::from);
+    match (capture, restore) {
+        (Ok(spans), Ok(())) => Ok(spans),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(_restore_error)) => Err(error),
     }
 }
 
@@ -1766,6 +2013,96 @@ mod tests {
             assert_eq!(audit.sparse_moe_submission_count, 1, "{label}");
             assert_eq!(audit.sparse_moe_active_pair_count, 1, "{label}");
         }
+    }
+
+    #[test]
+    fn shared_projection_pair_predicate_accepts_generic_aligned_views() {
+        let activation = TensorView::contiguous(crate::DType::Bf16, &[3, 3_840]).unwrap();
+        let gate_weight = TensorView::with_encoding(
+            crate::DType::U8,
+            crate::Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: crate::DType::F8E4M3Fn,
+            },
+            &[15_360, 3_840],
+        )
+        .unwrap();
+        let up_weight = gate_weight.clone();
+        let gate_output = TensorView::contiguous(crate::DType::Bf16, &[3, 15_360]).unwrap();
+        let up_output = gate_output.clone();
+        let gate = SemanticOpDescriptor::new(
+            crate::SemanticOpKind::Matmul,
+            vec![activation.clone(), gate_weight],
+            vec![gate_output],
+        )
+        .unwrap();
+        let up = SemanticOpDescriptor::new(
+            crate::SemanticOpKind::Matmul,
+            vec![activation, up_weight],
+            vec![up_output],
+        )
+        .unwrap();
+        assert!(prepared_projection_pair_compatible(&gate, &up));
+    }
+
+    #[test]
+    fn shared_deferred_scope_is_target_and_literal_opt_in_scoped() {
+        let enabled = Some(OsStr::new("1"));
+        assert!(prepared_deferred_completion_scope_enabled(
+            "hip",
+            Some("gfx1030"),
+            true,
+            false,
+            false,
+            true,
+            enabled
+        ));
+        assert!(prepared_deferred_completion_scope_enabled(
+            "hip",
+            Some("gfx1201"),
+            true,
+            false,
+            false,
+            true,
+            enabled
+        ));
+        assert!(!prepared_deferred_completion_scope_enabled(
+            "hip",
+            Some("gfx1030"),
+            true,
+            false,
+            false,
+            true,
+            Some(OsStr::new("true"))
+        ));
+        assert!(!prepared_deferred_completion_scope_enabled(
+            "hip",
+            Some("gfx1030"),
+            false,
+            false,
+            false,
+            true,
+            enabled
+        ));
+        assert!(!prepared_deferred_completion_scope_enabled(
+            "hip",
+            Some("gfx1030"),
+            true,
+            true,
+            false,
+            true,
+            enabled
+        ));
+    }
+
+    #[test]
+    fn shared_projection_sharing_defaults_on_and_is_fail_closed() {
+        assert!(prepared_projection_sharing_enabled(None));
+        assert!(prepared_projection_sharing_enabled(Some(OsStr::new("1"))));
+        assert!(!prepared_projection_sharing_enabled(Some(OsStr::new("0"))));
+        assert!(!prepared_projection_sharing_enabled(Some(OsStr::new(
+            "true"
+        ))));
     }
 
     #[test]

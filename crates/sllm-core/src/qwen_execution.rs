@@ -21,9 +21,9 @@ use crate::adapter::{
 };
 use crate::context_window::{ContextShiftDecisionV1, ContextWindowStateV1};
 use crate::execution::{
-    ExecutionBuffer, ExecutionError, ExecutionGraphSpan, ExecutionQueue, ExecutionSession,
-    ExecutionStateImageV1, KvState, KvStateAppendSubmission, LinearAttentionBindings,
-    LinearAttentionState, OwnedTensorBinding, PrepareSupport, PreparedOperation, Submission,
+    ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, ExecutionStateImageV1,
+    KvState, KvStateAppendSubmission, LinearAttentionBindings, LinearAttentionState,
+    OwnedTensorBinding, PrepareSupport, Submission,
 };
 use crate::final_output::QWEN35_VOCAB_SIZE;
 #[cfg(feature = "phase54-research")]
@@ -32,9 +32,7 @@ use crate::kv_state::{
     CausalAttentionDescriptor, KvCacheEncoding, KvPhysicalMemorySnapshot, KvStateDescriptor,
 };
 use crate::linear_attention::{LinearAttentionDescriptor, LinearAttentionStateDescriptor};
-use crate::model::{
-    LayerType, QWEN35_4B_FINGERPRINT, QWEN35_27B_FINGERPRINT, TensorDType, VerifiedCache,
-};
+use crate::model::{QWEN35_4B_FINGERPRINT, TensorDType, VerifiedCache};
 use crate::op::{
     AttentionPreprocessContract, AttentionPreprocessPositionMode, OpError, SemanticOpDescriptor,
     SemanticOpKind, TokenSelectorContractV1,
@@ -57,8 +55,11 @@ use crate::phase54_vo_transform::{
 };
 use crate::prepared_execution::{
     ExecutionAuditAccumulator, ExecutionBoundaryKind, ExecutionSegment, ExecutionTransaction,
-    PreparedCachePolicy, PreparedDynamicIdentity, PreparedExecutionError, PreparedExecutionPlan,
-    PreparedPlanNode, PreparedSemanticCache, PreparedTransition, require_terminal_success,
+    PREPARED_DEFERRED_COMPLETION_ENV, PREPARED_PROJECTION_SHARING_ENV, PreparedCachePolicy,
+    PreparedCompletionMode, PreparedDynamicIdentity, PreparedExecutionError, PreparedExecutionPlan,
+    PreparedGraphMember, PreparedGraphReplayState, PreparedPlanNode, PreparedSemanticCache,
+    PreparedTransition, capture_prepared_graph_spans, prepared_deferred_completion_scope_enabled,
+    prepared_projection_sharing_enabled, require_terminal_success,
 };
 use crate::qwen_graph::{
     QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES,
@@ -847,10 +848,42 @@ fn qwen_short_terminal_last_row_enabled(
     )
 }
 
+#[cfg(test)]
 fn qwen_deferred_completion_enabled(
     session: &ExecutionSession,
     graph: &QwenGraph,
     env_value: Option<&OsStr>,
+) -> bool {
+    qwen_deferred_completion_enabled_with_common_env(
+        session,
+        graph,
+        env_value,
+        std::env::var_os(PREPARED_DEFERRED_COMPLETION_ENV).as_deref(),
+        true,
+    )
+}
+
+fn qwen_deferred_completion_enabled_for_adapters(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &QwenAdapterRuntime,
+    env_value: Option<&OsStr>,
+) -> bool {
+    qwen_deferred_completion_enabled_with_common_env(
+        session,
+        graph,
+        env_value,
+        std::env::var_os(PREPARED_DEFERRED_COMPLETION_ENV).as_deref(),
+        adapters.lora.is_empty() && adapters.controls.is_empty(),
+    )
+}
+
+fn qwen_deferred_completion_enabled_with_common_env(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    env_value: Option<&OsStr>,
+    common_env_value: Option<&OsStr>,
+    adapters_empty: bool,
 ) -> bool {
     // The canonical gfx1030 text path uses deferred completion by default.
     // Keep an explicit zero as the rollback switch; unknown values remain
@@ -861,14 +894,42 @@ fn qwen_deferred_completion_enabled(
         Some(value) if value == OsStr::new("0") => false,
         Some(_) => false,
     };
-    mode_enabled
+    let legacy_enabled = mode_enabled
         && session.backend_name() == "hip"
         && session.expected_target().as_deref() == Some("gfx1030")
         && graph.model_fingerprint() == QWEN35_4B_FINGERPRINT
         && graph.fp8_sidecar_fingerprint().is_none()
         && !graph.is_multimodal()
         && !graph.is_mtp()
-        && graph.layer_types().len() == 32
+        && graph.layer_types().len() == 32;
+
+    // Preserve the legacy variable's explicit decision whenever it is
+    // present.  The model-neutral switch is an additive opt-in for verified
+    // FP16/MXFP8 state layouts, including MX graphs whose sidecar identity
+    // intentionally keeps them outside the old Qwen3.5 fingerprint gate.
+    if env_value.is_some() {
+        return legacy_enabled;
+    }
+    legacy_enabled
+        || prepared_deferred_completion_scope_enabled(
+            session.backend_name(),
+            session.expected_target().as_deref(),
+            qwen_prepared_encoding_compatible(graph),
+            graph.is_multimodal(),
+            graph.is_mtp(),
+            adapters_empty,
+            common_env_value,
+        )
+}
+
+fn qwen_prepared_encoding_compatible(graph: &QwenGraph) -> bool {
+    graph.states().iter().all(|state| match state.descriptor() {
+        QwenGraphStateDescriptor::Kv(descriptor) => matches!(
+            descriptor.cache_encoding(),
+            KvCacheEncoding::Fp16 | KvCacheEncoding::Mxfp8E4 | KvCacheEncoding::Mxfp8E5
+        ),
+        QwenGraphStateDescriptor::Linear(_) => true,
+    })
 }
 
 fn qwen38_deferred_completion_env_name(expected_target: Option<&str>) -> Option<&'static str> {
@@ -879,82 +940,13 @@ fn qwen38_deferred_completion_env_name(expected_target: Option<&str>) -> Option<
     }
 }
 
-fn qwen38_deferred_completion_topology_is_exact(layer_types: &[LayerType]) -> bool {
-    layer_types.len() == 64
-        && layer_types.iter().enumerate().all(|(layer, &actual)| {
-            let expected = if (layer + 1) % 4 == 0 {
-                LayerType::FullAttention
-            } else {
-                LayerType::LinearAttention
-            };
-            actual == expected
-        })
-}
-
-fn qwen38_mixed_weight_inventory_counts_are_exact(
-    binding_count: usize,
-    unique_binding_count: usize,
-    nvfp4_w4a4_count: usize,
-    fp8_outer_count: usize,
-    unquantized_count: usize,
-) -> bool {
-    binding_count == 851
-        && unique_binding_count == 851
-        && nvfp4_w4a4_count == 168
-        && fp8_outer_count == 233
-        && unquantized_count == 450
-        && nvfp4_w4a4_count + fp8_outer_count == 401
-}
-
-fn qwen38_mixed_weight_inventory_is_exact(graph: &QwenGraph) -> bool {
-    let mut names = BTreeSet::new();
-    let mut nvfp4_w4a4_count = 0;
-    let mut fp8_outer_count = 0;
-    let mut unquantized_count = 0;
-    for binding in graph.weight_bindings() {
-        if !names.insert(binding.tensor_name()) {
-            return false;
-        }
-        let Some(tensor) = graph
-            .tensor_metadata()
-            .iter()
-            .find(|tensor| tensor.name() == binding.tensor_name())
-        else {
-            return false;
-        };
-        match tensor.view().encoding() {
-            Encoding::Nvfp4W4A4 {
-                block_size: 16,
-                scale_dtype: DType::F8E4M3Fn,
-            } => nvfp4_w4a4_count += 1,
-            Encoding::Fp8Scaled {
-                granularity: Fp8ScaleGranularity::OuterDimension,
-                scale_dtype: DType::F32,
-                resident: Fp8ResidentRepresentation::PackedBytes,
-            } => fp8_outer_count += 1,
-            Encoding::Unquantized => unquantized_count += 1,
-            _ => return false,
-        }
-    }
-    qwen38_mixed_weight_inventory_counts_are_exact(
-        graph.weight_bindings().len(),
-        names.len(),
-        nvfp4_w4a4_count,
-        fp8_outer_count,
-        unquantized_count,
-    )
-}
-
 #[allow(clippy::too_many_arguments)] // Explicit fields keep the exact opt-in scope auditable.
 fn qwen38_nvfp4_projection_pack2_scope_enabled(
     backend_name: &str,
     expected_target: Option<&str>,
-    model_fingerprint: &str,
     has_fp8_sidecar: bool,
     is_multimodal: bool,
     is_mtp: bool,
-    layer_types: &[LayerType],
-    mixed_weight_inventory_is_exact: bool,
     adapters_empty: bool,
     has_verified_artifact: bool,
     env_value: Option<&OsStr>,
@@ -964,12 +956,9 @@ fn qwen38_nvfp4_projection_pack2_scope_enabled(
     env_value == Some(OsStr::new("1"))
         && backend_name == "hip"
         && matches!(expected_target, Some("gfx1030" | "gfx1201"))
-        && model_fingerprint == QWEN35_27B_FINGERPRINT
         && has_fp8_sidecar
         && !is_multimodal
         && !is_mtp
-        && qwen38_deferred_completion_topology_is_exact(layer_types)
-        && mixed_weight_inventory_is_exact
         && adapters_empty
         && has_verified_artifact
 }
@@ -982,15 +971,14 @@ fn qwen38_nvfp4_projection_pack2_enabled(
 ) -> bool {
     let artifact_matches = artifact
         .is_some_and(|artifact| graph.fp8_sidecar_fingerprint() == Some(artifact.recipe_digest()));
-    qwen38_nvfp4_projection_pack2_scope_enabled(
+    prepared_projection_sharing_enabled(
+        std::env::var_os(PREPARED_PROJECTION_SHARING_ENV).as_deref(),
+    ) && qwen38_nvfp4_projection_pack2_scope_enabled(
         session.backend_name(),
         session.expected_target().as_deref(),
-        graph.model_fingerprint(),
         graph.fp8_sidecar_fingerprint().is_some(),
         graph.is_multimodal(),
         graph.is_mtp(),
-        graph.layer_types(),
-        qwen38_mixed_weight_inventory_is_exact(graph),
         adapters.adapters().is_empty() && adapters.controls().is_empty(),
         artifact_matches,
         std::env::var_os(QWEN38_NVFP4_PROJECTION_PACK2_ENV).as_deref(),
@@ -1008,15 +996,14 @@ fn qwen38_fp8_gdn_projection_pack2_enabled(
     // Keep this selector structurally identical to the NVFP4 candidate while
     // reading a separate literal opt-in. The independent environment switch
     // allows both pair roles to be lowered in one verified composite pass.
-    qwen38_nvfp4_projection_pack2_scope_enabled(
+    prepared_projection_sharing_enabled(
+        std::env::var_os(PREPARED_PROJECTION_SHARING_ENV).as_deref(),
+    ) && qwen38_nvfp4_projection_pack2_scope_enabled(
         session.backend_name(),
         session.expected_target().as_deref(),
-        graph.model_fingerprint(),
         graph.fp8_sidecar_fingerprint().is_some(),
         graph.is_multimodal(),
         graph.is_mtp(),
-        graph.layer_types(),
-        qwen38_mixed_weight_inventory_is_exact(graph),
         adapters.adapters().is_empty() && adapters.controls().is_empty(),
         artifact_matches,
         std::env::var_os(QWEN38_FP8_GDN_PROJECTION_PACK2_ENV).as_deref(),
@@ -1027,28 +1014,24 @@ fn qwen38_fp8_gdn_projection_pack2_enabled(
 fn qwen38_deferred_completion_scope_enabled(
     backend_name: &str,
     expected_target: Option<&str>,
-    model_fingerprint: &str,
     has_fp8_sidecar: bool,
     is_multimodal: bool,
     is_mtp: bool,
-    layer_types: &[LayerType],
-    mixed_weight_inventory_is_exact: bool,
     adapters_empty: bool,
     env_value: Option<&OsStr>,
 ) -> bool {
     // This candidate is deliberately opt-in: a missing value is OFF and only
     // the exact value "1" enables it.  In particular, the legacy generic
     // Qwen deferred-completion variable must not enable this mixed graph.
-    env_value == Some(OsStr::new("1"))
-        && backend_name == "hip"
-        && matches!(expected_target, Some("gfx1030" | "gfx1201"))
-        && model_fingerprint == QWEN35_27B_FINGERPRINT
-        && has_fp8_sidecar
-        && !is_multimodal
-        && !is_mtp
-        && qwen38_deferred_completion_topology_is_exact(layer_types)
-        && mixed_weight_inventory_is_exact
-        && adapters_empty
+    prepared_deferred_completion_scope_enabled(
+        backend_name,
+        expected_target,
+        has_fp8_sidecar,
+        is_multimodal,
+        is_mtp,
+        adapters_empty,
+        env_value,
+    )
 }
 
 fn qwen38_deferred_completion_enabled(
@@ -1062,12 +1045,9 @@ fn qwen38_deferred_completion_enabled(
     qwen38_deferred_completion_scope_enabled(
         session.backend_name(),
         expected_target.as_deref(),
-        graph.model_fingerprint(),
         graph.fp8_sidecar_fingerprint().is_some(),
         graph.is_multimodal(),
         graph.is_mtp(),
-        graph.layer_types(),
-        qwen38_mixed_weight_inventory_is_exact(graph),
         adapters.lora.is_empty() && adapters.controls.is_empty(),
         env_value.as_deref(),
     )
@@ -1094,12 +1074,9 @@ fn qwen38_kv_append_attention_chain_enabled(
     qwen38_deferred_completion_scope_enabled(
         session.backend_name(),
         expected_target.as_deref(),
-        graph.model_fingerprint(),
         graph.fp8_sidecar_fingerprint().is_some(),
         graph.is_multimodal(),
         graph.is_mtp(),
-        graph.layer_types(),
-        qwen38_mixed_weight_inventory_is_exact(graph),
         adapters.lora.is_empty() && adapters.controls.is_empty(),
         env_value.as_deref(),
     )
@@ -2846,29 +2823,9 @@ fn qwen38_graph_node_is_stateless(node: &QwenGraphNode) -> bool {
     )
 }
 
-#[derive(Default)]
-struct QwenGraphReplayState {
-    ready: bool,
-    warm_members: Vec<QwenGraphWarmMember>,
-    spans: Arc<BTreeMap<u64, QwenGraphReplaySpan>>,
-}
-
-struct QwenGraphWarmMember {
-    ordinal: u64,
-    layer: u32,
-    label: String,
-    operation: PreparedOperation,
-    dispatch: crate::DispatchEvidence,
-}
-
-struct QwenGraphReplaySpan {
-    last_ordinal: u64,
-    graph: ExecutionGraphSpan,
-}
-
 struct QwenExecutionCore {
     // Graph payloads release before cached plans, buffers and the queue.
-    graph_replay: Mutex<QwenGraphReplayState>,
+    graph_replay: Mutex<PreparedGraphReplayState>,
     graph_collect_node: AtomicBool,
     qwen38_graph_spans_enabled: bool,
     session: Arc<ExecutionSession>,
@@ -5225,36 +5182,44 @@ impl QwenExecutionCore {
                     "Qwen3.8 projection-pack opt-in lacks its verified artifact".to_owned(),
                 )
             })?;
-            let reuse_plan = graph
+            match graph
                 .plan_unsloth_qwen38_projection_pack_reuse(artifact)
                 .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?
-                .ok_or_else(|| {
-                    QwenExecutionError::InvalidGraph(
-                        "Qwen3.8 projection-pack plan does not apply to the request graph"
-                            .to_owned(),
-                    )
-                })?;
-            let lowered = graph
-                .with_qwen38_projection_pack_reuse(&reuse_plan, scope)
-                .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?;
-            for node in lowered.nodes().iter().filter(|node| {
-                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
-            }) {
-                let operation = node.operation().ok_or_else(|| {
-                    QwenExecutionError::InvalidGraph(format!(
-                        "Qwen3.8 projection-pack node {} has no descriptor",
-                        node.label()
-                    ))
-                })?;
-                if let PrepareSupport::Unsupported { reason } = resident.session.supports(operation)
-                {
-                    return Err(QwenExecutionError::InvalidRequest(format!(
-                        "Qwen3.8 projection-pack node {} is unsupported at request construction: {reason}",
-                        node.label()
-                    )));
+            {
+                Some(reuse_plan) => {
+                    let lowered = graph
+                        .with_qwen38_projection_pack_reuse(&reuse_plan, scope)
+                        .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?;
+                    for node in lowered.nodes().iter().filter(|node| {
+                        node.kind()
+                            == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+                    }) {
+                        let operation = node.operation().ok_or_else(|| {
+                            QwenExecutionError::InvalidGraph(format!(
+                                "Qwen3.8 projection-pack node {} has no descriptor",
+                                node.label()
+                            ))
+                        })?;
+                        if let PrepareSupport::Unsupported { reason } =
+                            resident.session.supports(operation)
+                        {
+                            return Err(QwenExecutionError::InvalidRequest(format!(
+                                "Qwen3.8 projection-pack node {} is unsupported at request construction: {reason}",
+                                node.label()
+                            )));
+                        }
+                    }
+                    lowered
+                }
+                None => {
+                    // The selector is semantic and deliberately broader than
+                    // the Qwen adapter's native graph rewrite.  Keep the
+                    // adapter's topology/artifact checks fail-closed: a
+                    // selected request with no proven reuse plan simply uses
+                    // the ordinary graph rather than manufacturing a pack.
+                    graph
                 }
             }
-            lowered
         } else {
             graph
         };
@@ -5387,7 +5352,7 @@ impl QwenExecutionCore {
         let qwen38_graph_spans_enabled = qwen38_deferred_completion
             && graph_span_env.and_then(std::env::var_os).as_deref() == Some(OsStr::new("1"));
         let core = Self {
-            graph_replay: Mutex::new(QwenGraphReplayState::default()),
+            graph_replay: Mutex::new(PreparedGraphReplayState::default()),
             graph_collect_node: AtomicBool::new(false),
             qwen38_graph_spans_enabled,
             session: Arc::clone(&resident.session),
@@ -6222,7 +6187,7 @@ impl QwenExecutionCore {
             pending_speculative: None,
             adapters: QwenAdapterRuntime::disabled(),
             short_terminal_last_row: false,
-            graph_replay: Mutex::new(QwenGraphReplayState::default()),
+            graph_replay: Mutex::new(PreparedGraphReplayState::default()),
             graph_collect_node: AtomicBool::new(false),
             qwen38_graph_spans_enabled: false,
             qwen38_deferred_completion: false,
@@ -7097,17 +7062,24 @@ impl QwenExecutionCore {
         };
         let mut replay_skip_through = None;
         let mut argmax: Option<TerminalSelection> = None;
-        let deferred = qwen_deferred_completion_enabled(
+        let deferred = qwen_deferred_completion_enabled_for_adapters(
             self.session.as_ref(),
             &self.graph,
+            &self.adapters,
             std::env::var_os(QWEN_DEFERRED_COMPLETION_ENV).as_deref(),
         ) || self.qwen38_deferred_completion
             || chain_active;
-        let mut pending = if deferred {
-            ExecutionSegment::deferred(self.session.as_ref(), &self.queue, self.completion_timeout)?
+        let completion_mode = if deferred {
+            PreparedCompletionMode::Deferred
         } else {
-            ExecutionSegment::profiled(self.completion_timeout)
+            PreparedCompletionMode::Profiled
         };
+        let mut pending = ExecutionSegment::for_mode(
+            self.session.as_ref(),
+            &self.queue,
+            self.completion_timeout,
+            completion_mode,
+        )?;
         let execute_result =
             plan.execute_with_ordinal(transition, |planned, transition, node_ordinal| {
                 self.current_node_ordinal
@@ -9312,9 +9284,9 @@ impl QwenExecutionCore {
                 .lock()
                 .map_err(|_| QwenExecutionError::Poisoned)?
                 .warm_members
-                .push(QwenGraphWarmMember {
+                .push(PreparedGraphMember {
                     ordinal,
-                    layer,
+                    group: u64::from(layer),
                     label: node.label().to_owned(),
                     operation: prepared,
                     dispatch: submission.dispatch().clone(),
@@ -9336,62 +9308,15 @@ impl QwenExecutionCore {
             if state.ready || state.warm_members.is_empty() {
                 return Ok(());
             }
-            std::mem::take(&mut state.warm_members)
+            state.take_warm_members()
         };
-        self.session
-            .set_queue_completion_mode(&self.queue, crate::QueueCompletionMode::Deferred)?;
-        let capture = (|| -> Result<BTreeMap<u64, QwenGraphReplaySpan>, QwenExecutionError> {
-            let mut spans = BTreeMap::new();
-            let mut begin = 0;
-            while begin < members.len() {
-                let mut end = begin + 1;
-                while end < members.len()
-                    && members[end].layer == members[begin].layer
-                    && members[end].ordinal <= members[end - 1].ordinal + 1
-                {
-                    end += 1;
-                }
-                let group = &members[begin..end];
-                if group.len() >= 2 {
-                    let operations = group
-                        .iter()
-                        .map(|x| x.operation.clone())
-                        .collect::<Vec<_>>();
-                    let evidence = group
-                        .iter()
-                        .map(|x| (x.label.clone(), x.dispatch.clone()))
-                        .collect::<Vec<_>>();
-                    let graph =
-                        self.session
-                            .create_graph_span(&self.queue, &operations, &evidence)?;
-                    spans.insert(
-                        group[0].ordinal,
-                        QwenGraphReplaySpan {
-                            last_ordinal: group.last().expect("nonempty graph group").ordinal,
-                            graph,
-                        },
-                    );
-                }
-                begin = end;
-            }
-            if spans.is_empty() {
-                return Err(QwenExecutionError::InvalidGraph(
-                    "enabled graph route captured zero spans".to_owned(),
-                ));
-            }
-            Ok(spans)
-        })();
-        let restore = self
-            .session
-            .set_queue_completion_mode(&self.queue, crate::QueueCompletionMode::Profiled);
-        let spans = capture?;
-        restore?;
+        let spans = capture_prepared_graph_spans(&self.session, &self.queue, &members)
+            .map_err(QwenExecutionError::from)?;
         let mut state = self
             .graph_replay
             .lock()
             .map_err(|_| QwenExecutionError::Poisoned)?;
-        state.spans = Arc::new(spans);
-        state.ready = true;
+        state.install(spans);
         Ok(())
     }
 
@@ -13099,26 +13024,59 @@ mod tests {
     }
 
     #[test]
+    fn common_deferred_completion_opt_in_covers_mx_graphs_without_overriding_legacy_env() {
+        let (graph, _) = crate::qwen_graph::qwen35_execution_fixture();
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1201"));
+        let session = ExecutionSession::new("hip", recorder);
+
+        assert!(qwen_deferred_completion_enabled_with_common_env(
+            &session,
+            &graph,
+            None,
+            Some(OsStr::new("1")),
+            true,
+        ));
+        assert!(!qwen_deferred_completion_enabled_with_common_env(
+            &session,
+            &graph,
+            None,
+            Some(OsStr::new("0")),
+            true,
+        ));
+        let legacy_session =
+            ExecutionSession::new("hip", Arc::new(ExecutionRecorder::with_target("gfx1030")));
+        assert!(!qwen_deferred_completion_enabled_with_common_env(
+            &legacy_session,
+            &graph,
+            Some(OsStr::new("0")),
+            Some(OsStr::new("1")),
+            true,
+        ));
+        assert!(qwen_deferred_completion_enabled_with_common_env(
+            &legacy_session,
+            &graph,
+            Some(OsStr::new("1")),
+            Some(OsStr::new("0")),
+            true,
+        ));
+        assert!(!qwen_deferred_completion_enabled_with_common_env(
+            &session,
+            &graph,
+            None,
+            Some(OsStr::new("1")),
+            false,
+        ));
+    }
+
+    #[test]
     fn qwen38_deferred_completion_selector_is_opt_in_and_fail_closed() {
-        let exact_topology: Vec<_> = (0..64)
-            .map(|layer| {
-                if (layer + 1) % 4 == 0 {
-                    LayerType::FullAttention
-                } else {
-                    LayerType::LinearAttention
-                }
-            })
-            .collect();
         let enabled = |target, env_value| {
             qwen38_deferred_completion_scope_enabled(
                 "hip",
                 Some(target),
-                QWEN35_27B_FINGERPRINT,
                 true,
                 false,
                 false,
-                &exact_topology,
-                true,
                 true,
                 env_value,
             )
@@ -13143,131 +13101,31 @@ mod tests {
         assert!(enabled("gfx1030", Some(OsStr::new("1"))));
         assert!(enabled("gfx1201", Some(OsStr::new("1"))));
 
-        assert!(qwen38_mixed_weight_inventory_counts_are_exact(
-            851, 851, 168, 233, 450
-        ));
-        // A sidecar carrying one wrong resident encoding must not be treated
-        // as the fixed mixed artifact merely because its total is close.
-        assert!(!qwen38_mixed_weight_inventory_counts_are_exact(
-            851, 851, 168, 232, 451
-        ));
-        assert!(!qwen38_mixed_weight_inventory_counts_are_exact(
-            851, 851, 167, 233, 451
-        ));
-        assert!(!qwen38_mixed_weight_inventory_counts_are_exact(
-            851, 850, 168, 233, 450
-        ));
-
-        for (backend, target, fingerprint, sidecar, multimodal, mtp, adapters) in [
-            (
-                "cpu",
-                Some("gfx1030"),
-                QWEN35_27B_FINGERPRINT,
-                true,
-                false,
-                false,
-                true,
-            ),
-            (
-                "hip",
-                Some("gfx942"),
-                QWEN35_27B_FINGERPRINT,
-                true,
-                false,
-                false,
-                true,
-            ),
-            (
-                "hip",
-                Some("gfx1030"),
-                QWEN35_4B_FINGERPRINT,
-                true,
-                false,
-                false,
-                true,
-            ),
-            (
-                "hip",
-                Some("gfx1030"),
-                QWEN35_27B_FINGERPRINT,
-                false,
-                false,
-                false,
-                true,
-            ),
-            (
-                "hip",
-                Some("gfx1030"),
-                QWEN35_27B_FINGERPRINT,
-                true,
-                true,
-                false,
-                true,
-            ),
-            (
-                "hip",
-                Some("gfx1030"),
-                QWEN35_27B_FINGERPRINT,
-                true,
-                false,
-                true,
-                true,
-            ),
-            (
-                "hip",
-                Some("gfx1030"),
-                QWEN35_27B_FINGERPRINT,
-                true,
-                false,
-                false,
-                false,
-            ),
+        for (backend, target, sidecar, multimodal, mtp, adapters, expected) in [
+            ("cpu", Some("gfx1030"), true, false, false, true, false),
+            ("hip", Some("gfx942"), true, false, false, true, false),
+            ("hip", Some("gfx1030"), true, false, false, true, true),
+            ("hip", Some("gfx1030"), false, false, false, true, false),
+            ("hip", Some("gfx1030"), true, true, false, true, false),
+            ("hip", Some("gfx1030"), true, false, true, true, false),
+            ("hip", Some("gfx1030"), true, false, false, false, false),
         ] {
-            assert!(!qwen38_deferred_completion_scope_enabled(
-                backend,
-                target,
-                fingerprint,
-                sidecar,
-                multimodal,
-                mtp,
-                &exact_topology,
-                true,
-                adapters,
-                Some(OsStr::new("1")),
-            ));
+            assert_eq!(
+                qwen38_deferred_completion_scope_enabled(
+                    backend,
+                    target,
+                    sidecar,
+                    multimodal,
+                    mtp,
+                    adapters,
+                    Some(OsStr::new("1")),
+                ),
+                expected
+            );
         }
 
-        let mut wrong_length = exact_topology.clone();
-        wrong_length.pop();
-        assert!(!qwen38_deferred_completion_scope_enabled(
-            "hip",
-            Some("gfx1030"),
-            QWEN35_27B_FINGERPRINT,
-            true,
-            false,
-            false,
-            &wrong_length,
-            true,
-            true,
-            Some(OsStr::new("1")),
-        ));
-        let mut wrong_schedule = exact_topology;
-        wrong_schedule.swap(0, 3);
-        assert!(!qwen38_deferred_completion_scope_enabled(
-            "hip",
-            Some("gfx1030"),
-            QWEN35_27B_FINGERPRINT,
-            true,
-            false,
-            false,
-            &wrong_schedule,
-            true,
-            true,
-            Some(OsStr::new("1")),
-        ));
-
         // The real Qwen3.5-4B graph remains outside this selector even when
-        // the new environment variable would be set.
+        // the Qwen3.8 mixed-encoding requirement is absent.
         let (qwen35_graph, _) = crate::qwen_graph::qwen35_execution_fixture();
         let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
         let session = ExecutionSession::new("hip", recorder);
@@ -13280,25 +13138,13 @@ mod tests {
 
     #[test]
     fn qwen38_nvfp4_projection_pack2_selector_is_literal_opt_in_only() {
-        let exact_topology = (0..64)
-            .map(|layer| {
-                if (layer + 1) % 4 == 0 {
-                    LayerType::FullAttention
-                } else {
-                    LayerType::LinearAttention
-                }
-            })
-            .collect::<Vec<_>>();
         let enabled = |env_value, has_verified_artifact| {
             qwen38_nvfp4_projection_pack2_scope_enabled(
                 "hip",
                 Some("gfx1030"),
-                QWEN35_27B_FINGERPRINT,
                 true,
                 false,
                 false,
-                &exact_topology,
-                true,
                 true,
                 has_verified_artifact,
                 env_value,
@@ -13311,16 +13157,26 @@ mod tests {
         assert!(!enabled(Some(OsStr::new("1 ")), true));
         assert!(!enabled(Some(OsStr::new("1")), false));
         assert!(enabled(Some(OsStr::new("1")), true));
+        // Model identity is artifact validation, not a projection-sharing
+        // selector. A semantically compatible graph with a different lock
+        // fingerprint still reaches the same checked scope.
+        assert!(qwen38_nvfp4_projection_pack2_scope_enabled(
+            "hip",
+            Some("gfx1030"),
+            true,
+            false,
+            false,
+            true,
+            true,
+            Some(OsStr::new("1")),
+        ));
 
         assert!(!qwen38_nvfp4_projection_pack2_scope_enabled(
             "hip",
             Some("gfx942"),
-            QWEN35_27B_FINGERPRINT,
             true,
             false,
             false,
-            &exact_topology,
-            true,
             true,
             true,
             Some(OsStr::new("1")),
@@ -13329,25 +13185,13 @@ mod tests {
 
     #[test]
     fn qwen38_fp8_gdn_projection_pack2_selector_is_independent_and_fail_closed() {
-        let exact_topology = (0..64)
-            .map(|layer| {
-                if (layer + 1) % 4 == 0 {
-                    LayerType::FullAttention
-                } else {
-                    LayerType::LinearAttention
-                }
-            })
-            .collect::<Vec<_>>();
         let enabled = |env_value| {
             qwen38_nvfp4_projection_pack2_scope_enabled(
                 "hip",
                 Some("gfx1201"),
-                QWEN35_27B_FINGERPRINT,
                 true,
                 false,
                 false,
-                &exact_topology,
-                true,
                 true,
                 true,
                 env_value,
@@ -13362,12 +13206,9 @@ mod tests {
         assert!(!qwen38_nvfp4_projection_pack2_scope_enabled(
             "hip",
             Some("gfx1201"),
-            QWEN35_27B_FINGERPRINT,
             true,
             false,
             false,
-            &exact_topology,
-            true,
             true,
             true,
             None,
@@ -13375,12 +13216,9 @@ mod tests {
         assert!(!qwen38_nvfp4_projection_pack2_scope_enabled(
             "hip",
             Some("gfx942"),
-            QWEN35_27B_FINGERPRINT,
             true,
             false,
             false,
-            &exact_topology,
-            true,
             true,
             true,
             Some(OsStr::new("1")),

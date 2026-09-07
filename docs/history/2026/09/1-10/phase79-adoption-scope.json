@@ -1,0 +1,35 @@
+{
+  "schema_version": "phase79-adoption-scope-v1",
+  "status": "validated and adopted",
+  "target": "gfx1030",
+  "nvfp4_decode": {
+    "variant": 67,
+    "m": 1,
+    "k_min": 1024,
+    "k_max": 17408,
+    "k_multiple": 16,
+    "n_min": 1024,
+    "off": "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4=0"
+  },
+  "fp8_outer_decode": {
+    "variant": 68,
+    "encoding": "E4M3FN",
+    "m": 1,
+    "k_min": 128,
+    "k_max": 17408,
+    "k_multiple": 64,
+    "n_min": 64,
+    "off": "SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_DWORD8=0"
+  },
+  "numerical_basis": "N1 finite encoded-input domain: exact ingress/products, reduced FP32 sum depth; same scales and BF16 RNE. Independent production-ABI oracle and repeat checks passed. Logit differences recorded separately.",
+  "unchanged": [
+    "gfx1201/gfx942 matmul selector defaults",
+    "prefill variant selection (ID59 arithmetic repaired separately)",
+    "unsupported encoding/shape routes"
+  ],
+  "evidence": [
+    "phase79-operator-evidence.json",
+    "phase79-model-evidence.json",
+    "phase79-selector-inventory.md"
+  ]
+}

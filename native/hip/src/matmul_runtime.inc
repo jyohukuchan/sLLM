@@ -1,5 +1,26 @@
 namespace {
 
+void trace_matmul_selector_decision(
+    const sllm_matmul::DescriptorMetadata &metadata,
+    const sllm_matmul_kernel::SelectorDecision &decision,
+    const char *const target) noexcept {
+  if (!sllm_matmul_kernel::selector_env_is_one("SLLM_MATMUL_SELECTOR_TRACE")) {
+    return;
+  }
+  std::fprintf(
+      stderr,
+      "sllm matmul selector variant=%u kernel=%s supported=%u enabled=%u "
+      "adopted=%u target=%s m=%llu k=%llu n=%llu reason=%s\n",
+      static_cast<unsigned int>(decision.variant),
+      sllm_matmul_kernel::logical_kernel_id(decision.variant),
+      decision.supported ? 1U : 0U, decision.enabled ? 1U : 0U,
+      decision.adopted ? 1U : 0U, target == nullptr ? "" : target,
+      static_cast<unsigned long long>(metadata.m),
+      static_cast<unsigned long long>(metadata.k),
+      static_cast<unsigned long long>(metadata.n),
+      decision.reason == nullptr ? "" : decision.reason);
+}
+
 bool matmul_lowp_format(const sllm_matmul::DescriptorMetadata &metadata,
                         sllm_lowp::MatmulFormat *const format) noexcept {
   if (format == nullptr) {
@@ -60,36 +81,55 @@ matmul_lowp_selector_target(const sllm_lowp::ExactTarget target) noexcept {
   return "";
 }
 
-sllm_matmul_kernel::KernelVariant
-matmul_lowp_kernel_variant(const sllm_matmul::DescriptorMetadata &metadata,
-                           const sllm_lowp::PreparedProviderPlan &provider,
-                           const char *const arch_name) noexcept {
+sllm_matmul_kernel::SelectorDecision matmul_lowp_selector_decision(
+    const sllm_matmul::DescriptorMetadata &metadata,
+    const sllm_lowp::PreparedProviderPlan &provider,
+    const char *const arch_name) noexcept {
   (void)arch_name;
   const char *const selector_target =
       matmul_lowp_selector_target(provider.target);
   switch (provider.provider) {
   case sllm_lowp::ProviderKind::Mxfp8Block32:
   case sllm_lowp::ProviderKind::Mxfp8Gfx1201Wmma:
-    return ::sllm_matmul_kernel::select_mxfp8_variant(
-        metadata.m, metadata.k, metadata.n, selector_target);
+    return ::sllm_matmul_kernel::make_selector_decision(
+        ::sllm_matmul_kernel::select_mxfp8_variant(
+            metadata.m, metadata.k, metadata.n, selector_target),
+        true, true, true,
+        ::sllm_matmul_kernel::kSelectorReasonAdopted);
   case sllm_lowp::ProviderKind::Mxfp6Block32:
   case sllm_lowp::ProviderKind::Mxfp6Gfx1030MmqViaE4M3:
   case sllm_lowp::ProviderKind::Mxfp6Gfx1030Half2Dot2:
   case sllm_lowp::ProviderKind::Mxfp6Gfx1201WmmaViaE4M3:
-    return ::sllm_matmul_kernel::select_mxfp6_variant(
-        metadata.m, metadata.k, metadata.n, selector_target);
+    return ::sllm_matmul_kernel::make_selector_decision(
+        ::sllm_matmul_kernel::select_mxfp6_variant(
+            metadata.m, metadata.k, metadata.n, selector_target),
+        true, true, true,
+        ::sllm_matmul_kernel::kSelectorReasonAdopted);
   case sllm_lowp::ProviderKind::Nvfp4W4A16Block16:
-    return ::sllm_matmul_kernel::select_nvfp4_variant(metadata.m);
+    return ::sllm_matmul_kernel::make_selector_decision(
+        ::sllm_matmul_kernel::select_nvfp4_variant(metadata.m), true, true,
+        true, ::sllm_matmul_kernel::kSelectorReasonAdopted);
   case sllm_lowp::ProviderKind::Nvfp4W4A4Block16:
-    return ::sllm_matmul_kernel::select_nvfp4_w4a4_variant(
+    return ::sllm_matmul_kernel::select_nvfp4_w4a4_decision(
         metadata.m, metadata.k, metadata.n, selector_target);
   case sllm_lowp::ProviderKind::Mxfp4W4A4Block32:
-    return ::sllm_matmul_kernel::select_mxfp4_variant(metadata.m);
+    return ::sllm_matmul_kernel::make_selector_decision(
+        ::sllm_matmul_kernel::select_mxfp4_variant(metadata.m), true, true,
+        true, ::sllm_matmul_kernel::kSelectorReasonAdopted);
   case sllm_lowp::ProviderKind::Fp8OuterGfx1030Software:
   case sllm_lowp::ProviderKind::Unsupported:
     break;
   }
-  return ::sllm_matmul_kernel::KernelVariant::Baseline;
+  return ::sllm_matmul_kernel::make_selector_decision(
+      ::sllm_matmul_kernel::KernelVariant::Baseline, false, false, false,
+      ::sllm_matmul_kernel::kSelectorReasonUnsupported);
+}
+
+sllm_matmul_kernel::KernelVariant matmul_lowp_kernel_variant(
+    const sllm_matmul::DescriptorMetadata &metadata,
+    const sllm_lowp::PreparedProviderPlan &provider,
+    const char *const arch_name) noexcept {
+  return matmul_lowp_selector_decision(metadata, provider, arch_name).variant;
 }
 
 std::optional<sllm_lowp::PreparedProviderPlan>
@@ -1089,11 +1129,16 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
             }
             const bool fnuz =
                 metadata.fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ;
-            const sllm_matmul_kernel::KernelVariant kernel_variant =
-                ::sllm_matmul_kernel::select_fp8_outer_variant(
+            const sllm_matmul_kernel::SelectorDecision selector_decision =
+                ::sllm_matmul_kernel::select_fp8_outer_decision(
                     metadata.m, metadata.k, metadata.n, properties.gcnArchName,
                     fnuz);
+            const sllm_matmul_kernel::KernelVariant kernel_variant =
+                selector_decision.variant;
+            candidate->matmul_selector_decision = selector_decision;
             candidate->matmul_kernel_variant = kernel_variant;
+            trace_matmul_selector_decision(metadata, selector_decision,
+                                           properties.gcnArchName);
 
             // The exact-E4M3FN gfx1030 software route publishes the same
             // immutable provider semantics as the typed block-scaled paths.
@@ -1164,9 +1209,11 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
             // Freeze both semantic provider and concrete kernel variant here.
             // Execute and dispatch-info must not observe later environment or
             // target changes by running a selector again.
+            const sllm_matmul_kernel::SelectorDecision selector_decision =
+                matmul_lowp_selector_decision(metadata, provider_plan,
+                                              properties.gcnArchName);
             const sllm_matmul_kernel::KernelVariant kernel_variant =
-                matmul_lowp_kernel_variant(metadata, provider_plan,
-                                           properties.gcnArchName);
+                selector_decision.variant;
             const auto concrete_provider = matmul_lowp_concrete_provider_plan(
                 provider_plan, kernel_variant);
             if (!concrete_provider.has_value()) {
@@ -1179,7 +1226,10 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
                   "prepared provider contract");
             }
             candidate->matmul_provider_plan.emplace(*concrete_provider);
+            candidate->matmul_selector_decision = selector_decision;
             candidate->matmul_kernel_variant = kernel_variant;
+            trace_matmul_selector_decision(metadata, selector_decision,
+                                           properties.gcnArchName);
             split4_plan =
                 metadata.nvfp4_w4a4 &&
                 ((kernel_variant == ::sllm_matmul_kernel::KernelVariant::

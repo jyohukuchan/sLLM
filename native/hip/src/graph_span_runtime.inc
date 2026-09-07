@@ -118,6 +118,80 @@ bool graph_span_direct_matmul(const ElementwisePlan *const plan,
   return true;
 }
 
+bool graph_span_qwen38_nvfp4_member_compatible(
+    const sllm_matmul::DescriptorMetadata &metadata) noexcept {
+  return metadata.m == 1U && metadata.k != 0U &&
+         (metadata.k % UINT64_C(16)) == 0U && metadata.n != 0U &&
+         metadata.nvfp4_w4a4 && metadata.weight_value_bytes != 0U &&
+         metadata.weight_scale_offset >= metadata.weight.byte_offset &&
+         metadata.weight_tensor_scale_offset >= metadata.weight_scale_offset &&
+         metadata.weight_tensor_scale_offset <= UINT64_MAX - UINT64_C(4) &&
+         metadata.input_tensor_scale_offset ==
+             metadata.weight_tensor_scale_offset + UINT64_C(4);
+}
+
+bool graph_span_qwen38_nvfp4_workspace_bytes(
+    const uint64_t k, uint64_t *const workspace_bytes) noexcept {
+  if (workspace_bytes == nullptr || k == 0U || (k % UINT64_C(16)) != 0U ||
+      k > UINT64_MAX - UINT64_C(1)) {
+    return false;
+  }
+  const uint64_t packed_bytes = (k + UINT64_C(1)) / UINT64_C(2);
+  const uint64_t scale_bytes = k / UINT64_C(16);
+  if (packed_bytes > UINT64_MAX - scale_bytes) {
+    return false;
+  }
+  *workspace_bytes = packed_bytes + scale_bytes;
+  return *workspace_bytes != 0U;
+}
+
+bool graph_span_qwen38_nvfp4_variant_safe(
+    const sllm_matmul_kernel::KernelVariant variant,
+    const sllm_matmul::DescriptorMetadata &first,
+    const sllm_matmul::DescriptorMetadata &second,
+    const char *const arch_name) noexcept {
+  using sllm_matmul_kernel::KernelVariant;
+  if (variant == KernelVariant::Nvfp4W4A4Packed ||
+      variant == KernelVariant::Nvfp4W4A4Decode) {
+    return true;
+  }
+  const bool exact_gfx1030 = matches_runtime_gcn_arch(arch_name, "gfx1030");
+  const bool exact_gfx1201 = matches_runtime_gcn_arch(arch_name, "gfx1201");
+  switch (variant) {
+  case KernelVariant::Nvfp4W4A4DecodeColumns128:
+    return (exact_gfx1030 || exact_gfx1201) &&
+           sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_columns128_shape(
+               first.m, first.k, first.n) &&
+           sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_columns128_shape(
+               second.m, second.k, second.n);
+  case KernelVariant::Nvfp4W4A4DecodeWave4Column32:
+    return (exact_gfx1030 || exact_gfx1201) &&
+           sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_wave4col32_shape(
+               first.m, first.k, first.n) &&
+           sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_wave4col32_shape(
+               second.m, second.k, second.n);
+  case KernelVariant::Nvfp4W4A4DecodeActivationShared:
+    return exact_gfx1030 &&
+           sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_activation_shared_shape(
+               first.m, first.k, first.n) &&
+           sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_activation_shared_shape(
+               second.m, second.k, second.n);
+  case KernelVariant::Nvfp4W4A4DecodeScaleLut:
+    return (exact_gfx1030 &&
+            sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_activation_shared_shape(
+                first.m, first.k, first.n) &&
+            sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_activation_shared_shape(
+                second.m, second.k, second.n)) ||
+           (exact_gfx1201 &&
+            sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_wave4col32_shape(
+                first.m, first.k, first.n) &&
+            sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_wave4col32_shape(
+                second.m, second.k, second.n));
+  default:
+    return false;
+  }
+}
+
 bool graph_span_qwen38_pack(const ElementwisePlan *const plan,
                             const char *const arch_name) noexcept {
   if (plan == nullptr || !plan->qwen38_projection_pack2 ||
@@ -127,12 +201,23 @@ bool graph_span_qwen38_pack(const ElementwisePlan *const plan,
 
   const uint32_t role = plan->qwen38_projection_pack2_role;
   if (role == SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_NVFP4_MLP_GATE_UP) {
-    return plan->qwen38_projection_pack2_metadata[0].m == 1U &&
-           plan->qwen38_projection_pack2_metadata[0].k == UINT64_C(5120) &&
-           plan->qwen38_projection_pack2_metadata[0].n == UINT64_C(17408) &&
-           plan->qwen38_projection_pack2_metadata[1].m == 1U &&
-           plan->qwen38_projection_pack2_metadata[1].k == UINT64_C(5120) &&
-           plan->qwen38_projection_pack2_metadata[1].n == UINT64_C(17408);
+    const auto &first = plan->qwen38_projection_pack2_metadata[0];
+    const auto &second = plan->qwen38_projection_pack2_metadata[1];
+    uint64_t expected_workspace_bytes = 0U;
+    return graph_span_qwen38_nvfp4_member_compatible(first) &&
+           graph_span_qwen38_nvfp4_member_compatible(second) &&
+           first.m == second.m && first.k == second.k &&
+           first.activation.shape[0] == second.activation.shape[0] &&
+           first.activation.shape[1] == second.activation.shape[1] &&
+           plan->matmul_workspace != nullptr &&
+           graph_span_qwen38_nvfp4_workspace_bytes(
+               first.k, &expected_workspace_bytes) &&
+           plan->matmul_workspace_bytes == expected_workspace_bytes &&
+           plan->qwen38_projection_pack2_kernel_variants[0] ==
+               plan->qwen38_projection_pack2_kernel_variants[1] &&
+           graph_span_qwen38_nvfp4_variant_safe(
+               plan->qwen38_projection_pack2_kernel_variants[0], first,
+               second, arch_name);
   }
   if (role != SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_FP8_GDN_QKV_Z ||
       plan->qwen38_projection_pack2_metadata[0].m != 1U ||

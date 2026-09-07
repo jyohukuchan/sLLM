@@ -2533,7 +2533,9 @@ __launch_bounds__(256, 1) void sllm_matmul_nvfp4_w4a4_block16_prefill_row8_tiled
     shared_weight_tensor_scale = weight_tensor_scale[0];
     shared_input_tensor_scale = input_tensor_scale[0];
   }
-  float accumulator = 0.0F;
+  // Match the baseline's 256 strided K lanes while retaining weight reuse.
+  // Each slot corresponds to one baseline wave, not a longer sequential sum.
+  float partials[8] = {};
   for (uint64_t base = 0U; base < k; base += tile_k) {
     if (threadIdx.x < tile_k / 16U) {
       const uint64_t scale_inner = base + threadIdx.x * UINT64_C(16);
@@ -2572,17 +2574,26 @@ __launch_bounds__(256, 1) void sllm_matmul_nvfp4_w4a4_block16_prefill_row8_tiled
         const float activation_scale = e4m3fn_to_float(
             activation_block_scales[row * blocks_per_activation_row +
                                     inner / UINT64_C(16)]);
-        accumulator += e2m1_to_float(activation_code) * activation_scale *
-                       weight_tile[offset];
+        partials[offset / wave_width] +=
+            e2m1_to_float(activation_code) * activation_scale * weight_tile[offset];
       }
     }
     __syncthreads();
   }
 #pragma unroll
-  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
-    accumulator += __shfl_down(accumulator, offset, 32U);
+  for (uint32_t slot = 0U; slot < 8U; ++slot) {
+#pragma unroll
+    for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+      partials[slot] += __shfl_down(partials[slot], offset, 32U);
+    }
   }
   if (lane == 0U && row < m) {
+    // Same 8-wave tree as the baseline (its first two shuffle steps add zero).
+    const float sum0 = partials[0] + partials[4];
+    const float sum1 = partials[1] + partials[5];
+    const float sum2 = partials[2] + partials[6];
+    const float sum3 = partials[3] + partials[7];
+    const float accumulator = (sum0 + sum2) + (sum1 + sum3);
     output[row * n + column] = float_to_bf16_rne_bits(
         accumulator * shared_weight_tensor_scale * shared_input_tensor_scale);
   }

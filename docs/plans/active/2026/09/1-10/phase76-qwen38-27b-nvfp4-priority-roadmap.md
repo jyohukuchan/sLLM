@@ -1,6 +1,6 @@
 # Phase 76以降: Qwen3.8-27B NVFP4優先ロードマップ
 
-> 状態: Phase 76〜78完了。Phase 78は2026-09-05のユーザー承認により旧目標の未達・未実施を記録して終了。Phase 79〜81は未完了。
+> 状態: Phase 76〜79完了。Phase 78は2026-09-05のユーザー承認により旧目標の未達・未実施を記録して終了。Phase 80〜82は未完了。旧Phase 79〜81は2026-09-07のユーザー指示により80〜82へ繰り下げた。
 > 作成日: 2026-09-03
 
 ## 現在の完了判断
@@ -9,23 +9,33 @@
 [履歴](../../../../../history/2026/09/1-10/phase76-78-qwen38-nvfp4.md)を現在の終了判断とする。
 以下の旧gate・未完了というcheckpoint記述は当時の履歴であり、最新のユーザー判断を上書きしない。
 
+## 2026-09-07の順序変更
+
+新[Phase 79](../../../../archive/2026/09/1-10/phase79-common-optimization.md)で既存最適化の共通化・条件付き既定採用を先行する。
+旧Phase 79→80（static FP8 KV・MTP・文章生成）、旧80→81（他精度）、旧81→82（batching）とする。
+以下のPhase 76〜78 checkpointに残る旧番号・開始gateは当時の履歴であり、この順序変更とPhase 78完了判断を上書きしない。
+共通化Phaseは既存経路を対象とし、新しい精度形式・汎用FP8 artifact互換の追加は含めない。
+
 ## 目的と優先順位
 
 2026-09-03のユーザー指示により、次の最優先目標を、手持ちGPU上で
 `unsloth/Qwen3.8-27B-NVFP4`を実用的な単一要求速度で文章生成できる状態とする。
 この目標を満たすまでは他精度の横断最適化とGPU batchingを開始しない。目標達成後は、残る精度の
 単一要求最適化を一通り閉じ、その後にNVFP4 batchingを行う。
+2026-09-07の変更により、既存NVFP4/FP8経路のモデル横断共通化は新Phase 79として先行する。
+この既存経路の共通化に旧exact-model優先条件を適用せず、新しい他精度最適化はPhase 81に残す。
 
-番号上の既定順は次とする。
+2026-09-07変更後の番号上の既定順は次とする。
 
 1. Phase 76: exact artifact統合、正しさ、baseline/profile。
 2. Phase 77: mixed NVFP4 modelの単一要求decode最適化。
 3. Phase 78: 同modelの単一要求prefill最適化。
-4. Phase 79: static FP8 KV、MTP、長めの実入力、CLI/APIを含む実用closeout。
-5. Phase 80: 他精度の残る単一要求最適化。
-6. Phase 81: NVFP4のGPU batching最適化。
+4. Phase 79: [既存最適化の共通化・条件付き既定採用](../../../../archive/2026/09/1-10/phase79-common-optimization.md)。
+5. Phase 80: static FP8 KV、MTP、長めの実入力、CLI/APIを含む実用closeout。
+6. Phase 81: 他精度の残る単一要求最適化。
+7. Phase 82: NVFP4のGPU batching最適化。
 
-Phase 76〜79の途中で一般的なFP8 artifact互換、vision、tensor parallel、continuous batchingへscopeを
+Phase 76〜80の途中で一般的なFP8 artifact互換、vision、tensor parallel、continuous batchingへscopeを
 広げない。Qwen3.8 artifact内に実在する限定FP8 recipeは対象modelを動かすために扱うが、これを汎用FP8対応とは呼ばない。
 
 ## 固定する対象artifact
@@ -65,7 +75,7 @@ vision tower、MTP 15 tensorなどはBF16または非量子化parameterとして
 実装済みの基盤範囲は、固定revisionのconfig/index/header identity検証、main/MTP safetensorsの範囲検証、
 NVFP4 168本・FP8 233本・BF16を含む1199論理tensorのinventory、直接source load plan、mixed graph、
 FP8 BF16-channel-scaleのF32 resident化、NVFP4のvalue/block/global-scale uploadである。
-CLIのsafetensors直接指定、static FP8 KVのscale materialization、MTP接続はPhase 79の実用closeoutへ残す。
+CLIのsafetensors直接指定、static FP8 KVのscale materialization、MTP接続はPhase 80の実用closeoutへ残す。
 実モデルの初期GPU smokeはPhase 76〜78でFP16 KVを使って完了している。
 
 基盤検証は `cargo check`、`cargo test -p sllm-core --lib`（532 passed、20 ignored）、
@@ -111,7 +121,7 @@ R9700の全GPU可視physical index 2はHIP最小kernelでも`invalid image`（gf
 
 - exact artifactからGGUFを生成し、全使用tensorのrole、shape、dtype、scale、range、hashをfail-closedに検証する。
 - NVFP4 168本、FP8 233本、BF16が意図したproviderへ入り、weight側のBF16展開や別precision fallbackが0である。
-  static FP8 KVのmaterializationはPhase 79のcloseout条件とし、Phase 76〜78ではFP16 KVを明示的rollbackとして使う。
+  static FP8 KVのmaterializationはPhase 80のcloseout条件とし、Phase 76〜78ではFP16 KVを明示的rollbackとして使う。
 - 非整列境界を含むoperator oracleと、固定promptのlogit/token replayを通す。
 - R9700とV620でsingle GPU residentとなり、GTT spillなしでbounded single-request generationとcleanupを完了する。
 - target別baseline profileからPhase 77の上位bottleneckを確定する。
@@ -1203,7 +1213,11 @@ HIP device orderingと`rocm-smi` orderingは一致しないため、既存のR97
   QKV activation共有の追加効果もGDN実測比例の推定では1%未満であり、上限の証明ではない。
   次の調査候補はNVFP4 scaleだけのexact FP16事前展開で、重複履歴と追加容量の確認は未完了。
 
-## Phase 79: 実用closeout
+## Phase 79: 共通化・条件付き既定採用
+
+[専用計画](../../../../archive/2026/09/1-10/phase79-common-optimization.md)を正本とする。
+
+## Phase 80: 実用closeout
 
 - artifactのstatic FP8 KVをappend、full attention、context growthへ直接接続し、FP16 mirrorを作らない。
 - target-only逐次decodeが安定した後で、BF16 MTP companionを追加する。width 1〜3のdraft、逐次accept/reject、
@@ -1212,28 +1226,28 @@ HIP device orderingと`rocm-smi` orderingは一致しないため、既存のR97
 - 32 GB級deviceでmodel、MTP、KV、workspaceを収め、GTT spillとCPU/backend fallbackを許さない。
 - visionはこのcloseoutをblockしない。text target達成後の独立機能項目とする。
 
-## Phase 80: 他精度の単一要求最適化
+## Phase 81: 他精度の単一要求最適化
 
-Phase 79完了後にだけ、次の順で残件を閉じる。
+Phase 80完了後にだけ、次の順で残件を閉じる。
 
 1. MXFP8 W8A8 decode。ここで得たMXFP8 activation decodeを後続MXFP4 W4A8へ再利用する。
 2. MXFP6 W6A6 decode。MXFP8のtile/reduction骨格を使い、E3M2 ingressだけを独立評価する。
 3. MXFP4 W4A8 prefill/decode。weightはMXFP4 block32/E8M0、activationはMXFP8 E4M3 block32/E8M0とする。
 4. NVFP4 W4A16 decode残差と、必要なら既存prefill providerの追加改善。
 
-一般的なFP8 artifact互換は保留を維持する。Phase 76〜79のexact Qwen3.8 recipe対応を汎用化する作業はPhase 80へ
+一般的なFP8 artifact互換は保留を維持する。Phase 76〜80のexact Qwen3.8 recipe対応を汎用化する作業はPhase 81へ
 自動的に含めない。
 
-## Phase 81: NVFP4 batching
+## Phase 82: NVFP4 batching
 
-Phase 80完了後に開始する。最初はQwen3.8-27B NVFP4 W4A4へ限定する。
+Phase 81完了後に開始する。最初はQwen3.8-27B NVFP4 W4A4へ限定する。
 
 1. 同一decode stepのB=`2/4/8`でactivation pack、weight tile、scale loadをrequest間共有し、単一要求TPOTとaggregate throughputを測る。
 2. Phase 26のhost planningを再利用し、GPU B>1 executionへ接続する。単一要求providerを暗黙にB>1へ流用しない。
 3. decode-only batchingを成立させた後、prefill/decode混在、continuous admission、cancellation、KV ownershipへ進む。
 4. fairness、p50/p99 latency、aggregate tok/s、resident/request workspace、OOM admissionを別指標として記録する。
 
-tensor parallel、multi-GPU、RDMAはPhase 81へ含めず、batchingと通信最適化を同時に導入しない。
+tensor parallel、multi-GPU、RDMAはPhase 82へ含めず、batchingと通信最適化を同時に導入しない。
 
 ## 共通停止・再計画条件
 

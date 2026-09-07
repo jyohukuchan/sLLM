@@ -1406,6 +1406,8 @@ pub enum Qwen38ProjectionPackRoleV1 {
 pub struct Qwen38ProjectionPackContractV1 {
     role: Qwen38ProjectionPackRoleV1,
     input_global_scale_f32_bits: u32,
+    hidden_size: u32,
+    intermediate_size: u32,
 }
 
 impl Qwen38ProjectionPackContractV1 {
@@ -1417,15 +1419,41 @@ impl Qwen38ProjectionPackContractV1 {
     pub const GDN_Z_WIDTH: u32 = 6_144;
 
     pub fn nvfp4_mlp_gate_up(input_global_scale_f32_bits: u32) -> Result<Self, OpError> {
+        Self::nvfp4_mlp_gate_up_with_shape(
+            Self::HIDDEN_SIZE,
+            Self::MLP_INTERMEDIATE_SIZE,
+            input_global_scale_f32_bits,
+        )
+    }
+
+    /// Builds the shared NVFP4 gate/up contract for any row-major pair whose
+    /// activation K and output N satisfy the native provider alignment rules.
+    /// The legacy constructor above remains the Qwen3.8 convenience form.
+    pub fn nvfp4_mlp_gate_up_with_shape(
+        hidden_size: u32,
+        intermediate_size: u32,
+        input_global_scale_f32_bits: u32,
+    ) -> Result<Self, OpError> {
         let scale = f32::from_bits(input_global_scale_f32_bits);
-        if !scale.is_finite() || scale <= 0.0 {
-            return Err(OpError::Qwen38ProjectionPackInvalidInputGlobalScale {
-                bits: input_global_scale_f32_bits,
+        if hidden_size == 0
+            || intermediate_size == 0
+            || hidden_size % 16 != 0
+            || !scale.is_finite()
+            || scale <= 0.0
+        {
+            return Err(if !scale.is_finite() || scale <= 0.0 {
+                OpError::Qwen38ProjectionPackInvalidInputGlobalScale {
+                    bits: input_global_scale_f32_bits,
+                }
+            } else {
+                OpError::Qwen38ProjectionPackShapeMismatch
             });
         }
         Ok(Self {
             role: Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp,
             input_global_scale_f32_bits,
+            hidden_size,
+            intermediate_size,
         })
     }
 
@@ -1437,6 +1465,8 @@ impl Qwen38ProjectionPackContractV1 {
             | Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ => Some(Self {
                 role,
                 input_global_scale_f32_bits: 0,
+                hidden_size: Self::HIDDEN_SIZE,
+                intermediate_size: Self::MLP_INTERMEDIATE_SIZE,
             }),
         }
     }
@@ -1447,6 +1477,14 @@ impl Qwen38ProjectionPackContractV1 {
 
     pub const fn input_global_scale_f32_bits(self) -> u32 {
         self.input_global_scale_f32_bits
+    }
+
+    pub const fn hidden_size(self) -> u32 {
+        self.hidden_size
+    }
+
+    pub const fn intermediate_size(self) -> u32 {
+        self.intermediate_size
     }
 }
 
@@ -2409,8 +2447,8 @@ fn validate_qwen38_projection_pack2(
     }
     let expected_widths = match contract.role() {
         Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp | Qwen38ProjectionPackRoleV1::Fp8MlpGateUp => [
-            Qwen38ProjectionPackContractV1::MLP_INTERMEDIATE_SIZE as usize,
-            Qwen38ProjectionPackContractV1::MLP_INTERMEDIATE_SIZE as usize,
+            contract.intermediate_size() as usize,
+            contract.intermediate_size() as usize,
         ],
         Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ => [
             Qwen38ProjectionPackContractV1::GDN_QKV_WIDTH as usize,
@@ -2421,7 +2459,7 @@ fn validate_qwen38_projection_pack2(
         }
     };
     let m = activation.shape().first().copied().unwrap_or(0);
-    let hidden = Qwen38ProjectionPackContractV1::HIDDEN_SIZE as usize;
+    let hidden = contract.hidden_size() as usize;
     if activation.shape() != [m, hidden]
         || outputs
             .iter()
@@ -2960,6 +2998,33 @@ mod qwen38_projection_pack_tests {
                 512.0_f32.to_bits()
             );
         }
+    }
+
+    #[test]
+    fn nvfp4_pair_contract_accepts_generic_aligned_hidden_and_intermediate() {
+        let hidden = 3_840;
+        let intermediate = 15_360;
+        let descriptor = SemanticOpDescriptor::new_qwen38_projection_pack2(
+            vec![
+                TensorView::contiguous(DType::Bf16, &[1, hidden]).unwrap(),
+                nvfp4_view(&[intermediate, hidden]),
+                nvfp4_view(&[intermediate, hidden]),
+            ],
+            vec![
+                TensorView::contiguous(DType::Bf16, &[1, intermediate]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[1, intermediate]).unwrap(),
+            ],
+            Qwen38ProjectionPackContractV1::nvfp4_mlp_gate_up_with_shape(
+                hidden as u32,
+                intermediate as u32,
+                512.0_f32.to_bits(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let contract = descriptor.qwen38_projection_pack_contract().unwrap();
+        assert_eq!(contract.hidden_size(), hidden as u32);
+        assert_eq!(contract.intermediate_size(), intermediate as u32);
     }
 
     #[test]

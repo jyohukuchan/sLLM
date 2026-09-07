@@ -2125,6 +2125,9 @@ struct ElementwisePlan final : QuarantineNode {
   uint64_t matmul_context_workspace_bytes = 0U;
   sllm_matmul_kernel::KernelVariant matmul_kernel_variant =
       sllm_matmul_kernel::KernelVariant::Baseline;
+  sllm_matmul_kernel::SelectorDecision matmul_selector_decision = {
+      sllm_matmul_kernel::KernelVariant::Baseline, true, true, true,
+      sllm_matmul_kernel::kSelectorReasonBaseline};
   std::optional<sllm_lowp::PreparedProviderPlan> matmul_provider_plan;
   Fp8LtPlan *fp8_lt_plan;
   bool release_active;
@@ -12111,6 +12114,28 @@ extern "C" uint32_t sllm_test_matmul_prepared_kernel_id(
       lookup<ElementwisePlan>(raw_plan, HandleKind::MatmulPlan);
   return plan == nullptr ? 0U
                          : static_cast<uint32_t>(plan->matmul_kernel_variant);
+}
+
+extern "C" uint32_t sllm_test_matmul_prepared_selector_audit(
+    const sllm_matmul_plan_t *const raw_plan, uint32_t *const supported,
+    uint32_t *const enabled, uint32_t *const adopted,
+    const char **const reason) noexcept {
+  if (supported == nullptr || enabled == nullptr || adopted == nullptr ||
+      reason == nullptr) {
+    return 0U;
+  }
+  std::lock_guard<std::mutex> registry_lock(registry_mutex);
+  const ElementwisePlan *const plan =
+      lookup<ElementwisePlan>(raw_plan, HandleKind::MatmulPlan);
+  if (plan == nullptr) {
+    return 0U;
+  }
+  const auto &decision = plan->matmul_selector_decision;
+  *supported = decision.supported ? 1U : 0U;
+  *enabled = decision.enabled ? 1U : 0U;
+  *adopted = decision.adopted ? 1U : 0U;
+  *reason = decision.reason;
+  return static_cast<uint32_t>(decision.variant);
 }
 
 extern "C" uint32_t sllm_test_matmul_prepared_provider_semantics(

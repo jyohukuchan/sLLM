@@ -229,6 +229,40 @@ attentionとKV appendはtransientを維持する。decode tailはpublished atten
 state-publicationとterminal-readbackの両boundary完了後だけ長さを公開する。greedyではArgmaxだけを返し、sampling時だけ最終
 BF16 logits rowをbounded chunkでreadbackしてからtransactionをcommitする。
 
+共通prepared実行層は`PreparedCompletionMode`、`ExecutionSegment`、graph replay state、semantic cacheのdynamic identityを所有する。
+Gemma／Qwen adapterはimmutable graphからdescriptorとstate submissionを作り、model固有のweight identity、topology、artifact
+validation、KV encoding、quant scale、adapter／MTP／multimodal scopeを引き続き検証する。共通層はmodel fingerprintやtensor名を
+共有条件に使わず、adapterが渡すencoding-compatible predicateとexact descriptor、buffer view、state/lifetime identityだけで
+prepared entryを再利用する。`SLLM_PREPARED_DEFERRED_COMPLETION=1`はHIPの`gfx1030`／`gfx1201`で、compatible encoding、text-only、
+MTPなし、adapterなしのrequestだけに共通deferred completionを選ぶ。値が未設定、`0`、または不正ならprofiled completionを使う。
+Qwenの既存gfx1030 text defaultと、明示された`SLLM_QWEN_DEFERRED_COMPLETION`の`0`／`1`／不正値は互換性のため優先し、
+共通値はそれ以外のFP16／MXFP8 graphへ追加選択肢を与える。Qwen固有のgraph／artifact opt-inはこの共通制御の外側に残り、
+共通selectorが対象外modelを誤ってlowerしない。
+Gemmaは実際のopaque KV descriptorがFP16またはOCP MXFP8で、MTP hidden出力を要求しない場合だけこの判定を通し、static tensor FP8 KV、
+MTP、その他の範囲外形式はprofiledへ戻す。deferred modeがqueueのcompletion modeを変更するため、Gemma requestはresident queueを
+共有せずrequest専用queueを所有する。
+
+projection共有には`SLLM_PREPARED_PROJECTION_SHARING`を共通rollbackとして使う。未設定または`1`が既定の有効状態で、`0`は
+Gemma／QwenのProjectionPack loweringだけを無効にし、普通の二つのMatmul、prepared completion、graph replay、state validationを
+変更しない。不正値はfail-closedで無効扱いにする。Qwenの既存`SLLM_QWEN38_NVFP4_PROJECTION_PACK2`と
+`SLLM_QWEN38_FP8_GDN_PROJECTION_PACK2`は引き続きliteral `1`のtarget／artifact opt-inを要求し、共通値`0`がその選択を上書きする。
+GemmaのW4A4 gate/up packはdecodeの`M=1`で、verified GGUFまたは同等のfirst-class quantized source、U8 W4A4 weight、同じ
+BF16 activation view、同じ`[N,K]` shape、`K % 16 == 0`、非zero `N`、両weightのverified input-global scale bits一致を全て満たした
+場合だけlowerする。direct NVFP4 sidecar、prefill `M>1`、scale欠落／不一致、shape／layout／artifact不一致は普通のMatmulへ戻る。
+layoutはcandidate数、selected prepared pack submission数、scale不一致数、共通override状態を`Gemma4ExecutionAudit`へ転記するため、
+実modelのscale不一致でpackされなかった場合もGPU collectorから区別できる。
+
+| 実行条件 | FP16 | MXFP8 |
+| --- | --- | --- |
+| prepared completion／graph replay | 共通制御をencoding-compatibleなadapterで利用 | 同じ共通制御を利用。ただしdescriptorとscale／state identityを一致検証 |
+| Qwen KV append-attention chain | 全stateがFP16の候補だけchainを許可 | chainは選択せず、通常append／fence／attentionを維持 |
+| semantic projection pair | 共通predicateでactivation viewとweight／output shapeを検証 | 同じpredicateでmetadata共有を検証。新しいMXFP8 ProjectionPack kernelは作らない |
+| native projection pack | 既存target／artifact opt-inとABI／shape検証の範囲 | MXFP8のpack loweringは対象外。普通の低bit linearを使う |
+| state／lifetime | checked view、generation、completion boundaryを保持 | 同じ。quant scale planeとencodingもprepared identityに含める |
+
+この表はRust側の選択契約を示すもので、実GPUの数値一致や性能を保証しない。GPUでのGemma default／共通override比較と
+FP16／MXFP8のcorrectness・性能証拠はtarget、artifact、exact flagを記録したcollector結果を正とする。
+
 Gemma 4 26B-A4B MoEは別の`Gemma4MoeResidentModel`として、30 layerのdirect weight 567 rangeとlayer単位にpackした
 30 expert blobを一度だけresident化する。requestは25 sliding layerと5 full layerのopaque static E4M3 KV stateを保持し、
 sliding stateの物理ringは`min(logical capacity, window + 1)`、windowは1,024とする。最初の最大1,024-token prefill後は

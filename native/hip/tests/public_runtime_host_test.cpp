@@ -53,6 +53,9 @@ extern "C" void
 sllm_test_minimax_m3_moe_route_device_status(int32_t status) noexcept;
 extern "C" uint32_t sllm_test_matmul_prepared_kernel_id(
     const sllm_matmul_plan_t *raw_plan) noexcept;
+extern "C" uint32_t sllm_test_matmul_prepared_selector_audit(
+    const sllm_matmul_plan_t *raw_plan, uint32_t *supported, uint32_t *enabled,
+    uint32_t *adopted, const char **reason) noexcept;
 extern "C" uint32_t
 sllm_test_matmul_prepared_provider_semantics(const sllm_matmul_plan_t *raw_plan,
                                              uint32_t *provider, uint32_t *tile,
@@ -4034,31 +4037,39 @@ sllm_matmul_dispatch_info_t matmul_dispatch_info() {
   return info;
 }
 
-sllm_qwen38_projection_pack2_desc_t qwen38_projection_pack2_descriptor(
+sllm_qwen38_projection_pack2_desc_t qwen38_projection_pack2_nvfp4_descriptor(
     const sllm_buffer_t *const activation,
     const std::array<sllm_buffer_t *, 2> &weights,
-    const std::array<sllm_buffer_t *, 2> &outputs) {
-  constexpr uint64_t kHidden = 5120U;
-  constexpr uint64_t kIntermediate = 17408U;
+    const std::array<sllm_buffer_t *, 2> &outputs, const uint64_t k,
+    const uint64_t gate_n, const uint64_t up_n) {
   sllm_qwen38_projection_pack2_desc_t descriptor{};
   descriptor.struct_size = sizeof(descriptor);
   descriptor.abi_version = SLLM_HIP_ABI_VERSION;
   descriptor.op_version = SLLM_HIP_QWEN38_PROJECTION_PACK2_VERSION;
   descriptor.role = SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_NVFP4_MLP_GATE_UP;
   descriptor.input_global_scale_f32_bits = UINT32_C(0x44000000); // 512.0F
-  descriptor.activation = matmul_binding(activation, 0U, 1U, kHidden);
+  descriptor.activation = matmul_binding(activation, 0U, 1U, k);
   descriptor.gate_weight =
-      matmul_binding(weights[0], 0U, kIntermediate, kHidden);
-  descriptor.up_weight = matmul_binding(weights[1], 0U, kIntermediate, kHidden);
+      matmul_binding(weights[0], 0U, gate_n, k);
+  descriptor.up_weight = matmul_binding(weights[1], 0U, up_n, k);
   descriptor.gate_weight.dtype = SLLM_TENSOR_DTYPE_U8;
   descriptor.up_weight.dtype = SLLM_TENSOR_DTYPE_U8;
   descriptor.gate_weight.encoding =
       SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
   descriptor.up_weight.encoding =
       SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
-  descriptor.gate_output = matmul_binding(outputs[0], 0U, 1U, kIntermediate);
-  descriptor.up_output = matmul_binding(outputs[1], 0U, 1U, kIntermediate);
+  descriptor.gate_output = matmul_binding(outputs[0], 0U, 1U, gate_n);
+  descriptor.up_output = matmul_binding(outputs[1], 0U, 1U, up_n);
   return descriptor;
+}
+
+sllm_qwen38_projection_pack2_desc_t qwen38_projection_pack2_descriptor(
+    const sllm_buffer_t *const activation,
+    const std::array<sllm_buffer_t *, 2> &weights,
+    const std::array<sllm_buffer_t *, 2> &outputs) {
+  return qwen38_projection_pack2_nvfp4_descriptor(
+      activation, weights, outputs, UINT64_C(5120), UINT64_C(17408),
+      UINT64_C(17408));
 }
 
 sllm_qwen38_projection_pack2_dispatch_info_t
@@ -4351,6 +4362,123 @@ bool qwen38_projection_pack2_public_contract() {
   restore_environment();
   return valid && fake_hip::live_events() == 0U &&
          fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
+bool qwen38_projection_pack2_nvfp4_generic_contract() {
+  constexpr uint64_t k = UINT64_C(3840);
+  constexpr uint64_t gate_n = UINT64_C(15360);
+  constexpr uint64_t up_n = UINT64_C(7680);
+  constexpr uint64_t invalid_k = k - UINT64_C(1);
+  constexpr uint64_t mismatch_k = k + UINT64_C(16);
+  const auto weight_bytes = [](const uint64_t width,
+                               const uint64_t inner_k) constexpr {
+    const uint64_t values = width * (inner_k / UINT64_C(2));
+    const uint64_t scales = width * (inner_k / UINT64_C(16));
+    return ((values + scales + UINT64_C(3)) & ~UINT64_C(3)) + UINT64_C(8);
+  };
+  const uint64_t max_weight_bytes =
+      weight_bytes(gate_n, mismatch_k) > weight_bytes(up_n, mismatch_k)
+          ? weight_bytes(gate_n, mismatch_k)
+          : weight_bytes(up_n, mismatch_k);
+  const auto run_for_target = [&](const char *const target) {
+    fake_hip::reset();
+    fake_hip::set_gcn_arch_name(target);
+    sllm_context_t *context = nullptr;
+    sllm_queue_t *queue = nullptr;
+    sllm_buffer_t *activation = nullptr;
+    std::array<sllm_buffer_t *, 2> weights{};
+    std::array<sllm_buffer_t *, 2> outputs{};
+    sllm_qwen38_projection_pack2_plan_t *plan = nullptr;
+    sllm_completion_t *completion = nullptr;
+    Error error;
+    bool valid = create_context_for_arch(target, &context) &&
+                 create_queue(context, &queue) &&
+                 create_buffer_sized(context, k * sizeof(uint16_t),
+                                     &activation) &&
+                 create_buffer_sized(context, max_weight_bytes, &weights[0]) &&
+                 create_buffer_sized(context, max_weight_bytes, &weights[1]) &&
+                 create_buffer_sized(context, gate_n * sizeof(uint16_t),
+                                     &outputs[0]) &&
+                 create_buffer_sized(context, up_n * sizeof(uint16_t),
+                                     &outputs[1]);
+    if (valid) {
+      const auto descriptor = qwen38_projection_pack2_nvfp4_descriptor(
+          activation, weights, outputs, k, gate_n, up_n);
+      valid = expect_status(sllm_qwen38_projection_pack2_prepare(
+                                context, &descriptor, &plan, &error.sink),
+                            SLLM_STATUS_OK,
+                            "Qwen3.8 generic NVFP4 prepare", error) &&
+              plan != nullptr;
+    }
+    if (valid) {
+      auto info = qwen38_projection_pack2_dispatch_info();
+      valid = expect_status(sllm_qwen38_projection_pack2_execute(
+                                plan, queue, &completion, &info, &error.sink),
+                            SLLM_STATUS_OK,
+                            "Qwen3.8 generic NVFP4 execute", error) &&
+              completion != nullptr && info.m == 1U && info.k == k &&
+              info.n == gate_n && info.output_elements == gate_n + up_n &&
+              info.workspace_bytes == k / UINT64_C(2) + k / UINT64_C(16) &&
+              info.grid_size_x != 0U;
+      valid = query_completion(completion, SLLM_STATUS_OK) &&
+              release_completion(&completion) && valid;
+    }
+    if (plan != nullptr) {
+      valid = expect_status(
+                  sllm_qwen38_projection_pack2_plan_release(
+                      &plan, &error.sink),
+                  SLLM_STATUS_OK, "Qwen3.8 generic NVFP4 plan release",
+                  error) &&
+              valid;
+    }
+
+    if (valid) {
+      const auto invalid_descriptor = qwen38_projection_pack2_nvfp4_descriptor(
+          activation, weights, outputs, invalid_k, gate_n, up_n);
+      valid = expect_status(
+                  sllm_qwen38_projection_pack2_prepare(
+                      context, &invalid_descriptor, &plan, &error.sink),
+                  SLLM_STATUS_UNSUPPORTED,
+                  "Qwen3.8 generic NVFP4 K boundary rejection", error) &&
+              plan == nullptr && valid;
+    }
+    if (valid) {
+      auto mismatch_descriptor = qwen38_projection_pack2_nvfp4_descriptor(
+          activation, weights, outputs, k, gate_n, up_n);
+      mismatch_descriptor.up_weight.shape[1] = mismatch_k;
+      mismatch_descriptor.up_weight.stride_elements[0] = mismatch_k;
+      valid = expect_status(
+                  sllm_qwen38_projection_pack2_prepare(
+                      context, &mismatch_descriptor, &plan, &error.sink),
+                  SLLM_STATUS_SHAPE_MISMATCH,
+                  "Qwen3.8 generic NVFP4 K mismatch rejection", error) &&
+              plan == nullptr && valid;
+    }
+    if (completion != nullptr)
+      valid = release_completion(&completion) && valid;
+    if (plan != nullptr)
+      valid = expect_status(
+                  sllm_qwen38_projection_pack2_plan_release(
+                      &plan, &error.sink),
+                  SLLM_STATUS_OK, "Qwen3.8 generic NVFP4 cleanup release",
+                  error) &&
+              valid;
+    for (sllm_buffer_t *&output : outputs)
+      valid = release_buffer(&output) && valid;
+    for (sllm_buffer_t *&weight : weights)
+      valid = release_buffer(&weight) && valid;
+    valid = release_buffer(&activation) && valid;
+    if (queue != nullptr)
+      valid = release_queue(&queue) && valid;
+    if (context != nullptr)
+      valid = release_context(&context) && valid;
+    return valid && fake_hip::live_events() == 0U &&
+           fake_hip::live_streams() == 0U &&
+           fake_hip::live_allocations() == 0U;
+  };
+  const bool valid = run_for_target("gfx1030") && run_for_target("gfx1201");
+  fake_hip::set_gcn_arch_name("gfx1201");
+  return valid;
 }
 
 bool qwen38_projection_pack2_fp8_gdn_public_contract() {
@@ -6518,7 +6646,9 @@ bool matmul_fp8_outer_decode_selector_contract() {
   valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
   unsetenv(variables[2]);
   setenv(variables[4], "yes", 1);
-  valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
+  valid = valid &&
+          select(1U, 5120U, 17408U) ==
+              KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32;
   unsetenv(variables[4]);
 
   setenv(variables[2], "1", 1);
@@ -6530,6 +6660,23 @@ bool matmul_fp8_outer_decode_selector_contract() {
 
   setenv(variables[0], "yes", 1);
   valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
+  unsetenv(variables[0]);
+
+  // The adopted dword8 default is present only at its lower K/N boundary;
+  // an explicit zero on either direct candidate rolls back to emulation.
+  valid = valid &&
+          select(1U, 127U, 64U) == KernelVariant::Fp8Emulation &&
+          select(1U, 128U, 63U) == KernelVariant::Fp8Emulation &&
+          select(1U, 128U, 64U) ==
+              KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
+          select(1U, 192U, 65U) ==
+              KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32;
+  setenv(variables[0], "0", 1);
+  valid = valid && select(1U, 128U, 64U) == KernelVariant::Fp8Emulation;
+  unsetenv(variables[0]);
+  setenv(variables[1], "0", 1);
+  valid = valid && select(1U, 128U, 64U) == KernelVariant::Fp8Emulation;
+  unsetenv(variables[1]);
 
   unsetenv(variables[0]);
   unsetenv(variables[1]);
@@ -6553,7 +6700,10 @@ bool matmul_fp8_outer_decode_selector_contract() {
           KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
       select(1U, 5120U, 248320U) ==
           KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
-      select(1U, 5120U, 12289U) == KernelVariant::Fp8Emulation &&
+      // The generic dword8 candidate accepts every nonzero N in the existing
+      // half2 K-aligned decode shape; only adoption is gated by N >= 64.
+      select(1U, 5120U, 12289U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
       select(2U, 5120U, 17408U) ==
           KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
       select(1U, 5120U, 17408U, "gfx1201") == KernelVariant::Fp8Native &&
@@ -6606,7 +6756,9 @@ bool matmul_fp8_outer_decode_selector_contract() {
   valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
   unsetenv(variables[2]);
   setenv(variables[3], "yes", 1);
-  valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
+  valid = valid &&
+          select(1U, 5120U, 17408U) ==
+              KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32;
   unsetenv(variables[3]);
   setenv(variables[0], "1", 1);
 
@@ -6667,8 +6819,19 @@ bool matmul_fp8_outer_decode_selector_contract() {
       uint32_t prepared_provider = 0U;
       uint32_t prepared_tile = 0U;
       uint32_t prepared_inner_product = 0U;
+      uint32_t selector_supported = 0U;
+      uint32_t selector_enabled = 0U;
+      uint32_t selector_adopted = 0U;
+      const char *selector_reason = nullptr;
       valid =
           sllm_test_matmul_prepared_kernel_id(plan) == 66U &&
+          sllm_test_matmul_prepared_selector_audit(
+              plan, &selector_supported, &selector_enabled, &selector_adopted,
+              &selector_reason) == 66U &&
+          selector_supported == 1U && selector_enabled == 1U &&
+          selector_adopted == 0U && selector_reason != nullptr &&
+          std::strcmp(selector_reason,
+                      "explicit force selected supported candidate") == 0 &&
           sllm_test_matmul_prepared_provider_semantics(
               plan, &prepared_provider, &prepared_tile,
               &prepared_inner_product) == 1U &&
@@ -6680,7 +6843,7 @@ bool matmul_fp8_outer_decode_selector_contract() {
           prepared_inner_product ==
               static_cast<uint32_t>(
                   sllm_lowp::InnerProduct::E4M3Fp16Dot2Fp32) &&
-          valid;
+      valid;
 
       unsetenv(variables[0]);
       setenv(variables[1], "1", 1);
@@ -6723,8 +6886,20 @@ bool matmul_fp8_outer_decode_selector_contract() {
       uint32_t lut_provider = 0U;
       uint32_t lut_tile = 0U;
       uint32_t lut_inner_product = 0U;
+      uint32_t lut_selector_supported = 0U;
+      uint32_t lut_selector_enabled = 0U;
+      uint32_t lut_selector_adopted = 0U;
+      const char *lut_selector_reason = nullptr;
       valid =
           sllm_test_matmul_prepared_kernel_id(lut_plan) == 82U &&
+          sllm_test_matmul_prepared_selector_audit(
+              lut_plan, &lut_selector_supported, &lut_selector_enabled,
+              &lut_selector_adopted, &lut_selector_reason) == 82U &&
+          lut_selector_supported == 1U && lut_selector_enabled == 1U &&
+          lut_selector_adopted == 0U && lut_selector_reason != nullptr &&
+          std::strcmp(lut_selector_reason,
+                      "explicit force selected supported shape-specific "
+                      "candidate") == 0 &&
           sllm_test_matmul_prepared_provider_semantics(
               lut_plan, &lut_provider, &lut_tile, &lut_inner_product) == 1U &&
           lut_provider ==
@@ -7063,7 +7238,8 @@ bool matmul_fp8_outer_f16_staging_selector_and_lease_contract() {
               KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
           select(128U, 5120U, 248320U) ==
               KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
-          select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation &&
+          select(1U, 5120U, 17408U) ==
+              KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
           select(128U, 16U, 16U, "gfx1201") == KernelVariant::Fp8Native &&
           select(128U, 16U, 16U, "gfx942:sramecc+:xnack-") ==
               KernelVariant::Fp8Native &&
@@ -7357,8 +7533,16 @@ bool matmul_nvfp4_w4a4_selector_contract() {
     return sllm_matmul_kernel::select_nvfp4_w4a4_variant(m, k, n, target);
   };
   bool valid =
-      select(1U, 5120U) == KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 5120U) == KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
       select(1U, 15U) == KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 1024U, "gfx1030", 1024U) ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      select(1U, 1008U, "gfx1030", 1024U) ==
+          KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 1024U, "gfx1030", 1023U) ==
+          KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 1024U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4Decode &&
       select(2U, 5120U) == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
       select(2U, 5120U, "gfx1201") ==
           KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
@@ -7374,6 +7558,11 @@ bool matmul_nvfp4_w4a4_selector_contract() {
           80U &&
       static_cast<uint32_t>(KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32) ==
           81U;
+
+  setenv(variables[6], "0", 1);
+  valid = valid && select(1U, 5120U, "gfx1030", 17408U) ==
+                       KernelVariant::Nvfp4W4A4Decode;
+  unsetenv(variables[6]);
 
   // ID69 is exact gfx1201 and M>1/K16-aligned only.  Invalid target/shape
   // requests must fall through to the existing provider.
@@ -7921,6 +8110,260 @@ bool matmul_nvfp4_w4a4_selector_contract() {
           fake_hip::live_allocations() == 0U && valid;
   unsetenv(variables[0]);
   unsetenv(variables[12]);
+  restore();
+  return valid;
+}
+
+bool matmul_selector_decision_contract() {
+  constexpr std::array<const char *const, 16> variables = {
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030Half2Environment,
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030Dword8Environment,
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030ActivationSharedEnvironment,
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030LdsLutEnvironment,
+      sllm_matmul_kernel::kNvfp4W4A4DecodeWave4Column32Environment,
+      sllm_matmul_kernel::kNvfp4W4A4DecodeColumns128Environment,
+      sllm_matmul_kernel::kNvfp4W4A4DecodeActivationSharedEnvironment,
+      sllm_matmul_kernel::kNvfp4W4A4DecodeScaleLutEnvironment,
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A",
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8",
+      "SLLM_FP8_OUTER_PREFILL_FORCE_BASELINE",
+      sllm_matmul_kernel::kFp8OuterDecodeBaselineEnvironment,
+      sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201Wmma128x32Environment,
+      sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201F16StagingEnvironment,
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA",
+      "SLLM_NVFP4_W4A4_FORCE_BASELINE"};
+  std::array<bool, variables.size()> was_present{};
+  std::array<std::string, variables.size()> old_values{};
+  for (std::size_t index = 0U; index < variables.size(); ++index) {
+    const char *const value = std::getenv(variables[index]);
+    was_present[index] = value != nullptr;
+    old_values[index] = value != nullptr ? value : "";
+    unsetenv(variables[index]);
+  }
+  const auto restore = [&]() {
+    for (std::size_t index = 0U; index < variables.size(); ++index) {
+      if (was_present[index]) {
+        setenv(variables[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(variables[index]);
+      }
+    }
+  };
+  using sllm_matmul_kernel::KernelVariant;
+  bool valid = true;
+
+  const auto fp8_baseline = sllm_matmul_kernel::select_fp8_outer_decision(
+      1U, 64U, 33U, "gfx1030");
+  valid = valid && fp8_baseline.variant == KernelVariant::Fp8Emulation &&
+          fp8_baseline.supported && fp8_baseline.enabled &&
+          fp8_baseline.adopted &&
+          std::strcmp(fp8_baseline.reason, "baseline selected; optimized "
+                                         "candidate is not adopted") == 0;
+
+  const auto fp8_adopted = sllm_matmul_kernel::select_fp8_outer_decision(
+      1U, 128U, 64U, "gfx1030");
+  const auto fp8_k_adoption_boundary =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 127U, 64U, "gfx1030");
+  const auto fp8_n_adoption_boundary =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 128U, 63U, "gfx1030");
+  valid = valid &&
+          fp8_adopted.variant ==
+              KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
+          fp8_adopted.supported && fp8_adopted.enabled && fp8_adopted.adopted &&
+          std::strcmp(fp8_adopted.reason,
+                      "adopted default for target and shape") == 0 &&
+          fp8_k_adoption_boundary.variant == KernelVariant::Fp8Emulation &&
+          fp8_k_adoption_boundary.adopted &&
+          fp8_n_adoption_boundary.variant == KernelVariant::Fp8Emulation &&
+          fp8_n_adoption_boundary.adopted;
+
+  setenv(variables[0], "0", 1);
+  const auto fp8_half2_off = sllm_matmul_kernel::select_fp8_outer_decision(
+      1U, 64U, 33U, "gfx1030");
+  valid = valid && fp8_half2_off.variant == KernelVariant::Fp8Emulation &&
+          fp8_half2_off.adopted &&
+          std::strcmp(fp8_half2_off.reason,
+                      "baseline selected; optimized candidate flag is off") ==
+              0;
+  unsetenv(variables[0]);
+
+  setenv(variables[1], "0", 1);
+  const auto fp8_dword8_off = sllm_matmul_kernel::select_fp8_outer_decision(
+      1U, 128U, 64U, "gfx1030");
+  valid = valid && fp8_dword8_off.variant == KernelVariant::Fp8Emulation &&
+          fp8_dword8_off.adopted &&
+          std::strcmp(fp8_dword8_off.reason,
+                      "baseline selected; optimized candidate flag is off") ==
+              0;
+  unsetenv(variables[1]);
+
+  setenv(variables[0], "1", 1);
+  const auto fp8_half2 = sllm_matmul_kernel::select_fp8_outer_decision(
+      1U, 64U, 33U, "gfx1030");
+  const auto fp8_half2_k_boundary =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 63U, 33U, "gfx1030");
+  valid = valid && fp8_half2.variant ==
+                      KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32 &&
+          fp8_half2.supported && fp8_half2.enabled && !fp8_half2.adopted &&
+          fp8_half2_k_boundary.variant == KernelVariant::Fp8Emulation &&
+          fp8_half2_k_boundary.adopted &&
+          std::strcmp(fp8_half2_k_boundary.reason,
+                      "baseline selected; requested candidate is unsupported "
+                      "for target or shape") == 0;
+  unsetenv(variables[0]);
+
+  setenv(variables[11], "1", 1);
+  const auto fp8_explicit_baseline =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx1030");
+  valid = valid && fp8_explicit_baseline.variant == KernelVariant::Fp8Emulation &&
+          !fp8_explicit_baseline.adopted &&
+          std::strcmp(fp8_explicit_baseline.reason,
+                      "explicit baseline override selected") == 0;
+  unsetenv(variables[11]);
+
+  setenv(variables[1], "1", 1);
+  const auto fp8_dword8 = sllm_matmul_kernel::select_fp8_outer_decision(
+      1U, 64U, 33U, "gfx1030");
+  valid = valid && fp8_dword8.variant ==
+                      KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
+          fp8_dword8.supported && fp8_dword8.enabled && !fp8_dword8.adopted;
+  unsetenv(variables[1]);
+
+  const auto fp8_native = sllm_matmul_kernel::select_fp8_outer_decision(
+      1U, 64U, 33U, "gfx1201");
+  const auto fp8_unknown = sllm_matmul_kernel::select_fp8_outer_decision(
+      1U, 64U, 33U, "gfx900");
+  valid = valid && fp8_native.variant == KernelVariant::Fp8Native &&
+          fp8_native.supported && fp8_native.enabled && fp8_native.adopted &&
+          fp8_unknown.variant == KernelVariant::Fp8Emulation &&
+          !fp8_unknown.supported;
+
+  const auto nvfp4_baseline =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 16U, 33U,
+                                                     "gfx1030");
+  const auto nvfp4_unaligned =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 15U, 33U,
+                                                     "gfx1030");
+  valid = valid && nvfp4_baseline.variant == KernelVariant::Nvfp4W4A4Decode &&
+          nvfp4_baseline.supported && nvfp4_baseline.enabled &&
+          nvfp4_baseline.adopted &&
+          nvfp4_unaligned.variant == KernelVariant::Nvfp4W4A4Decode &&
+          !nvfp4_unaligned.supported;
+
+  const auto nvfp4_adopted =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1024U, 1024U,
+                                                     "gfx1030");
+  const auto nvfp4_k_adoption_boundary =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1008U, 1024U,
+                                                     "gfx1030");
+  const auto nvfp4_n_adoption_boundary =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1024U, 1023U,
+                                                     "gfx1030");
+  valid = valid &&
+          nvfp4_adopted.variant == KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+          nvfp4_adopted.supported && nvfp4_adopted.enabled &&
+          nvfp4_adopted.adopted &&
+          std::strcmp(nvfp4_adopted.reason,
+                      "adopted default for target and shape") == 0 &&
+          nvfp4_k_adoption_boundary.variant == KernelVariant::Nvfp4W4A4Decode &&
+          nvfp4_k_adoption_boundary.supported &&
+          nvfp4_k_adoption_boundary.adopted &&
+          nvfp4_n_adoption_boundary.variant == KernelVariant::Nvfp4W4A4Decode &&
+          nvfp4_n_adoption_boundary.supported &&
+          nvfp4_n_adoption_boundary.adopted;
+
+  setenv(variables[4], "0", 1);
+  const auto nvfp4_wave4_off =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 16U, 33U,
+                                                     "gfx1030");
+  valid = valid && nvfp4_wave4_off.variant == KernelVariant::Nvfp4W4A4Decode &&
+          nvfp4_wave4_off.adopted &&
+          std::strcmp(nvfp4_wave4_off.reason,
+                      "baseline selected; optimized candidate flag is off") ==
+              0;
+  unsetenv(variables[4]);
+
+  setenv(variables[4], "0", 1);
+  const auto nvfp4_adopted_off =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1024U, 1024U,
+                                                     "gfx1030");
+  valid = valid && nvfp4_adopted_off.variant == KernelVariant::Nvfp4W4A4Decode &&
+          nvfp4_adopted_off.supported && nvfp4_adopted_off.enabled &&
+          nvfp4_adopted_off.adopted &&
+          std::strcmp(nvfp4_adopted_off.reason,
+                      "baseline selected; optimized candidate flag is off") ==
+              0;
+  unsetenv(variables[4]);
+
+  setenv(variables[4], "1", 1);
+  const auto nvfp4_wave4 =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 16U, 33U,
+                                                     "gfx1030");
+  const auto nvfp4_wave4_k_boundary =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 15U, 33U,
+                                                     "gfx1030");
+  valid = valid &&
+          nvfp4_wave4.variant == KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+          nvfp4_wave4.supported && nvfp4_wave4.enabled &&
+          !nvfp4_wave4.adopted &&
+          nvfp4_wave4_k_boundary.variant == KernelVariant::Nvfp4W4A4Decode &&
+          !nvfp4_wave4_k_boundary.supported &&
+          std::strcmp(nvfp4_wave4_k_boundary.reason,
+                      "baseline selected; requested candidate is unsupported "
+                      "for target or shape") == 0;
+  unsetenv(variables[4]);
+
+  setenv(variables[7], "1", 1);
+  const auto nvfp4_lut =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 5120U, 17408U,
+                                                     "gfx1201");
+  const auto nvfp4_lut_adjacent =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 17424U, 5120U,
+                                                     "gfx1201");
+  const auto nvfp4_lut_gemma =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 3840U, 15360U,
+                                                     "gfx1201");
+  valid = valid && nvfp4_lut.variant == KernelVariant::Nvfp4W4A4DecodeScaleLut &&
+          nvfp4_lut.supported && nvfp4_lut.enabled && !nvfp4_lut.adopted &&
+          std::strcmp(nvfp4_lut.reason,
+                      "explicit force selected supported shape-specific "
+                      "candidate") == 0 &&
+          nvfp4_lut_adjacent.variant == KernelVariant::Nvfp4W4A4Decode &&
+          nvfp4_lut_adjacent.supported &&
+          nvfp4_lut_gemma.variant == KernelVariant::Nvfp4W4A4DecodeScaleLut &&
+          nvfp4_lut_gemma.supported && nvfp4_lut_gemma.enabled;
+
+  setenv(variables[12], "1", 1);
+  const auto nvfp4_wmma128x32_fallback =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(513U, 48U, 33U,
+                                                     "gfx1201");
+  valid = valid &&
+          nvfp4_wmma128x32_fallback.variant ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+          nvfp4_wmma128x32_fallback.supported &&
+          nvfp4_wmma128x32_fallback.enabled;
+  unsetenv(variables[12]);
+
+  setenv(variables[13], "1", 1);
+  const auto nvfp4_f16_staging_fallback =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(127U, 5120U, 17408U,
+                                                     "gfx1201");
+  valid = valid &&
+          nvfp4_f16_staging_fallback.variant ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+          nvfp4_f16_staging_fallback.supported &&
+          nvfp4_f16_staging_fallback.enabled;
+  unsetenv(variables[13]);
+  unsetenv(variables[7]);
+
+  setenv(variables[8], "1", 1);
+  const auto nvfp4_dp4a =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(2U, 16U, 33U,
+                                                     "gfx1030");
+  valid = valid && nvfp4_dp4a.variant ==
+                      KernelVariant::Nvfp4W4A4PrefillDp4a64x64 &&
+          nvfp4_dp4a.supported && nvfp4_dp4a.enabled && !nvfp4_dp4a.adopted;
+
   restore();
   return valid;
 }
@@ -13308,6 +13751,10 @@ int main() {
     std::cerr << "Qwen3.8 projection-pack public contract test failed\n";
     return 1;
   }
+  if (!qwen38_projection_pack2_nvfp4_generic_contract()) {
+    std::cerr << "Qwen3.8 generic NVFP4 projection-pack contract test failed\n";
+    return 1;
+  }
   if (!qwen38_projection_pack2_fp8_gdn_public_contract()) {
     std::cerr
         << "Qwen3.8 FP8 GDN projection-pack public contract test failed\n";
@@ -13335,6 +13782,10 @@ int main() {
   }
   if (!matmul_nvfp4_w4a4_selector_contract()) {
     std::cerr << "matmul NVFP4 W4A4 selector contract test failed\n";
+    return 1;
+  }
+  if (!matmul_selector_decision_contract()) {
+    std::cerr << "matmul selector decision contract test failed\n";
     return 1;
   }
   if (!matmul_nvfp4_w4a4_activation_shared_lifetime_contract()) {

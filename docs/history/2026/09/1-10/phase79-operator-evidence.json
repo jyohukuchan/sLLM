@@ -1,0 +1,193 @@
+{
+  "schema": "phase79-operator-evidence-v1",
+  "created": "2026-09-07",
+  "scope": {
+    "kind": "operator_only",
+    "target": "gfx1030",
+    "raw_artifacts": "scratch stdout/stderr are not tracked; only SHA-256 pointers are recorded",
+    "identity": "draft/after-run hashes are evidence pointers and are not immutable final identity",
+    "model_evidence": "final model logits/token evidence is maintained separately by the main agent"
+  },
+  "common_after_run_sources": {
+    "native/hip/src/matmul_kernel.hip.cpp": "9ed70c5d17a952fca249488ba1bb4149abc9cb3a6aa9d05bb7900166a860493c",
+    "native/hip/src/matmul_kernel_internal.hpp": "1a6422c9a9126ae3ec7259c6c557782e9f1d41427429c416fef2c1f971021aa7",
+    "native/hip/src/qwen38_projection_pack_runtime.inc": "35cdf0a1c5834dff8e125646a79c3362b389f88eb92d78878c9456128a7c62ce",
+    "native/hip/src/graph_span_runtime.inc": "c8e770ec6a0c2cd1da5f96cb687eeb3515c6810609c4cab647badcf80d2af873",
+    "archive_observed_after_run": "e4c6bb73d739668a7fdcf750e8e078b2df04077d01b0aa440d4c51bed90d1fb9"
+  },
+  "runs": [
+    {
+      "name": "public-ab",
+      "device_uuid": "GPU-08b2ddcbd6e6b36c",
+      "oracle": "host_encoded_resident_v1",
+      "repeat": {"warmups": 3, "measured": 10, "deterministic": true},
+      "cleanup": "not_reported",
+      "source_sha256": "fa4e9ab4c7c89378ef8538755b7474d7d335c795b41725f35f1e182f0af00fa1",
+      "binary_sha256": "472e1fb50ca58e1613d4723656b3eb6ffc846af9bcbc187fbc675112b6a31cc6",
+      "archive_sha256_recorded": "514788d62711bfe8e8e3621c00147259523bff11b7626f0315ca5ef85a5e1a36",
+      "raw_sha256": {
+        "stdout": "d5c2e3f48fe883851acbd154fc87fb83dbdd15f6226c5a55940ef865418880e4",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "result": "PASS; all oracle and pairwise comparison mismatches 0, max BF16 ULP 0",
+      "performance_ms_median": [
+        {"kind": "nvfp4", "K": 16, "N": 17, "id11": 0.058051, "id58": 0.057480, "id67": 0.140282},
+        {"kind": "nvfp4", "K": 64, "N": 65, "id11": 0.056551, "id58": 0.056211, "id67": 0.141932},
+        {"kind": "nvfp4", "K": 3840, "N": 15360, "id11": 0.661041, "id58": 0.619440, "id67": 0.142793},
+        {"kind": "nvfp4", "K": 15360, "N": 3840, "id11": 0.619410, "id58": 0.618100, "id67": 0.146933},
+        {"kind": "fp8", "K": 64, "N": 17, "id6": 0.141242, "id68": 0.142532},
+        {"kind": "fp8", "K": 128, "N": 65, "id6": 0.219544, "id68": 0.141423},
+        {"kind": "fp8", "K": 3840, "N": 512, "id6": 1.431013, "id68": 0.141002},
+        {"kind": "fp8", "K": 3840, "N": 2048, "id6": 1.448393, "id68": 0.166603},
+        {"kind": "fp8", "K": 3840, "N": 4096, "id6": 1.493844, "id68": 0.142613},
+        {"kind": "fp8", "K": 3840, "N": 8192, "id6": 1.505934, "id68": 0.142013},
+        {"kind": "fp8", "K": 4096, "N": 3840, "id6": 5.638902, "id68": 0.142943},
+        {"kind": "fp8", "K": 8192, "N": 3840, "id6": 8.692832, "id68": 0.221384}
+      ]
+    },
+    {
+      "name": "decode-middle",
+      "device_uuid": "GPU-08b2ddcbd6e6b36c",
+      "oracle": "host_encoded_resident_v1",
+      "repeat": {"warmups": 3, "measured": 10, "deterministic": true},
+      "cleanup": "not_reported",
+      "source_sha256": "72de051382c9393cd094845b1f739f3e45f51a65b4f5bd8418ff033e94419bb9",
+      "binary_sha256": "928123ce9361718b941d8468b46431d03ca3222744a8a137debf0527edcbe3aa",
+      "archive_sha256_observed": "e4c6bb73d739668a7fdcf750e8e078b2df04077d01b0aa440d4c51bed90d1fb9",
+      "raw_sha256": {
+        "stdout": "67c75ccd3fab66e72a0c48950d755b11111f07046245b36d265285b8cc691bb0",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "result": "PASS; all NVFP4 oracle and pairwise comparison mismatches 0, max BF16 ULP 0",
+      "performance_ms_median": [
+        {"K": 256, "N": 256, "id11": 0.140152, "id58": 0.140222, "id67": 0.140403},
+        {"K": 512, "N": 512, "id11": 0.139873, "id58": 0.140732, "id67": 0.139782},
+        {"K": 1024, "N": 1024, "id11": 0.143162, "id58": 0.159772, "id67": 0.140842},
+        {"K": 2048, "N": 2048, "id11": 0.300854, "id58": 0.300584, "id67": 0.139972},
+        {"K": 4096, "N": 4096, "id11": 0.701361, "id58": 0.700011, "id67": 0.140862},
+        {"K": 64, "N": 4096, "id11": 0.140372, "id58": 0.141182, "id67": 0.141163},
+        {"K": 4096, "N": 64, "id11": 0.140433, "id58": 0.141103, "id67": 0.140862}
+      ]
+    },
+    {
+      "name": "decode-adoption-boundary",
+      "device_uuid": "GPU-08b2ddcbd6e6b36c",
+      "oracle": "host_encoded_resident_v1",
+      "repeat": {"warmups": 3, "measured": 10, "deterministic": true},
+      "cleanup": "not_reported",
+      "source_sha256": "2b1d13df2b510e24814dd7bef91765297d15ac2c7a3fdff06ccf0e79159ee154",
+      "binary_sha256": "5b37ca683bc9bd7a0a74ef1750f8767a18325610cc095ee4affc92a925c309f0",
+      "archive_sha256_observed": "e4c6bb73d739668a7fdcf750e8e078b2df04077d01b0aa440d4c51bed90d1fb9",
+      "raw_sha256": {
+        "stdout": "1b1fd43a4c4bc20157f8838c52804f559ad022e8a799abf01bfd38639920beea",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "result": "PASS; all NVFP4/FP8 oracle and pairwise comparison mismatches 0, max BF16 ULP 0",
+      "performance_ms_median": [
+        {"kind": "nvfp4", "K": 1008, "N": 1024, "id11": 0.139383, "id58": 0.139573, "id67": 0.139533},
+        {"kind": "nvfp4", "K": 1024, "N": 1023, "id11": 0.141463, "id58": 0.141443, "id67": 0.140773},
+        {"kind": "nvfp4", "K": 1024, "N": 1024, "id11": 0.140873, "id58": 0.141323, "id67": 0.141323},
+        {"kind": "nvfp4", "K": 1024, "N": 1025, "id11": 0.141353, "id58": 0.141233, "id67": 0.140823},
+        {"kind": "nvfp4", "K": 1040, "N": 1024, "id11": 0.141843, "id58": 0.141653, "id67": 0.140783},
+        {"kind": "nvfp4", "K": 17408, "N": 1024, "id11": 0.779397, "id58": 0.267706, "id67": 0.142253},
+        {"kind": "fp8", "K": 64, "N": 64, "id6": 0.044151, "id68": 0.042771},
+        {"kind": "fp8", "K": 128, "N": 63, "id6": 0.141323, "id68": 0.038831},
+        {"kind": "fp8", "K": 128, "N": 64, "id6": 0.142343, "id68": 0.062762},
+        {"kind": "fp8", "K": 128, "N": 65, "id6": 0.220965, "id68": 0.147033},
+        {"kind": "fp8", "K": 192, "N": 64, "id6": 0.300556, "id68": 0.142573}
+      ]
+    },
+    {
+      "name": "prefill-boundary",
+      "device_uuid": "GPU-08b2ddcbd6e6b36c",
+      "oracle": "host_block16_encoded_v1",
+      "repeat": {"warmups": 3, "measured": 10, "deterministic": true},
+      "cleanup": "not_reported",
+      "source_sha256": "b9cb149c7254b0d3985d8f90a47960063bd48d2ec1c57dce137b9c1f42fdb1b6",
+      "binary_sha256": "ac57bffe6a596501ddc8a086a1e325cf0cf3909eff739e65068969eca578265c",
+      "archive_sha256_observed": "e4c6bb73d739668a7fdcf750e8e078b2df04077d01b0aa440d4c51bed90d1fb9",
+      "raw_sha256": {
+        "stdout": "10e286564595500830b7fc29416e3a08cb960f7b3274b85e4b512e607affb65c",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "result": "PASS; all sampled oracle and pairwise comparison mismatches 0, max BF16 ULP 0",
+      "performance_ms_median": [
+        {"M": 63, "K": 48, "N": 37, "id11": 0.138652, "id59": 0.138853},
+        {"M": 64, "K": 48, "N": 37, "id11": 0.140992, "id59": 0.139862},
+        {"M": 65, "K": 48, "N": 37, "id11": 0.140102, "id59": 0.141312},
+        {"M": 63, "K": 3840, "N": 15360, "id11": 33.353665, "id59": 22.282208},
+        {"M": 64, "K": 3840, "N": 15360, "id11": 33.927845, "id59": 22.301967},
+        {"M": 65, "K": 3840, "N": 15360, "id11": 34.443372, "id59": 24.584254}
+      ]
+    },
+    {
+      "name": "prefill-reduction-fix",
+      "device_uuid": "GPU-08b2ddcbd6e6b36c",
+      "oracle": "host_block16_encoded_v1",
+      "repeat": {"warmups": 3, "measured": 10, "deterministic": true},
+      "cleanup": "not_reported",
+      "source_sha256": "b9cb149c7254b0d3985d8f90a47960063bd48d2ec1c57dce137b9c1f42fdb1b6",
+      "binary_sha256": "983630ed68aa0e078bcc3781e668e0a04e22fdbfd68fd315b66f14964e590422",
+      "archive_sha256_observed": "e4c6bb73d739668a7fdcf750e8e078b2df04077d01b0aa440d4c51bed90d1fb9",
+      "raw_sha256": {
+        "stdout": "f53cfedb26114ae5e0b26f8b5276f52b397a18760b0fe6f879b7cfd3f923e30e",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "result": "PASS; all sampled oracle and pairwise comparison mismatches 0, max BF16 ULP 0",
+      "performance_ms_median": [
+        {"M": 63, "K": 48, "N": 37, "id11": 0.141053, "id59": 0.141183},
+        {"M": 64, "K": 48, "N": 37, "id11": 0.141863, "id59": 0.140844},
+        {"M": 65, "K": 48, "N": 37, "id11": 0.142033, "id59": 0.142053},
+        {"M": 63, "K": 3840, "N": 15360, "id11": 33.329035, "id59": 26.951178},
+        {"M": 64, "K": 3840, "N": 15360, "id11": 33.893097, "id59": 26.984338},
+        {"M": 65, "K": 3840, "N": 15360, "id11": 34.435818, "id59": 29.499282}
+      ]
+    },
+    {
+      "name": "phase79-pack-gemma",
+      "device_uuid": "GPU-76a08c022586fed6",
+      "oracle": "nvfp4_host_quantized_constant_v1",
+      "shape": {"M": 1, "K": 3840, "N": 15360},
+      "repeat": {"direct": 3, "graph_replays": 2, "graph_nodes": 3},
+      "cleanup": 0,
+      "source_sha256": "5f92350aacce7273e223336b7680e8e61cd3690bdb4044798d35c9455c9099fd",
+      "binary_sha256": "dfcb6becef1675e5a2129f2ca5e418587a2338d0b7febd6be2c31575131d9e4c",
+      "archive_sha256_recorded": "e4c6bb73d739668a7fdcf750e8e078b2df04077d01b0aa440d4c51bed90d1fb9",
+      "raw_sha256": {
+        "stdout": "3bdac12733edb43ad4144a0ebfbf3c4133aed3456031d6002edddcc758a7734c",
+        "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "dispatch": {"public_kernel_id": 1, "grid_x": 990, "workspace": 2160},
+      "result": "PASS; direct repeats and graph replays max BF16 ULP 0",
+      "performance": "timing not measured"
+    }
+  ],
+  "excluded": [
+    {
+      "name": "prefill-middle",
+      "device_uuid": "GPU-08b2ddcbd6e6b36c",
+      "oracle": "host_block16_encoded_v1",
+      "repeat": {"warmups": 3, "measured": 10},
+      "source_sha256": "536465ae861bf16bfbde280ccd3184b05ec9225b85019e2b0b66ebac1362b262",
+      "binary_sha256": "9be53c1d5fe09541c355c73b83fea05a157fcb30cda569379516080c65c9f86a",
+      "archive_sha256_recorded": "514788d62711bfe8e8e3621c00147259523bff11b7626f0315ca5ef85a5e1a36",
+      "raw_sha256": {
+        "stdout": "bed58b016cad5a55044e25fde604a8671035cc10e968b9ee9509028d92dfdf1e",
+        "stderr": "046b6cd22b3a935346bea51380bacac191aea05c1683295866c1332120e7a03a"
+      },
+      "failure_shapes": [
+        {"M": 4096, "K": 4096, "N": 4096, "id11": 0, "status": "FAIL"},
+        {"M": 4096, "K": 64, "N": 4096, "id11": 0, "status": "FAIL"}
+      ],
+      "observed_candidate_ms_median": [
+        {"M": 4096, "K": 4096, "N": 4096, "id59": 424.666425},
+        {"M": 4096, "K": 64, "N": 4096, "id59": 33.004171}
+      ],
+      "reason": "The requested M=1 decode shape list was mistakenly run as prefill, so this run is off-scope and excluded from adoption rationale. Baseline ID11 additionally failed launch with status=260 on the two large shapes; id=0 is the unpopulated dispatch field after that failure."
+    }
+  ],
+  "notes": [
+    "prefill-reduction-fix is the revised ID59 operator run; prefill-boundary is retained as the earlier boundary run.",
+    "Operator PASS results do not replace the separate final model evidence maintained by the main agent."
+  ]
+}

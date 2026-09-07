@@ -264,6 +264,30 @@
 
 ## 開発・最適化の優先順位
 
+### Phase完了時のcommit・push
+
+2026-09-07のユーザー明示指示により、以後は各Phaseの完了手順にcommit・GitHubへのpushを含める。
+実装、必要な検証、main-plan／計画／履歴の更新を終えたら、`push`スキルで変更全体を確認し、
+目的ごとの必要最小限のコミットへ整理して現在のブランチをpushする。この指示を継続的な公開許可として扱い、
+Phaseごとに再確認を求めない。ユーザーによる個別の停止・保留指示を優先する。
+push後はremoteとの同期とworking treeを確認し、完了報告に公開したcommitと検証結果を記載する。
+pushが失敗した場合は原因と未公開範囲を記録し、実装完了と公開待ちを区別して報告する。
+
+### 最適化の共通化と既定採用の方針
+
+2026-09-07のユーザー指示により、次Phaseは既存最適化の共通化を先行し、従来のPhase 79〜81をPhase 80〜82へ繰り下げる。
+
+- 最適化は演算の意味、GPU能力、shape/layout、重み・KV encodingに基づいて適用する。model fingerprintによる成果物検証は維持し、最適化判定のモデル固定条件は必要な演算条件へ置き換える。
+- prepared cache、same-stream segment owner、completion集約とGraph実行制御は共通execution層で再利用する。モデル固有graph、attention preprocess、GDN、model stateはadapter側に維持する。
+- 正しく実行できる条件と性能上採用する条件を分け、既存selectorを整理する。選択した経路と不採用理由を観測可能にし、確認できた範囲から条件付きで既定採用する。強制選択は比較・切戻し用に残す。
+- Graph制御の共通化とKV形式別kernel対応は別作業とする。FP16条件を単に外さず、量子化scale、配置、buffer寿命、同期条件を扱う。static tensor FP8とOCP MXFP8は別形式として扱う。
+- 検証は影響する演算・境界・形式と小型の代表モデルを中心にする。数値誤差・logits/品質と性能を分け、生成列一致だけで量子化の採否を決めない。旧Phaseの長時間測定を一律に再実行しない。
+- 今回の後続最適化ではモデル固有の追加速度探索を優先しない。全モデル・全KV形式対応や一律速度倍率を新しい必達条件にしない。
+
+具体的な対象と順序は[Phase 79計画](archive/2026/09/1-10/phase79-common-optimization.md)に置く。
+
+### 既存の優先順位・採用基準
+
 - 多くのモデル・GPUへ共通適用できる変更から行う。
   1. 異種モデル・異種GPUで共通。
   2. 異種モデル共通、またはGPU共通。
@@ -437,9 +461,10 @@
 | 完了・両target実モデルPASS（R9700 single-visible） | 76 | exact Unsloth Qwen3.8-27B混合NVFP4 artifactの統合、正しさ、baseline／profile |
 | 完了・decode機能／dispatch PASS（速度残差はPhase 78へ統合） | 77 | 同artifactのsingle-request decode専用経路を成立。実用速度は未達のため、whole-model速度gateをPhase 78で閉じる |
 | 完了・ユーザー承認による目標変更／未達受容 | 78 | r25を到達点として終了。V620 decode基準を実artifact帯域へ変更し、prefill等の旧目標未達・正式比較未実施を明記。モデル固有の追加最適化は要求しない |
-| 計画済み | 79 | static FP8 KV、MTP、文章生成の実用closeout |
-| 計画済み | 80 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了 |
-| 計画済み | 81 | NVFP4のGPU batching最適化 |
+| 完了・条件付き既定採用 | 79 | NVFP4/FP8 decode既定化、projection/実行制御共通化、prefill基準加算順復元 |
+| 計画済み | 80 | static FP8 KV、MTP、文章生成の実用closeout |
+| 計画済み | 81 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了 |
+| 計画済み | 82 | NVFP4のGPU batching最適化 |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
 
@@ -454,10 +479,31 @@ superseded履歴となった。v2のfresh correctnessは両local targetでPASS�
 フェーズ53を完了した。その後2026-08-30のユーザー決定でblock16経路を廃止し、同じreviewed Qwen3.5-4B BF16 dense scopeの
 省略時KVをstandard OCP MXFP8 E4M3へ変更した。Phase 53/54のblock16 evidenceは採用根拠ではなく履歴としてのみ保持する。
 gfx942実機は今後の検証項目との一括実行へ延期し、local RDNA follow-upをblockしない。
+2026-09-07の順序変更: 新Phase 79で共通化・条件付き既定採用を行い、旧Phase 79のstatic FP8 KV／MTP／文章生成をPhase 80、
+旧Phase 80の他精度最適化をPhase 81、旧Phase 81のNVFP4 batchingをPhase 82へ移す。
+以下の日付付き経過に残る旧番号と旧gateは当時の記録であり、現在の順序は上の一覧と
+[Phase 79計画](archive/2026/09/1-10/phase79-common-optimization.md)を正とする。
+
 2026-09-05の最新ユーザー指示によりPhase 78は完了扱いとする。
 [完了記録](archive/2026/09/1-10/phase78-accepted-closeout.md)と
 [目標変更・未達・未実施の履歴](../history/2026/09/1-10/phase76-78-qwen38-nvfp4.md)を現在の判断とし、
 以下の未完了・旧gateの記述はそれ以前の経過として読む。ID72はopt-in採用保留を維持する。
+同日の[他モデル追加測定](../history/2026/09/1-10/phase78-cross-model-measurement.md)では、Qwen3.5-4B／9B
+MXFP8・両GPUの8条件で要求準備22～36%短縮を観測したが、prefill／decode全体の大幅改善は確認しなかった。
+旧版全体との探索比較であり、FP8 outer ID71の効果や非Qwenモデルへの一般化は含めない。
+続く[Gemma NVFP4追加測定](../history/2026/09/1-10/phase78-nvfp4-cross-model-measurement.md)では、共通NVFP4経路と
+混合FP8経路によるprefill高速化、汎用DP4A opt-inの効果を観測した。ただし旧版とのtoken差があり、品質維持を
+満たした汎用採用とは扱わない。既定selectorやPhase78完了判断は変更していない。
+
+2026-09-06のユーザー指示で、R9700・固定Qwen3.8 27B NVFP4・同時実行1要求に限定した
+sLLMサーバー統合を先行する。KVはユーザーが受容したMXFP8 E4とし、専用
+`--qwen38-nvfp4`引数で検証済みsafetensorsを読み込む。この限定経路は最終公開入力をGGUFへ
+統一する方針の全面変更ではない。OpenWebUI接続を含む
+[完了計画](archive/2026/09/1-10/qwen38-nvfp4-r9700-server.md)の範囲を実装・実機確認した。Phase 79のstatic FP8 KV・
+MTP全体やPhase 81 batchingの完了とは扱わない。
+続くユーザー指示でFP16 KVを受容し、Phase78のR9700高速opt-inを常駐サービスへ適用する。
+初回MXFP8配置ではこのopt-in設定が未指定だった。
+[高速経路適用計画](archive/2026/09/1-10/qwen38-r9700-server-fastpath.md)で同条件HTTP速度を比較し、greedy7.881→19.922 tok/s、温度0.7で12.822 tok/sを確認した。
 
 2026-09-03のユーザー指示により、次の優先laneをPhase 76〜79のexact
 `unsloth/Qwen3.8-27B-NVFP4`実用化へ固定する。このartifactは168個のMLP projectionをNVFP4 W4A4、233個の

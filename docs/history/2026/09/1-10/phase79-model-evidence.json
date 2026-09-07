@@ -1,0 +1,2651 @@
+{
+  "schema_version": "phase79-model-evidence-v1",
+  "state": "complete",
+  "quality_verdict": "not_evaluated",
+  "identity_note": "Reviewed Gemma captures/benchmarks are the post-review final evidence. Earlier draft/final-labeled captures are retained as exploratory or initial-integration observations. Qwen source mapping is recorded in phase79-build-identity.json.",
+  "captures": [
+    {
+      "name": "fixed-logits-draft1-gfx1030-default",
+      "target": "gfx1030",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "3697e63e8dfd607349b45ba6d28ead8ecab85099257db7baba9d14cfbe71bc3e",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "raw_sha256": "78e3c8a7e943a371b654f4799d49e603fb3377f60e53fdd35ff806b005c99db6",
+      "execution_sha256": "0709ddf00d41e7eb56c0012c5f9c078323b5b8079fb7ed9c4f8ecbe51d23657e",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-draft1-gfx1030-fp8-dword8",
+      "target": "gfx1030",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "3697e63e8dfd607349b45ba6d28ead8ecab85099257db7baba9d14cfbe71bc3e",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "raw_sha256": "e6b4844d929fd046a23c206e71d45b9f7c8756f65716f478def19f66467195e8",
+      "execution_sha256": "1d502c8ad7a594de7ee11cb91e4ada451436a9fa1efe797f21b240dc9957bcb2",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-draft1-gfx1030-nv-old",
+      "target": "gfx1030",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "3697e63e8dfd607349b45ba6d28ead8ecab85099257db7baba9d14cfbe71bc3e",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "raw_sha256": "1dbea4d722720db6c5c03412030d9c6401b7e75aaa5e60851105807f98a3d2ca",
+      "execution_sha256": "d1dec8100c4eb6cf2e7fdb5dd4bc55cdc1a97b30c4f58eeb8c5927b0d60b94f7",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-draft1-gfx1030-nv-wave4",
+      "target": "gfx1030",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "3697e63e8dfd607349b45ba6d28ead8ecab85099257db7baba9d14cfbe71bc3e",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "raw_sha256": "edbe0f8b7770d7e6d5ded3cf8e546930fa6d9051b7d9640a0dc2ff0984f74b4b",
+      "execution_sha256": "a8dabece95c263dc9773b2711aa2a10ffe6ed1c7f41504fbbda2e70433421e4e",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-draft1-gfx1201-default",
+      "target": "gfx1201",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "b41b421a474083a9119cb2e08302daf329896656d53be014097fd7085d4495a8",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "raw_sha256": "2f237e62ab22539777d113bf57dc2d0ac37e342c3e0c377a40c29ec8ab3ed7b1",
+      "execution_sha256": "f8a436371dd588e364c11313a2ce969ebabda4517c1849b8dfd7b572ee738226",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-draft1-gfx1201-nv-old",
+      "target": "gfx1201",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "b41b421a474083a9119cb2e08302daf329896656d53be014097fd7085d4495a8",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "raw_sha256": "2db802941e83f3adeb4948777073e44136c5626e7e057d73527432617f441805",
+      "execution_sha256": "fe38a16f54a9aed06da3394cbede9af78c9cb4eea5450c40e552f547f690795f",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-draft1-gfx1201-nv-wave4",
+      "target": "gfx1201",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "b41b421a474083a9119cb2e08302daf329896656d53be014097fd7085d4495a8",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "raw_sha256": "42d6f1e623dee1f9cd4733ef4b1a3efea847255c8d43e5ab01b80170a2db48f8",
+      "execution_sha256": "61f1170e8b39c6220f5b3788b22da0cd671507b615173636a762155b8a37c90f",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-draft2-gfx1030-nv-old",
+      "target": "gfx1030",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "00d7177c070bd3f1d4d6a12733facc37ba9ea96be6db28cf52636c305744ce7f",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "raw_sha256": "570f1b77a6571ee9de4c63576223c3e8ac506393ca9180ab23ee6dccde1d9b77",
+      "execution_sha256": "69526bf3aa404945186109f012610c2be4d017382b71fde12700ec7198bafc3a",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-draft2-gfx1030-prefill-fixed",
+      "target": "gfx1030",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "00d7177c070bd3f1d4d6a12733facc37ba9ea96be6db28cf52636c305744ce7f",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "raw_sha256": "799ec02c06198a69118a6436028f6c263609adfc636cbcd41825174a001167a9",
+      "execution_sha256": "fe00c9fab872ff79fb032e923d61f1dc21543db1b5ea375f13e7058329444627",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-final-gfx1030-default",
+      "target": "gfx1030",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "a3dca1b94fa052371c6fddb5cc80cf511c6e3e98b18196dc75dedc0c9a43138e",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "raw_sha256": "4102094d9d00bf46999de85676527439187514adc94ca401f48bfcd8b1a63732",
+      "execution_sha256": "0fe432eee1f38296755fcabf5a6ca3541b6c6e1f31dcfda5f655945cf7d984f7",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-final-gfx1030-deferred",
+      "target": "gfx1030",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "a3dca1b94fa052371c6fddb5cc80cf511c6e3e98b18196dc75dedc0c9a43138e",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "raw_sha256": "b32b479d5aaac5eba78c32be547c639d51b147f6f2feeba235fa2cb8b8f018a7",
+      "execution_sha256": "afc984efeb1728dc9c1ca1cb07d80fee43907849aaa5d9da1f108d9480c99054",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-final-gfx1030-pack-off",
+      "target": "gfx1030",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "a3dca1b94fa052371c6fddb5cc80cf511c6e3e98b18196dc75dedc0c9a43138e",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "raw_sha256": "ed034b94c28fc834ffbd8f127a3dc11d6b487598d6b215a82e317d457128c186",
+      "execution_sha256": "1e013e8e0126ae3e0c529691b72cf824337c169ae0824ced996db5f91676d3a9",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 0,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 0,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 0,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-final-gfx1201-default",
+      "target": "gfx1201",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "b497a64ed1c1e51d6eef3ee8d0fd9f59dd54c510dcdcd88a4d431b0de2fb6d45",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "raw_sha256": "8e771d68af43fba03bd08df83d28fd8e63b361955bd7b20e273bd348fbe440cf",
+      "execution_sha256": "06f665f1a9f3d57d0433da79a447f074e2d69ab1f5e2f4bd3f25fd915014baea",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-final-gfx1201-deferred",
+      "target": "gfx1201",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "b497a64ed1c1e51d6eef3ee8d0fd9f59dd54c510dcdcd88a4d431b0de2fb6d45",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "raw_sha256": "8c86681afd476bb01c910474a77a6d692537edd29ab4095351569a3f03113489",
+      "execution_sha256": "16614ad0013f06030a53ac79973385b00babf6feb765bc3f462006ef597b8ea7",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-final-gfx1201-nv-old",
+      "target": "gfx1201",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "b497a64ed1c1e51d6eef3ee8d0fd9f59dd54c510dcdcd88a4d431b0de2fb6d45",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "raw_sha256": "8e0d388b9d8cc34733771ac672ced95c3e742bbc3a6c560f8d8c7a7c04e452fe",
+      "execution_sha256": "1ae1c2928d699d96a7a9c2c65231b6720a033581f1979c3bca2bcab011ce6bff",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-final-gfx1201-pack-off",
+      "target": "gfx1201",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "b497a64ed1c1e51d6eef3ee8d0fd9f59dd54c510dcdcd88a4d431b0de2fb6d45",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "raw_sha256": "54d009c54421b33a885da2d2def3a26db5db339a7a7659eedddb393b143771ac",
+      "execution_sha256": "6eac516af18321d1bf57d99a388f92c325d7a0f47be0265f915c136887c38b0d",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 0,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 0,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 0,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-reviewed-gfx1030-default",
+      "target": "gfx1030",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "3deb1450f2cf70623bcdead3098fe499710f15f018ab768a443bd10db59853a5",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "raw_sha256": "4102094d9d00bf46999de85676527439187514adc94ca401f48bfcd8b1a63732",
+      "execution_sha256": "c69530375a45573eefb2c3e0fc7323728a201ef03429793ed5d886a865ad6779",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-reviewed-gfx1030-deferred",
+      "target": "gfx1030",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "3deb1450f2cf70623bcdead3098fe499710f15f018ab768a443bd10db59853a5",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "raw_sha256": "b32b479d5aaac5eba78c32be547c639d51b147f6f2feeba235fa2cb8b8f018a7",
+      "execution_sha256": "f417d2e7e600efb2ac293d0fde243f8c153d3ea72b2720521129ce78faf31a28",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-reviewed-gfx1030-pack-off",
+      "target": "gfx1030",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "3deb1450f2cf70623bcdead3098fe499710f15f018ab768a443bd10db59853a5",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "raw_sha256": "ed034b94c28fc834ffbd8f127a3dc11d6b487598d6b215a82e317d457128c186",
+      "execution_sha256": "add6ddae7ff944aba3b61ad305affc3f35a99517feb95234c3c8188c7965c92d",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 0,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 0,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 0,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-reviewed-gfx1201-default",
+      "target": "gfx1201",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "ced2e87f3495456958033dd8463c14c8e80c18e189861ab1fef0072f6014e507",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "raw_sha256": "8e771d68af43fba03bd08df83d28fd8e63b361955bd7b20e273bd348fbe440cf",
+      "execution_sha256": "9dd5f65a4c2b9756a52efc0f93db5d3e3f87f19805dc212ac805c8cc363e97e9",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-reviewed-gfx1201-deferred",
+      "target": "gfx1201",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "ced2e87f3495456958033dd8463c14c8e80c18e189861ab1fef0072f6014e507",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "raw_sha256": "8c86681afd476bb01c910474a77a6d692537edd29ab4095351569a3f03113489",
+      "execution_sha256": "b20f3bf35cc36b576fa1bd69069b2315a1aeda6415eaf2053099244271b1e637",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-reviewed-gfx1201-nv-old",
+      "target": "gfx1201",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "ced2e87f3495456958033dd8463c14c8e80c18e189861ab1fef0072f6014e507",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "raw_sha256": "8e0d388b9d8cc34733771ac672ced95c3e742bbc3a6c560f8d8c7a7c04e452fe",
+      "execution_sha256": "770b1064d7860c912dfe3304f5c5f33b4abc1e9f2c103ab56314bc8bcfd3f264",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5352,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 144,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    },
+    {
+      "name": "fixed-logits-reviewed-gfx1201-pack-off",
+      "target": "gfx1201",
+      "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "kv_encoding": "fp16",
+      "binary_sha256": "ced2e87f3495456958033dd8463c14c8e80c18e189861ab1fef0072f6014e507",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "raw_sha256": "54d009c54421b33a885da2d2def3a26db5db339a7a7659eedddb393b143771ac",
+      "execution_sha256": "201a3ac7e85293e74919719676b1a3dc2f4bd76ca8d70916f8a1425eeceae0f7",
+      "state": "CAPTURED",
+      "exit_code": 0,
+      "cleanup": {
+        "cleanup_current_bytes": 0,
+        "cleanup_retryable": 0,
+        "cleanup_durable": 0
+      },
+      "rows": [
+        {
+          "id": "short-3",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 0,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "observed-17",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 0,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        },
+        {
+          "id": "boundary-65",
+          "kernel_dispatch_count": 5496,
+          "segment_count": 8,
+          "boundary_count": 8,
+          "projection_pack_submission_count": 0,
+          "prefill_projection_pack_submission_count": 0,
+          "fallback_used": false
+        }
+      ]
+    }
+  ],
+  "comparisons": [
+    {
+      "name": "compare-draft2-prefill-fix",
+      "raw_sha256": "6105d82c58fd647eb2e6acb54c4c0f84a209b992a68292b03dbbf49f665babcf",
+      "target": "gfx1030",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.0,
+        "max_abs_logit_error": 0.0
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-draft2-gfx1030-nv-old.json",
+          "sha256": "570f1b77a6571ee9de4c63576223c3e8ac506393ca9180ab23ee6dccde1d9b77"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-draft2-gfx1030-prefill-fixed.json",
+          "sha256": "799ec02c06198a69118a6436028f6c263609adfc636cbcd41825174a001167a9"
+        }
+      ]
+    },
+    {
+      "name": "compare-final-gfx1030-deferred",
+      "raw_sha256": "26963f39e46eff745274ce640146c2bebd8e83f38aa577bffafe9a920acb7ed9",
+      "target": "gfx1030",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.0,
+        "max_abs_logit_error": 0.0
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-final-gfx1030-default.json",
+          "sha256": "4102094d9d00bf46999de85676527439187514adc94ca401f48bfcd8b1a63732"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-final-gfx1030-deferred.json",
+          "sha256": "b32b479d5aaac5eba78c32be547c639d51b147f6f2feeba235fa2cb8b8f018a7"
+        }
+      ]
+    },
+    {
+      "name": "compare-final-gfx1030-pack-off",
+      "raw_sha256": "183dd6c16c820656d4be32a55f369972031a1a5c7ca58ee5f8526e5813aa7f85",
+      "target": "gfx1030",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.0,
+        "max_abs_logit_error": 0.0
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-final-gfx1030-default.json",
+          "sha256": "4102094d9d00bf46999de85676527439187514adc94ca401f48bfcd8b1a63732"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-final-gfx1030-pack-off.json",
+          "sha256": "ed034b94c28fc834ffbd8f127a3dc11d6b487598d6b215a82e317d457128c186"
+        }
+      ]
+    },
+    {
+      "name": "compare-final-gfx1201-deferred",
+      "raw_sha256": "0fed02250077f9be229121b8d48ed7b7b504458be6f367330c4de609ae302541",
+      "target": "gfx1201",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.0,
+        "max_abs_logit_error": 0.0
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-final-gfx1201-default.json",
+          "sha256": "8e771d68af43fba03bd08df83d28fd8e63b361955bd7b20e273bd348fbe440cf"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-final-gfx1201-deferred.json",
+          "sha256": "8c86681afd476bb01c910474a77a6d692537edd29ab4095351569a3f03113489"
+        }
+      ]
+    },
+    {
+      "name": "compare-final-gfx1201-nv-old",
+      "raw_sha256": "f9e067854292a507cce958f0fec856475758a03cc4ac39057f4fccb4767d7577",
+      "target": "gfx1201",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.0,
+        "max_abs_logit_error": 0.0
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-final-gfx1201-default.json",
+          "sha256": "8e771d68af43fba03bd08df83d28fd8e63b361955bd7b20e273bd348fbe440cf"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-final-gfx1201-nv-old.json",
+          "sha256": "8e0d388b9d8cc34733771ac672ced95c3e742bbc3a6c560f8d8c7a7c04e452fe"
+        }
+      ]
+    },
+    {
+      "name": "compare-final-gfx1201-pack-off",
+      "raw_sha256": "6d2fda3d3ee6b697c103a43955f957ed405d5c6c59cb8f1483923a9013ae062b",
+      "target": "gfx1201",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.0,
+        "max_abs_logit_error": 0.0
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-final-gfx1201-default.json",
+          "sha256": "8e771d68af43fba03bd08df83d28fd8e63b361955bd7b20e273bd348fbe440cf"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-final-gfx1201-pack-off.json",
+          "sha256": "54d009c54421b33a885da2d2def3a26db5db339a7a7659eedddb393b143771ac"
+        }
+      ]
+    },
+    {
+      "name": "compare-gfx1030-fp8-dword8",
+      "raw_sha256": "0836a03b3bda8a043733d14ab3855ea339527a9e7da9d10d597e4df127ca28fc",
+      "target": "gfx1030",
+      "summary": {
+        "count": 12,
+        "top1_matches": 8,
+        "max_kld": 5.834112502939047,
+        "max_abs_logit_error": 23.6875
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-draft1-gfx1030-default.json",
+          "sha256": "78e3c8a7e943a371b654f4799d49e603fb3377f60e53fdd35ff806b005c99db6"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-draft1-gfx1030-fp8-dword8.json",
+          "sha256": "e6b4844d929fd046a23c206e71d45b9f7c8756f65716f478def19f66467195e8"
+        }
+      ]
+    },
+    {
+      "name": "compare-gfx1030-nv-old-to-default",
+      "raw_sha256": "9ae6ed310067d6ca903ba0a89c530e3dad29ea2e86d3dc770f82c8f037562f79",
+      "target": "gfx1030",
+      "summary": {
+        "count": 12,
+        "top1_matches": 11,
+        "max_kld": 2.144630732304193,
+        "max_abs_logit_error": 8.71875
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-draft1-gfx1030-nv-old.json",
+          "sha256": "1dbea4d722720db6c5c03412030d9c6401b7e75aaa5e60851105807f98a3d2ca"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-draft1-gfx1030-default.json",
+          "sha256": "78e3c8a7e943a371b654f4799d49e603fb3377f60e53fdd35ff806b005c99db6"
+        }
+      ]
+    },
+    {
+      "name": "compare-gfx1030-nv-wave4",
+      "raw_sha256": "4305a3ffc2b94b9dc41521ffb6ba5f4901cb553dce249244f0f1e347035ec65d",
+      "target": "gfx1030",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.34725287884098144,
+        "max_abs_logit_error": 6.609375
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-draft1-gfx1030-default.json",
+          "sha256": "78e3c8a7e943a371b654f4799d49e603fb3377f60e53fdd35ff806b005c99db6"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-draft1-gfx1030-nv-wave4.json",
+          "sha256": "edbe0f8b7770d7e6d5ded3cf8e546930fa6d9051b7d9640a0dc2ff0984f74b4b"
+        }
+      ]
+    },
+    {
+      "name": "compare-gfx1201-nv-old-to-default",
+      "raw_sha256": "d9034dd558829e6ce4817c2676c7cfe17f01565cc76935fcf837e9b26ea5fe10",
+      "target": "gfx1201",
+      "summary": {
+        "count": 12,
+        "top1_matches": 7,
+        "max_kld": 2.852354311319818,
+        "max_abs_logit_error": 15.01953125
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-draft1-gfx1201-nv-old.json",
+          "sha256": "2db802941e83f3adeb4948777073e44136c5626e7e057d73527432617f441805"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-draft1-gfx1201-default.json",
+          "sha256": "2f237e62ab22539777d113bf57dc2d0ac37e342c3e0c377a40c29ec8ab3ed7b1"
+        }
+      ]
+    },
+    {
+      "name": "compare-gfx1201-nv-wave4",
+      "raw_sha256": "8e7d359e6ff5b5c3af1ef6dcb1ffd54aa5342c60a6fda3c3386ca029b3c02586",
+      "target": "gfx1201",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.0,
+        "max_abs_logit_error": 0.0
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-draft1-gfx1201-default.json",
+          "sha256": "2f237e62ab22539777d113bf57dc2d0ac37e342c3e0c377a40c29ec8ab3ed7b1"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-draft1-gfx1201-nv-wave4.json",
+          "sha256": "42d6f1e623dee1f9cd4733ef4b1a3efea847255c8d43e5ab01b80170a2db48f8"
+        }
+      ]
+    },
+    {
+      "name": "compare-reviewed-gfx1030-deferred",
+      "raw_sha256": "8fe2b8b84abfa5550acc3667a4aa0c84c4524593d5bc9a32b1166436a2a2f1d2",
+      "target": "gfx1030",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.0,
+        "max_abs_logit_error": 0.0
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-reviewed-gfx1030-default.json",
+          "sha256": "4102094d9d00bf46999de85676527439187514adc94ca401f48bfcd8b1a63732"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-reviewed-gfx1030-deferred.json",
+          "sha256": "b32b479d5aaac5eba78c32be547c639d51b147f6f2feeba235fa2cb8b8f018a7"
+        }
+      ]
+    },
+    {
+      "name": "compare-reviewed-gfx1030-pack-off",
+      "raw_sha256": "11d1521c906289be8c991462c86a5c6c3c6c95e826775911beef2770e4f34a81",
+      "target": "gfx1030",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.0,
+        "max_abs_logit_error": 0.0
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-reviewed-gfx1030-default.json",
+          "sha256": "4102094d9d00bf46999de85676527439187514adc94ca401f48bfcd8b1a63732"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-reviewed-gfx1030-pack-off.json",
+          "sha256": "ed034b94c28fc834ffbd8f127a3dc11d6b487598d6b215a82e317d457128c186"
+        }
+      ]
+    },
+    {
+      "name": "compare-reviewed-gfx1201-deferred",
+      "raw_sha256": "14fea90356f61cd7451556b83bdee703d03fb445af1d607a57145e9c6bd61eb1",
+      "target": "gfx1201",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.0,
+        "max_abs_logit_error": 0.0
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-reviewed-gfx1201-default.json",
+          "sha256": "8e771d68af43fba03bd08df83d28fd8e63b361955bd7b20e273bd348fbe440cf"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-reviewed-gfx1201-deferred.json",
+          "sha256": "8c86681afd476bb01c910474a77a6d692537edd29ab4095351569a3f03113489"
+        }
+      ]
+    },
+    {
+      "name": "compare-reviewed-gfx1201-nv-old",
+      "raw_sha256": "974b8ad5d2648612c659ccfe38e7a1935b892f57b28438d25f3d119e25822750",
+      "target": "gfx1201",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.0,
+        "max_abs_logit_error": 0.0
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-reviewed-gfx1201-default.json",
+          "sha256": "8e771d68af43fba03bd08df83d28fd8e63b361955bd7b20e273bd348fbe440cf"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-reviewed-gfx1201-nv-old.json",
+          "sha256": "8e0d388b9d8cc34733771ac672ced95c3e742bbc3a6c560f8d8c7a7c04e452fe"
+        }
+      ]
+    },
+    {
+      "name": "compare-reviewed-gfx1201-pack-off",
+      "raw_sha256": "e2cb205e886a2326627cde2f608a89d2e5c8f0b3639b8bcbf64e5f14ddb75e1e",
+      "target": "gfx1201",
+      "summary": {
+        "count": 12,
+        "top1_matches": 12,
+        "max_kld": 0.0,
+        "max_abs_logit_error": 0.0
+      },
+      "captures": [
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-reviewed-gfx1201-default.json",
+          "sha256": "8e771d68af43fba03bd08df83d28fd8e63b361955bd7b20e273bd348fbe440cf"
+        },
+        {
+          "path": ".local-artifacts/phase79-model/fixed-logits-reviewed-gfx1201-pack-off.json",
+          "sha256": "54d009c54421b33a885da2d2def3a26db5db339a7a7659eedddb393b143771ac"
+        }
+      ]
+    }
+  ],
+  "benchmarks": [
+    {
+      "name": "reviewed-gfx1030-gemma-17x9-default",
+      "binary_sha256": "63716805300e2fbc38725862a47b1d15c1f4f1ad323f8dd6ad6f4cc47903e55c",
+      "raw_sha256": "8ba136e3366852b01e08b5ed6d502defb762c5af5ebddc304cfdb1828f5422e0",
+      "execution_sha256": "3fbb690f0ed5621bfc44f1551fdaa87683221ac8c76dad715dbc2c1fafb22457",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "flags": {},
+      "metrics": {
+        "ttft_ns": {
+          "median": 1562203736,
+          "min": 1557689842,
+          "max": 1563347571
+        },
+        "prefill_tokens_per_second": {
+          "median": 11.003232236362622,
+          "min": 10.99265459568611,
+          "max": 11.00437416234623
+        },
+        "decode_tokens_per_second": {
+          "median": 15.562187122227908,
+          "min": 15.293441737657979,
+          "max": 15.583465043643589
+        },
+        "e2e_ns": {
+          "median": 2076714096,
+          "min": 2076271816,
+          "max": 2080791333
+        }
+      },
+      "audit": {
+        "selected_backend": "hip",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+        "plan_digest": "sha256:0ac901b2988a3461ace05cbbf29da4d8b87000cc853e9bd084588a7a0865dd2c",
+        "submission_count": 36120,
+        "kernel_dispatch_count": 47928,
+        "segment_count": 72,
+        "boundary_count": 72,
+        "fallback_used": false,
+        "all_dispatches_hip": true,
+        "model_load_count": 1,
+        "model_reused": true,
+        "sample_count": 4,
+        "weight_encoding": "mixed-nvfp4-w4a4-fp8-w8a8",
+        "mtp_proposal_blocks": null,
+        "mtp_proposed_draft_tokens": null,
+        "mtp_accepted_draft_tokens": null,
+        "mtp_rejected_draft_tokens": null
+      },
+      "cleanup": {
+        "warmup_request_count": 1,
+        "measured_request_count": 3,
+        "request_cleanup_count": 4,
+        "performance_sample_count": 4,
+        "all_requests_dropped": true,
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "session_cleanup": {
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "memory": {
+        "model_ready": {
+          "model_resident": {
+            "current_bytes": 9201218276,
+            "high_water_bytes": 9201218276
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 344064
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 11500044
+          },
+          "current_bytes": 9201218276,
+          "high_water_bytes": 9213062384,
+          "poisoned": false
+        },
+        "after_model_drop": {
+          "model_resident": {
+            "current_bytes": 0,
+            "high_water_bytes": 9201218276
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 9158656
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 195500748
+          },
+          "current_bytes": 0,
+          "high_water_bytes": 9405877680,
+          "poisoned": false
+        },
+        "model_resident_high_water_bytes": 9201218276,
+        "resident_vram_bytes": 9201218276,
+        "resident_vram_source": "model_resident_allocator_high_water",
+        "peak_vram_bytes": 9405877680,
+        "peak_source": "runtime_allocator"
+      },
+      "tokens_sha256": [
+        "9c920257761e3244309d89f19090bd3a09dc95eb9b21d020f1874404daf23e1f",
+        "9c920257761e3244309d89f19090bd3a09dc95eb9b21d020f1874404daf23e1f",
+        "9c920257761e3244309d89f19090bd3a09dc95eb9b21d020f1874404daf23e1f"
+      ]
+    },
+    {
+      "name": "reviewed-gfx1030-gemma-17x9-selector-rollback",
+      "binary_sha256": "63716805300e2fbc38725862a47b1d15c1f4f1ad323f8dd6ad6f4cc47903e55c",
+      "raw_sha256": "305eabe920cce800ed5908075ee5a1760fbf62571674d44fdfc17d3680cd8231",
+      "execution_sha256": "1b0e0702a754473eb63fd0c2f2e708260e3b475c0a16634c18b6810ad061be6e",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "flags": {
+        "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4": "0",
+        "SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_DWORD8": "0",
+        "SLLM_PREPARED_PROJECTION_SHARING": "0"
+      },
+      "metrics": {
+        "ttft_ns": {
+          "median": 1565642081,
+          "min": 1554122502,
+          "max": 1568365034
+        },
+        "prefill_tokens_per_second": {
+          "median": 10.979474892779114,
+          "min": 10.960959498822016,
+          "max": 11.028652385701022
+        },
+        "decode_tokens_per_second": {
+          "median": 1.5516249353927136,
+          "min": 1.5280105492809275,
+          "max": 1.5557684155308737
+        },
+        "e2e_ns": {
+          "median": 6724251938,
+          "min": 6707797729,
+          "max": 6789691130
+        }
+      },
+      "audit": {
+        "selected_backend": "hip",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+        "plan_digest": "sha256:0ac901b2988a3461ace05cbbf29da4d8b87000cc853e9bd084588a7a0865dd2c",
+        "submission_count": 37656,
+        "kernel_dispatch_count": 49464,
+        "segment_count": 72,
+        "boundary_count": 72,
+        "fallback_used": false,
+        "all_dispatches_hip": true,
+        "model_load_count": 1,
+        "model_reused": true,
+        "sample_count": 4,
+        "weight_encoding": "mixed-nvfp4-w4a4-fp8-w8a8",
+        "mtp_proposal_blocks": null,
+        "mtp_proposed_draft_tokens": null,
+        "mtp_accepted_draft_tokens": null,
+        "mtp_rejected_draft_tokens": null
+      },
+      "cleanup": {
+        "warmup_request_count": 1,
+        "measured_request_count": 3,
+        "request_cleanup_count": 4,
+        "performance_sample_count": 4,
+        "all_requests_dropped": true,
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "session_cleanup": {
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "memory": {
+        "model_ready": {
+          "model_resident": {
+            "current_bytes": 9201218276,
+            "high_water_bytes": 9201218276
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 344064
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 11500044
+          },
+          "current_bytes": 9201218276,
+          "high_water_bytes": 9213062384,
+          "poisoned": false
+        },
+        "after_model_drop": {
+          "model_resident": {
+            "current_bytes": 0,
+            "high_water_bytes": 9201218276
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 9158656
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 195500748
+          },
+          "current_bytes": 0,
+          "high_water_bytes": 9405877680,
+          "poisoned": false
+        },
+        "model_resident_high_water_bytes": 9201218276,
+        "resident_vram_bytes": 9201218276,
+        "resident_vram_source": "model_resident_allocator_high_water",
+        "peak_vram_bytes": 9405877680,
+        "peak_source": "runtime_allocator"
+      },
+      "tokens_sha256": [
+        "57b6f2ed9239c8f9fe517f44bd7b55114f906b3e6447c7ee3eb9b488bc62d09d",
+        "57b6f2ed9239c8f9fe517f44bd7b55114f906b3e6447c7ee3eb9b488bc62d09d",
+        "57b6f2ed9239c8f9fe517f44bd7b55114f906b3e6447c7ee3eb9b488bc62d09d"
+      ]
+    },
+    {
+      "name": "reviewed-gfx1030-gemma-17x9-shared-deferred",
+      "binary_sha256": "63716805300e2fbc38725862a47b1d15c1f4f1ad323f8dd6ad6f4cc47903e55c",
+      "raw_sha256": "a84be4b55475c8e421654e43cc20a194fe8fc430a8d50d10d27ade3ee9b593a2",
+      "execution_sha256": "7f6a5d48a017c0f3b1180a2b907a7bccb2ec7b2ffd69ec060a2af00a514a5b0f",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "flags": {
+        "SLLM_PREPARED_DEFERRED_COMPLETION": "1"
+      },
+      "metrics": {
+        "ttft_ns": {
+          "median": 1570977939,
+          "min": 1558142682,
+          "max": 1881396633
+        },
+        "prefill_tokens_per_second": {
+          "median": 10.948227898837457,
+          "min": 9.115268520025099,
+          "max": 11.003009249244784
+        },
+        "decode_tokens_per_second": {
+          "median": 15.357502717711673,
+          "min": 9.598930053341817,
+          "max": 15.437700441052208
+        },
+        "e2e_ns": {
+          "median": 2091898275,
+          "min": 2076356797,
+          "max": 2714825344
+        }
+      },
+      "audit": {
+        "selected_backend": "hip",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+        "plan_digest": "sha256:0ac901b2988a3461ace05cbbf29da4d8b87000cc853e9bd084588a7a0865dd2c",
+        "submission_count": 36120,
+        "kernel_dispatch_count": 47928,
+        "segment_count": 72,
+        "boundary_count": 72,
+        "fallback_used": false,
+        "all_dispatches_hip": true,
+        "model_load_count": 1,
+        "model_reused": true,
+        "sample_count": 4,
+        "weight_encoding": "mixed-nvfp4-w4a4-fp8-w8a8",
+        "mtp_proposal_blocks": null,
+        "mtp_proposed_draft_tokens": null,
+        "mtp_accepted_draft_tokens": null,
+        "mtp_rejected_draft_tokens": null
+      },
+      "cleanup": {
+        "warmup_request_count": 1,
+        "measured_request_count": 3,
+        "request_cleanup_count": 4,
+        "performance_sample_count": 4,
+        "all_requests_dropped": true,
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "session_cleanup": {
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "memory": {
+        "model_ready": {
+          "model_resident": {
+            "current_bytes": 9201218276,
+            "high_water_bytes": 9201218276
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 344064
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 11500044
+          },
+          "current_bytes": 9201218276,
+          "high_water_bytes": 9213062384,
+          "poisoned": false
+        },
+        "after_model_drop": {
+          "model_resident": {
+            "current_bytes": 0,
+            "high_water_bytes": 9201218276
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 9158656
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 195500748
+          },
+          "current_bytes": 0,
+          "high_water_bytes": 9405877680,
+          "poisoned": false
+        },
+        "model_resident_high_water_bytes": 9201218276,
+        "resident_vram_bytes": 9201218276,
+        "resident_vram_source": "model_resident_allocator_high_water",
+        "peak_vram_bytes": 9405877680,
+        "peak_source": "runtime_allocator"
+      },
+      "tokens_sha256": [
+        "9c920257761e3244309d89f19090bd3a09dc95eb9b21d020f1874404daf23e1f",
+        "9c920257761e3244309d89f19090bd3a09dc95eb9b21d020f1874404daf23e1f",
+        "9c920257761e3244309d89f19090bd3a09dc95eb9b21d020f1874404daf23e1f"
+      ]
+    },
+    {
+      "name": "reviewed-gfx1030-gemma-65x9-default",
+      "binary_sha256": "63716805300e2fbc38725862a47b1d15c1f4f1ad323f8dd6ad6f4cc47903e55c",
+      "raw_sha256": "cfdc94d5be877da5612d40ee87aad22878b568a0c2bb8f306b3c94d83c5d8c90",
+      "execution_sha256": "76c6d4539523c5840b222dfc15adbd34883091f2db66c9fcf3e1319d3f71b929",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "flags": {},
+      "metrics": {
+        "ttft_ns": {
+          "median": 4860314514,
+          "min": 4858925195,
+          "max": 4872962887
+        },
+        "prefill_tokens_per_second": {
+          "median": 13.43299418309627,
+          "min": 13.405026621914727,
+          "max": 13.439707462775576
+        },
+        "decode_tokens_per_second": {
+          "median": 15.35308342854596,
+          "min": 11.532742224264434,
+          "max": 15.570070160935417
+        },
+        "e2e_ns": {
+          "median": 5394031996,
+          "min": 5372733206,
+          "max": 5553992915
+        }
+      },
+      "audit": {
+        "selected_backend": "hip",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+        "plan_digest": "sha256:0ac901b2988a3461ace05cbbf29da4d8b87000cc853e9bd084588a7a0865dd2c",
+        "submission_count": 36120,
+        "kernel_dispatch_count": 47928,
+        "segment_count": 72,
+        "boundary_count": 72,
+        "fallback_used": false,
+        "all_dispatches_hip": true,
+        "model_load_count": 1,
+        "model_reused": true,
+        "sample_count": 4,
+        "weight_encoding": "mixed-nvfp4-w4a4-fp8-w8a8",
+        "mtp_proposal_blocks": null,
+        "mtp_proposed_draft_tokens": null,
+        "mtp_accepted_draft_tokens": null,
+        "mtp_rejected_draft_tokens": null
+      },
+      "cleanup": {
+        "warmup_request_count": 1,
+        "measured_request_count": 3,
+        "request_cleanup_count": 4,
+        "performance_sample_count": 4,
+        "all_requests_dropped": true,
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "session_cleanup": {
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "memory": {
+        "model_ready": {
+          "model_resident": {
+            "current_bytes": 9201218276,
+            "high_water_bytes": 9201218276
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 344064
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 11500044
+          },
+          "current_bytes": 9201218276,
+          "high_water_bytes": 9213062384,
+          "poisoned": false
+        },
+        "after_model_drop": {
+          "model_resident": {
+            "current_bytes": 0,
+            "high_water_bytes": 9201218276
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 26066944
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 747502860
+          },
+          "current_bytes": 0,
+          "high_water_bytes": 9974788080,
+          "poisoned": false
+        },
+        "model_resident_high_water_bytes": 9201218276,
+        "resident_vram_bytes": 9201218276,
+        "resident_vram_source": "model_resident_allocator_high_water",
+        "peak_vram_bytes": 9974788080,
+        "peak_source": "runtime_allocator"
+      },
+      "tokens_sha256": [
+        "5a70ebd4982c1b80d94c69fe4bddafb25dc65f756cdf7256050267ec38cb9f43",
+        "5a70ebd4982c1b80d94c69fe4bddafb25dc65f756cdf7256050267ec38cb9f43",
+        "5a70ebd4982c1b80d94c69fe4bddafb25dc65f756cdf7256050267ec38cb9f43"
+      ]
+    },
+    {
+      "name": "reviewed-gfx1030-gemma-65x9-selector-rollback",
+      "binary_sha256": "63716805300e2fbc38725862a47b1d15c1f4f1ad323f8dd6ad6f4cc47903e55c",
+      "raw_sha256": "dd3e4f83d6483792a6628c6eb97454464ea5234c3dc175e116140acc6f13dc2f",
+      "execution_sha256": "9411f044c045e347de71215b8434dcbd32a97d6819db3549d8a47f17bef575b6",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "flags": {
+        "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4": "0",
+        "SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_DWORD8": "0",
+        "SLLM_PREPARED_PROJECTION_SHARING": "0"
+      },
+      "metrics": {
+        "ttft_ns": {
+          "median": 4880301536,
+          "min": 4880183510,
+          "max": 4904266536
+        },
+        "prefill_tokens_per_second": {
+          "median": 13.378844961201686,
+          "min": 13.322911547948538,
+          "max": 13.38563261722784
+        },
+        "decode_tokens_per_second": {
+          "median": 1.5445060722789086,
+          "min": 1.5169380334717546,
+          "max": 1.5592443705393537
+        },
+        "e2e_ns": {
+          "median": 10059835062,
+          "min": 10034995328,
+          "max": 10154084829
+        }
+      },
+      "audit": {
+        "selected_backend": "hip",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+        "plan_digest": "sha256:0ac901b2988a3461ace05cbbf29da4d8b87000cc853e9bd084588a7a0865dd2c",
+        "submission_count": 37656,
+        "kernel_dispatch_count": 49464,
+        "segment_count": 72,
+        "boundary_count": 72,
+        "fallback_used": false,
+        "all_dispatches_hip": true,
+        "model_load_count": 1,
+        "model_reused": true,
+        "sample_count": 4,
+        "weight_encoding": "mixed-nvfp4-w4a4-fp8-w8a8",
+        "mtp_proposal_blocks": null,
+        "mtp_proposed_draft_tokens": null,
+        "mtp_accepted_draft_tokens": null,
+        "mtp_rejected_draft_tokens": null
+      },
+      "cleanup": {
+        "warmup_request_count": 1,
+        "measured_request_count": 3,
+        "request_cleanup_count": 4,
+        "performance_sample_count": 4,
+        "all_requests_dropped": true,
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "session_cleanup": {
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "memory": {
+        "model_ready": {
+          "model_resident": {
+            "current_bytes": 9201218276,
+            "high_water_bytes": 9201218276
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 344064
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 11500044
+          },
+          "current_bytes": 9201218276,
+          "high_water_bytes": 9213062384,
+          "poisoned": false
+        },
+        "after_model_drop": {
+          "model_resident": {
+            "current_bytes": 0,
+            "high_water_bytes": 9201218276
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 26066944
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 747502860
+          },
+          "current_bytes": 0,
+          "high_water_bytes": 9974788080,
+          "poisoned": false
+        },
+        "model_resident_high_water_bytes": 9201218276,
+        "resident_vram_bytes": 9201218276,
+        "resident_vram_source": "model_resident_allocator_high_water",
+        "peak_vram_bytes": 9974788080,
+        "peak_source": "runtime_allocator"
+      },
+      "tokens_sha256": [
+        "3d62c5ffc42fa18a15194ad1a0930b67ab520a0718be933b5fd4bafbe6017cc2",
+        "3d62c5ffc42fa18a15194ad1a0930b67ab520a0718be933b5fd4bafbe6017cc2",
+        "3d62c5ffc42fa18a15194ad1a0930b67ab520a0718be933b5fd4bafbe6017cc2"
+      ]
+    },
+    {
+      "name": "reviewed-gfx1030-gemma-65x9-shared-deferred",
+      "binary_sha256": "63716805300e2fbc38725862a47b1d15c1f4f1ad323f8dd6ad6f4cc47903e55c",
+      "raw_sha256": "f13ddf33d9f842a781532d202823c0b5784d376c766eba945668603a165cb08d",
+      "execution_sha256": "e77210e8aae47b4e1437a80e9aec8dece269a644fb3af7e3cf93822dd6878b1a",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "flags": {
+        "SLLM_PREPARED_DEFERRED_COMPLETION": "1"
+      },
+      "metrics": {
+        "ttft_ns": {
+          "median": 4857180147,
+          "min": 4845600788,
+          "max": 4882487973
+        },
+        "prefill_tokens_per_second": {
+          "median": 13.448602485958817,
+          "min": 13.37693177786999,
+          "max": 13.470242289679112
+        },
+        "decode_tokens_per_second": {
+          "median": 15.341881606028439,
+          "min": 15.137733076977085,
+          "max": 15.674194807404154
+        },
+        "e2e_ns": {
+          "median": 5374082993,
+          "min": 5367574631,
+          "max": 5403937838
+        }
+      },
+      "audit": {
+        "selected_backend": "hip",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+        "plan_digest": "sha256:0ac901b2988a3461ace05cbbf29da4d8b87000cc853e9bd084588a7a0865dd2c",
+        "submission_count": 36120,
+        "kernel_dispatch_count": 47928,
+        "segment_count": 72,
+        "boundary_count": 72,
+        "fallback_used": false,
+        "all_dispatches_hip": true,
+        "model_load_count": 1,
+        "model_reused": true,
+        "sample_count": 4,
+        "weight_encoding": "mixed-nvfp4-w4a4-fp8-w8a8",
+        "mtp_proposal_blocks": null,
+        "mtp_proposed_draft_tokens": null,
+        "mtp_accepted_draft_tokens": null,
+        "mtp_rejected_draft_tokens": null
+      },
+      "cleanup": {
+        "warmup_request_count": 1,
+        "measured_request_count": 3,
+        "request_cleanup_count": 4,
+        "performance_sample_count": 4,
+        "all_requests_dropped": true,
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "session_cleanup": {
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "memory": {
+        "model_ready": {
+          "model_resident": {
+            "current_bytes": 9201218276,
+            "high_water_bytes": 9201218276
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 344064
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 11500044
+          },
+          "current_bytes": 9201218276,
+          "high_water_bytes": 9213062384,
+          "poisoned": false
+        },
+        "after_model_drop": {
+          "model_resident": {
+            "current_bytes": 0,
+            "high_water_bytes": 9201218276
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 26066944
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 747502860
+          },
+          "current_bytes": 0,
+          "high_water_bytes": 9974788080,
+          "poisoned": false
+        },
+        "model_resident_high_water_bytes": 9201218276,
+        "resident_vram_bytes": 9201218276,
+        "resident_vram_source": "model_resident_allocator_high_water",
+        "peak_vram_bytes": 9974788080,
+        "peak_source": "runtime_allocator"
+      },
+      "tokens_sha256": [
+        "5a70ebd4982c1b80d94c69fe4bddafb25dc65f756cdf7256050267ec38cb9f43",
+        "5a70ebd4982c1b80d94c69fe4bddafb25dc65f756cdf7256050267ec38cb9f43",
+        "5a70ebd4982c1b80d94c69fe4bddafb25dc65f756cdf7256050267ec38cb9f43"
+      ]
+    },
+    {
+      "name": "final-gfx1030-qwen4b-bf16-kv-mxfp8-e4-33x9-common-deferred",
+      "binary_sha256": "700de92ff2f0b3f6de8ab1ef4c13922e423d35761c7fbc92e92ddb1537bc40ff",
+      "raw_sha256": "60fa800b72813ae91d0f20ddd008581820bb0d3f5d89c560b1e92c9ae59eefe6",
+      "execution_sha256": "cd79d1602b22da0653ff39b3f5a6afb2e42a330986e89ed34cbd491f650a4a2a",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "flags": {
+        "SLLM_PREPARED_DEFERRED_COMPLETION": "1"
+      },
+      "metrics": {
+        "ttft_ns": {
+          "median": 142630557,
+          "min": 141283372,
+          "max": 142665077
+        },
+        "prefill_tokens_per_second": {
+          "median": 242.7053794985442,
+          "min": 242.35122282422103,
+          "max": 244.6507285020345
+        },
+        "decode_tokens_per_second": {
+          "median": 45.01048429210616,
+          "min": 44.985649549677625,
+          "max": 45.23257865395569
+        },
+        "e2e_ns": {
+          "median": 329653726,
+          "min": 328797141,
+          "max": 330031843
+        }
+      },
+      "audit": {
+        "selected_backend": "hip",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+        "plan_digest": "sha256:45786731957b76eecfd73b85593233c3b3102bf05327d4a5f58621c35bb8fa8e",
+        "submission_count": 11344,
+        "kernel_dispatch_count": 13392,
+        "segment_count": 324,
+        "boundary_count": 324,
+        "fallback_used": false,
+        "all_dispatches_hip": true,
+        "model_load_count": 1,
+        "weight_encoding": "bf16",
+        "fp8_provider": null,
+        "request_model_load_count": 0,
+        "model_reused": true,
+        "sample_count": 4,
+        "correctness_control_request_count": 0,
+        "correctness_control_source": "first-warmup-sample",
+        "correctness_control_reference_sample_index": 0,
+        "total_request_count": 4
+      },
+      "cleanup": {
+        "correctness_control_request_count": 0,
+        "correctness_control_source": "first-warmup-sample",
+        "correctness_control_reference_sample_index": 0,
+        "warmup_request_count": 1,
+        "measured_request_count": 3,
+        "request_cleanup_count": 4,
+        "performance_sample_count": 4,
+        "all_requests_dropped": true,
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "session_cleanup": {
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "memory": {
+        "placement_total_memory_bytes": 34342961152,
+        "placement_available_memory_bytes": 34311503872,
+        "placement_required_bytes": 10214767513,
+        "placement_model_resident_bytes": 8411592192,
+        "placement_request_state_bytes": 52220928,
+        "placement_safety_reserve_bytes": 1717148057,
+        "workspace_separate_allocation_bytes": 148221696,
+        "workspace_arena_bytes": 33806336,
+        "model_ready": {
+          "model_resident": {
+            "current_bytes": 8411592192,
+            "high_water_bytes": 8411592192
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 0
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 0
+          },
+          "current_bytes": 8411592192,
+          "high_water_bytes": 8411592192,
+          "poisoned": false
+        },
+        "after_model_drop": {
+          "model_resident": {
+            "current_bytes": 0,
+            "high_water_bytes": 8411592192
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 52220928
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 17417216
+          },
+          "current_bytes": 0,
+          "high_water_bytes": 8481230336,
+          "poisoned": false
+        },
+        "model_resident_high_water_bytes": 8411592192,
+        "resident_vram_bytes": 8411592192,
+        "resident_vram_source": "model_resident_allocator_high_water",
+        "peak_vram_bytes": 8481230336,
+        "peak_source": "runtime_allocator"
+      },
+      "tokens_sha256": [
+        "f8e2674678df76409d8d441e48089e31c5417dcf15d31a57e776554347606537",
+        "f8e2674678df76409d8d441e48089e31c5417dcf15d31a57e776554347606537",
+        "f8e2674678df76409d8d441e48089e31c5417dcf15d31a57e776554347606537"
+      ]
+    },
+    {
+      "name": "final-gfx1030-qwen4b-bf16-kv-mxfp8-e4-33x9-profiled",
+      "binary_sha256": "700de92ff2f0b3f6de8ab1ef4c13922e423d35761c7fbc92e92ddb1537bc40ff",
+      "raw_sha256": "be7f65c69d52345ad56512d61256d4b3d8606f1b4d8c98a2ad813d5fcb5e02c5",
+      "execution_sha256": "7e27da69c516b9348454be5f88ff048505fd8aaa0ad289ae29ac4218ceead859",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "flags": {
+        "SLLM_QWEN_DEFERRED_COMPLETION": "0",
+        "SLLM_PREPARED_DEFERRED_COMPLETION": "0"
+      },
+      "metrics": {
+        "ttft_ns": {
+          "median": 145850303,
+          "min": 145681030,
+          "max": 152401188
+        },
+        "prefill_tokens_per_second": {
+          "median": 236.27431490919923,
+          "min": 227.60725978322904,
+          "max": 236.36959678441082
+        },
+        "decode_tokens_per_second": {
+          "median": 39.28622604142396,
+          "min": 39.07311899770651,
+          "max": 39.313216003924715
+        },
+        "e2e_ns": {
+          "median": 359302675,
+          "min": 357432133,
+          "max": 364384554
+        }
+      },
+      "audit": {
+        "selected_backend": "hip",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+        "plan_digest": "sha256:45786731957b76eecfd73b85593233c3b3102bf05327d4a5f58621c35bb8fa8e",
+        "submission_count": 11344,
+        "kernel_dispatch_count": 13392,
+        "segment_count": 324,
+        "boundary_count": 324,
+        "fallback_used": false,
+        "all_dispatches_hip": true,
+        "model_load_count": 1,
+        "weight_encoding": "bf16",
+        "fp8_provider": null,
+        "request_model_load_count": 0,
+        "model_reused": true,
+        "sample_count": 4,
+        "correctness_control_request_count": 0,
+        "correctness_control_source": "first-warmup-sample",
+        "correctness_control_reference_sample_index": 0,
+        "total_request_count": 4
+      },
+      "cleanup": {
+        "correctness_control_request_count": 0,
+        "correctness_control_source": "first-warmup-sample",
+        "correctness_control_reference_sample_index": 0,
+        "warmup_request_count": 1,
+        "measured_request_count": 3,
+        "request_cleanup_count": 4,
+        "performance_sample_count": 4,
+        "all_requests_dropped": true,
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "session_cleanup": {
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "memory": {
+        "placement_total_memory_bytes": 34342961152,
+        "placement_available_memory_bytes": 34311503872,
+        "placement_required_bytes": 10214767513,
+        "placement_model_resident_bytes": 8411592192,
+        "placement_request_state_bytes": 52220928,
+        "placement_safety_reserve_bytes": 1717148057,
+        "workspace_separate_allocation_bytes": 148221696,
+        "workspace_arena_bytes": 33806336,
+        "model_ready": {
+          "model_resident": {
+            "current_bytes": 8411592192,
+            "high_water_bytes": 8411592192
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 0
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 0
+          },
+          "current_bytes": 8411592192,
+          "high_water_bytes": 8411592192,
+          "poisoned": false
+        },
+        "after_model_drop": {
+          "model_resident": {
+            "current_bytes": 0,
+            "high_water_bytes": 8411592192
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 52220928
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 17417216
+          },
+          "current_bytes": 0,
+          "high_water_bytes": 8481230336,
+          "poisoned": false
+        },
+        "model_resident_high_water_bytes": 8411592192,
+        "resident_vram_bytes": 8411592192,
+        "resident_vram_source": "model_resident_allocator_high_water",
+        "peak_vram_bytes": 8481230336,
+        "peak_source": "runtime_allocator"
+      },
+      "tokens_sha256": [
+        "f8e2674678df76409d8d441e48089e31c5417dcf15d31a57e776554347606537",
+        "f8e2674678df76409d8d441e48089e31c5417dcf15d31a57e776554347606537",
+        "f8e2674678df76409d8d441e48089e31c5417dcf15d31a57e776554347606537"
+      ]
+    },
+    {
+      "name": "final-gfx1030-qwen4b-fp16-33x9-common-deferred",
+      "binary_sha256": "700de92ff2f0b3f6de8ab1ef4c13922e423d35761c7fbc92e92ddb1537bc40ff",
+      "raw_sha256": "012f43c8624a1bba4a16a6f79be2c26d67f83f4a9209f4c7f4c8fa039c11b1e2",
+      "execution_sha256": "673607c92bcede0c6f5cfe76855deb0f9d78e9d3a80b8b3fa8eb30d587aaad32",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "flags": {
+        "SLLM_PREPARED_DEFERRED_COMPLETION": "1"
+      },
+      "metrics": {
+        "ttft_ns": {
+          "median": 567831677,
+          "min": 567673965,
+          "max": 568029741
+        },
+        "prefill_tokens_per_second": {
+          "median": 58.59078540196804,
+          "min": 58.547682787036614,
+          "max": 58.59341552231729
+        },
+        "decode_tokens_per_second": {
+          "median": 16.068196833820462,
+          "min": 16.01172586720433,
+          "max": 16.069920481132133
+        },
+        "e2e_ns": {
+          "median": 1072735555,
+          "min": 1072629881,
+          "max": 1075723597
+        }
+      },
+      "audit": {
+        "selected_backend": "hip",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+        "plan_digest": "sha256:64572a559216fb566ed673661804e0480cfb1056b23cb2cb4ddab2e382701f12",
+        "submission_count": 16848,
+        "kernel_dispatch_count": 26836,
+        "segment_count": 324,
+        "boundary_count": 324,
+        "fallback_used": false,
+        "all_dispatches_hip": true,
+        "model_load_count": 1,
+        "weight_encoding": "mxfp8-e4m3-w8a8",
+        "fp8_provider": null,
+        "request_model_load_count": 0,
+        "model_reused": true,
+        "sample_count": 4,
+        "correctness_control_request_count": 0,
+        "correctness_control_source": "first-warmup-sample",
+        "correctness_control_reference_sample_index": 0,
+        "total_request_count": 4
+      },
+      "cleanup": {
+        "correctness_control_request_count": 0,
+        "correctness_control_source": "first-warmup-sample",
+        "correctness_control_reference_sample_index": 0,
+        "warmup_request_count": 1,
+        "measured_request_count": 3,
+        "request_cleanup_count": 4,
+        "performance_sample_count": 4,
+        "all_requests_dropped": true,
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "session_cleanup": {
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "memory": {
+        "placement_total_memory_bytes": 34342961152,
+        "placement_available_memory_bytes": 34311503872,
+        "placement_required_bytes": 6757877657,
+        "placement_model_resident_bytes": 4954035712,
+        "placement_request_state_bytes": 52887552,
+        "placement_safety_reserve_bytes": 1717148057,
+        "workspace_separate_allocation_bytes": 148221696,
+        "workspace_arena_bytes": 33806336,
+        "model_ready": {
+          "model_resident": {
+            "current_bytes": 4954035712,
+            "high_water_bytes": 4954035712
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 0
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 0
+          },
+          "current_bytes": 4954035712,
+          "high_water_bytes": 4954035712,
+          "poisoned": false
+        },
+        "after_model_drop": {
+          "model_resident": {
+            "current_bytes": 0,
+            "high_water_bytes": 4954035712
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 52887552
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 33806336
+          },
+          "current_bytes": 0,
+          "high_water_bytes": 5040729600,
+          "poisoned": false
+        },
+        "model_resident_high_water_bytes": 4954035712,
+        "resident_vram_bytes": 4954035712,
+        "resident_vram_source": "model_resident_allocator_high_water",
+        "peak_vram_bytes": 5040729600,
+        "peak_source": "runtime_allocator"
+      },
+      "tokens_sha256": [
+        "f8e2674678df76409d8d441e48089e31c5417dcf15d31a57e776554347606537",
+        "f8e2674678df76409d8d441e48089e31c5417dcf15d31a57e776554347606537",
+        "f8e2674678df76409d8d441e48089e31c5417dcf15d31a57e776554347606537"
+      ]
+    },
+    {
+      "name": "final-gfx1030-qwen4b-fp16-33x9-profiled",
+      "binary_sha256": "700de92ff2f0b3f6de8ab1ef4c13922e423d35761c7fbc92e92ddb1537bc40ff",
+      "raw_sha256": "c95a7774585bf50b8052e696be6a1d2ee124ddf297e7527b3bcc5bf277333106",
+      "execution_sha256": "fc42bdf480d37eeeb785ff40691ea0ff7e51e89414fcbf4fa79159f04cb41a96",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "flags": {
+        "SLLM_QWEN_DEFERRED_COMPLETION": "0",
+        "SLLM_PREPARED_DEFERRED_COMPLETION": "0"
+      },
+      "metrics": {
+        "ttft_ns": {
+          "median": 568413964,
+          "min": 568033237,
+          "max": 568702799
+        },
+        "prefill_tokens_per_second": {
+          "median": 58.54255115036991,
+          "min": 58.54097051289364,
+          "max": 58.56826718820774
+        },
+        "decode_tokens_per_second": {
+          "median": 14.704357667825425,
+          "min": 14.679986910002473,
+          "max": 14.7161882835485
+        },
+        "e2e_ns": {
+          "median": 1120490511,
+          "min": 1119568565,
+          "max": 1122491097
+        }
+      },
+      "audit": {
+        "selected_backend": "hip",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+        "plan_digest": "sha256:64572a559216fb566ed673661804e0480cfb1056b23cb2cb4ddab2e382701f12",
+        "submission_count": 16848,
+        "kernel_dispatch_count": 26836,
+        "segment_count": 324,
+        "boundary_count": 324,
+        "fallback_used": false,
+        "all_dispatches_hip": true,
+        "model_load_count": 1,
+        "weight_encoding": "mxfp8-e4m3-w8a8",
+        "fp8_provider": null,
+        "request_model_load_count": 0,
+        "model_reused": true,
+        "sample_count": 4,
+        "correctness_control_request_count": 0,
+        "correctness_control_source": "first-warmup-sample",
+        "correctness_control_reference_sample_index": 0,
+        "total_request_count": 4
+      },
+      "cleanup": {
+        "correctness_control_request_count": 0,
+        "correctness_control_source": "first-warmup-sample",
+        "correctness_control_reference_sample_index": 0,
+        "warmup_request_count": 1,
+        "measured_request_count": 3,
+        "request_cleanup_count": 4,
+        "performance_sample_count": 4,
+        "all_requests_dropped": true,
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "session_cleanup": {
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0
+      },
+      "memory": {
+        "placement_total_memory_bytes": 34342961152,
+        "placement_available_memory_bytes": 34311503872,
+        "placement_required_bytes": 6757877657,
+        "placement_model_resident_bytes": 4954035712,
+        "placement_request_state_bytes": 52887552,
+        "placement_safety_reserve_bytes": 1717148057,
+        "workspace_separate_allocation_bytes": 148221696,
+        "workspace_arena_bytes": 33806336,
+        "model_ready": {
+          "model_resident": {
+            "current_bytes": 4954035712,
+            "high_water_bytes": 4954035712
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 0
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 0
+          },
+          "current_bytes": 4954035712,
+          "high_water_bytes": 4954035712,
+          "poisoned": false
+        },
+        "after_model_drop": {
+          "model_resident": {
+            "current_bytes": 0,
+            "high_water_bytes": 4954035712
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 52887552
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 33806336
+          },
+          "current_bytes": 0,
+          "high_water_bytes": 5040729600,
+          "poisoned": false
+        },
+        "model_resident_high_water_bytes": 4954035712,
+        "resident_vram_bytes": 4954035712,
+        "resident_vram_source": "model_resident_allocator_high_water",
+        "peak_vram_bytes": 5040729600,
+        "peak_source": "runtime_allocator"
+      },
+      "tokens_sha256": [
+        "f8e2674678df76409d8d441e48089e31c5417dcf15d31a57e776554347606537",
+        "f8e2674678df76409d8d441e48089e31c5417dcf15d31a57e776554347606537",
+        "f8e2674678df76409d8d441e48089e31c5417dcf15d31a57e776554347606537"
+      ]
+    }
+  ],
+  "final_gemma_capture_prefix": "fixed-logits-reviewed-",
+  "qwen_graph": [
+    {
+      "arm": "graph-off",
+      "raw_sha256": "855d2950d60a84611b2d485682022022dd854262ab5ed08d756d7780d15550f6",
+      "binary_sha256": "85be2b837cfd7c32feb66c95e6f304780ec132903abd3e82684d1d54e989d189",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "model": {
+        "root": "/home/homelab1/datapool/ai_models/safetensors/Qwen3.8-27B-NVFP4",
+        "path_environment": "SLLM_PHASE78_MODEL_PATH",
+        "repository": "unsloth/Qwen3.8-27B-NVFP4",
+        "revision": "57926baca9a82b4d6906b43f2750d55315f5b10f",
+        "model_bytes": 22568192096,
+        "model_sha256": "c473512c70eace07e2256fe9fd76596ac03e3295bee7d54cfb72676416afcc05"
+      },
+      "repetitions": {
+        "warmups_per_row": 1,
+        "measured_per_row": 1,
+        "measured_statistics": "median and median absolute deviation over measured runs only"
+      },
+      "generated_tokens_sha256": "sha256:a7b40beb3b207d66d694b862fc6261ff12ef2c66f93fa89940b92515c2670eaf",
+      "audit": [
+        {
+          "target": "gfx1030",
+          "kernel_dispatch_count": 22077,
+          "fallback_used": false,
+          "graph_replay_count": 0,
+          "graph_span_count": 0,
+          "graph_capture_kernel_node_count": 0
+        },
+        {
+          "target": "gfx1030",
+          "kernel_dispatch_count": 22077,
+          "fallback_used": false,
+          "graph_replay_count": 0,
+          "graph_span_count": 0,
+          "graph_capture_kernel_node_count": 0
+        }
+      ],
+      "cleanup": {
+        "allocation_after_resident_drop_before_shutdown": {
+          "model_resident": {
+            "current_bytes": 0,
+            "high_water_bytes": 21650549568
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 780664832
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 948510720
+          },
+          "current_bytes": 0,
+          "high_water_bytes": 23379725120,
+          "poisoned": false,
+          "high_water_scope": "cumulative execution-session allocation accounting"
+        },
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0,
+        "zero": true
+      }
+    },
+    {
+      "arm": "graph-on",
+      "raw_sha256": "0b918710f2e9948f2a489ea594bbaccffd3fba042299d7f896bd254991229706",
+      "binary_sha256": "85be2b837cfd7c32feb66c95e6f304780ec132903abd3e82684d1d54e989d189",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "model": {
+        "root": "/home/homelab1/datapool/ai_models/safetensors/Qwen3.8-27B-NVFP4",
+        "path_environment": "SLLM_PHASE78_MODEL_PATH",
+        "repository": "unsloth/Qwen3.8-27B-NVFP4",
+        "revision": "57926baca9a82b4d6906b43f2750d55315f5b10f",
+        "model_bytes": 22568192096,
+        "model_sha256": "c473512c70eace07e2256fe9fd76596ac03e3295bee7d54cfb72676416afcc05"
+      },
+      "repetitions": {
+        "warmups_per_row": 1,
+        "measured_per_row": 1,
+        "measured_statistics": "median and median absolute deviation over measured runs only"
+      },
+      "generated_tokens_sha256": "sha256:a7b40beb3b207d66d694b862fc6261ff12ef2c66f93fa89940b92515c2670eaf",
+      "audit": [
+        {
+          "target": "gfx1030",
+          "kernel_dispatch_count": 22077,
+          "fallback_used": false,
+          "graph_replay_count": 1920,
+          "graph_span_count": 128,
+          "graph_capture_kernel_node_count": 1128
+        },
+        {
+          "target": "gfx1030",
+          "kernel_dispatch_count": 22077,
+          "fallback_used": false,
+          "graph_replay_count": 1920,
+          "graph_span_count": 128,
+          "graph_capture_kernel_node_count": 1128
+        }
+      ],
+      "cleanup": {
+        "allocation_after_resident_drop_before_shutdown": {
+          "model_resident": {
+            "current_bytes": 0,
+            "high_water_bytes": 21650549568
+          },
+          "request_state": {
+            "current_bytes": 0,
+            "high_water_bytes": 780664832
+          },
+          "workspace": {
+            "current_bytes": 0,
+            "high_water_bytes": 948510720
+          },
+          "current_bytes": 0,
+          "high_water_bytes": 23379725120,
+          "poisoned": false,
+          "high_water_scope": "cumulative execution-session allocation accounting"
+        },
+        "retryable_cleanup": 0,
+        "durable_quarantine": 0,
+        "zero": true
+      }
+    }
+  ]
+}

@@ -22,9 +22,11 @@ use crate::kv_state::{KvCacheEncoding, KvStateDescriptor};
 use crate::op::TokenSelectorContractV1;
 use crate::op::{RmsNormContract, SemanticOpDescriptor, SemanticOpKind};
 use crate::prepared_execution::{
-    ExecutionAuditAccumulator, ExecutionBoundaryKind, ExecutionSegment, PreparedCachePolicy,
-    PreparedDynamicIdentity, PreparedExecutionAudit, PreparedSemanticCache,
-    require_terminal_success,
+    ExecutionAuditAccumulator, ExecutionBoundaryKind, ExecutionSegment,
+    PREPARED_DEFERRED_COMPLETION_ENV, PREPARED_PROJECTION_SHARING_ENV, PreparedCachePolicy,
+    PreparedCompletionMode, PreparedDynamicIdentity, PreparedExecutionAudit, PreparedSemanticCache,
+    prepared_deferred_completion_scope_enabled, prepared_projection_pair_compatible,
+    prepared_projection_sharing_enabled, require_terminal_success,
 };
 use crate::session_checkpoint::{
     CheckpointIdentity, CheckpointPayload, OpaqueStatePlane, SessionCheckpoint,
@@ -36,8 +38,8 @@ use crate::{
     ExecutionBuffer, ExecutionQueue, ExecutionSession, ExecutionState, ExecutionStateImageV1,
     KvState, OwnedTensorBinding, PrepareSupport, QuantizedTensorEncoding, SamplingSelectionV1,
     ScalePlaneRole, StateForkAuditV1, TensorDType, TensorView, VerifiedCache,
-    VerifiedGgufGemmaSource, VerifiedNvfp4Sidecar, VerifiedUnslothGemma4Nvfp4, WeightUploadRequest,
-    upload_verified_weight,
+    VerifiedGgufGemmaSource, VerifiedNvfp4Sidecar, VerifiedUnslothGemma4Nvfp4, WeightConsumer,
+    WeightUploadRequest, upload_verified_weight,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -142,6 +144,11 @@ pub struct Gemma4ExecutionLayout {
     plan_digest: [u8; 32],
     tensors: Vec<Gemma4ExecutionTensor>,
     nodes: Vec<Gemma4ExecutionNode>,
+    projection_share_pairs: Vec<(usize, usize)>,
+    projection_pack_pairs: Vec<(usize, usize)>,
+    projection_pack_candidate_count: u64,
+    projection_pack_scale_mismatch_count: u64,
+    projection_pack_override_disabled: bool,
     model_weight_bytes: u64,
     workspace_bytes: u64,
     request_state_bytes: u64,
@@ -162,6 +169,36 @@ impl Gemma4ExecutionLayout {
 
     pub fn nodes(&self) -> &[Gemma4ExecutionNode] {
         &self.nodes
+    }
+
+    /// Adjacent ordinary projection nodes that consume one activation view
+    /// and use a compatible weight encoding. The pair is metadata only;
+    /// decode W4A4 gate/up pairs are tracked separately when their verified
+    /// scale recipe also satisfies the shared ProjectionPack ABI.
+    pub fn projection_share_pairs(&self) -> &[(usize, usize)] {
+        &self.projection_share_pairs
+    }
+
+    pub fn projection_pack_pairs(&self) -> &[(usize, usize)] {
+        &self.projection_pack_pairs
+    }
+
+    /// Number of decode gate/up pairs that reached the reviewed pack
+    /// eligibility checks for this layout.
+    pub const fn projection_pack_candidate_count(&self) -> u64 {
+        self.projection_pack_candidate_count
+    }
+
+    /// Number of otherwise compatible Gemma gate/up pairs rejected because
+    /// their verified input-global scale bit patterns differ.
+    pub const fn projection_pack_scale_mismatch_count(&self) -> u64 {
+        self.projection_pack_scale_mismatch_count
+    }
+
+    /// Whether the common projection-sharing rollback was active while this
+    /// layout was built.
+    pub const fn projection_pack_override_disabled(&self) -> bool {
+        self.projection_pack_override_disabled
     }
 
     pub const fn model_weight_bytes(&self) -> u64 {
@@ -215,7 +252,6 @@ pub struct Gemma4ResidentModel {
 
 struct Gemma4ResidentInner {
     session: Arc<ExecutionSession>,
-    queue: ExecutionQueue,
     lock: crate::Gemma4ModelLock,
     plan: WeightLoadPlan,
     nvfp4_sidecar: Option<Arc<VerifiedNvfp4Sidecar>>,
@@ -234,6 +270,10 @@ trait GemmaQuantizedSource: Send + Sync {
         &self,
         descriptor: &crate::QuantizedTensorDescriptor,
     ) -> Result<Vec<u8>, Gemma4ExecutionLayoutError>;
+    fn nvfp4_input_global_scale_f32_bits(
+        &self,
+        logical_name: &str,
+    ) -> Result<Option<u32>, Gemma4ExecutionLayoutError>;
 }
 
 impl GemmaQuantizedSource for VerifiedUnslothGemma4Nvfp4 {
@@ -262,6 +302,26 @@ impl GemmaQuantizedSource for VerifiedUnslothGemma4Nvfp4 {
         descriptor: &crate::QuantizedTensorDescriptor,
     ) -> Result<Vec<u8>, Gemma4ExecutionLayoutError> {
         build_unsloth_gemma_resident_bytes(self, descriptor)
+    }
+
+    fn nvfp4_input_global_scale_f32_bits(
+        &self,
+        logical_name: &str,
+    ) -> Result<Option<u32>, Gemma4ExecutionLayoutError> {
+        let Some(descriptor) = self.tensor(logical_name) else {
+            return Ok(None);
+        };
+        let Some(plane) = descriptor
+            .scale_planes
+            .iter()
+            .find(|plane| plane.role == ScalePlaneRole::InputOuter)
+        else {
+            return Ok(None);
+        };
+        let scale = self
+            .read_f32_reciprocal(plane)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        Ok(Some(scale.to_bits()))
     }
 }
 
@@ -292,6 +352,36 @@ impl GemmaQuantizedSource for VerifiedGgufGemmaSource {
     ) -> Result<Vec<u8>, Gemma4ExecutionLayoutError> {
         self.resident_bytes(&descriptor.logical_name)
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
+    }
+
+    fn nvfp4_input_global_scale_f32_bits(
+        &self,
+        logical_name: &str,
+    ) -> Result<Option<u32>, Gemma4ExecutionLayoutError> {
+        let Some(descriptor) = self.tensor(logical_name) else {
+            return Ok(None);
+        };
+        let Some(plane) = descriptor
+            .scale_planes
+            .iter()
+            .find(|plane| plane.role == ScalePlaneRole::InputOuter)
+        else {
+            return Ok(None);
+        };
+        let bytes = self
+            .gguf()
+            .read_tensor_range(&plane.source_name, 0, 4)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let bytes: [u8; 4] = bytes.try_into().map_err(|_| {
+            Gemma4ExecutionLayoutError::invalid("Gemma NVFP4 input scale is not four bytes")
+        })?;
+        let scale = f32::from_le_bytes(bytes);
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma NVFP4 input scale is non-positive or non-finite",
+            ));
+        }
+        Ok(Some(scale.to_bits()))
     }
 }
 
@@ -746,6 +836,10 @@ pub struct Gemma4ExecutionAudit {
     kernel_dispatch_count: u64,
     segment_count: u64,
     boundary_count: u64,
+    projection_pack_submission_count: u64,
+    projection_pack_candidate_count: u64,
+    projection_pack_scale_mismatch_count: u64,
+    projection_pack_override_disabled: bool,
     fallback_used: bool,
 }
 
@@ -768,6 +862,24 @@ impl Gemma4ExecutionAudit {
 
     pub const fn boundary_count(&self) -> u64 {
         self.boundary_count
+    }
+
+    /// Number of physical prepared submissions lowered through Gemma's
+    /// ProjectionPack ABI, copied from the common prepared audit.
+    pub const fn projection_pack_submission_count(&self) -> u64 {
+        self.projection_pack_submission_count
+    }
+
+    pub const fn projection_pack_candidate_count(&self) -> u64 {
+        self.projection_pack_candidate_count
+    }
+
+    pub const fn projection_pack_scale_mismatch_count(&self) -> u64 {
+        self.projection_pack_scale_mismatch_count
+    }
+
+    pub const fn projection_pack_override_disabled(&self) -> bool {
+        self.projection_pack_override_disabled
     }
 
     pub const fn fallback_used(&self) -> bool {
@@ -805,6 +917,19 @@ fn merge_gemma_execution_audits(
         .boundary_count
         .checked_add(right.boundary_count)
         .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma audit count overflowed"))?;
+    left.projection_pack_submission_count = left
+        .projection_pack_submission_count
+        .checked_add(right.projection_pack_submission_count)
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma audit count overflowed"))?;
+    left.projection_pack_candidate_count = left
+        .projection_pack_candidate_count
+        .checked_add(right.projection_pack_candidate_count)
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma audit count overflowed"))?;
+    left.projection_pack_scale_mismatch_count = left
+        .projection_pack_scale_mismatch_count
+        .checked_add(right.projection_pack_scale_mismatch_count)
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma audit count overflowed"))?;
+    left.projection_pack_override_disabled |= right.projection_pack_override_disabled;
     left.fallback_used |= right.fallback_used;
     Ok(Some(left))
 }
@@ -1538,8 +1663,12 @@ impl Gemma4ResidentModel {
         }
         let graph = crate::build_gemma4_graph(&lock, &plan, 1, 0, 1)
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let layout =
-            build_gemma4_quantized_execution_layout_source(&graph, &plan, source.as_ref())?;
+        let layout = build_gemma4_quantized_execution_layout_source_for_session(
+            &graph,
+            &plan,
+            source.as_ref(),
+            &session,
+        )?;
         let queue = session
             .create_queue()
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
@@ -1556,7 +1685,6 @@ impl Gemma4ResidentModel {
         Ok(Self {
             inner: Arc::new(Gemma4ResidentInner {
                 session,
-                queue,
                 lock,
                 plan,
                 nvfp4_sidecar: None,
@@ -1586,8 +1714,10 @@ impl Gemma4ResidentModel {
         let graph = crate::build_gemma4_graph(&lock, &plan, 1, 0, 1)
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let layout = match sidecar.as_deref() {
-            Some(sidecar) => build_gemma4_nvfp4_execution_layout(&graph, &plan, sidecar)?,
-            None => build_gemma4_execution_layout(&graph, &plan)?,
+            Some(sidecar) => {
+                build_gemma4_nvfp4_execution_layout_for_session(&graph, &plan, sidecar, &session)?
+            }
+            None => build_gemma4_execution_layout_for_session(&graph, &plan, &session)?,
         };
         let queue = session
             .create_queue()
@@ -1609,7 +1739,6 @@ impl Gemma4ResidentModel {
         Ok(Self {
             inner: Arc::new(Gemma4ResidentInner {
                 session,
-                queue,
                 lock,
                 plan,
                 nvfp4_sidecar: sidecar,
@@ -1620,8 +1749,8 @@ impl Gemma4ResidentModel {
         })
     }
 
-    /// Creates a fresh request-local workspace and KV owner while sharing the
-    /// immutable model allocations and ordered execution queue.
+    /// Creates a fresh request-local workspace, KV owner, and execution queue
+    /// while sharing the immutable model allocations.
     pub fn new_request(
         &self,
         prefill_token_count: u64,
@@ -1655,13 +1784,25 @@ impl Gemma4ResidentModel {
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let layout = if let Some(artifact) = self.inner.quantized_model.as_deref() {
-            build_gemma4_quantized_execution_layout_source(&graph, &self.inner.plan, artifact)?
+            build_gemma4_quantized_execution_layout_source_for_session(
+                &graph,
+                &self.inner.plan,
+                artifact,
+                &self.inner.session,
+            )?
         } else {
             match self.inner.nvfp4_sidecar.as_deref() {
-                Some(sidecar) => {
-                    build_gemma4_nvfp4_execution_layout(&graph, &self.inner.plan, sidecar)?
-                }
-                None => build_gemma4_execution_layout(&graph, &self.inner.plan)?,
+                Some(sidecar) => build_gemma4_nvfp4_execution_layout_for_session(
+                    &graph,
+                    &self.inner.plan,
+                    sidecar,
+                    &self.inner.session,
+                )?,
+                None => build_gemma4_execution_layout_for_session(
+                    &graph,
+                    &self.inner.plan,
+                    &self.inner.session,
+                )?,
             }
         };
         // A context shift temporarily owns the old request while the fresh
@@ -1718,10 +1859,18 @@ impl Gemma4ResidentModel {
                 "Gemma opaque KV layer set differs from full-attention graph layers",
             ));
         }
+        // Deferred completion changes queue-level observation mode. Give each
+        // request its own queue so one request cannot restore or overwrite a
+        // concurrent request's mode on the resident queue.
+        let queue = self
+            .inner
+            .session
+            .create_queue()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         Ok(Gemma4ExecutionRequest {
             _resident: Arc::clone(&self.inner),
             session: Arc::clone(&self.inner.session),
-            queue: self.inner.queue.clone(),
+            queue,
             lock: self.inner.lock.clone(),
             plan: self.inner.plan.clone(),
             layout,
@@ -2246,11 +2395,23 @@ impl Gemma4ExecutionRequest {
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let layout = if let Some(artifact) = self._resident.quantized_model.as_deref() {
-            build_gemma4_quantized_execution_layout_source(&graph, &self.plan, artifact)?
+            build_gemma4_quantized_execution_layout_source_for_session(
+                &graph,
+                &self.plan,
+                artifact,
+                &self.session,
+            )?
         } else {
             match self._resident.nvfp4_sidecar.as_deref() {
-                Some(sidecar) => build_gemma4_nvfp4_execution_layout(&graph, &self.plan, sidecar)?,
-                None => build_gemma4_execution_layout(&graph, &self.plan)?,
+                Some(sidecar) => build_gemma4_nvfp4_execution_layout_for_session(
+                    &graph,
+                    &self.plan,
+                    sidecar,
+                    &self.session,
+                )?,
+                None => {
+                    build_gemma4_execution_layout_for_session(&graph, &self.plan, &self.session)?
+                }
             }
         };
         let buffers = self.buffers.rebind_transition(&self.layout, &layout)?;
@@ -2315,11 +2476,23 @@ impl Gemma4ExecutionRequest {
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let layout = if let Some(artifact) = self._resident.quantized_model.as_deref() {
-            build_gemma4_quantized_execution_layout_source(&graph, &self.plan, artifact)?
+            build_gemma4_quantized_execution_layout_source_for_session(
+                &graph,
+                &self.plan,
+                artifact,
+                &self.session,
+            )?
         } else {
             match self._resident.nvfp4_sidecar.as_deref() {
-                Some(sidecar) => build_gemma4_nvfp4_execution_layout(&graph, &self.plan, sidecar)?,
-                None => build_gemma4_execution_layout(&graph, &self.plan)?,
+                Some(sidecar) => build_gemma4_nvfp4_execution_layout_for_session(
+                    &graph,
+                    &self.plan,
+                    sidecar,
+                    &self.session,
+                )?,
+                None => {
+                    build_gemma4_execution_layout_for_session(&graph, &self.plan, &self.session)?
+                }
             }
         };
         let buffers = self.buffers.rebind_transition(&self.layout, &layout)?;
@@ -3573,6 +3746,11 @@ impl Gemma4ExecutionRequest {
                 "Gemma transition is not exact HIP/no-fallback",
             ));
         }
+        let projection_pack_submission_count = audit.projection_pack_submission_count();
+        let projection_pack_candidate_count = self.layout.projection_pack_candidate_count();
+        let projection_pack_scale_mismatch_count =
+            self.layout.projection_pack_scale_mismatch_count();
+        let projection_pack_override_disabled = self.layout.projection_pack_override_disabled();
         match &mut self.audit {
             Some(total) => {
                 if total.target != audit.target() {
@@ -3596,6 +3774,19 @@ impl Gemma4ExecutionRequest {
                     .boundary_count
                     .checked_add(audit.boundary_count())
                     .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("audit count overflow"))?;
+                total.projection_pack_submission_count = total
+                    .projection_pack_submission_count
+                    .checked_add(projection_pack_submission_count)
+                    .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("audit count overflow"))?;
+                total.projection_pack_candidate_count = total
+                    .projection_pack_candidate_count
+                    .checked_add(projection_pack_candidate_count)
+                    .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("audit count overflow"))?;
+                total.projection_pack_scale_mismatch_count = total
+                    .projection_pack_scale_mismatch_count
+                    .checked_add(projection_pack_scale_mismatch_count)
+                    .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("audit count overflow"))?;
+                total.projection_pack_override_disabled |= projection_pack_override_disabled;
                 total.fallback_used |= audit.fallback_used();
             }
             None => {
@@ -3605,6 +3796,10 @@ impl Gemma4ExecutionRequest {
                     kernel_dispatch_count: audit.kernel_dispatch_count(),
                     segment_count: audit.segment_count(),
                     boundary_count: audit.boundary_count(),
+                    projection_pack_submission_count,
+                    projection_pack_candidate_count,
+                    projection_pack_scale_mismatch_count,
+                    projection_pack_override_disabled,
                     fallback_used: audit.fallback_used(),
                 });
             }
@@ -4346,6 +4541,7 @@ impl Gemma4ProvisionedBuffers {
                 "execution graph, layout, queue, or timeout differs",
             ));
         }
+        validate_gemma_projection_share_pairs(layout)?;
         let mut transition = request_state
             .begin(
                 graph.token_count(),
@@ -4357,25 +4553,63 @@ impl Gemma4ProvisionedBuffers {
             .prepared_execution_plan()
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let prepared_transition = transition.transition();
-        let mut pending = ExecutionSegment::profiled(options.completion_timeout);
+        let completion_mode = if prepared_deferred_completion_scope_enabled(
+            self.session.backend_name(),
+            self.session.expected_target().as_deref(),
+            gemma_deferred_encoding_compatible(opaque_kv_states),
+            false,
+            include_mtp_hidden,
+            true,
+            std::env::var_os(PREPARED_DEFERRED_COMPLETION_ENV).as_deref(),
+        ) {
+            PreparedCompletionMode::Deferred
+        } else {
+            PreparedCompletionMode::Profiled
+        };
+        let mut pending = ExecutionSegment::for_mode(
+            &self.session,
+            queue,
+            options.completion_timeout,
+            completion_mode,
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let mut audit = ExecutionAuditAccumulator::new(options.expected_backend);
         let mut terminal_bytes = None;
         let mut selector_logits = None;
         let mut selector_terminal_seen = false;
         let mut embedding_terminal = None;
+        let mut projection_pack_skip = None;
 
         execution_plan
             .execute(prepared_transition, |planned, current| {
                 let graph_node = planned.operation();
+                if projection_pack_skip == Some(graph_node.id()) {
+                    projection_pack_skip = None;
+                    return Ok(());
+                }
                 let node = layout.nodes.get(graph_node.id()).ok_or_else(|| {
                     Gemma4ExecutionLayoutError::invalid("execution node is absent")
                 })?;
+                let projection_pack_first = layout
+                    .projection_pack_pairs()
+                    .iter()
+                    .find_map(|&(first, second)| (first == graph_node.id()).then_some(second));
+                let expected_kind = graph_node.kind().semantic_kind().ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid("graph node has no semantic kind")
+                })?;
+                let descriptor_kind_matches = if projection_pack_first.is_some() {
+                    node.descriptor.kind() == SemanticOpKind::Qwen38ProjectionPack2
+                } else {
+                    node.descriptor.kind() == expected_kind
+                };
+                let semantic_label = if projection_pack_first.is_some() {
+                    format!("{}.qwen38_projection_pack2", graph_node.label())
+                } else {
+                    graph_node.label().to_owned()
+                };
                 if current != prepared_transition
                     || node.graph_node_id != graph_node.id()
-                    || node.descriptor.kind()
-                        != graph_node.kind().semantic_kind().ok_or_else(|| {
-                            Gemma4ExecutionLayoutError::invalid("graph node has no semantic kind")
-                        })?
+                    || !descriptor_kind_matches
                 {
                     return Err(Gemma4ExecutionLayoutError::invalid(
                         "prepared graph and execution layout differ",
@@ -4534,6 +4768,9 @@ impl Gemma4ProvisionedBuffers {
                                 graph_node.label()
                             ))
                         })?;
+                if let Some(second) = projection_pack_first {
+                    projection_pack_skip = Some(second);
+                }
                 let boundary = planned.boundary_after();
                 if boundary.is_none() {
                     let final_embedding_norm = include_embeddings
@@ -4554,13 +4791,13 @@ impl Gemma4ProvisionedBuffers {
                             ));
                         }
                     } else {
-                        pending.retain_semantic(graph_node.label(), submission);
+                        pending.retain_semantic(semantic_label, submission);
                     }
                     return Ok(());
                 }
                 let boundary = boundary.expect("checked boundary presence");
                 pending
-                    .flush_with_semantic(graph_node.label(), &mut submission, boundary, &mut audit)
+                    .flush_with_semantic(&semantic_label, &mut submission, boundary, &mut audit)
                     .map_err(|error| {
                         Gemma4ExecutionLayoutError::invalid(format!(
                             "{} boundary flush failed: {error}",
@@ -5459,7 +5696,7 @@ fn gemma_is_nvfp4_weight(view: &TensorView) -> bool {
 }
 
 fn gemma_is_w4a4_weight(view: &TensorView) -> bool {
-    matches!(view.encoding(), Encoding::Nvfp4W4A4 { .. })
+    view.dtype() == DType::U8 && matches!(view.encoding(), Encoding::Nvfp4W4A4 { .. })
 }
 
 fn gemma_is_fp8_weight(view: &TensorView) -> bool {
@@ -5693,11 +5930,97 @@ fn validate_gemma_input_token_ids(token_ids: &[i32]) -> Result<(), Gemma4Executi
     Ok(())
 }
 
+fn gemma_tensor_root(tensors: &[Gemma4ExecutionTensor], mut tensor_id: usize) -> Option<usize> {
+    loop {
+        match tensors.get(tensor_id)?.backing() {
+            Gemma4TensorBacking::Alias { tensor_id: source } => tensor_id = *source,
+            _ => return Some(tensor_id),
+        }
+    }
+}
+
+fn gemma_projection_share_pairs(
+    tensors: &[Gemma4ExecutionTensor],
+    nodes: &[Gemma4ExecutionNode],
+) -> Vec<(usize, usize)> {
+    nodes
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, pair)| {
+            let [first, second] = pair else {
+                return None;
+            };
+            let first_input = *first.inputs().first()?;
+            let second_input = *second.inputs().first()?;
+            if first_input != second_input
+                || gemma_tensor_root(tensors, first_input)
+                    != gemma_tensor_root(tensors, second_input)
+                || !prepared_projection_pair_compatible(first.descriptor(), second.descriptor())
+            {
+                return None;
+            }
+            Some((index, index + 1))
+        })
+        .collect()
+}
+
+fn validate_gemma_projection_share_pairs(
+    layout: &Gemma4ExecutionLayout,
+) -> Result<(), Gemma4ExecutionLayoutError> {
+    for &(first, second) in layout.projection_share_pairs() {
+        let first_node = layout.nodes().get(first).ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("projection pair member is absent")
+        })?;
+        let second_node = layout.nodes().get(second).ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("projection pair member is absent")
+        })?;
+        if first_node.inputs().first() != second_node.inputs().first()
+            || !prepared_projection_pair_compatible(
+                first_node.descriptor(),
+                second_node.descriptor(),
+            )
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "projection pair activation or encoding changed after layout preparation",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn gemma_projection_pack_target_enabled(backend_name: &str, expected_target: Option<&str>) -> bool {
+    backend_name == "hip" && matches!(expected_target, Some("gfx1030" | "gfx1201"))
+}
+
+fn gemma_projection_pack_session_enabled(session: &ExecutionSession) -> bool {
+    gemma_projection_pack_target_enabled(
+        session.backend_name(),
+        session.expected_target().as_deref(),
+    )
+}
+
+fn gemma_deferred_encoding_compatible(
+    opaque_kv_states: Option<&BTreeMap<u32, crate::KvState>>,
+) -> bool {
+    opaque_kv_states.is_some_and(|states| {
+        states
+            .values()
+            .all(|state| gemma_deferred_kv_encoding_compatible(state.descriptor().cache_encoding()))
+    })
+}
+
+fn gemma_deferred_kv_encoding_compatible(encoding: KvCacheEncoding) -> bool {
+    matches!(
+        encoding,
+        KvCacheEncoding::Fp16 | KvCacheEncoding::Mxfp8E4 | KvCacheEncoding::Mxfp8E5
+    )
+}
+
 pub fn build_gemma4_execution_layout(
     graph: &Gemma4Graph,
     plan: &WeightLoadPlan,
 ) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
-    build_gemma4_execution_layout_source(graph, plan, None, None)
+    build_gemma4_execution_layout_source(graph, plan, None, None, false)
 }
 
 pub fn build_gemma4_nvfp4_execution_layout(
@@ -5705,7 +6028,7 @@ pub fn build_gemma4_nvfp4_execution_layout(
     plan: &WeightLoadPlan,
     sidecar: &VerifiedNvfp4Sidecar,
 ) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
-    build_gemma4_execution_layout_source(graph, plan, Some(sidecar), None)
+    build_gemma4_execution_layout_source(graph, plan, Some(sidecar), None, false)
 }
 
 pub fn build_gemma4_quantized_execution_layout(
@@ -5721,7 +6044,51 @@ fn build_gemma4_quantized_execution_layout_source(
     plan: &WeightLoadPlan,
     source: &dyn GemmaQuantizedSource,
 ) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
-    build_gemma4_execution_layout_source(graph, plan, None, Some(source))
+    build_gemma4_execution_layout_source(graph, plan, None, Some(source), false)
+}
+
+fn build_gemma4_execution_layout_for_session(
+    graph: &Gemma4Graph,
+    plan: &WeightLoadPlan,
+    session: &ExecutionSession,
+) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
+    build_gemma4_execution_layout_source(
+        graph,
+        plan,
+        None,
+        None,
+        gemma_projection_pack_session_enabled(session),
+    )
+}
+
+fn build_gemma4_nvfp4_execution_layout_for_session(
+    graph: &Gemma4Graph,
+    plan: &WeightLoadPlan,
+    sidecar: &VerifiedNvfp4Sidecar,
+    session: &ExecutionSession,
+) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
+    build_gemma4_execution_layout_source(
+        graph,
+        plan,
+        Some(sidecar),
+        None,
+        gemma_projection_pack_session_enabled(session),
+    )
+}
+
+fn build_gemma4_quantized_execution_layout_source_for_session(
+    graph: &Gemma4Graph,
+    plan: &WeightLoadPlan,
+    source: &dyn GemmaQuantizedSource,
+    session: &ExecutionSession,
+) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
+    build_gemma4_execution_layout_source(
+        graph,
+        plan,
+        None,
+        Some(source),
+        gemma_projection_pack_session_enabled(session),
+    )
 }
 
 fn build_gemma4_execution_layout_source(
@@ -5729,6 +6096,7 @@ fn build_gemma4_execution_layout_source(
     plan: &WeightLoadPlan,
     sidecar: Option<&VerifiedNvfp4Sidecar>,
     artifact: Option<&dyn GemmaQuantizedSource>,
+    allow_projection_pack: bool,
 ) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
     if graph.lock_fingerprint() != plan.lock_fingerprint
         || graph.weight_plan_digest() != plan.digest()
@@ -5742,7 +6110,7 @@ fn build_gemma4_execution_layout_source(
             "sidecar and first-class quantized artifact are mutually exclusive",
         ));
     }
-    let mut builder = LayoutBuilder::new(graph, plan, sidecar, artifact)?;
+    let mut builder = LayoutBuilder::new(graph, plan, sidecar, artifact, allow_projection_pack)?;
     builder.build()?;
     builder.finish()
 }
@@ -5752,11 +6120,17 @@ struct LayoutBuilder<'a> {
     plan: &'a WeightLoadPlan,
     nvfp4_sidecar: Option<&'a VerifiedNvfp4Sidecar>,
     quantized_model: Option<&'a dyn GemmaQuantizedSource>,
+    allow_projection_pack: bool,
     tensors: Vec<Gemma4ExecutionTensor>,
     nodes: Vec<Gemma4ExecutionNode>,
     weights: BTreeMap<String, usize>,
     weight_entries: BTreeMap<String, &'a WeightLoadEntry>,
     node_outputs: Vec<Vec<usize>>,
+    projection_inputs: BTreeMap<usize, usize>,
+    projection_pack_pairs: Vec<(usize, usize)>,
+    projection_pack_candidate_count: u64,
+    projection_pack_scale_mismatch_count: u64,
+    projection_pack_override_disabled: bool,
     token_ids: usize,
     positions: usize,
     workspace_bytes: u64,
@@ -5769,6 +6143,7 @@ impl<'a> LayoutBuilder<'a> {
         plan: &'a WeightLoadPlan,
         nvfp4_sidecar: Option<&'a VerifiedNvfp4Sidecar>,
         quantized_model: Option<&'a dyn GemmaQuantizedSource>,
+        allow_projection_pack: bool,
     ) -> Result<Self, Gemma4ExecutionLayoutError> {
         if let Some(sidecar) = nvfp4_sidecar {
             if sidecar.source_lock_fingerprint() != graph.lock_fingerprint()
@@ -5784,11 +6159,17 @@ impl<'a> LayoutBuilder<'a> {
             plan,
             nvfp4_sidecar,
             quantized_model,
+            allow_projection_pack,
             tensors: Vec::new(),
             nodes: Vec::with_capacity(graph.nodes().len()),
             weights: BTreeMap::new(),
             weight_entries: BTreeMap::new(),
             node_outputs: vec![Vec::new(); graph.nodes().len()],
+            projection_inputs: BTreeMap::new(),
+            projection_pack_pairs: Vec::new(),
+            projection_pack_candidate_count: 0,
+            projection_pack_scale_mismatch_count: 0,
+            projection_pack_override_disabled: false,
             token_ids: usize::MAX,
             positions: usize::MAX,
             workspace_bytes: 0,
@@ -5867,8 +6248,24 @@ impl<'a> LayoutBuilder<'a> {
     }
 
     fn build(&mut self) -> Result<(), Gemma4ExecutionLayoutError> {
-        for node in self.graph.nodes() {
-            let node_id = node.id();
+        for node_id in 0..self.graph.nodes().len() {
+            if node_id + 1 < self.graph.nodes().len() {
+                if let Some((gate_output, up_output)) =
+                    self.try_projection_pack2(node_id, node_id + 1)?
+                {
+                    self.node_outputs[node_id] = vec![gate_output];
+                    self.node_outputs[node_id + 1] = vec![up_output];
+                    continue;
+                }
+            }
+            if self
+                .projection_pack_pairs
+                .iter()
+                .any(|&(_, second)| second == node_id)
+            {
+                continue;
+            }
+            let node = &self.graph.nodes()[node_id];
             let result = match node.kind() {
                 Gemma4GraphNodeKind::Embedding { weight } => {
                     let weight = self.weight(weight)?;
@@ -5947,6 +6344,7 @@ impl<'a> LayoutBuilder<'a> {
                         Gemma4ExecutionLayoutError::invalid("model resident bytes overflowed")
                     })
             })?;
+        let projection_share_pairs = gemma_projection_share_pairs(&self.tensors, &self.nodes);
         Ok(Gemma4ExecutionLayout {
             model_fingerprint: self.graph.lock_fingerprint().to_owned(),
             nvfp4_sidecar_fingerprint: self
@@ -5959,6 +6357,11 @@ impl<'a> LayoutBuilder<'a> {
             plan_digest: *self.plan.digest(),
             tensors: self.tensors,
             nodes: self.nodes,
+            projection_share_pairs,
+            projection_pack_pairs: self.projection_pack_pairs,
+            projection_pack_candidate_count: self.projection_pack_candidate_count,
+            projection_pack_scale_mismatch_count: self.projection_pack_scale_mismatch_count,
+            projection_pack_override_disabled: self.projection_pack_override_disabled,
             model_weight_bytes,
             workspace_bytes: self.workspace_bytes,
             request_state_bytes: self.request_state_bytes,
@@ -6110,21 +6513,205 @@ impl<'a> LayoutBuilder<'a> {
             ));
         }
         let m = elements / k;
-        let input = self.alias(
-            format!("{}.matmul_input", self.graph.nodes()[node_id].label()),
-            source,
-            contiguous_usize(DType::Bf16, &[m, k])?,
-        )?;
         let output = self.workspace(
             format!("{}.output", self.graph.nodes()[node_id].label()),
             contiguous_usize(DType::Bf16, &[m, n])?,
         )?;
+        self.matmul_with_output(node_id, weight_name, output)
+    }
+
+    fn projection_input(
+        &mut self,
+        node_id: usize,
+        source: usize,
+        k: usize,
+    ) -> Result<usize, Gemma4ExecutionLayoutError> {
+        let elements = usize::try_from(self.tensor(source)?.view.element_count())
+            .map_err(|_| Gemma4ExecutionLayoutError::invalid("matmul input is too large"))?;
+        if elements % k != 0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "matmul input width differs from weight K",
+            ));
+        }
+        let input_view = contiguous_usize(DType::Bf16, &[elements / k, k])?;
+        if let Some(&input) = self.projection_inputs.get(&source) {
+            if self.tensor(input)?.view != input_view {
+                return Err(Gemma4ExecutionLayoutError::invalid(
+                    "shared projection activation view differs",
+                ));
+            }
+            return Ok(input);
+        }
+        let input = self.alias(
+            format!("{}.matmul_input", self.graph.nodes()[node_id].label()),
+            source,
+            input_view,
+        )?;
+        self.projection_inputs.insert(source, input);
+        Ok(input)
+    }
+
+    fn matmul_with_output(
+        &mut self,
+        node_id: usize,
+        weight_name: &str,
+        output: usize,
+    ) -> Result<Vec<usize>, Gemma4ExecutionLayoutError> {
+        let source = self.predecessor_output(node_id, 0, 0)?;
+        let weight = self.weight(weight_name)?;
+        let weight_shape = self.tensor(weight)?.view.shape();
+        if weight_shape.len() != 2 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "matmul weight is not rank two",
+            ));
+        }
+        let n = weight_shape[0];
+        let k = weight_shape[1];
+        let input = self.projection_input(node_id, source, k)?;
+        let expected = contiguous_usize(DType::Bf16, &[self.tensor(input)?.view.shape()[0], n])?;
+        if self.tensor(output)?.view != expected {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "matmul output view differs from its weight shape",
+            ));
+        }
         self.semantic(
             node_id,
             SemanticOpKind::Matmul,
             vec![input, weight],
             vec![output],
         )
+    }
+
+    fn try_projection_pack2(
+        &mut self,
+        node_id: usize,
+        up_id: usize,
+    ) -> Result<Option<(usize, usize)>, Gemma4ExecutionLayoutError> {
+        if !self.allow_projection_pack || self.graph.token_count() != 1 {
+            return Ok(None);
+        }
+        let (gate_name, up_name) = match (
+            self.graph.nodes()[node_id].kind(),
+            self.graph.nodes()[up_id].kind(),
+        ) {
+            (
+                Gemma4GraphNodeKind::Matmul {
+                    consumer: WeightConsumer::MlpGate,
+                    weight: gate_name,
+                },
+                Gemma4GraphNodeKind::Matmul {
+                    consumer: WeightConsumer::MlpUp,
+                    weight: up_name,
+                },
+            ) => (gate_name.as_str(), up_name.as_str()),
+            _ => return Ok(None),
+        };
+        self.projection_pack_candidate_count = self
+            .projection_pack_candidate_count
+            .checked_add(1)
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("projection-pack candidate count overflowed")
+            })?;
+        if !prepared_projection_sharing_enabled(
+            std::env::var_os(PREPARED_PROJECTION_SHARING_ENV).as_deref(),
+        ) {
+            self.projection_pack_override_disabled = true;
+            return Ok(None);
+        }
+        let source = self.predecessor_output(node_id, 0, 0)?;
+        if self.predecessor_output(up_id, 0, 0)? != source {
+            return Ok(None);
+        }
+        let gate_weight = self.weight(gate_name)?;
+        let up_weight = self.weight(up_name)?;
+        let gate_view = self.tensor(gate_weight)?.view.clone();
+        let up_view = self.tensor(up_weight)?.view.clone();
+        if !gemma_is_w4a4_weight(&gate_view)
+            || !gemma_is_w4a4_weight(&up_view)
+            || gate_view != up_view
+            || gate_view.shape().len() != 2
+            || gate_view.shape()[0] != up_view.shape()[0]
+            || gate_view.shape()[1] != up_view.shape()[1]
+        {
+            return Ok(None);
+        }
+        let Some(quantized_model) = self.quantized_model else {
+            // The reviewed direct sidecar uses a different NVFP4 view and
+            // does not carry the W4A4 pack scale ABI. Keep its ordinary
+            // lowering until a matching native contract exists.
+            return Ok(None);
+        };
+        let Some(gate_input_scale) =
+            quantized_model.nvfp4_input_global_scale_f32_bits(gate_name)?
+        else {
+            return Ok(None);
+        };
+        let Some(up_input_scale) = quantized_model.nvfp4_input_global_scale_f32_bits(up_name)?
+        else {
+            return Ok(None);
+        };
+        if gate_input_scale != up_input_scale {
+            self.projection_pack_scale_mismatch_count = self
+                .projection_pack_scale_mismatch_count
+                .checked_add(1)
+                .ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid(
+                        "projection-pack scale-mismatch count overflowed",
+                    )
+                })?;
+            return Ok(None);
+        }
+        let k = gate_view.shape()[1];
+        let n = gate_view.shape()[0];
+        let input = self.projection_input(node_id, source, k)?;
+        let m = self.tensor(input)?.view.shape()[0];
+        let gate_output = self.workspace(
+            format!("{}.output", self.graph.nodes()[node_id].label()),
+            contiguous_usize(DType::Bf16, &[m, n])?,
+        )?;
+        let up_output = self.workspace(
+            format!("{}.output", self.graph.nodes()[up_id].label()),
+            contiguous_usize(DType::Bf16, &[m, n])?,
+        )?;
+        let gate_matmul = SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            self.views(&[input, gate_weight])?,
+            self.views(&[gate_output])?,
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let up_matmul = SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            self.views(&[input, up_weight])?,
+            self.views(&[up_output])?,
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if !prepared_projection_pair_compatible(&gate_matmul, &up_matmul) {
+            return Ok(None);
+        }
+        let contract = crate::Qwen38ProjectionPackContractV1::nvfp4_mlp_gate_up_with_shape(
+            u32::try_from(k)
+                .map_err(|_| Gemma4ExecutionLayoutError::invalid("projection K is too large"))?,
+            u32::try_from(n)
+                .map_err(|_| Gemma4ExecutionLayoutError::invalid("projection N is too large"))?,
+            gate_input_scale,
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let descriptor = SemanticOpDescriptor::new_qwen38_projection_pack2(
+            self.views(&[input, gate_weight, up_weight])?,
+            self.views(&[gate_output, up_output])?,
+            contract,
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        self.nodes.push(Gemma4ExecutionNode {
+            graph_node_id: node_id,
+            descriptor,
+            inputs: vec![input, gate_weight, up_weight],
+            outputs: vec![gate_output, up_output],
+            kv_appends: Vec::new(),
+        });
+        self.matmul_with_output(up_id, up_name, up_output)?;
+        self.projection_pack_pairs.push((node_id, up_id));
+        Ok(Some((gate_output, up_output)))
     }
 
     fn rotary(
@@ -6706,6 +7293,10 @@ mod tests {
             kernel_dispatch_count: dispatches,
             segment_count: submissions,
             boundary_count: submissions,
+            projection_pack_submission_count: 0,
+            projection_pack_candidate_count: 0,
+            projection_pack_scale_mismatch_count: 0,
+            projection_pack_override_disabled: false,
             fallback_used: false,
         };
         let merged = merge_gemma_execution_audits(Some(audit(3, 5)), Some(audit(7, 11)))
@@ -6723,6 +7314,44 @@ mod tests {
     }
 
     #[test]
+    fn projection_pack_capability_is_limited_to_reviewed_hip_targets() {
+        for (backend, target, expected) in [
+            ("hip", Some("gfx1030"), true),
+            ("hip", Some("gfx1201"), true),
+            ("hip", Some("gfx942"), false),
+            ("cpu", Some("gfx1030"), false),
+            ("hip", None, false),
+        ] {
+            assert_eq!(
+                gemma_projection_pack_target_enabled(backend, target),
+                expected,
+                "backend={backend} target={target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_completion_accepts_only_fp16_or_mxfp8_kv_state() {
+        assert!(!gemma_deferred_encoding_compatible(None));
+        for encoding in [
+            KvCacheEncoding::Fp16,
+            KvCacheEncoding::Mxfp8E4,
+            KvCacheEncoding::Mxfp8E5,
+        ] {
+            assert!(gemma_deferred_kv_encoding_compatible(encoding));
+        }
+        for encoding in [
+            KvCacheEncoding::Fp8E4M3Fn,
+            KvCacheEncoding::Fp8E4M3FnStatic,
+            KvCacheEncoding::Fp8E4M3Block16,
+            KvCacheEncoding::Fp8E5M2Block16,
+            KvCacheEncoding::Nvfp4,
+        ] {
+            assert!(!gemma_deferred_kv_encoding_compatible(encoding));
+        }
+    }
+
+    #[test]
     fn layout_materializes_every_semantic_descriptor_and_exact_weight_identity() {
         let (graph, plan) = fixture(3, 0, 17);
         let layout = build_gemma4_execution_layout(&graph, &plan).unwrap();
@@ -6730,6 +7359,20 @@ mod tests {
         assert_eq!(layout.model_weight_bytes(), plan.total_destination_bytes);
         assert!(layout.workspace_bytes() > 0);
         assert!(layout.request_state_bytes() > 0);
+        assert!(
+            layout
+                .projection_share_pairs()
+                .iter()
+                .any(|&(first, second)| {
+                    layout.nodes()[first].graph_node_id() < layout.nodes()[second].graph_node_id()
+                        && graph.nodes()[layout.nodes()[first].graph_node_id()]
+                            .label()
+                            .ends_with(".mlp_gate")
+                        && graph.nodes()[layout.nodes()[second].graph_node_id()]
+                            .label()
+                            .ends_with(".mlp_up")
+                })
+        );
         assert!(layout.nodes().iter().enumerate().all(|(index, node)| {
             node.graph_node_id() == index
                 && node.descriptor().kind() == graph.nodes()[index].kind().semantic_kind().unwrap()

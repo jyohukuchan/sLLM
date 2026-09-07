@@ -55,6 +55,59 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-09-07-P79-DECODE-DEFAULTS: NVFP4/FP8共通decodeの条件付き既定化（N1）
+
+- scope: exact gfx1030、M1。NVFP4 ID67はK1024..17408・K%16=0・N>=1024、
+  FP8 E4M3FN outer ID68はK128..17408・K%64=0・N>=64。layout等の既存public契約を維持する。
+- 分類: **N1**。実数式、量子化recipe、scale、BF16 RNEを維持。有限encoded入力で、
+  FP8 ingressはFP16へexactに展開され、加算依存深さはscalarのKから最大概ね`8*ceil(K/256)+5`へ減る。
+  NVFP4はblock16内をexact integer dot4で合計し、scale適用後のFP32加算深さを
+  `ceil(K/256)+8`から`ceil(K/512)+5`へ減らす。追加の再量子化・非決定atomicはない。
+- correctness: production ABIの実Gemma形状、中間形状、採用境界で独立encoded oracle、
+  repeat、全BF16比較を確認。実モデルはfinite、HIP-only、cleanup0。
+- 出力影響: 候補別の探索で、最初の生成差はNV wave4が0始まり10、FP8 dword8が1。
+  固定入力logitsも異なる（最大KLDは各0.347253/5.834114）。生成列・品質の同等性は主張せず、
+  演算の誤差非増加に基づいて数値gateを自動承認する。
+- 性能/採否: 採用。最終Gemma比較のdecodeは17入力で1.5516→15.5622、65入力で1.5445→15.3531 tok/s。
+  これは両selectorとprojection共有の合成効果で、個別候補の寄与率ではない。個別効果は探索・operator表へ分離した。
+- rollback: `SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4=0` と
+  `SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_DWORD8=0`。範囲外/他targetの既定は維持。
+- 詳細: [採用範囲](../history/2026/09/1-10/phase79-adoption-scope.json)、[Phase79履歴](../history/2026/09/1-10/phase79-common-optimization.md)。
+
+### OUT-2026-09-07-P79-SHARED-EXECUTION: projection共有と実行制御の共通化（N0）
+
+- scope: 共通prepared completion/Graph制御とモデルadapter、HIP gfx1030/gfx1201の適合NVFP4 gate/up。
+  同一activation、encoding/layout、verified input scale bitsの一致を要求し、非対応targetは通常matmulへ戻す。
+- 分類: **N0**。同一quantizerの出力を2 projectionで共有し、member別weight/scaleと既存consumerを維持。
+  completion/Graphはownerと同期方式の変更で、演算・丸め順は変えない。request専用queueとupload完了順序を維持する。
+- correctness: Gemmaの両targetで共有ON/OFF・deferred ON/OFFが全12位置の全logits一致。
+  各caseのdecodeはpack144 submission、prefill0、無効時0。native Gemma形状の3-node Graph replayも独立oracle一致。
+  Qwen3.8 Graph ON/OFFとQwen4B FP16/MXFP8 KVのprofiled/deferredは生成列一致、HIP-only、cleanup0。
+- 採否: 適合Gemma packは既定採用。Qwenの既存個別opt-in、共通deferredのopt-inは維持。
+  Gemmaの追加deferred効果は測定ばらつき程度であり、全モデルの新しい既定へは拡張しない。
+- rollback: `SLLM_PREPARED_PROJECTION_SHARING=0`、`SLLM_PREPARED_DEFERRED_COMPLETION=0`。
+  Qwenの既存deferred既定を止める場合は優先する`SLLM_QWEN_DEFERRED_COMPLETION=0`を使う。
+- 詳細: [runtime契約](../architecture/runtime.md)、[Phase79履歴](../history/2026/09/1-10/phase79-common-optimization.md)。
+
+### OUT-2026-09-07-P79-NVFP4-PREFILL-REDUCTION: 基準加算順の復元（N1／基準互換N0）
+
+- scope: NVFP4 W4A4 ID59、M>1/K>0/K%16=0/N>0、有限encoded値。
+- change: 各row waveの長い逐次和を8個のK-strided partialへ分け、ID11と同じwave treeと8-wave merge順へ戻す。
+  重みのshared predecode、activation量子化recipe、tensor scale、BF16 RNEは維持する。
+- 分類: **旧ID59→修正ID59はN1**。FP32加算深さを `ceil(K/32)+5` から
+  `ceil(K/256)+8` 以下へ減らす。**ID11→修正ID59は有限encoded入力でN0**。
+  E2M1×E4M3の積とterm積はFP32で厳密であり、scale因数分解は追加丸めを生じない。
+  NaN payload互換は主張しない。
+- 観測: 旧ID59はGemma M65でID11比最大KLD 2.144631/maxabs 8.718750だった。
+  修正版gfx1030 draft2はM63/64/65のtiny/実shape全BF16出力、独立oracle、repeatがPASS。
+  Gemma M3/17/65と各3 teacher-forced decodeの12位置でID11と全logits一致（KLD/maxabs 0）。
+  finite、実HIP dispatch、fallbackなし、cleanup0を確認した。品質評価一般のPASSには読み替えない。
+- 状態: 採用。修正後の両targetで固定入力12位置がID11と一致し、共通化後の最終buildでも確認した。source/build/raw identityは下記履歴で追跡する。
+- rollback: `SLLM_NVFP4_W4A4_FORCE_BASELINE=1` はID11を選ぶ。ただし既存ID11は
+  M4096/N4096でlaunch status260を観測しており、大規模prefillの万能切戻しとは扱わない。
+  ID59修正版はrow共有gridを維持し、この制約の回避を維持する。
+- 詳細: [Phase79履歴](../history/2026/09/1-10/phase79-common-optimization.md)。
+
 ### OUT-2026-09-05-P78-FP8-PREFILL-LOAD64: V620 FP8 prefill協調load（N0）
 
 - scope: exact gfx1030 ID71、M1024/K6144/N5120およびM1024/K5120/N10240。
