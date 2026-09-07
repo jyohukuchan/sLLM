@@ -38,3 +38,4 @@ __pycache__/
 
 # Raw rocprof counter scratch; keep local only.
 /.rocprofv3/
+/.local-artifacts/h3-public-runtime-diagnostics/

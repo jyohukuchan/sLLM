@@ -51,6 +51,11 @@ Clippy、C++整形、schemaとsemantic契約の失敗も確認した。
 - H0は626件PASS（239.015秒）、H1は空のtargetで1,479件、H2は38件PASS。
   公開CIは実行結果を確認後に追記する。
 
+公開commit `7b805da4e40834ac6a39b6e9205ce77b76da8f6a`でH1/H2と基本H3は成功した。
+[public-runtime run](https://github.com/jyohukuchan/sLLM/actions/runs/34109526923)は、新設の診断ログ用directoryが
+未追跡と判定されclean checkout検査に停止した。専用pathだけを`.gitignore`へ追加し、厳格なclean検査を維持して再公開する。
+CI H1のbuild peak RSSは1,910,018,048 B、testは1,475,383,296 B、全体207.785秒だった。
+
 生ログ、生成binary、モデルは追跡しない。
 
 [計画](../../../../plans/active/2026/09/1-10/phase80-ci-restoration.md) /
