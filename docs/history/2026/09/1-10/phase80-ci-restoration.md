@@ -49,12 +49,24 @@ Clippy、C++整形、schemaとsemantic契約の失敗も確認した。
   作業用clean clone `b5c5b8cb`の実source/matrixを検査した結果であり、mainの最終公開CIとは区別する。
   public-runtime契約85件も同じcloneでPASS（88.110秒）。
 - H0は626件PASS（239.015秒）、H1は空のtargetで1,479件、H2は38件PASS。
-  公開CIは実行結果を確認後に追記する。
+  公開CIの経過は以下に記録する。
 
 公開commit `7b805da4e40834ac6a39b6e9205ce77b76da8f6a`でH1/H2と基本H3は成功した。
 [public-runtime run](https://github.com/jyohukuchan/sLLM/actions/runs/34109526923)は、新設の診断ログ用directoryが
 未追跡と判定されclean checkout検査に停止した。専用pathだけを`.gitignore`へ追加し、厳格なclean検査を維持して再公開する。
 CI H1のbuild peak RSSは1,910,018,048 B、testは1,475,383,296 B、全体207.785秒だった。
+
+修正commit `66061db4f3a5f6c4cfaf85c8d926e0cba65d7e44`の
+[基本H3](https://github.com/jyohukuchan/sLLM/actions/runs/34110212509)と
+[public-runtime H3](https://github.com/jyohukuchan/sLLM/actions/runs/34110212521)は成功した。
+後者は両targetのcompile/link/extract/inspectとstrict aggregateを完了した。
+一方、先行[host run](https://github.com/jyohukuchan/sLLM/actions/runs/34109526892)のH0は656.718秒・RSS1,520,492,544 Bで
+全40 commandを資源内で実行し、semantic契約の1件だけが失敗した。新しいstderr artifactで、
+closed environmentを検査する負例がGitHubのPython実行ファイルとlocal固定pinの違いで先に止まることを確認した。
+実行時のPython pinを緩めず、先行するpin rejectionもe2e負例の有効な拒否として扱う。
+加えてtest専用のsealed sourceコピーへ実行Pythonのpinを注入し、`PYTHONPATH`追加、余分なtree変数、`PATH`改変が
+実際の環境guardで拒否されることを検査する。production source/pinは不変で、fixtureをGPU証拠にはしない。
+controller全14 testはPASS（1.781秒）。
 
 生ログ、生成binary、モデルは追跡しない。
 

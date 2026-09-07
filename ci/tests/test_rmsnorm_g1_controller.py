@@ -51,7 +51,7 @@ class SemanticG1ControllerTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _sealed_controller_command(*controller_args: str) -> list[str]:
+    def _sealed_controller_command(*controller_args: str, fixture_python_pin: bool = False) -> list[str]:
         """Exec the controller from a fully sealed source descriptor.
 
         This mirrors the reviewed workflow's two-stage launcher without
@@ -72,6 +72,19 @@ fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcn
 os.set_inheritable(fd, True)
 os.execve("/usr/bin/python3", ["/usr/bin/python3", "-I", "-S", f"/proc/self/fd/{fd}", *sys.argv[2:]], {**os.environ, "SLLM_G1_CONTROLLER_FD": str(fd)})
 '''
+        if fixture_python_pin:
+            # Authenticate the test interpreter in an ephemeral source copy so
+            # later environment guards are exercised on every host. This copy
+            # is only used for negative tests and is never GPU evidence.
+            fixture = r'''
+import hashlib
+import re
+python_bytes = open("/usr/bin/python3", "rb").read()
+data, hash_matches = re.subn(rb'^_CONTROLLER_PYTHON_SHA256 = "[0-9a-f]+"$', b'_CONTROLLER_PYTHON_SHA256 = "' + hashlib.sha256(python_bytes).hexdigest().encode() + b'"', data, flags=re.MULTILINE)
+data, size_matches = re.subn(rb'^_CONTROLLER_PYTHON_SIZE = [0-9_]+$', b'_CONTROLLER_PYTHON_SIZE = ' + str(len(python_bytes)).encode(), data, flags=re.MULTILINE)
+assert hash_matches == size_matches == 1
+'''
+            bootstrap = bootstrap.replace('fd = os.memfd_create(', fixture + '\nfd = os.memfd_create(', 1)
         return ["/usr/bin/python3", "-I", "-S", "-c", bootstrap, str(CONTROLLER), *controller_args]
 
     def test_importable_controller_has_no_execution_or_emission_api(self) -> None:
@@ -107,12 +120,25 @@ os.execve("/usr/bin/python3", ["/usr/bin/python3", "-I", "-S", f"/proc/self/fd/{
     def test_closed_environment_rejects_pythonpath_and_dirty_or_copied_authority_before_gpu_work(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-g1-controller-") as temporary:
             root = Path(temporary)
+            def assert_pre_gpu_rejection(completed: subprocess.CompletedProcess[bytes], expected: tuple[str, ...]) -> None:
+                self.assertEqual(completed.returncode, 2)
+                stderr = completed.stderr.decode("utf-8")
+                # A runner whose /usr/bin/python3 bytes are outside the reviewed
+                # pin is rejected by the earlier immutable-interpreter gate. It
+                # is still a valid fail-closed result, and must not make this
+                # negative test depend on a mutable runner image.
+                self.assertTrue(
+                    any(marker in stderr for marker in expected)
+                    or "fixed Python bytes differ from the reviewed executable pin" in stderr,
+                    stderr,
+                )
+
             py_path = subprocess.run(self._sealed_controller_command(*self._controller_arguments(root)), cwd=ROOT, env=self._closed_environment(root, extra={"PYTHONPATH": "/tmp/forged"}), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-            self.assertEqual(py_path.returncode, 2)
-            self.assertIn("environment is not the exact closed", py_path.stderr.decode("utf-8"))
+            assert_pre_gpu_rejection(py_path, ("environment is not the exact closed",))
             clean_env = subprocess.run(self._sealed_controller_command(*self._controller_arguments(root)), cwd=ROOT, env=self._closed_environment(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-            self.assertEqual(clean_env.returncode, 2)
-            self.assertRegex(clean_env.stderr.decode("utf-8"), "dangerous Git local configuration|dirty or copied mutable checkout")
+            assert_pre_gpu_rejection(clean_env, ("dangerous Git local configuration", "dirty or copied mutable checkout"))
+            if "fixed Python bytes differ from the reviewed executable pin" not in clean_env.stderr.decode("utf-8"):
+                self.assertRegex(clean_env.stderr.decode("utf-8"), "dangerous Git local configuration|dirty or copied mutable checkout")
             forged_args = list(self._controller_arguments(root))
             tree_mismatch = subprocess.run(
                 self._sealed_controller_command(*forged_args),
@@ -122,8 +148,26 @@ os.execve("/usr/bin/python3", ["/usr/bin/python3", "-I", "-S", f"/proc/self/fd/{
                 stderr=subprocess.PIPE,
                 check=False,
             )
-            self.assertEqual(tree_mismatch.returncode, 2)
-            self.assertIn("environment is not the exact closed", tree_mismatch.stderr.decode("utf-8"))
+            assert_pre_gpu_rejection(tree_mismatch, ("environment is not the exact closed",))
+            self.assertFalse((root / "run" / "artifacts").exists())
+
+    def test_closed_environment_guard_rejects_mutations_with_authenticated_test_interpreter(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sllm-g1-environment-") as temporary:
+            root = Path(temporary)
+            mutations = (
+                ({"PYTHONPATH": "/tmp/forged"}, "environment is not the exact closed"),
+                ({"REVIEWED_TREE_OID": "0" * 40}, "environment is not the exact closed"),
+                ({"PATH": "/tmp:/usr/bin:/bin"}, "fixed workflow environment drifted"),
+            )
+            for extra, expected in mutations:
+                with self.subTest(extra=extra):
+                    result = subprocess.run(
+                        self._sealed_controller_command(*self._controller_arguments(root), fixture_python_pin=True),
+                        cwd=ROOT, env=self._closed_environment(root, extra=extra),
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                    )
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn(expected, result.stderr.decode("utf-8"))
             self.assertFalse((root / "run" / "artifacts").exists())
 
     def test_direct_mutable_controller_path_and_unsealed_descriptor_are_rejected(self) -> None:
