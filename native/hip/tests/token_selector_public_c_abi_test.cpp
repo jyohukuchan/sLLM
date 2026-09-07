@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 #ifndef SLLM_TEST_EXPECTED_TARGET
@@ -74,6 +75,35 @@ bool verify_rng_contract() {
   // legacy categorical order (effective logit descending, token ID tie-break).
   return first.status == SLLM_STATUS_OK && first.token_id == 1 &&
          second.status == SLLM_STATUS_OK && second.token_id == 1;
+}
+
+bool verify_fixed_topk_topp_contract() {
+  constexpr uint64_t vocab = 25U;
+  uint16_t logits[vocab]{};
+  float additive[vocab]{};
+  uint8_t mask[vocab]{};
+  for (uint64_t index = 0U; index != vocab; ++index) {
+    // The first twenty tokens are the only plausible candidates.  The
+    // extension must skip these auxiliary arrays when both flags are clear.
+    logits[index] = static_cast<uint16_t>((vocab - index) << 7U);
+    additive[index] = std::numeric_limits<float>::quiet_NaN();
+    mask[index] = 0U;
+  }
+  for (const uint32_t top_k : {0U, 20U, 64U}) {
+    const uint64_t workspace_bytes =
+        top_k == 0U ? SLLM_HIP_TOKEN_SELECTOR_K0_WORKSPACE_BYTES
+                    : 2U * top_k * 8U;
+    std::vector<uint8_t> workspace(workspace_bytes);
+    sllm_token_selector_record_t output{};
+    const hipError_t status = sllm_token_selector_kernel::launch(
+        logits, additive, mask, workspace.data(), vocab, 1.0F, top_k, 0.95F, 0U,
+        19U, 0U, &output, nullptr);
+    if (status != hipSuccess || output.status != SLLM_STATUS_OK ||
+        output.token_id < 0 || output.token_id >= 20) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool wait_release(sllm_completion_t **const completion,
@@ -178,6 +208,7 @@ bool run_selector(const sllm_context_t *const context,
   sllm_buffer_t *additive = nullptr;
   sllm_buffer_t *mask = nullptr;
   sllm_buffer_t *output = nullptr;
+  sllm_buffer_t *workspace = nullptr;
   Error error;
   info.size_bytes = sizeof(logits_host);
   if (!expect(sllm_buffer_create(context, &info, &logits, &error.sink),
@@ -197,6 +228,12 @@ bool run_selector(const sllm_context_t *const context,
   info.size_bytes = SLLM_HIP_TOKEN_SELECTOR_OUTPUT_BYTES;
   if (!expect(sllm_buffer_create(context, &info, &output, &error.sink),
               SLLM_STATUS_OK, "create output", error)) {
+    return false;
+  }
+  const uint64_t workspace_bytes = 2U * 20U * 8U;
+  info.size_bytes = workspace_bytes;
+  if (!expect(sllm_buffer_create(context, &info, &workspace, &error.sink),
+              SLLM_STATUS_OK, "create workspace", error)) {
     return false;
   }
   bool ok = upload(queue, logits, logits_host, sizeof(logits_host)) &&
@@ -246,8 +283,52 @@ bool run_selector(const sllm_context_t *const context,
                 SLLM_STATUS_OK, "sllm_token_selector_plan_release", error) &&
          ok;
   }
+  // Reuse the same three full views through the v2 fixed top-k/top-p ABI and
+  // bind only the persistent scratch/output additions.
+  descriptor.op_version = SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP;
+  descriptor.top_k = 20U;
+  descriptor.flags = SLLM_HIP_TOKEN_SELECTOR_FLAG_ADDITIVE_PRESENT |
+                     SLLM_HIP_TOKEN_SELECTOR_FLAG_MASK_PRESENT;
+  descriptor.top_p = 0.95F;
+  descriptor.workspace =
+      binding(workspace, SLLM_TENSOR_DTYPE_U8, 1U, workspace_bytes);
+  plan = nullptr;
+  ok = expect(sllm_token_selector_prepare(context, &descriptor, &plan,
+                                          &error.sink),
+              SLLM_STATUS_OK, "sllm_token_selector_prepare(v2)", error) &&
+       ok;
+  dispatch = {};
+  dispatch.struct_size = sizeof(dispatch);
+  dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+  dispatch.info_version = SLLM_HIP_TOKEN_SELECTOR_DISPATCH_INFO_VERSION;
+  completion = nullptr;
+  ok = expect(sllm_token_selector_execute(plan, queue, &completion, &dispatch,
+                                          &error.sink),
+              SLLM_STATUS_OK, "sllm_token_selector_execute(v2)", error) &&
+       ok;
+  ok = wait_release(&completion, "sllm_completion_wait(selector v2)") && ok;
+  bytes.assign(SLLM_HIP_TOKEN_SELECTOR_OUTPUT_BYTES, 0U);
+  ok = download(queue, output, &bytes) && ok;
+  std::memcpy(&record, bytes.data(), sizeof(record));
+  ok = (record.status == SLLM_STATUS_OK && record.token_id >= 0 &&
+        record.token_id < static_cast<int32_t>(vocab) &&
+        dispatch.kernel_id ==
+            SLLM_HIP_TOKEN_SELECTOR_KERNEL_ID_FIXED_TOPK_TOPP_V1 &&
+        dispatch.dispatch_count >= 2U &&
+        std::strcmp(dispatch.kernel_symbol,
+                    "token_selector.fixed_topk_topp.v1") == 0) &&
+       ok;
+  if (plan != nullptr) {
+    ok =
+        expect(sllm_token_selector_plan_release(&plan, &error.sink),
+               SLLM_STATUS_OK, "sllm_token_selector_plan_release(v2)", error) &&
+        ok;
+  }
   ok = expect(sllm_buffer_release(&output, &error.sink), SLLM_STATUS_OK,
               "release output", error) &&
+       ok;
+  ok = expect(sllm_buffer_release(&workspace, &error.sink), SLLM_STATUS_OK,
+              "release workspace", error) &&
        ok;
   ok = expect(sllm_buffer_release(&mask, &error.sink), SLLM_STATUS_OK,
               "release mask", error) &&
@@ -282,7 +363,8 @@ int main() {
               SLLM_STATUS_OK, "sllm_queue_create", error)) {
     return 1;
   }
-  bool success = verify_rng_contract() && run_selector(context, queue);
+  bool success = verify_rng_contract() && verify_fixed_topk_topp_contract() &&
+                 run_selector(context, queue);
   sllm_buffer_t *dummy = nullptr;
   sllm_token_selector_desc_t invalid{};
   invalid.struct_size = sizeof(invalid);

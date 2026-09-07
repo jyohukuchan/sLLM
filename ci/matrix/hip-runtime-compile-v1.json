@@ -25,7 +25,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "28521c2fad2770d3d01ea562e63c0118f6308c4812afb5446a7b71625d3309ef"
+        "sha256": "88a44fa3a258bd5c792616f1f3f53494078bead08f75a555c4112fb5e5ce4f9b"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -37,10 +37,10 @@
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
-        "sha256": "f937004e7c768dca3eb590572bbc0917d183531753c7e03c35de2841ddc2b901"
+        "sha256": "52d207e29446d7f3bf3f9873774dd2d00074dbf8195f07c937515a873766fb60"
       }
     ],
-    "source_set_sha256": "0bf5d1efc2014a4d769b1777803c197a0fc0b02671c514b428788979d53572e9"
+    "source_set_sha256": "fa039b77dea47c6f02ce33c6f7736a0f9d4a19ae8c50d130ac438606fef6320c"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -148,7 +148,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "28521c2fad2770d3d01ea562e63c0118f6308c4812afb5446a7b71625d3309ef"
+        "sha256": "88a44fa3a258bd5c792616f1f3f53494078bead08f75a555c4112fb5e5ce4f9b"
       },
       {
         "path": "native/hip/src/argmax_api.cpp",
@@ -460,11 +460,11 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "89b4d21c03d1b652a9d4f2ea30c9b79a820c7f32603e5dd899f3dcb484311763"
+        "sha256": "ce2824405cd4b0383b6fc59035ef063e315defa06e29ea3949033144c2ec927a"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
-        "sha256": "f937004e7c768dca3eb590572bbc0917d183531753c7e03c35de2841ddc2b901"
+        "sha256": "52d207e29446d7f3bf3f9873774dd2d00074dbf8195f07c937515a873766fb60"
       },
       {
         "path": "native/hip/src/qwen38_projection_pack_runtime.inc",
@@ -516,23 +516,23 @@
       },
       {
         "path": "native/hip/src/token_selector_api.cpp",
-        "sha256": "2bfa3fc3003dd97bc50fb773cdc4f0c47dc3481af1b58c72d709a955275356f1"
+        "sha256": "5a5b81509652ae70e42f1b5cf8433229740adfff174c84f7f966888115a1c2f9"
       },
       {
         "path": "native/hip/src/token_selector_api.hpp",
-        "sha256": "45d1d04eb0f2143df536f4e78fa5d8a8d303e0c8953bd193d07a3f2a7e9ff0c4"
+        "sha256": "820d998d597c123f61a5418e61d28b47c262920b587085c66a779d313c5be486"
       },
       {
         "path": "native/hip/src/token_selector_kernel.hip.cpp",
-        "sha256": "4b06dd997b063b951275dd6ecabfc10899f97c86ab53f5f6addacec4b527da46"
+        "sha256": "0bca6eeb6012862d75b6d523dbe6274fb3979429b1115042f24e08cc669469bc"
       },
       {
         "path": "native/hip/src/token_selector_kernel_internal.hpp",
-        "sha256": "b49a46082f780da9f817f9dc6d7dd1703c61bf76d0e310bedb1cb01c35086648"
+        "sha256": "705bed9cd6bc67f97c64c1788e59aa24769988c418d9d5fb38dc0de47fccda92"
       },
       {
         "path": "native/hip/src/token_selector_runtime.inc",
-        "sha256": "8438b4ae7691e61c0f2e09766de4dc37c6dc5aca9062ae392ccd8700de46b86e"
+        "sha256": "cc36fc4d763d9e5751276b69a30e35c3246ff5b7c9aaad7f143c0a2ce1276706"
       },
       {
         "path": "native/hip/src/windowed_attention_api.cpp",
@@ -547,7 +547,7 @@
         "sha256": "e6d480204c7f49f0385ca511cdb2080372e114d2befa5f345a97b7d5bd0eb8f1"
       }
     ],
-    "source_set_sha256": "3ad937085fbf1df7fed1b3cbe8517a8e63eb79617de1961cd2cba179c36725f6"
+    "source_set_sha256": "988bd803364cc80794d01bdaece18a62027060389f2db9ade51c96a7f4f0e015"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",

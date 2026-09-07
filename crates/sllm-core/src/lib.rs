@@ -11,6 +11,7 @@ mod deepseek_v4_attention;
 mod deepseek_v4_gguf;
 mod deepseek_v4_headers;
 mod deepseek_v4_semantics;
+mod device_sampling;
 mod diffusion_gemma;
 pub mod diffusion_gemma_gguf;
 mod diffusion_gemma_graph;

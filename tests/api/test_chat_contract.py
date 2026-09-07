@@ -75,21 +75,30 @@ def test_phase40_logprob_schema_and_sampler_bounds_are_fail_closed() -> None:
         {
             **base,
             "n": 8,
-            "logit_bias": {"0": -100, "4294967295": 100},
-            "logprobs": True,
+            "logprobs": False,
             "top_logprobs": 0,
             "response_format": {"type": "json_object"},
             "sllm": {
                 "sampling": {
                     "chain_version": 1,
-                    "top_k": 0,
+                    "top_k": 20,
+                    "min_p": 0.0,
                     "typical_p": 1.0,
-                    "repeat_penalty": 100.0,
+                    "repeat_penalty": 1.0,
+                    "repeat_last_n": 0,
                 }
             },
         }
     )
     assert accepted.accepted
+
+    ministral_profile = validate_chat_request(
+        {
+            **base,
+            "sllm": {"sampling": {"top_k": 0}},
+        }
+    )
+    assert ministral_profile.accepted
 
     invalid_requests = (
         {**base, "top_logprobs": 1},
@@ -111,4 +120,4 @@ def test_phase40_logprob_schema_and_sampler_bounds_are_fail_closed() -> None:
         result = validate_chat_request(request)
         assert not result.accepted
         assert result.error is not None
-        assert result.error.code == "invalid_value"
+        assert result.error.code in {"invalid_value", "unsupported_parameter"}

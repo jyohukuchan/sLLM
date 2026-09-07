@@ -192,13 +192,19 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_ARGMAX_MAX_M UINT64_C(4294967295)
 
 #define SLLM_HIP_TOKEN_SELECTOR_VERSION UINT32_C(1)
+#define SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP UINT32_C(2)
 #define SLLM_HIP_TOKEN_SELECTOR_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_TOKEN_SELECTOR_KERNEL_ID_BF16_F32_MASK_V1 UINT32_C(1)
+#define SLLM_HIP_TOKEN_SELECTOR_KERNEL_ID_FIXED_TOPK_TOPP_V1 UINT32_C(2)
 #define SLLM_HIP_TOKEN_SELECTOR_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_TOKEN_SELECTOR_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE UINT32_C(1024)
 #define SLLM_HIP_TOKEN_SELECTOR_MAX_V UINT64_C(1048576)
 #define SLLM_HIP_TOKEN_SELECTOR_OUTPUT_BYTES UINT32_C(16)
+#define SLLM_HIP_TOKEN_SELECTOR_FLAG_ADDITIVE_PRESENT UINT32_C(1)
+#define SLLM_HIP_TOKEN_SELECTOR_FLAG_MASK_PRESENT UINT32_C(2)
+#define SLLM_HIP_TOKEN_SELECTOR_K0_WORKSPACE_BYTES UINT64_C(532504)
 
 #define SLLM_HIP_MOE_ROUTE_VERSION UINT32_C(1)
 #define SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION UINT32_C(1)
@@ -1069,6 +1075,13 @@ typedef struct sllm_token_selector_desc_t {
   float temperature;
   uint64_t seed;
   uint64_t counter;
+  /* Version 2 fixed top-k/top-p extension.  These fields are ignored for
+   * op_version 1; old callers may pass the legacy prefix size. */
+  uint32_t top_k;
+  uint32_t flags;
+  float top_p;
+  uint32_t reserved_v2;
+  sllm_tensor_binding_t workspace;
 } sllm_token_selector_desc_t;
 
 typedef struct sllm_token_selector_dispatch_info_t {

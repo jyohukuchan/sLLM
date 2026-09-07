@@ -21,6 +21,10 @@ fn completion_accepts_all_prompt_shapes_and_defaults() {
         let request = parse_completion_request(&completion(body)).unwrap();
         assert_eq!(request.max_tokens(), DEFAULT_COMPLETION_TOKENS);
         assert_eq!(request.n(), 1);
+        assert_eq!(request.temperature(), 1.0);
+        assert_eq!(request.top_p(), 0.95);
+        assert_eq!(request.presence_penalty(), 0.0);
+        assert_eq!(request.frequency_penalty(), 0.0);
     }
 }
 
@@ -50,7 +54,7 @@ fn completion_rejects_unknown_unsupported_wrong_type_and_nonfinite() {
         (
             serde_json::json!({"model":"m","prompt":"x","temperature":3}),
             "temperature",
-            ErrorCodeV1::InvalidValue,
+            ErrorCodeV1::UnsupportedParameter,
         ),
         (
             serde_json::json!({"model":"m","prompt":"x","logprobs":true}),
@@ -72,12 +76,15 @@ fn completion_rejects_unknown_unsupported_wrong_type_and_nonfinite() {
 #[test]
 fn completion_validates_stop_bias_and_limits() {
     let request = parse_completion_request(&completion(serde_json::json!({
-        "model":"m", "prompt":"x", "stop":["a","b"], "logit_bias":{"1":-100,"2":100},
-        "max_tokens":4096, "temperature":0, "top_p":0, "n":8, "logprobs":5,
+        "model":"m", "prompt":"x", "stop":["a","b"],
+        "max_tokens":4096, "temperature":1, "top_p":0.95, "n":8, "logprobs":0,
     })))
     .unwrap();
     assert_eq!(request.stop(), &["a", "b"]);
-    assert_eq!(request.logit_bias().len(), 2);
+    assert!(request.logit_bias().is_empty());
+    assert_eq!(request.logprobs(), Some(0));
+    assert_eq!(request.temperature(), 1.0);
+    assert_eq!(request.top_p(), 0.95);
     for value in [
         serde_json::json!({"model":"m","prompt":"x","max_tokens":0}),
         serde_json::json!({"model":"m","prompt":"x","max_tokens":4097}),
@@ -90,6 +97,36 @@ fn completion_validates_stop_bias_and_limits() {
                 .code(),
             ErrorCodeV1::InvalidValue
         );
+    }
+}
+
+#[test]
+fn completion_rejects_nonfixed_sampling_controls() {
+    for (body, param) in [
+        (
+            serde_json::json!({"model":"m","prompt":"x","temperature":0.8}),
+            "temperature",
+        ),
+        (
+            serde_json::json!({"model":"m","prompt":"x","top_p":0.9}),
+            "top_p",
+        ),
+        (
+            serde_json::json!({"model":"m","prompt":"x","presence_penalty":1}),
+            "presence_penalty",
+        ),
+        (
+            serde_json::json!({"model":"m","prompt":"x","logit_bias":{"1":1}}),
+            "logit_bias",
+        ),
+        (
+            serde_json::json!({"model":"m","prompt":"x","logprobs":1}),
+            "logprobs",
+        ),
+    ] {
+        let error = parse_completion_request(&completion(body)).unwrap_err();
+        assert_eq!(error.param(), Some(param));
+        assert_eq!(error.code(), ErrorCodeV1::UnsupportedParameter);
     }
 }
 
@@ -196,6 +233,8 @@ fn template_input_tokens_and_infill_share_strict_messages() {
     assert_eq!(infill.prefix(), "a");
     assert!(infill.stream());
     assert_eq!(infill.prompt(), Some("c"));
+    assert_eq!(infill.temperature(), 1.0);
+    assert_eq!(infill.top_p(), 0.95);
     assert_eq!(
         parse_infill_request(&completion(serde_json::json!({
             "model":"m","prefix":"a","suffix":"b","input_extra":[],

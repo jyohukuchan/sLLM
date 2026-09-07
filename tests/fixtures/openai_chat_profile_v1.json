@@ -14,8 +14,8 @@
         {"role": "system", "content": "Answer briefly."},
         {"role": "user", "content": "hello"}
       ],
-      "temperature": 0.0,
-      "top_p": 1.0,
+      "temperature": 1.0,
+      "top_p": 0.95,
       "max_completion_tokens": 17,
       "presence_penalty": 0.0,
       "frequency_penalty": 0.0,
@@ -44,14 +44,13 @@
   },
   "positive_variants": [
     {
-      "case_id": "phase40-choice-logprob-json-object",
+      "case_id": "fixed-choice-json-object",
       "request": {
         "model": "qwen-test",
         "messages": [{"role": "user", "content": "Return JSON with a short answer."}],
         "n": 2,
-        "logprobs": true,
-        "top_logprobs": 3,
-        "logit_bias": {"0": -100, "7": 2.5},
+        "logprobs": false,
+        "top_logprobs": 0,
         "response_format": {"type": "json_object"},
         "seed": 41
       }
@@ -102,7 +101,7 @@
       "case_id": "top-logprobs-without-logprobs",
       "body": {"model": "qwen-test", "messages": [{"role": "user", "content": "x"}], "top_logprobs": 1},
       "status": 400,
-      "code": "invalid_value",
+      "code": "unsupported_parameter",
       "param": "top_logprobs"
     },
     {

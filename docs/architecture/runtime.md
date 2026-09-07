@@ -544,6 +544,24 @@ logprobをfail-closedに監査する。gfx1030/gfx1201のselector contract matri
 gfx942はwave64 feature-pinned compile/routeのみPASSで、MI300X real correctness/performanceはVM再確保後へdeferredする。直接llama.cpp
 source reuseはなく、provenance lockは変更しない。
 
+### Phase 81 固定profileの共通GPU sampling（実装・検証中）
+
+公開APIの採用profileは[main-plan](../plans/main-plan.md)に従い、
+temperature 1、top-p 0.95、モデル読込時のtop-kを共通TokenSelectへ渡す。
+上記Phase 40の任意samplerとhost full-logits経路は過去の実装範囲であり、固定profileの公開要求を
+そのCPU経路へ暗黙に戻さない。profile外の要求は実行前に拒否する。
+
+Rustのrequest ownerは`DeviceSamplingBuffers`で制約・16-byte出力・workspaceを再利用する。
+補正なし・制約なしは空配列とdescriptor flagsで表し、語彙長の中立配列のCPU生成とH2Dを省く。
+grammar等の内部maskは変更時だけ転送する。HIPはtop-k→top-p→抽選を行い、K0ではtop-kを省略する。
+Qwen、Gemma Dense/MoE、Ministralの終端は同じ契約へ接続し、重み形式やモデル名ごとの専用samplerを増やさない。
+Qwen画像prefillもembeddingとmRoPE位置を保持したまま同じ終端を使う。
+
+selectorは既存Graph／KV処理の後へ順序づけ、選択recordのstatus・token・有限値を検査してから公開する。
+取消済み要求は再利用せずfresh requestを使う。公開済みtokenのKVを取消操作で巻き戻さない。
+接続・性能・未対応機能の実証範囲は[Phase 81計画](../plans/active/2026/09/1-10/phase81-fixed-gpu-sampling.md)へ記録し、
+この設計記載を全モデルの実機成功やPhase完了の証拠とはしない。
+
 ### Phase 41 prefix・context・checkpoint state
 
 Phase 41はrequest-local ownerを壊さず、公開済みquiescent stateだけをcross-request boundaryへ出す。prefix keyはmodel-lock、

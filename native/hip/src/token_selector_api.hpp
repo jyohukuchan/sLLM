@@ -16,11 +16,18 @@ struct DescriptorMetadata final {
   TensorMetadata additive_logits;
   TensorMetadata valid_mask;
   TensorMetadata output;
+  TensorMetadata workspace;
   uint64_t vocab_size;
   float temperature;
+  uint32_t op_version;
+  uint32_t top_k;
+  float top_p;
+  uint32_t flags;
   uint64_t seed;
   uint64_t counter;
 };
+
+uint64_t workspace_bytes(uint64_t vocab_size, uint32_t top_k) noexcept;
 
 sllm_status_t
 validate_descriptor_prefix(const sllm_token_selector_desc_t *descriptor,

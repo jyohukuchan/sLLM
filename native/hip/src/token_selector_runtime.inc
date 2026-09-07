@@ -36,8 +36,7 @@ sllm_status_t validate_token_selector_dispatch_info(
 }
 
 void initialize_token_selector_dispatch_info(
-    sllm_token_selector_dispatch_info_t *const info,
-    const uint64_t dispatch_id,
+    sllm_token_selector_dispatch_info_t *const info, const uint64_t dispatch_id,
     const sllm_token_selector::DescriptorMetadata &metadata,
     const char *const arch_name) noexcept {
   const uint32_t struct_size = info->struct_size;
@@ -48,10 +47,32 @@ void initialize_token_selector_dispatch_info(
   info->info_version = SLLM_HIP_TOKEN_SELECTOR_DISPATCH_INFO_VERSION;
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
-  info->dispatch_count = 1U;
-  info->kernel_id = SLLM_HIP_TOKEN_SELECTOR_KERNEL_ID_BF16_F32_MASK_V1;
+  if (metadata.op_version == SLLM_HIP_TOKEN_SELECTOR_VERSION) {
+    info->dispatch_count = 1U;
+    info->grid_size_x = 1U;
+  } else if (metadata.top_k == 0U) {
+    // Histogram, parallel bin weights/prefix, nucleus boundary, selected
+    // score bucket, token-tile count, token-block prefix, and final select.
+    info->dispatch_count = 8U;
+    info->grid_size_x =
+        static_cast<uint32_t>((metadata.vocab_size + 1023U) / 1024U);
+  } else {
+    uint64_t records = ((metadata.vocab_size + 1023U) / 1024U) *
+                       static_cast<uint64_t>(metadata.top_k);
+    uint32_t launches = 2U; // initial tile candidates and final selection
+    while (records > 1024U) {
+      const uint64_t blocks = (records + 1023U) / 1024U;
+      records = blocks * static_cast<uint64_t>(metadata.top_k);
+      ++launches;
+    }
+    info->dispatch_count = launches;
+    info->grid_size_x =
+        static_cast<uint32_t>((metadata.vocab_size + 1023U) / 1024U);
+  }
+  info->kernel_id = metadata.op_version == SLLM_HIP_TOKEN_SELECTOR_VERSION
+                        ? SLLM_HIP_TOKEN_SELECTOR_KERNEL_ID_BF16_F32_MASK_V1
+                        : SLLM_HIP_TOKEN_SELECTOR_KERNEL_ID_FIXED_TOPK_TOPP_V1;
   info->workgroup_size_x = SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE;
-  info->grid_size_x = 1U;
   info->vocab_size = metadata.vocab_size;
   info->fallback_allowed = 0U;
   info->fallback_used = 0U;
@@ -59,29 +80,34 @@ void initialize_token_selector_dispatch_info(
   info->token_id = -1;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_TOKEN_SELECTOR_KERNEL_SYMBOL_MAX,
-      ::sllm_token_selector_kernel::kLogicalKernelId);
+      metadata.op_version == SLLM_HIP_TOKEN_SELECTOR_VERSION
+          ? ::sllm_token_selector_kernel::kLogicalKernelId
+          : ::sllm_token_selector_kernel::kFixedLogicalKernelId);
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, SLLM_HIP_TOKEN_SELECTOR_DEVICE_SYMBOL_MAX,
-      ::sllm_token_selector_kernel::kDeviceSymbol);
-  sllm_public_runtime::copy_fixed_string(
-      info->gcn_arch_name, SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
+      metadata.op_version == SLLM_HIP_TOKEN_SELECTOR_VERSION
+          ? ::sllm_token_selector_kernel::kDeviceSymbol
+          : ::sllm_token_selector_kernel::kFixedDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
+                                         SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
 
-bool token_selector_intervals_overlap(const Buffer *const left_buffer,
-                                      const sllm_token_selector::TensorMetadata &left,
-                                      const Buffer *const right_buffer,
-                                      const sllm_token_selector::TensorMetadata &right) noexcept {
+bool token_selector_intervals_overlap(
+    const Buffer *const left_buffer,
+    const sllm_token_selector::TensorMetadata &left,
+    const Buffer *const right_buffer,
+    const sllm_token_selector::TensorMetadata &right) noexcept {
   return left_buffer == right_buffer &&
          sllm_token_selector::intervals_overlap(left, right);
 }
 
 } // namespace
 
-extern "C" sllm_status_t sllm_token_selector_prepare(
-    const sllm_context_t *const raw_context,
-    const sllm_token_selector_desc_t *const descriptor,
-    sllm_token_selector_plan_t **const raw_plan,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_token_selector_prepare(const sllm_context_t *const raw_context,
+                            const sllm_token_selector_desc_t *const descriptor,
+                            sllm_token_selector_plan_t **const raw_plan,
+                            sllm_error_sink_t *const error_sink) noexcept {
   try {
     if (raw_plan != nullptr) {
       *raw_plan = nullptr;
@@ -108,17 +134,22 @@ extern "C" sllm_status_t sllm_token_selector_prepare(
     uintptr_t token = 0U;
     {
       std::lock_guard<std::mutex> registry_lock(registry_mutex);
-      Context *const context = lookup<Context>(raw_context, HandleKind::Context);
+      Context *const context =
+          lookup<Context>(raw_context, HandleKind::Context);
       Buffer *const logits =
           lookup<Buffer>(descriptor->logits.buffer, HandleKind::Buffer);
-      Buffer *const additive =
-          lookup<Buffer>(descriptor->additive_logits.buffer, HandleKind::Buffer);
+      Buffer *const additive = lookup<Buffer>(
+          descriptor->additive_logits.buffer, HandleKind::Buffer);
       Buffer *const valid_mask =
           lookup<Buffer>(descriptor->valid_mask.buffer, HandleKind::Buffer);
       Buffer *const output =
           lookup<Buffer>(descriptor->output.buffer, HandleKind::Buffer);
+      Buffer *const workspace =
+          metadata.op_version == SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP
+              ? lookup<Buffer>(descriptor->workspace.buffer, HandleKind::Buffer)
+              : output;
       if (context == nullptr || logits == nullptr || additive == nullptr ||
-          valid_mask == nullptr || output == nullptr) {
+          valid_mask == nullptr || output == nullptr || workspace == nullptr) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
             "token selector context or buffer handle is stale or wrong kind");
@@ -126,13 +157,15 @@ extern "C" sllm_status_t sllm_token_selector_prepare(
       std::lock_guard<std::mutex> accounting_lock(context->accounting_mutex);
       if (context->poisoned.load() || context->release_active ||
           logits->release_active || additive->release_active ||
-          valid_mask->release_active || output->release_active) {
+          valid_mask->release_active || output->release_active ||
+          workspace->release_active) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_BUSY,
             "token selector cannot prepare while an owner is releasing");
       }
       if (logits->context != context || additive->context != context ||
-          valid_mask->context != context || output->context != context) {
+          valid_mask->context != context || output->context != context ||
+          workspace->context != context) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_CONTEXT_OR_DEVICE_MISMATCH,
             "token selector buffers must belong to the supplied context");
@@ -140,16 +173,22 @@ extern "C" sllm_status_t sllm_token_selector_prepare(
       if (metadata.logits.end_offset > logits->size_bytes ||
           metadata.additive_logits.end_offset > additive->size_bytes ||
           metadata.valid_mask.end_offset > valid_mask->size_bytes ||
-          metadata.output.end_offset > output->size_bytes) {
+          metadata.output.end_offset > output->size_bytes ||
+          metadata.workspace.end_offset > workspace->size_bytes) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
             "token selector tensor interval exceeds its backing buffer");
       }
-      const Buffer *const buffers[] = {logits, additive, valid_mask, output};
+      const Buffer *const buffers[] = {logits, additive, valid_mask, output,
+                                       workspace};
       const sllm_token_selector::TensorMetadata metadata_values[] = {
           metadata.logits, metadata.additive_logits, metadata.valid_mask,
-          metadata.output};
-      for (std::size_t index = 0U; index != 4U; ++index) {
+          metadata.output, metadata.workspace};
+      const std::size_t buffer_count =
+          metadata.op_version == SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP
+              ? 5U
+              : 4U;
+      for (std::size_t index = 0U; index != buffer_count; ++index) {
         for (std::size_t prior = 0U; prior != index; ++prior) {
           if (token_selector_intervals_overlap(
                   buffers[index], metadata_values[index], buffers[prior],
@@ -163,20 +202,22 @@ extern "C" sllm_status_t sllm_token_selector_prepare(
       if (!sllm_public_runtime::AccountingState::
               reserve_token_selector_prepared_plan(
                   context->accounting, logits->accounting, additive->accounting,
-                  valid_mask->accounting, output->accounting)) {
+                  valid_mask->accounting, output->accounting,
+                  workspace->accounting)) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
             "token selector prepared-plan accounting is exhausted");
       }
       try {
         candidate = std::make_unique<TokenSelectorPlan>(
-            context, logits, additive, valid_mask, output, metadata);
+            context, logits, additive, valid_mask, output, workspace, metadata);
         token = register_handle(candidate.get(), HandleKind::TokenSelectorPlan);
       } catch (...) {
         (void)sllm_public_runtime::AccountingState::
             release_token_selector_prepared_plan(
                 context->accounting, logits->accounting, additive->accounting,
-                valid_mask->accounting, output->accounting);
+                valid_mask->accounting, output->accounting,
+                workspace->accounting);
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
             "token selector prepared-plan allocation or registration failed");
@@ -185,7 +226,8 @@ extern "C" sllm_status_t sllm_token_selector_prepare(
         (void)sllm_public_runtime::AccountingState::
             release_token_selector_prepared_plan(
                 context->accounting, logits->accounting, additive->accounting,
-                valid_mask->accounting, output->accounting);
+                valid_mask->accounting, output->accounting,
+                workspace->accounting);
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
             "token selector prepared-plan handle allocation failed");
@@ -201,9 +243,9 @@ extern "C" sllm_status_t sllm_token_selector_prepare(
   }
 }
 
-extern "C" sllm_status_t sllm_token_selector_plan_release(
-    sllm_token_selector_plan_t **const raw_plan,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_token_selector_plan_release(sllm_token_selector_plan_t **const raw_plan,
+                                 sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status =
         sllm_public_runtime::validate_error_sink(error_sink);
@@ -219,13 +261,15 @@ extern "C" sllm_status_t sllm_token_selector_plan_release(
     bool quarantine_plan = false;
     {
       std::lock_guard<std::mutex> registry_lock(registry_mutex);
-      plan = lookup<TokenSelectorPlan>(*raw_plan, HandleKind::TokenSelectorPlan);
+      plan =
+          lookup<TokenSelectorPlan>(*raw_plan, HandleKind::TokenSelectorPlan);
       if (plan == nullptr) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
             "token selector plan handle is stale or has the wrong kind");
       }
-      std::lock_guard<std::mutex> accounting_lock(plan->context->accounting_mutex);
+      std::lock_guard<std::mutex> accounting_lock(
+          plan->context->accounting_mutex);
       if (plan->release_active || plan->in_flight) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_BUSY,
@@ -239,7 +283,8 @@ extern "C" sllm_status_t sllm_token_selector_plan_release(
               release_token_selector_prepared_plan(
                   plan->context->accounting, plan->logits->accounting,
                   plan->additive_logits->accounting,
-                  plan->valid_mask->accounting, plan->output->accounting);
+                  plan->valid_mask->accounting, plan->output->accounting,
+                  plan->workspace->accounting);
       unregister_handle(*raw_plan);
       *raw_plan = nullptr;
       if (!accounting_released) {
@@ -251,7 +296,8 @@ extern "C" sllm_status_t sllm_token_selector_plan_release(
       poison_owner.retain(plan);
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INTERNAL_ERROR,
-          "token selector prepared-plan accounting release failed; plan quarantined");
+          "token selector prepared-plan accounting release failed; plan "
+          "quarantined");
     }
     delete plan;
     return SLLM_STATUS_OK;
@@ -278,7 +324,8 @@ extern "C" sllm_status_t sllm_token_selector_execute(
         completion_output == nullptr || dispatch_info == nullptr) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-          "token selector execute plan, queue, completion, or dispatch info is null");
+          "token selector execute plan, queue, completion, or dispatch info is "
+          "null");
     }
     const sllm_status_t dispatch_status =
         validate_token_selector_dispatch_info(dispatch_info, error_sink);
@@ -302,19 +349,24 @@ extern "C" sllm_status_t sllm_token_selector_execute(
             error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
             "token selector plan and queue belong to different contexts");
       }
-      std::lock_guard<std::mutex> accounting_lock(plan->context->accounting_mutex);
+      std::lock_guard<std::mutex> accounting_lock(
+          plan->context->accounting_mutex);
       if (plan->context->poisoned.load() || plan->context->release_active ||
           queue->release_active || plan->release_active || plan->in_flight ||
-          plan->logits->release_active || plan->additive_logits->release_active ||
-          plan->valid_mask->release_active || plan->output->release_active) {
+          plan->logits->release_active ||
+          plan->additive_logits->release_active ||
+          plan->valid_mask->release_active || plan->output->release_active ||
+          plan->workspace->release_active) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_BUSY,
             "token selector owner graph is releasing or already in flight");
       }
-      if (!sllm_public_runtime::AccountingState::reserve_token_selector_submission(
-              plan->context->accounting, queue->accounting,
-              plan->logits->accounting, plan->additive_logits->accounting,
-              plan->valid_mask->accounting, plan->output->accounting)) {
+      if (!sllm_public_runtime::AccountingState::
+              reserve_token_selector_submission(
+                  plan->context->accounting, queue->accounting,
+                  plan->logits->accounting, plan->additive_logits->accounting,
+                  plan->valid_mask->accounting, plan->output->accounting,
+                  plan->workspace->accounting)) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
             "token selector submission accounting is exhausted");
@@ -327,7 +379,8 @@ extern "C" sllm_status_t sllm_token_selector_execute(
             rollback_token_selector_submission(
                 plan->context->accounting, queue->accounting,
                 plan->logits->accounting, plan->additive_logits->accounting,
-                plan->valid_mask->accounting, plan->output->accounting);
+                plan->valid_mask->accounting, plan->output->accounting,
+                plan->workspace->accounting);
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
             "token selector context dispatch id is exhausted");
@@ -343,9 +396,11 @@ extern "C" sllm_status_t sllm_token_selector_execute(
     NativeEventGuard event_guard;
     TokenSelectorExecuteScopeGuard execute_guard(plan, queue, &candidate,
                                                  &event_guard, error_sink);
-    const sllm_status_t device_status = select_context_device(plan->context, error_sink);
+    const sllm_status_t device_status =
+        select_context_device(plan->context, error_sink);
     if (device_status != SLLM_STATUS_OK) {
-      if (!rollback_reserved_token_selector_submission(plan, queue, error_sink)) {
+      if (!rollback_reserved_token_selector_submission(plan, queue,
+                                                       error_sink)) {
         execute_guard.disarm();
         return SLLM_STATUS_INTERNAL_ERROR;
       }
@@ -353,10 +408,11 @@ extern "C" sllm_status_t sllm_token_selector_execute(
       return device_status;
     }
     hipDeviceProp_t properties = {};
-    const sllm_status_t property_status = get_context_device_properties(
-        plan->context, &properties, error_sink);
+    const sllm_status_t property_status =
+        get_context_device_properties(plan->context, &properties, error_sink);
     if (property_status != SLLM_STATUS_OK) {
-      if (!rollback_reserved_token_selector_submission(plan, queue, error_sink)) {
+      if (!rollback_reserved_token_selector_submission(plan, queue,
+                                                       error_sink)) {
         execute_guard.disarm();
         return SLLM_STATUS_INTERNAL_ERROR;
       }
@@ -366,7 +422,8 @@ extern "C" sllm_status_t sllm_token_selector_execute(
     char arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME] = {};
     if (!copy_property(arch_name, sizeof(arch_name), properties.gcnArchName,
                        sizeof(properties.gcnArchName))) {
-      if (!rollback_reserved_token_selector_submission(plan, queue, error_sink)) {
+      if (!rollback_reserved_token_selector_submission(plan, queue,
+                                                       error_sink)) {
         execute_guard.disarm();
         return SLLM_STATUS_INTERNAL_ERROR;
       }
@@ -377,30 +434,34 @@ extern "C" sllm_status_t sllm_token_selector_execute(
     }
 #if defined(SLLM_HIP_COMPILE_TARGET)
     if (!matches_runtime_gcn_arch(arch_name, SLLM_HIP_COMPILE_TARGET)) {
-      if (!rollback_reserved_token_selector_submission(plan, queue, error_sink)) {
+      if (!rollback_reserved_token_selector_submission(plan, queue,
+                                                       error_sink)) {
         execute_guard.disarm();
         return SLLM_STATUS_INTERNAL_ERROR;
       }
       execute_guard.disarm();
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
-          "token selector device target does not match the compiled exact target");
+          "token selector device target does not match the compiled exact "
+          "target");
     }
 #endif
 
     try {
-      candidate = std::make_unique<Completion>(
-          plan->context, queue, plan->logits, 0U, false,
-          std::vector<uint8_t>{});
+      candidate =
+          std::make_unique<Completion>(plan->context, queue, plan->logits, 0U,
+                                       false, std::vector<uint8_t>{});
       candidate->token_selector = true;
       candidate->token_selector_plan = plan;
       candidate->token_selector_logits = plan->logits;
       candidate->token_selector_additive = plan->additive_logits;
       candidate->token_selector_valid_mask = plan->valid_mask;
       candidate->token_selector_output = plan->output;
+      candidate->token_selector_workspace = plan->workspace;
       execute_guard.candidate_allocated();
     } catch (...) {
-      if (!rollback_reserved_token_selector_submission(plan, queue, error_sink)) {
+      if (!rollback_reserved_token_selector_submission(plan, queue,
+                                                       error_sink)) {
         execute_guard.disarm();
         return SLLM_STATUS_INTERNAL_ERROR;
       }
@@ -411,11 +472,13 @@ extern "C" sllm_status_t sllm_token_selector_execute(
     }
 
     hipEvent_t native_event = nullptr;
-    const hipError_t event_status = queue_profiles_completions(queue)
-                                        ? hipEventCreateWithFlags(&native_event, 0U)
-                                        : hipSuccess;
+    const hipError_t event_status =
+        queue_profiles_completions(queue)
+            ? hipEventCreateWithFlags(&native_event, 0U)
+            : hipSuccess;
     if (event_status != hipSuccess) {
-      if (!rollback_reserved_token_selector_submission(plan, queue, error_sink)) {
+      if (!rollback_reserved_token_selector_submission(plan, queue,
+                                                       error_sink)) {
         execute_guard.disarm();
         return SLLM_STATUS_INTERNAL_ERROR;
       }
@@ -425,10 +488,10 @@ extern "C" sllm_status_t sllm_token_selector_execute(
     event_guard.adopt(plan->context, native_event);
     candidate->event = native_event;
     hipEvent_t timing_start_event = nullptr;
-    const hipError_t timing_event_status = queue_profiles_completions(queue)
-                                               ? hipEventCreateWithFlags(
-                                                     &timing_start_event, 0U)
-                                               : hipSuccess;
+    const hipError_t timing_event_status =
+        queue_profiles_completions(queue)
+            ? hipEventCreateWithFlags(&timing_start_event, 0U)
+            : hipSuccess;
     if (timing_event_status != hipSuccess) {
       execute_guard.disarm();
       return rollback_unpublished_submission(
@@ -477,16 +540,20 @@ extern "C" sllm_status_t sllm_token_selector_execute(
              static_cast<std::size_t>(offset);
     };
     const hipError_t launch_status = ::sllm_token_selector_kernel::launch(
-        static_cast<const uint16_t *>(byte_pointer(
-            plan->logits, plan->metadata.logits.byte_offset)),
+        static_cast<const uint16_t *>(
+            byte_pointer(plan->logits, plan->metadata.logits.byte_offset)),
         static_cast<const float *>(byte_pointer(
             plan->additive_logits, plan->metadata.additive_logits.byte_offset)),
         static_cast<const uint8_t *>(byte_pointer(
             plan->valid_mask, plan->metadata.valid_mask.byte_offset)),
+        static_cast<uint8_t *>(byte_pointer(
+            plan->workspace, plan->metadata.workspace.byte_offset)),
         plan->metadata.vocab_size, plan->metadata.temperature,
+        plan->metadata.top_k, plan->metadata.top_p, plan->metadata.flags,
         plan->metadata.seed, plan->metadata.counter,
-        static_cast<sllm_token_selector_record_t *>(byte_pointer(
-            plan->output, plan->metadata.output.byte_offset)), queue->stream);
+        static_cast<sllm_token_selector_record_t *>(
+            byte_pointer(plan->output, plan->metadata.output.byte_offset)),
+        queue->stream);
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,

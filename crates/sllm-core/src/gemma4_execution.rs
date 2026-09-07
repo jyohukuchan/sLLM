@@ -8,18 +8,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
 use crate::context_window::{ContextShiftDecisionV1, ContextWindowStateV1};
+use crate::device_sampling::{DeviceSamplingBuffers, decode_selected_record};
 use crate::gemma4::Gemma4LayerType;
 use crate::gemma4_graph::{
     GEMMA4_HIDDEN_SIZE, Gemma4Graph, Gemma4GraphBindingClass, Gemma4GraphNodeKind, Gemma4NormRole,
 };
 use crate::kv_state::{KvCacheEncoding, KvStateDescriptor};
-use crate::op::TokenSelectorContractV1;
 use crate::op::{RmsNormContract, SemanticOpDescriptor, SemanticOpKind};
 use crate::prepared_execution::{
     ExecutionAuditAccumulator, ExecutionBoundaryKind, ExecutionSegment,
@@ -242,6 +242,7 @@ pub struct Gemma4ProvisionedBuffers {
     session: Arc<ExecutionSession>,
     buffers: Vec<ExecutionBuffer>,
     prepared_semantics: Arc<PreparedSemanticCache>,
+    device_sampling: Arc<Mutex<Option<DeviceSamplingBuffers>>>,
 }
 
 /// Immutable Gemma weights and constants retained across request owners.
@@ -4023,6 +4024,7 @@ impl Gemma4ProvisionedBuffers {
             session: Arc::clone(&self.session),
             buffers,
             prepared_semantics: Arc::clone(&self.prepared_semantics),
+            device_sampling: Arc::clone(&self.device_sampling),
         })
     }
 
@@ -4952,17 +4954,7 @@ impl Gemma4ProvisionedBuffers {
         audit: &mut ExecutionAuditAccumulator,
         completion_timeout: Duration,
     ) -> Result<SamplingSelectionV1, Gemma4ExecutionLayoutError> {
-        let vocab = selector.additive_logits().len();
-        if vocab == 0 || selector.valid_mask().len() != vocab {
-            return Err(Gemma4ExecutionLayoutError::invalid(
-                "device selector additive logits/mask must be non-empty and equal-sized",
-            ));
-        }
-        if !selector.valid_mask().iter().any(|&value| value != 0) {
-            return Err(Gemma4ExecutionLayoutError::invalid(
-                "device selector valid mask rejects every token",
-            ));
-        }
+        let vocab = selector.vocab_size();
         if logits.dtype() != DType::Bf16
             || logits.encoding() != Encoding::Unquantized
             || logits.shape().len() != 2
@@ -5006,88 +4998,35 @@ impl Gemma4ProvisionedBuffers {
             row_offset,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let additive_view = TensorView::contiguous(DType::F32, &[1, vocab])
-            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let mask_view = TensorView::contiguous(DType::U8, &[1, vocab])
-            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let output_view = TensorView::contiguous(DType::U8, &[16])
-            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let additive = self
+        let mut storage = self
+            .device_sampling
+            .lock()
+            .map_err(|_| Gemma4ExecutionLayoutError::invalid("sampler storage lock poisoned"))?;
+        if storage.is_none() {
+            *storage = Some(
+                DeviceSamplingBuffers::new(self.session.as_ref(), vocab)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
+            );
+        }
+        let binding = self
             .session
-            .allocate_with_category(
-                additive_view.payload_bytes(),
-                AllocationCategory::RequestState,
+            .bind(self.buffer(logits_tensor_id)?, logits_row, AccessMode::Read)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let prepared = storage
+            .as_mut()
+            .expect("sampler storage initialized")
+            .prepare(
+                self.session.as_ref(),
+                queue,
+                binding,
+                selector,
+                completion_timeout,
             )
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let valid_mask = self
-            .session
-            .allocate_with_category(mask_view.payload_bytes(), AllocationCategory::RequestState)
-            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let output = self
-            .session
-            .allocate_with_category(
-                output_view.payload_bytes(),
-                AllocationCategory::RequestState,
-            )
-            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let additive_bytes = selector
-            .additive_logits()
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<_>>();
-        upload_selector_bytes(
-            self.session.as_ref(),
-            queue,
-            &additive,
-            &additive_view,
-            &additive_bytes,
-            completion_timeout,
-            "Gemma device selector additive-logit upload",
-        )?;
-        upload_selector_bytes(
-            self.session.as_ref(),
-            queue,
-            &valid_mask,
-            &mask_view,
-            selector.valid_mask(),
-            completion_timeout,
-            "Gemma device selector valid-mask upload",
-        )?;
-        let contract = TokenSelectorContractV1::new(
-            u64::try_from(vocab).map_err(|_| {
-                Gemma4ExecutionLayoutError::invalid("selector vocabulary is too large")
-            })?,
-            selector.temperature(),
-            selector.seed(),
-            selector.counter(),
-        )
-        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let descriptor = Arc::new(
-            SemanticOpDescriptor::new_token_select(
-                vec![logits_row.clone(), additive_view.clone(), mask_view.clone()],
-                vec![output_view.clone()],
-                contract,
-            )
-            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
-        );
         let operation = BoundSemanticOp::new(
-            descriptor,
-            vec![
-                self.session
-                    .bind(self.buffer(logits_tensor_id)?, logits_row, AccessMode::Read)
-                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
-                self.session
-                    .bind(&additive, additive_view, AccessMode::Read)
-                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
-                self.session
-                    .bind(&valid_mask, mask_view, AccessMode::Read)
-                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
-            ],
-            vec![
-                self.session
-                    .bind(&output, output_view, AccessMode::Write)
-                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
-            ],
+            Arc::new(prepared.descriptor),
+            prepared.inputs,
+            prepared.outputs,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let mut submission =
@@ -5116,41 +5055,11 @@ impl Gemma4ProvisionedBuffers {
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         if copied != 16 {
             return Err(Gemma4ExecutionLayoutError::invalid(
-                "device selector returned a short or long selected record",
+                "device selector record length differs from 16",
             ));
         }
-        let token_id = i32::from_le_bytes(bytes[0..4].try_into().expect("token ID record bytes"));
-        let status = u32::from_le_bytes(bytes[4..8].try_into().expect("status record bytes"));
-        let logprob = f32::from_le_bytes(bytes[8..12].try_into().expect("logprob record bytes"));
-        let reserved = u32::from_le_bytes(bytes[12..16].try_into().expect("reserved record bytes"));
-        if status != 0 {
-            return Err(Gemma4ExecutionLayoutError::invalid(format!(
-                "device selector record status is {status}"
-            )));
-        }
-        if reserved != 0 {
-            return Err(Gemma4ExecutionLayoutError::invalid(
-                "device selector selected record reserved field is non-zero",
-            ));
-        }
-        if token_id < 0
-            || usize::try_from(token_id).map_or(true, |id| id >= vocab)
-            || selector.valid_mask()[usize::try_from(token_id).unwrap_or(0)] == 0
-        {
-            return Err(Gemma4ExecutionLayoutError::invalid(
-                "device selector returned an out-of-range or masked token ID",
-            ));
-        }
-        if !logprob.is_finite() {
-            return Err(Gemma4ExecutionLayoutError::invalid(
-                "device selector returned a non-finite logprob",
-            ));
-        }
-        Ok(SamplingSelectionV1 {
-            token_id: u32::try_from(token_id).expect("validated token ID fits u32"),
-            logprob: f64::from(logprob),
-            top_logprobs: Vec::new(),
-        })
+        decode_selected_record(&bytes, selector)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
     }
 
     fn read_last_logits(
@@ -5430,6 +5339,7 @@ pub fn provision_gemma4_execution_buffers(
         session,
         buffers,
         prepared_semantics: Arc::new(PreparedSemanticCache::default()),
+        device_sampling: Arc::new(Mutex::new(None)),
     })
 }
 
@@ -5476,6 +5386,7 @@ fn provision_gemma4_request_buffers(
         session,
         buffers,
         prepared_semantics: Arc::new(PreparedSemanticCache::default()),
+        device_sampling: Arc::new(Mutex::new(None)),
     })
 }
 
@@ -5492,67 +5403,6 @@ fn require_transfer_success(
             "{label} reported failure"
         ))),
     }
-}
-
-fn upload_selector_bytes(
-    session: &ExecutionSession,
-    queue: &ExecutionQueue,
-    buffer: &ExecutionBuffer,
-    view: &TensorView,
-    bytes: &[u8],
-    completion_timeout: Duration,
-    stage: &str,
-) -> Result<(), Gemma4ExecutionLayoutError> {
-    if bytes.is_empty()
-        || view.payload_bytes()
-            != u64::try_from(bytes.len()).map_err(|_| {
-                Gemma4ExecutionLayoutError::invalid("selector upload length does not fit u64")
-            })?
-    {
-        return Err(Gemma4ExecutionLayoutError::invalid(format!(
-            "{stage} bytes do not exactly match the tensor view"
-        )));
-    }
-    let maximum = session
-        .max_transfer_bytes()
-        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-    if maximum == 0 {
-        return Err(Gemma4ExecutionLayoutError::invalid(
-            "backend transfer limit must be non-zero",
-        ));
-    }
-    let mut offset = 0_u64;
-    let total = u64::try_from(bytes.len())
-        .map_err(|_| Gemma4ExecutionLayoutError::invalid("selector upload is too large"))?;
-    while offset < total {
-        let length = (total - offset).min(maximum);
-        let start = usize::try_from(offset).map_err(|_| {
-            Gemma4ExecutionLayoutError::invalid("selector upload offset is too large")
-        })?;
-        let end = start
-            .checked_add(usize::try_from(length).map_err(|_| {
-                Gemma4ExecutionLayoutError::invalid("selector upload chunk is too large")
-            })?)
-            .ok_or_else(|| {
-                Gemma4ExecutionLayoutError::invalid("selector upload range overflowed")
-            })?;
-        let destination = buffer
-            .range(
-                view.byte_offset().checked_add(offset).ok_or_else(|| {
-                    Gemma4ExecutionLayoutError::invalid("selector upload offset overflowed")
-                })?,
-                length,
-            )
-            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let mut transfer = session
-            .upload(queue, destination, Arc::from(bytes[start..end].to_vec()))
-            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        require_transfer_success(transfer.wait(completion_timeout), stage)?;
-        offset = offset.checked_add(length).ok_or_else(|| {
-            Gemma4ExecutionLayoutError::invalid("selector upload progress overflowed")
-        })?;
-    }
-    Ok(())
 }
 
 fn read_gemma_buffer_bytes(

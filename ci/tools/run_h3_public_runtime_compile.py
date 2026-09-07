@@ -410,6 +410,18 @@ KERNEL_SYMBOLS = (
     "sllm_rmsnorm_residual_fused_wave64_v1",
     "sllm_rotary_split_half_bf16_fp32_v1",
     "sllm_token_selector_bf16_f32_mask_v1",
+    "sllm_token_selector_fixed_topk_final_v1",
+    "sllm_token_selector_fixed_topk_initial_v1",
+    "sllm_token_selector_fixed_topk_reduce_v1",
+    "sllm_token_selector_fixed_topk_topp_v1",
+    "sllm_token_selector_fixed_topp_boundary_v1",
+    "sllm_token_selector_fixed_topp_count_v1",
+    "sllm_token_selector_fixed_topp_histogram_v1",
+    "sllm_token_selector_fixed_topp_prefix_v1",
+    "sllm_token_selector_fixed_topp_select_key_v1",
+    "sllm_token_selector_fixed_topp_select_v1",
+    "sllm_token_selector_fixed_topp_token_block_prefix_v1",
+    "sllm_token_selector_fixed_topp_weight_prefix_v1",
 )
 INTERNAL_RUNTIME_SYMBOLS = ("sllm_hip_kv_view_readback",)
 CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS = (

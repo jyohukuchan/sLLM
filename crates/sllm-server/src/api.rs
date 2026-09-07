@@ -18,9 +18,15 @@ use crate::phase42_api::{CompletionRequestV1, InfillRequestV1};
 pub const MAX_REQUEST_BODY_BYTES: usize = 96 * 1024 * 1024;
 pub const DEFAULT_MAX_COMPLETION_TOKENS: u32 = 256;
 pub const MAX_COMPLETION_TOKENS: u32 = 4_096;
+/// Phase 81's public sampling profile.  Keep these values in one server-side
+/// contract so Chat Completions, protocol adapters, and the model backends do
+/// not silently drift to the old greedy/default settings.
+pub(crate) const FIXED_TEMPERATURE_V1: f32 = 1.0;
+pub(crate) const FIXED_TOP_P_V1: f32 = 0.95;
+pub(crate) const FIXED_PRESENCE_PENALTY_V1: f32 = 0.0;
+pub(crate) const FIXED_FREQUENCY_PENALTY_V1: f32 = 0.0;
 const MAX_MODEL_ALIAS_BYTES: usize = 256;
 const MAX_MESSAGES: usize = 1_024;
-const MAX_LOGIT_BIAS_ENTRIES: usize = 4_096;
 const MAX_SAMPLER_TOP_K: u32 = 1_000_000;
 const MAX_SAMPLER_HISTORY: u32 = 4_096;
 const MAX_SAMPLER_SEQUENCE_BREAKERS: usize = 16;
@@ -33,6 +39,18 @@ pub const MAX_MODEL_VARIANT_NAME_BYTES: usize = 128;
 pub const MODEL_VARIANT_SCALE_MIN: f32 = -16.0;
 pub const MODEL_VARIANT_SCALE_MAX: f32 = 16.0;
 pub const MODEL_VARIANT_SCALE_DEFAULT: f32 = 1.0;
+
+pub(crate) fn validate_fixed_sampling_value(
+    param: &str,
+    value: Option<f32>,
+    expected: f32,
+) -> Result<f32, ApiErrorV1> {
+    let value = value.unwrap_or(expected);
+    if value != expected {
+        return Err(ApiErrorV1::unsupported(param));
+    }
+    Ok(value)
+}
 
 const SUPPORTED_FIELDS: &[&str] = &[
     "model",
@@ -1389,41 +1407,6 @@ enum WireStop {
     Many(Vec<String>),
 }
 
-fn parse_logit_bias(
-    wire: Option<BTreeMap<String, f32>>,
-) -> Result<Option<LogitBiasV1>, ApiErrorV1> {
-    let Some(entries) = wire else {
-        return Ok(None);
-    };
-    if entries.len() > MAX_LOGIT_BIAS_ENTRIES {
-        return Err(ApiErrorV1::invalid_value(
-            "logit_bias",
-            format!("logit_bias must contain at most {MAX_LOGIT_BIAS_ENTRIES} entries"),
-        ));
-    }
-    let mut validated = BTreeMap::new();
-    for (raw_token_id, bias) in entries {
-        let token_id = raw_token_id
-            .parse::<u64>()
-            .ok()
-            .and_then(|value| (value <= u64::from(u32::MAX)).then_some(value as u32));
-        let Some(token_id) = token_id else {
-            return Err(ApiErrorV1::invalid_value(
-                format!("logit_bias.{raw_token_id}"),
-                "logit_bias keys must be unsigned 32-bit token IDs",
-            ));
-        };
-        if !bias.is_finite() || !(-100.0..=100.0).contains(&bias) {
-            return Err(ApiErrorV1::invalid_value(
-                format!("logit_bias.{raw_token_id}"),
-                "logit bias must be finite and in [-100,100]",
-            ));
-        }
-        validated.insert(token_id, bias);
-    }
-    Ok(Some(LogitBiasV1 { entries: validated }))
-}
-
 fn parse_response_format(
     wire: Option<WireResponseFormat>,
 ) -> Result<Option<ResponseFormatV1>, ApiErrorV1> {
@@ -1533,7 +1516,7 @@ fn parse_sampler_extension(
             ));
         }
     }
-    let repeat_last_n = wire.repeat_last_n.unwrap_or(64);
+    let repeat_last_n = wire.repeat_last_n.unwrap_or(0);
     if repeat_last_n > MAX_SAMPLER_HISTORY {
         return Err(ApiErrorV1::invalid_value(
             "sllm.sampling.repeat_last_n",
@@ -1562,7 +1545,7 @@ fn parse_sampler_extension(
         ));
     }
 
-    Ok(Some(SamplerExtensionConfigV1 {
+    let extension = SamplerExtensionConfigV1 {
         chain_version,
         top_k: wire.top_k,
         min_p: wire.min_p,
@@ -1574,7 +1557,54 @@ fn parse_sampler_extension(
         xtc,
         mirostat,
         dynamic_temperature,
-    }))
+    };
+    validate_fixed_sampler_extension(&extension)?;
+    Ok(Some(extension))
+}
+
+fn validate_fixed_sampler_extension(
+    extension: &SamplerExtensionConfigV1,
+) -> Result<(), ApiErrorV1> {
+    if extension
+        .top_k()
+        .is_some_and(|value| !matches!(value, 0 | 20 | 64))
+    {
+        return Err(ApiErrorV1::unsupported("sllm.sampling.top_k"));
+    }
+    if extension.min_p().is_some_and(|value| value != 0.0) {
+        return Err(ApiErrorV1::unsupported("sllm.sampling.min_p"));
+    }
+    if extension.typical_p().is_some_and(|value| value != 1.0) {
+        return Err(ApiErrorV1::unsupported("sllm.sampling.typical_p"));
+    }
+    if extension.repeat_penalty().is_some_and(|value| value != 1.0) {
+        return Err(ApiErrorV1::unsupported("sllm.sampling.repeat_penalty"));
+    }
+    if extension.repeat_last_n() != 0 {
+        return Err(ApiErrorV1::unsupported("sllm.sampling.repeat_last_n"));
+    }
+    if extension.ignore_eos() {
+        return Err(ApiErrorV1::unsupported("sllm.sampling.ignore_eos"));
+    }
+    if extension
+        .dry()
+        .is_some_and(|value| value.multiplier() != 0.0)
+    {
+        return Err(ApiErrorV1::unsupported("sllm.sampling.dry"));
+    }
+    if extension
+        .xtc()
+        .is_some_and(|value| value.probability() != 0.0)
+    {
+        return Err(ApiErrorV1::unsupported("sllm.sampling.xtc"));
+    }
+    if extension.mirostat().is_some() {
+        return Err(ApiErrorV1::unsupported("sllm.sampling.mirostat"));
+    }
+    if extension.dynamic_temperature().is_some() {
+        return Err(ApiErrorV1::unsupported("sllm.sampling.dynamic_temperature"));
+    }
+    Ok(())
 }
 
 fn parse_dry_sampling(wire: WireDrySamplingOptions) -> Result<DrySamplingConfigV1, ApiErrorV1> {
@@ -1935,12 +1965,15 @@ pub(crate) fn parse_chat_completion_request_for_profile(
             "n must be an integer in [1,8]",
         ));
     }
-    let logit_bias = parse_logit_bias(wire.logit_bias)?;
-    if wire.top_logprobs.is_some() && wire.logprobs != Some(true) {
-        return Err(ApiErrorV1::invalid_value(
-            "top_logprobs",
-            "top_logprobs requires logprobs=true",
-        ));
+    if wire.logit_bias.is_some() {
+        return Err(ApiErrorV1::unsupported("logit_bias"));
+    }
+    let logit_bias = None;
+    if wire.logprobs == Some(true) {
+        return Err(ApiErrorV1::unsupported("logprobs"));
+    }
+    if wire.top_logprobs.is_some_and(|value| value != 0) {
+        return Err(ApiErrorV1::unsupported("top_logprobs"));
     }
     let logprobs = match (wire.logprobs, wire.top_logprobs) {
         (None, None) => None,
@@ -1949,14 +1982,6 @@ pub(crate) fn parse_chat_completion_request_for_profile(
             top_logprobs,
         }),
     };
-    if let Some(top_logprobs) = wire.top_logprobs {
-        if top_logprobs > 20 {
-            return Err(ApiErrorV1::invalid_value(
-                "top_logprobs",
-                "top_logprobs must be in [0,20]",
-            ));
-        }
-    }
     let response_format = parse_response_format(wire.response_format)?;
 
     let mut messages = Vec::with_capacity(wire.messages.len());
@@ -2034,25 +2059,22 @@ pub(crate) fn parse_chat_completion_request_for_profile(
         ));
     }
 
-    let sampling = SamplingParametersV1::new(
-        wire.temperature.unwrap_or(1.0),
-        wire.top_p.unwrap_or(1.0),
-        wire.presence_penalty.unwrap_or(0.0),
-        wire.frequency_penalty.unwrap_or(0.0),
-    )
-    .map_err(|error| {
-        let text = error.to_string();
-        let param = if text.starts_with("temperature") {
-            "temperature"
-        } else if text.starts_with("top_p") {
-            "top_p"
-        } else if text.starts_with("presence_penalty") {
-            "presence_penalty"
-        } else {
-            "frequency_penalty"
-        };
-        ApiErrorV1::invalid_value(param, text)
-    })?;
+    let temperature =
+        validate_fixed_sampling_value("temperature", wire.temperature, FIXED_TEMPERATURE_V1)?;
+    let top_p = validate_fixed_sampling_value("top_p", wire.top_p, FIXED_TOP_P_V1)?;
+    let presence_penalty = validate_fixed_sampling_value(
+        "presence_penalty",
+        wire.presence_penalty,
+        FIXED_PRESENCE_PENALTY_V1,
+    )?;
+    let frequency_penalty = validate_fixed_sampling_value(
+        "frequency_penalty",
+        wire.frequency_penalty,
+        FIXED_FREQUENCY_PENALTY_V1,
+    )?;
+    let sampling =
+        SamplingParametersV1::new(temperature, top_p, presence_penalty, frequency_penalty)
+            .map_err(|error| ApiErrorV1::invalid_value("sampling", error.to_string()))?;
     if wire.max_completion_tokens.is_some() && wire.max_tokens.is_some() {
         return Err(ApiErrorV1::invalid_value(
             "max_tokens",
@@ -2321,13 +2343,17 @@ mod tests {
     #[test]
     fn supported_request_defaults_and_boundaries_are_typed() {
         let request = parse_chat_completion_request(&valid(
-            r#", "temperature":0, "top_p":0, "presence_penalty":-2, "frequency_penalty":2, "max_completion_tokens":4096, "stop":["x","終"], "seed":-9223372036854775808, "stream":true, "n":1"#,
+            r#", "temperature":1, "top_p":0.95, "presence_penalty":0, "frequency_penalty":0, "max_completion_tokens":4096, "stop":["x","終"], "seed":-9223372036854775808, "stream":true, "n":1"#,
         ))
         .unwrap();
         assert_eq!(request.model(), "qwen");
         assert_eq!(request.messages().len(), 1);
         assert!(request.stream());
         assert_eq!(request.generation().max_new_tokens(), 4096);
+        assert_eq!(request.generation().sampling().temperature(), 1.0);
+        assert_eq!(request.generation().sampling().top_p(), 0.95);
+        assert_eq!(request.generation().sampling().presence_penalty(), 0.0);
+        assert_eq!(request.generation().sampling().frequency_penalty(), 0.0);
         assert_eq!(request.seed(), Some(i64::MIN));
         assert_eq!(request.sampling_seed(), Some(1_u64 << 63));
         let maximum =
@@ -2345,15 +2371,13 @@ mod tests {
     }
 
     #[test]
-    fn phase40_wire_fields_are_typed_without_changing_legacy_generation() {
+    fn fixed_wire_fields_preserve_tools_and_seed_behavior() {
         let body = serde_json::to_vec(&serde_json::json!({
             "model": "qwen",
             "messages": [{"role": "user", "content": "return json"}],
-            "temperature": 0.8,
+            "temperature": 1.0,
+            "top_p": 0.95,
             "seed": 41,
-            "logit_bias": {"0": -100, "7": 2.5, "4294967295": 100},
-            "logprobs": true,
-            "top_logprobs": 20,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -2367,29 +2391,15 @@ mod tests {
             "sllm": {
                 "sampling": {
                     "chain_version": 1,
-                    "top_k": 17,
-                    "min_p": 0.05,
-                    "typical_p": 0.9,
-                    "repeat_penalty": 1.1,
-                    "ignore_eos": true,
-                    "dry": {"multiplier": 0.5, "base": 1.75, "allowed_length": 2, "penalty_last_n": 64},
-                    "xtc": {"probability": 0.2, "threshold": 0.1, "min_keep": 1},
-                    "dynamic_temperature": {"range": 0.25, "exponent": 1.2}
+                    "top_k": 20
                 }
             }
         }))
         .unwrap();
         let request = parse_chat_completion_request(&body).unwrap();
         assert_eq!(request.choice_count(), 8);
-        assert_eq!(request.logit_bias().unwrap().entries().len(), 3);
-        assert_eq!(request.logit_bias().unwrap().entries()[&0], -100.0);
-        assert_eq!(
-            request.logprobs(),
-            Some(LogprobOptionsV1 {
-                enabled: true,
-                top_logprobs: Some(20)
-            })
-        );
+        assert!(request.logit_bias().is_none());
+        assert!(request.logprobs().is_none());
         let ResponseFormatV1::JsonSchema(schema) = request.response_format().unwrap() else {
             panic!("expected json schema response format")
         };
@@ -2397,13 +2407,14 @@ mod tests {
         assert_eq!(schema.strict(), Some(true));
         let sampler = request.sampler().unwrap();
         assert_eq!(sampler.chain_version(), 1);
-        assert_eq!(sampler.top_k(), Some(17));
-        assert_eq!(sampler.repeat_last_n(), 64);
-        assert!(sampler.dry().is_some());
-        assert!(sampler.xtc().is_some());
-        assert!(sampler.dynamic_temperature().is_some());
+        assert_eq!(sampler.top_k(), Some(20));
+        assert_eq!(sampler.repeat_last_n(), 0);
         assert!(sampler.mirostat().is_none());
-        assert_eq!(request.generation().sampling().temperature(), 0.8);
+        assert_eq!(request.generation().sampling().temperature(), 1.0);
+
+        let no_top_k =
+            parse_chat_completion_request(&valid(r#", "sllm":{"sampling":{"top_k":0}}"#)).unwrap();
+        assert_eq!(no_top_k.sampler().and_then(|value| value.top_k()), Some(0));
 
         let choice_zero = request.for_choice(0).unwrap();
         let choice_seven = request.for_choice(7).unwrap();
@@ -2412,6 +2423,41 @@ mod tests {
         assert_eq!(choice_seven.choice_count(), 1);
         assert_ne!(choice_seven.seed(), request.seed());
         assert!(request.for_choice(8).is_err());
+    }
+
+    #[test]
+    fn fixed_sampling_rejects_nonfixed_public_controls() {
+        for (extra, param) in [
+            (r#", "temperature":0.8"#, "temperature"),
+            (r#", "top_p":0.9"#, "top_p"),
+            (r#", "presence_penalty":0.1"#, "presence_penalty"),
+            (r#", "frequency_penalty":0.1"#, "frequency_penalty"),
+            (r#", "logit_bias":{"1":1}"#, "logit_bias"),
+            (r#", "logprobs":true"#, "logprobs"),
+            (r#", "top_logprobs":1"#, "top_logprobs"),
+            (
+                r#", "sllm":{"sampling":{"repeat_last_n":1}}"#,
+                "sllm.sampling.repeat_last_n",
+            ),
+            (
+                r#", "sllm":{"sampling":{"top_k":17}}"#,
+                "sllm.sampling.top_k",
+            ),
+        ] {
+            let error = parse_chat_completion_request(&valid(extra)).unwrap_err();
+            assert_eq!(error.param(), Some(param));
+            assert_eq!(error.code(), ErrorCodeV1::UnsupportedParameter);
+        }
+        let request =
+            parse_chat_completion_request(&valid(r#", "logprobs":false, "top_logprobs":0"#))
+                .unwrap();
+        assert_eq!(
+            request.logprobs(),
+            Some(LogprobOptionsV1 {
+                enabled: false,
+                top_logprobs: Some(0),
+            })
+        );
     }
 
     #[test]
@@ -2480,27 +2526,22 @@ mod tests {
             (
                 valid(r#", "top_logprobs":1"#),
                 "top_logprobs",
-                ErrorCodeV1::InvalidValue,
-            ),
-            (
-                valid(r#", "logprobs":false, "top_logprobs":0"#),
-                "top_logprobs",
-                ErrorCodeV1::InvalidValue,
+                ErrorCodeV1::UnsupportedParameter,
             ),
             (
                 valid(r#", "logprobs":true, "top_logprobs":21"#),
-                "top_logprobs",
-                ErrorCodeV1::InvalidValue,
+                "logprobs",
+                ErrorCodeV1::UnsupportedParameter,
             ),
             (
                 valid(r#", "logit_bias":{"-1":1}"#),
-                "logit_bias.-1",
-                ErrorCodeV1::InvalidValue,
+                "logit_bias",
+                ErrorCodeV1::UnsupportedParameter,
             ),
             (
                 valid(r#", "logit_bias":{"1":101}"#),
-                "logit_bias.1",
-                ErrorCodeV1::InvalidValue,
+                "logit_bias",
+                ErrorCodeV1::UnsupportedParameter,
             ),
             (
                 valid(r#", "sllm":{"sampling":{"typical_p":0}}"#),
@@ -2547,26 +2588,13 @@ mod tests {
             (
                 valid(r#", "top_p":0.9, "sllm":{"sampling":{"mirostat":{"version":2}}}"#),
                 "top_p",
-                ErrorCodeV1::InvalidValue,
+                ErrorCodeV1::UnsupportedParameter,
             ),
         ] {
             let error = parse_chat_completion_request(&body).unwrap_err();
             assert_eq!(error.param(), Some(param), "unexpected error for {param}");
             assert_eq!(error.code(), code);
         }
-
-        let too_many_biases = (0..=MAX_LOGIT_BIAS_ENTRIES)
-            .map(|token| (token.to_string(), 0.0_f32))
-            .collect::<BTreeMap<_, _>>();
-        let body = serde_json::to_vec(&serde_json::json!({
-            "model": "qwen",
-            "messages": [{"role": "user", "content": "hi"}],
-            "logit_bias": too_many_biases,
-        }))
-        .unwrap();
-        let error = parse_chat_completion_request(&body).unwrap_err();
-        assert_eq!(error.param(), Some("logit_bias"));
-        assert_eq!(error.code(), ErrorCodeV1::InvalidValue);
 
         let too_large_schema = serde_json::json!({
             "type": "json_schema",

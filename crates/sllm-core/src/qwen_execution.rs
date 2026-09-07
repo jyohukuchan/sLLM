@@ -20,6 +20,7 @@ use crate::adapter::{
     AdapterRequestSetV1, ControlVectorSelectionV1, LoraAdapterSelectionV1, VerifiedLoraTargetV1,
 };
 use crate::context_window::{ContextShiftDecisionV1, ContextWindowStateV1};
+use crate::device_sampling::{DeviceSamplingBuffers, decode_selected_record};
 use crate::execution::{
     ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, ExecutionStateImageV1,
     KvState, KvStateAppendSubmission, LinearAttentionBindings, LinearAttentionState,
@@ -35,7 +36,7 @@ use crate::linear_attention::{LinearAttentionDescriptor, LinearAttentionStateDes
 use crate::model::{QWEN35_4B_FINGERPRINT, TensorDType, VerifiedCache};
 use crate::op::{
     AttentionPreprocessContract, AttentionPreprocessPositionMode, OpError, SemanticOpDescriptor,
-    SemanticOpKind, TokenSelectorContractV1,
+    SemanticOpKind,
 };
 #[cfg(feature = "phase54-research")]
 use crate::phase54_kq_transform::{
@@ -2496,6 +2497,30 @@ impl QwenExecutionRequest {
             .prefill_multimodal(token_ids, embeddings_bf16, positions)
     }
 
+    /// Preserves multimodal embeddings and mRoPE positions while selecting
+    /// the final token on device, without publishing full-vocabulary logits.
+    pub fn prefill_multimodal_with_device_selector(
+        &mut self,
+        token_ids: &[i32],
+        embeddings_bf16: &[u16],
+        positions: &[[i32; 3]],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if self.core.graph.is_mtp() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "device token selector is unsupported for MTP graphs".to_owned(),
+            ));
+        }
+        self.core.prefill_impl(
+            token_ids,
+            false,
+            false,
+            None,
+            Some((embeddings_bf16, positions)),
+            Some(selector),
+        )
+    }
+
     /// Runs exactly one decode token at the current committed position.
     pub fn decode(&mut self, token_id: i32) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.core.decode(token_id)
@@ -2826,6 +2851,7 @@ fn qwen38_graph_node_is_stateless(node: &QwenGraphNode) -> bool {
 struct QwenExecutionCore {
     // Graph payloads release before cached plans, buffers and the queue.
     graph_replay: Mutex<PreparedGraphReplayState>,
+    device_sampling: Mutex<Option<DeviceSamplingBuffers>>,
     graph_collect_node: AtomicBool,
     qwen38_graph_spans_enabled: bool,
     session: Arc<ExecutionSession>,
@@ -5353,6 +5379,7 @@ impl QwenExecutionCore {
             && graph_span_env.and_then(std::env::var_os).as_deref() == Some(OsStr::new("1"));
         let core = Self {
             graph_replay: Mutex::new(PreparedGraphReplayState::default()),
+            device_sampling: Mutex::new(None),
             graph_collect_node: AtomicBool::new(false),
             qwen38_graph_spans_enabled,
             session: Arc::clone(&resident.session),
@@ -6188,6 +6215,7 @@ impl QwenExecutionCore {
             adapters: QwenAdapterRuntime::disabled(),
             short_terminal_last_row: false,
             graph_replay: Mutex::new(PreparedGraphReplayState::default()),
+            device_sampling: Mutex::new(None),
             graph_collect_node: AtomicBool::new(false),
             qwen38_graph_spans_enabled: false,
             qwen38_deferred_completion: false,
@@ -7026,13 +7054,12 @@ impl QwenExecutionCore {
                 "prepared transition length differs from the Qwen admission result".to_owned(),
             ));
         }
-        // The chain is a decode-only request route.  In particular, a caller
-        // that supplies an explicit device selector is outside the exact
-        // initial scope and must retain the ordinary fence path.
+        // Layer graph spans and the KV append/attention chain finish before
+        // terminal selection. The sampler is submitted after them on the same
+        // queue, outside capture, with fresh request-local RNG scalars.
         let chain_active = self.qwen38_kv_append_attention_chain
             && token_count == 1
             && emit_terminal
-            && device_selector.is_none()
             && matches!(
                 position_mode,
                 AttentionPreprocessPositionMode::DecodeContinuation
@@ -7041,7 +7068,6 @@ impl QwenExecutionCore {
         let graph_active = self.qwen38_graph_spans_enabled
             && token_count == 1
             && emit_terminal
-            && device_selector.is_none()
             && matches!(
                 position_mode,
                 AttentionPreprocessPositionMode::DecodeContinuation
@@ -8054,107 +8080,42 @@ impl QwenExecutionCore {
         selector: &DeviceTokenSelectorRequestV1,
         pending: &mut ExecutionSegment,
     ) -> Result<Option<TerminalSelection>, QwenExecutionError> {
-        if boundary_after != Some(ExecutionBoundaryKind::TerminalReadback) {
+        if boundary_after != Some(ExecutionBoundaryKind::TerminalReadback)
+            || node.inputs().len() != 1
+            || node.outputs().len() != 1
+        {
             return Err(QwenExecutionError::InvalidGraph(
-                "terminal token selector lacks its readback boundary".to_owned(),
-            ));
-        }
-        if node.inputs().len() != 1 || node.outputs().len() != 1 {
-            return Err(QwenExecutionError::InvalidGraph(
-                "terminal token selector requires one logits input and one output".to_owned(),
-            ));
-        }
-        let vocab = QWEN35_VOCAB_SIZE;
-        if selector.additive_logits().len() != vocab || selector.valid_mask().len() != vocab {
-            return Err(QwenExecutionError::InvalidRequest(
-                "device selector additive logits/mask must match Qwen vocabulary".to_owned(),
-            ));
-        }
-        if !selector.valid_mask().iter().any(|&value| value != 0) {
-            return Err(QwenExecutionError::InvalidRequest(
-                "device selector valid mask rejects every token".to_owned(),
+                "terminal selector requires one logits input and a readback boundary".to_owned(),
             ));
         }
         let logits = first_row_view(&self.view(node.inputs()[0], token_count)?)?;
+        let vocab = selector.vocab_size();
         if logits.dtype() != DType::Bf16 || logits.shape() != [1, vocab] {
             return Err(QwenExecutionError::InvalidGraph(
-                "terminal selector logits must be BF16 [1,vocab]".to_owned(),
+                "terminal selector logits must match the request BF16 vocabulary".to_owned(),
             ));
         }
-        let additive_view = TensorView::contiguous(DType::F32, &[1, vocab]).map_err(|error| {
-            QwenExecutionError::InvalidGraph(format!(
-                "device selector additive tensor view is invalid: {error}"
-            ))
-        })?;
-        let mask_view = TensorView::contiguous(DType::U8, &[1, vocab]).map_err(|error| {
-            QwenExecutionError::InvalidGraph(format!(
-                "device selector mask tensor view is invalid: {error}"
-            ))
-        })?;
-        let output_view = TensorView::contiguous(DType::U8, &[16]).map_err(|error| {
-            QwenExecutionError::InvalidGraph(format!(
-                "device selector output tensor view is invalid: {error}"
-            ))
-        })?;
-        let additive = self.session.allocate_with_category(
-            additive_view.payload_bytes(),
-            crate::AllocationCategory::RequestState,
-        )?;
-        let valid_mask = self.session.allocate_with_category(
-            mask_view.payload_bytes(),
-            crate::AllocationCategory::RequestState,
-        )?;
-        let output = self.session.allocate_with_category(
-            output_view.payload_bytes(),
-            crate::AllocationCategory::RequestState,
-        )?;
-        let additive_bytes = selector
-            .additive_logits()
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<_>>();
-        let mask_bytes = selector.valid_mask().to_vec();
-        upload_exact_bytes(
-            self.session.as_ref(),
-            &self.queue,
-            &additive,
-            &additive_view,
-            &additive_bytes,
-            self.completion_timeout,
-            "device selector additive-logit upload",
-        )?;
-        upload_exact_bytes(
-            self.session.as_ref(),
-            &self.queue,
-            &valid_mask,
-            &mask_view,
-            &mask_bytes,
-            self.completion_timeout,
-            "device selector valid-mask upload",
-        )?;
-        let contract = TokenSelectorContractV1::new(
-            u64::try_from(vocab).expect("Qwen vocabulary fits u64"),
-            selector.temperature(),
-            selector.seed(),
-            selector.counter(),
-        )?;
-        let descriptor = SemanticOpDescriptor::new_token_select(
-            vec![logits.clone(), additive_view.clone(), mask_view.clone()],
-            vec![output_view.clone()],
-            contract,
-        )?;
-        let input_bindings = vec![
-            self.bind_view(node.inputs()[0], logits, AccessMode::Read)?,
-            self.session
-                .bind(&additive, additive_view, AccessMode::Read)?,
-            self.session
-                .bind(&valid_mask, mask_view, AccessMode::Read)?,
-        ];
-        let output_binding = self.session.bind(&output, output_view, AccessMode::Write)?;
+        let mut storage = self
+            .device_sampling
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        if storage.is_none() {
+            *storage = Some(DeviceSamplingBuffers::new(self.session.as_ref(), vocab)?);
+        }
+        let prepared = storage
+            .as_mut()
+            .expect("sampler storage initialized")
+            .prepare(
+                self.session.as_ref(),
+                &self.queue,
+                self.bind_view(node.inputs()[0], logits, AccessMode::Read)?,
+                selector,
+                self.completion_timeout,
+            )?;
         let mut submission = self.submit_semantic(
-            descriptor,
-            input_bindings,
-            vec![output_binding],
+            prepared.descriptor,
+            prepared.inputs,
+            prepared.outputs,
             PreparedCachePolicy::Transient,
         )?;
         self.close_boundary_with_semantic(
@@ -8169,49 +8130,13 @@ impl QwenExecutionCore {
         let copied = readback.read_into(&mut bytes)?;
         if copied != 16 {
             return Err(QwenExecutionError::InvalidRequest(
-                "device selector returned a short or long selected record".to_owned(),
+                "device selector record length differs from 16".to_owned(),
             ));
         }
-        let token_id = i32::from_le_bytes(bytes[0..4].try_into().expect("record token bytes"));
-        let status = u32::from_le_bytes(bytes[4..8].try_into().expect("record status bytes"));
-        let logprob = f32::from_le_bytes(bytes[8..12].try_into().expect("record logprob bytes"));
-        let reserved = u32::from_le_bytes(bytes[12..16].try_into().expect("record reserved bytes"));
-        if status != 0 {
-            return Err(QwenExecutionError::Execution(
-                ExecutionError::BackendStatus {
-                    status,
-                    diagnostic: format!("{} token-selector record status", node.label()),
-                },
-            ));
-        }
-        if reserved != 0 {
-            return Err(QwenExecutionError::InvalidRequest(
-                "device selector selected record reserved field is non-zero".to_owned(),
-            ));
-        }
-        if token_id < 0 || usize::try_from(token_id).map_or(true, |id| id >= vocab) {
-            return Err(QwenExecutionError::InvalidRequest(
-                "device selector returned an out-of-range token ID".to_owned(),
-            ));
-        }
-        let token_index = usize::try_from(token_id).expect("non-negative token ID");
-        if selector.valid_mask()[token_index] == 0 {
-            return Err(QwenExecutionError::InvalidRequest(
-                "device selector returned a masked token ID".to_owned(),
-            ));
-        }
-        if !logprob.is_finite() {
-            return Err(QwenExecutionError::InvalidRequest(
-                "device selector returned a non-finite logprob".to_owned(),
-            ));
-        }
+        let selection = decode_selected_record(&bytes, selector)?;
         Ok(Some(TerminalSelection {
-            token_ids: vec![token_id],
-            selection: Some(SamplingSelectionV1 {
-                token_id: u32::try_from(token_id).expect("validated token ID fits u32"),
-                logprob: f64::from(logprob),
-                top_logprobs: Vec::new(),
-            }),
+            token_ids: vec![selection.token_id as i32],
+            selection: Some(selection),
         }))
     }
 
@@ -15498,6 +15423,55 @@ mod tests {
                 .count(),
             2,
         );
+    }
+
+    #[test]
+    fn fixed_device_selector_reuses_buffers_without_full_vocab_uploads() {
+        for top_k in [0, 20, 64] {
+            let recorder = Arc::new(ExecutionRecorder::default());
+            let (mut core, _) = provisioned_core(Arc::clone(&recorder));
+            let parameters = crate::SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).unwrap();
+            let config = crate::SamplerChainConfigV1::new(parameters)
+                .with_top_k(top_k)
+                .unwrap();
+            let chain = crate::SamplerChainV1::new(config, &[]).unwrap();
+            let first = chain
+                .prepare_device_selector(QWEN35_VOCAB_SIZE, None, 17, 0)
+                .unwrap();
+            let before = recorder.events().len();
+            core.prefill_with_device_selector(&[1], &first).unwrap();
+            let after_prefill = recorder.events();
+            assert!(
+                after_prefill[before..]
+                    .iter()
+                    .filter_map(|event| event.strip_prefix("upload:"))
+                    .all(|length| length.parse::<usize>().unwrap() < QWEN35_VOCAB_SIZE)
+            );
+            let second = chain
+                .prepare_device_selector(QWEN35_VOCAB_SIZE, None, 17, 1)
+                .unwrap();
+            let output = core.decode_with_device_selector(0, &second).unwrap();
+            assert!(output.last_logits().is_none());
+            assert!(output.selection().is_some());
+            let events = recorder.events();
+            let decode_events = &events[after_prefill.len()..];
+            assert!(
+                !decode_events
+                    .iter()
+                    .any(|event| event.starts_with("allocate:"))
+            );
+            assert!(
+                decode_events
+                    .iter()
+                    .filter_map(|event| event.strip_prefix("upload:"))
+                    .all(|length| length.parse::<usize>().unwrap() < QWEN35_VOCAB_SIZE)
+            );
+            assert!(
+                !decode_events
+                    .iter()
+                    .any(|event| event == "argmax-readback-start")
+            );
+        }
     }
 
     #[test]

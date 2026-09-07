@@ -8,9 +8,11 @@
 //! entirely in the [`ExecutionSession`] adapter; this module never emulates a
 //! backend or falls back to a host implementation.
 
+use crate::device_sampling::{DeviceSamplingBuffers, decode_selected_record};
+use crate::{DeviceTokenSelectorRequestV1, SamplingSelectionV1};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::execution::{
@@ -213,15 +215,20 @@ impl DispatchAuditBuilder {
 }
 
 /// Output from a completed prefill or decode transition.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Ministral3ExecutionOutput {
     token_ids: Vec<i32>,
     last_logits_bf16: Option<Vec<u16>>,
+    selection: Option<SamplingSelectionV1>,
     committed_length: u64,
     audit: Ministral3DispatchAudit,
 }
 
 impl Ministral3ExecutionOutput {
+    pub fn selection(&self) -> Option<&SamplingSelectionV1> {
+        self.selection.as_ref()
+    }
+
     pub fn token_ids(&self) -> &[i32] {
         &self.token_ids
     }
@@ -546,6 +553,7 @@ impl Ministral3ResidentModel {
             poisoned: false,
             workspace_bytes,
             last_audit: None,
+            device_sampling: Mutex::new(None),
         })
     }
 }
@@ -561,6 +569,7 @@ pub struct Ministral3ExecutionRequest {
     poisoned: bool,
     workspace_bytes: u64,
     last_audit: Option<Ministral3DispatchAudit>,
+    device_sampling: Mutex<Option<DeviceSamplingBuffers>>,
 }
 
 impl fmt::Debug for Ministral3ExecutionRequest {
@@ -606,7 +615,7 @@ impl Ministral3ExecutionRequest {
                 "prefill must start at position zero",
             ));
         }
-        self.transition(token_ids, false)
+        self.transition(token_ids, false, None)
     }
 
     /// Runs prefill and publishes the exact final BF16 vocabulary row in
@@ -625,7 +634,7 @@ impl Ministral3ExecutionRequest {
                 "prefill must start at position zero",
             ));
         }
-        self.transition(token_ids, true)
+        self.transition(token_ids, true, None)
     }
 
     pub fn decode(
@@ -642,7 +651,7 @@ impl Ministral3ExecutionRequest {
                 "decode requires a committed prefill",
             ));
         }
-        self.transition(&[token_id], false)
+        self.transition(&[token_id], false, None)
     }
 
     /// Runs one decode transition and publishes the exact final BF16
@@ -661,13 +670,40 @@ impl Ministral3ExecutionRequest {
                 "decode requires a committed prefill",
             ));
         }
-        self.transition(&[token_id], true)
+        self.transition(&[token_id], true, None)
+    }
+
+    pub fn prefill_with_device_selector(
+        &mut self,
+        token_ids: &[i32],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<Ministral3ExecutionOutput, Ministral3ExecutionError> {
+        if self.committed_length != 0 {
+            return Err(Ministral3ExecutionError::invalid(
+                "prefill must start at position zero",
+            ));
+        }
+        self.transition(token_ids, false, Some(selector))
+    }
+
+    pub fn decode_with_device_selector(
+        &mut self,
+        token_id: i32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<Ministral3ExecutionOutput, Ministral3ExecutionError> {
+        if self.committed_length == 0 {
+            return Err(Ministral3ExecutionError::invalid(
+                "decode requires a committed prefill",
+            ));
+        }
+        self.transition(&[token_id], false, Some(selector))
     }
 
     fn transition(
         &mut self,
         token_ids: &[i32],
         include_last_logits: bool,
+        selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<Ministral3ExecutionOutput, Ministral3ExecutionError> {
         if self.poisoned {
             return Err(Ministral3ExecutionError::invalid(
@@ -708,11 +744,16 @@ impl Ministral3ExecutionRequest {
             self.poisoned = true;
             return Err(error);
         }
+        if selector.is_some_and(|selector| selector.vocab_size() != MINISTRAL3_GRAPH_VOCAB_SIZE) {
+            return Err(Ministral3ExecutionError::invalid(
+                "device selector vocabulary mismatch",
+            ));
+        }
         let graph = build_ministral3_text_graph(token_count, start, self.state_capacity)?;
         validate_graph_contract(&graph, &self.resident.plan)?;
         self.upload_runtime_inputs(&graph, token_ids, start)?;
-        let result = self.execute_graph(&graph);
-        let (selected, audit) = match result {
+        let result = self.execute_graph(&graph, selector);
+        let (selected, selection, audit) = match result {
             Ok(value) => value,
             Err(error) => {
                 self.poisoned = true;
@@ -738,6 +779,7 @@ impl Ministral3ExecutionRequest {
         self.last_audit = Some(audit.clone());
         Ok(Ministral3ExecutionOutput {
             token_ids: selected,
+            selection,
             last_logits_bf16,
             committed_length: end,
             audit,
@@ -807,10 +849,19 @@ impl Ministral3ExecutionRequest {
     fn execute_graph(
         &self,
         graph: &Ministral3TextGraph,
-    ) -> Result<(Vec<i32>, Ministral3DispatchAudit), Ministral3ExecutionError> {
+        selector: Option<&DeviceTokenSelectorRequestV1>,
+    ) -> Result<
+        (
+            Vec<i32>,
+            Option<SamplingSelectionV1>,
+            Ministral3DispatchAudit,
+        ),
+        Ministral3ExecutionError,
+    > {
         let expected_target = self.resident.session.expected_target();
         let mut audit = DispatchAuditBuilder::default();
         let mut selected = None;
+        let mut selection = None;
         for node in graph.nodes() {
             let execute = match node.kind() {
                 Ministral3GraphNodeKind::View | Ministral3GraphNodeKind::Reshape => Ok(()),
@@ -951,6 +1002,60 @@ impl Ministral3ExecutionRequest {
                     audit.record(submission.dispatch(), expected_target.as_deref())
                 }
                 _ => {
+                    if let Some(selector) =
+                        selector.filter(|_| node.kind() == &Ministral3GraphNodeKind::Argmax)
+                    {
+                        let input_id = *node.inputs().first().ok_or_else(|| {
+                            Ministral3ExecutionError::invalid("selector logits missing")
+                        })?;
+                        let logits = self.bind_tensor(graph, input_id, AccessMode::Read)?;
+                        let mut cache = self.device_sampling.lock().map_err(|_| {
+                            Ministral3ExecutionError::invalid("sampler storage poisoned")
+                        })?;
+                        if cache.is_none() {
+                            *cache = Some(DeviceSamplingBuffers::new(
+                                self.resident.session.as_ref(),
+                                selector.vocab_size(),
+                            )?);
+                        }
+                        let prepared = cache.as_mut().expect("sampler initialized").prepare(
+                            self.resident.session.as_ref(),
+                            &self.resident.queue,
+                            logits,
+                            selector,
+                            self.resident.completion_timeout,
+                        )?;
+                        let bound = BoundSemanticOp::new(
+                            Arc::new(prepared.descriptor),
+                            prepared.inputs,
+                            prepared.outputs,
+                        )?;
+                        let operation = self.resident.session.prepare(Arc::new(bound))?;
+                        let mut submission = self
+                            .resident
+                            .session
+                            .submit(&operation, &self.resident.queue)?;
+                        require_success(
+                            node.label(),
+                            submission.wait(self.resident.completion_timeout)?,
+                        )?;
+                        let mut readback = submission.start_output_readback(0)?;
+                        require_success(
+                            node.label(),
+                            readback.wait(self.resident.completion_timeout)?,
+                        )?;
+                        let mut bytes = [0_u8; 16];
+                        if readback.read_into(&mut bytes)? != 16 {
+                            return Err(Ministral3ExecutionError::invalid(
+                                "sampler record length differs from 16",
+                            ));
+                        }
+                        let value = decode_selected_record(&bytes, selector)?;
+                        selected = Some(vec![value.token_id as i32]);
+                        selection = Some(value);
+                        audit.record(submission.dispatch(), expected_target.as_deref())?;
+                        continue;
+                    }
                     let operation = node.operation().ok_or_else(|| {
                         Ministral3ExecutionError::invalid(format!(
                             "semantic node {} has no operation",
@@ -998,7 +1103,7 @@ impl Ministral3ExecutionRequest {
                 "terminal selected token count differs from one",
             ));
         }
-        Ok((selected, audit.finish()?))
+        Ok((selected, selection, audit.finish()?))
     }
 
     fn ensure_state_lengths(&self, expected: u64) -> Result<(), Ministral3ExecutionError> {
@@ -1640,6 +1745,7 @@ mod tests {
     struct RecordingAdapter {
         states: Arc<Mutex<Vec<TestState>>>,
         fail_submit: AtomicBool,
+        submitted: Mutex<Vec<crate::SemanticOpKind>>,
     }
 
     struct RecordingSubmission;
@@ -1833,7 +1939,7 @@ mod tests {
         fn submit(
             &self,
             _access: &ExecutionAdapterAccess<'_>,
-            _prepared: &PreparedOperation,
+            prepared: &PreparedOperation,
             _queue: &ExecutionQueue,
         ) -> Result<(Box<dyn ExecutionSubmissionAdapter>, DispatchEvidence), ExecutionError>
         {
@@ -1843,6 +1949,10 @@ mod tests {
                     diagnostic: "injected semantic failure".to_owned(),
                 });
             }
+            self.submitted
+                .lock()
+                .expect("record submissions")
+                .push(prepared.operation().descriptor().kind());
             Ok((
                 Box::new(RecordingSubmission),
                 Self::evidence("test.semantic"),
@@ -2116,6 +2226,7 @@ mod tests {
                 poisoned: false,
                 workspace_bytes,
                 last_audit: None,
+                device_sampling: Mutex::new(None),
             },
             adapter,
         )
@@ -2220,6 +2331,62 @@ mod tests {
                 if message.contains("poisoned")
         ));
         assert_eq!(failing.committed_length(), 0);
+    }
+
+    #[test]
+    fn device_sampling_replaces_argmax_and_reuses_request_buffers() {
+        use crate::{SamplerChainConfigV1, SamplerChainV1, SamplingParametersV1, SemanticOpKind};
+        let (mut request, adapter) = test_request(3, 8);
+        // This tests the common runtime seam, not a public model profile choice.
+        let config =
+            SamplerChainConfigV1::new(SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).unwrap())
+                .with_top_k(20)
+                .unwrap();
+        let sampler = SamplerChainV1::new(config, &[]).unwrap();
+        let selector = sampler
+            .prepare_device_selector(MINISTRAL3_GRAPH_VOCAB_SIZE, None, 7, 0)
+            .unwrap();
+        let output = request
+            .prefill_with_device_selector(&[0; 3], &selector)
+            .unwrap();
+        assert_eq!(output.selection().unwrap().token_id, 0);
+        assert!(output.last_logits_bf16().is_none());
+        assert_eq!(output.committed_length(), 3);
+        let output_buffer = request
+            .device_sampling
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .output
+            .id();
+        let selector = sampler
+            .prepare_device_selector(MINISTRAL3_GRAPH_VOCAB_SIZE, None, 7, 1)
+            .unwrap();
+        let output = request.decode_with_device_selector(1, &selector).unwrap();
+        assert!(output.selection().is_some());
+        assert!(output.last_logits_bf16().is_none());
+        assert_eq!(output.committed_length(), 4);
+        assert_eq!(
+            request
+                .device_sampling
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .output
+                .id(),
+            output_buffer
+        );
+        let events = adapter.submitted.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|&&kind| kind == SemanticOpKind::TokenSelect)
+                .count(),
+            2
+        );
+        assert!(!events.contains(&SemanticOpKind::Argmax));
     }
 
     #[test]

@@ -82,6 +82,17 @@ MAX_SEQUENCE_BREAKERS = 16
 MAX_SEQUENCE_BREAKER_BYTES = 1_024
 
 
+def _fixed_field_error(payload: Mapping[str, Any], field: str, expected: float) -> ApiError | None:
+    if field not in payload:
+        return None
+    value = payload[field]
+    if not _is_finite_number(value):
+        return _reject("invalid_value", field, f"{field} must be a finite number")
+    if value != expected:
+        return _reject("unsupported_parameter", field, f"{field} only accepts {expected}")
+    return None
+
+
 @dataclass(frozen=True)
 class ApiError:
     status: int
@@ -346,6 +357,8 @@ def _validate_sampler(value: Any, *, stream: bool) -> str | None:
         or not 0 <= sampling["top_k"] <= MAX_SAMPLER_TOP_K
     ):
         return "top_k must be in [0,1000000]"
+    if "top_k" in sampling and sampling["top_k"] not in {0, 20, 64}:
+        return "top_k is not enabled by a fixed model profile"
     for field, bounds in (("min_p", (0.0, 1.0, True)), ("typical_p", (0.0, 1.0, False)), ("repeat_penalty", (0.0, 100.0, False))):
         if field not in sampling:
             continue
@@ -353,14 +366,21 @@ def _validate_sampler(value: Any, *, stream: bool) -> str | None:
         lower, upper, include_lower = bounds
         if not _is_finite_number(value_number) or not (lower < value_number <= upper if not include_lower else lower <= value_number <= upper):
             return f"{field} is outside its supported range"
+        expected = {"min_p": 0.0, "typical_p": 1.0, "repeat_penalty": 1.0}[field]
+        if value_number != expected:
+            return f"{field} is not enabled by the fixed profile"
     if "repeat_last_n" in sampling and (
         isinstance(sampling["repeat_last_n"], bool)
         or not isinstance(sampling["repeat_last_n"], int)
         or not 0 <= sampling["repeat_last_n"] <= MAX_SAMPLER_HISTORY
     ):
         return "repeat_last_n must be in [0,4096]"
+    if sampling.get("repeat_last_n", 0) != 0:
+        return "repeat_last_n is not enabled by the fixed profile"
     if "ignore_eos" in sampling and not isinstance(sampling["ignore_eos"], bool):
         return "ignore_eos must be boolean"
+    if sampling.get("ignore_eos", False):
+        return "ignore_eos is not enabled by the fixed profile"
 
     dry = sampling.get("dry")
     if dry is not None:
@@ -372,6 +392,8 @@ def _validate_sampler(value: Any, *, stream: bool) -> str | None:
         for field, lower, upper in (("multiplier", 0.0, 100.0), ("base", 1.0, 4.0)):
             if field in dry and (not _is_finite_number(dry[field]) or not lower <= dry[field] <= upper):
                 return f"dry.{field} is outside its supported range"
+        if dry.get("multiplier", 0.0) != 0.0:
+            return "dry is not enabled by the fixed profile"
         for field in ("allowed_length", "penalty_last_n"):
             if field in dry and (isinstance(dry[field], bool) or not isinstance(dry[field], int) or not 0 <= dry[field] <= MAX_SAMPLER_HISTORY):
                 return f"dry.{field} must be in [0,4096]"
@@ -390,6 +412,8 @@ def _validate_sampler(value: Any, *, stream: bool) -> str | None:
         for field in ("probability", "threshold"):
             if field in xtc and (not _is_finite_number(xtc[field]) or not 0.0 <= xtc[field] <= 1.0):
                 return f"xtc.{field} is outside its supported range"
+        if xtc.get("probability", 0.0) != 0.0:
+            return "xtc is not enabled by the fixed profile"
         if "min_keep" in xtc and (isinstance(xtc["min_keep"], bool) or not isinstance(xtc["min_keep"], int) or not 1 <= xtc["min_keep"] <= MAX_SAMPLER_HISTORY):
             return "xtc.min_keep must be in [1,4096]"
 
@@ -406,6 +430,7 @@ def _validate_sampler(value: Any, *, stream: bool) -> str | None:
             return "mirostat.tau is outside its supported range"
         if "eta" in mirostat and (not _is_finite_number(mirostat["eta"]) or not 0.0 < mirostat["eta"] <= 1.0):
             return "mirostat.eta is outside its supported range"
+        return "mirostat is not enabled by the fixed profile"
         if any(field in sampling for field in ("top_k", "min_p", "typical_p", "xtc", "dynamic_temperature")):
             return "mirostat cannot be combined with top_k, min_p, typical_p, xtc, or dynamic_temperature"
 
@@ -418,6 +443,7 @@ def _validate_sampler(value: Any, *, stream: bool) -> str | None:
             return f"unsupported dynamic_temperature field: {unknown}"
         if "range" in dynamic and (not _is_finite_number(dynamic["range"]) or not 0.0 <= dynamic["range"] <= 10.0):
             return "dynamic_temperature.range is outside its supported range"
+        return "dynamic_temperature is not enabled by the fixed profile"
         if "exponent" in dynamic and (not _is_finite_number(dynamic["exponent"]) or not 0.0 < dynamic["exponent"] <= 10.0):
             return "dynamic_temperature.exponent is outside its supported range"
     return None
@@ -474,15 +500,10 @@ def validate_chat_request(
                     "reasoning_content is supported only on assistant messages",
                 )
 
-    if "temperature" in payload and (
-        not _is_finite_number(payload["temperature"])
-        or not 0.0 <= payload["temperature"] <= 2.0
-    ):
-        return _reject("invalid_value", "temperature", "temperature must be in [0, 2]")
-    if "top_p" in payload and (
-        not _is_finite_number(payload["top_p"]) or not 0.0 <= payload["top_p"] <= 1.0
-    ):
-        return _reject("invalid_value", "top_p", "top_p must be in [0, 1]")
+    for field, expected in (("temperature", 1.0), ("top_p", 0.95)):
+        error = _fixed_field_error(payload, field, expected)
+        if error is not None:
+            return error
     if "max_completion_tokens" in payload and (
         isinstance(payload["max_completion_tokens"], bool)
         or not isinstance(payload["max_completion_tokens"], int)
@@ -502,10 +523,9 @@ def validate_chat_request(
         else:
             return _reject("invalid_value", "stop", "stop must be a string or string array")
     for field in ("presence_penalty", "frequency_penalty"):
-        if field in payload and (
-            not _is_finite_number(payload[field]) or not -2.0 <= payload[field] <= 2.0
-        ):
-            return _reject("invalid_value", field, f"{field} must be in [-2, 2]")
+        error = _fixed_field_error(payload, field, 0.0)
+        if error is not None:
+            return error
     if "stream" in payload and not isinstance(payload["stream"], bool):
         return _reject("invalid_value", "stream", "stream must be boolean")
     if "n" in payload and (
@@ -523,35 +543,20 @@ def validate_chat_request(
         return _reject("invalid_value", "seed", "seed must be a signed 64-bit integer")
 
     if "logit_bias" in payload:
-        bias = payload["logit_bias"]
-        if not isinstance(bias, Mapping):
-            return _reject("invalid_value", "logit_bias", "logit_bias must be an object")
-        if len(bias) > MAX_LOGIT_BIAS_ENTRIES:
-            return _reject("invalid_value", "logit_bias", "logit_bias must contain at most 4096 entries")
-        for token_id, value in bias.items():
-            if not isinstance(token_id, str):
-                return _reject("invalid_value", "logit_bias", "token IDs must be strings")
-            try:
-                parsed = int(token_id, 10)
-            except ValueError:
-                parsed = -1
-            if parsed < 0 or parsed > (1 << 32) - 1 or not token_id.isascii() or not token_id.isdigit():
-                return _reject("invalid_value", f"logit_bias.{token_id}", "token ID must be an unsigned 32-bit integer")
-            if not _is_finite_number(value) or not -100.0 <= value <= 100.0:
-                return _reject("invalid_value", f"logit_bias.{token_id}", "logit bias must be finite and in [-100, 100]")
+        return _reject("unsupported_parameter", "logit_bias", "logit bias is disabled")
 
     if "logprobs" in payload and not isinstance(payload["logprobs"], bool):
         return _reject("invalid_value", "logprobs", "logprobs must be boolean")
+    if payload.get("logprobs") is True:
+        return _reject("unsupported_parameter", "logprobs", "logprobs is disabled")
     if "top_logprobs" in payload:
         top_logprobs = payload["top_logprobs"]
         if (
             isinstance(top_logprobs, bool)
             or not isinstance(top_logprobs, int)
-            or not 0 <= top_logprobs <= 20
+            or top_logprobs != 0
         ):
-            return _reject("invalid_value", "top_logprobs", "top_logprobs must be in [0, 20]")
-        if payload.get("logprobs") is not True:
-            return _reject("invalid_value", "top_logprobs", "top_logprobs requires logprobs=true")
+            return _reject("unsupported_parameter", "top_logprobs", "top_logprobs only accepts 0")
 
     if "response_format" in payload:
         response_format_error = _validate_response_format(payload["response_format"], messages)

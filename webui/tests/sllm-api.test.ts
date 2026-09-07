@@ -222,8 +222,8 @@ void test('requires the terminal DONE marker for chat streams', async () => {
         {
           model: 'qwen',
           messages: [{ role: 'user', content: 'hello' }],
-          temperature: 0.2,
-          topP: 0.9,
+          temperature: 1,
+          topP: 0.95,
           maxTokens: 8,
           responseFormat: 'text',
           reasoning: false,

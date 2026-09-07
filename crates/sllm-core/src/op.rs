@@ -143,6 +143,7 @@ pub enum TokenSelectorTensor {
     Logits,
     AdditiveLogits,
     ValidMask,
+    Workspace,
     Output,
 }
 
@@ -152,6 +153,7 @@ impl fmt::Display for TokenSelectorTensor {
             Self::Logits => "logits",
             Self::AdditiveLogits => "additive logits",
             Self::ValidMask => "valid mask",
+            Self::Workspace => "workspace",
             Self::Output => "output",
         })
     }
@@ -166,6 +168,9 @@ impl fmt::Display for TokenSelectorTensor {
 pub struct TokenSelectorContractV1 {
     vocab_size: u64,
     temperature_bits: u32,
+    top_k: u32,
+    top_p_bits: u32,
+    flags: u32,
     seed: u64,
     counter: u64,
 }
@@ -190,10 +195,60 @@ impl TokenSelectorContractV1 {
         Ok(Self {
             vocab_size,
             temperature_bits: temperature.to_bits(),
+            top_k: 0,
+            top_p_bits: 1.0_f32.to_bits(),
+            flags: Self::FLAG_ADDITIVE_PRESENT | Self::FLAG_MASK_PRESENT,
             seed,
             counter,
         })
     }
+
+    /// Creates the fixed decode selector contract.  Fixed selection is
+    /// deliberately narrow so the native ABI can use a bounded reusable
+    /// workspace: top-k is 20 or 64 and top-p is exactly 0.95.
+    pub fn new_fixed(
+        vocab_size: u64,
+        top_k: u32,
+        top_p: f32,
+        seed: u64,
+        counter: u64,
+        use_additive: bool,
+        use_mask: bool,
+    ) -> Result<Self, OpError> {
+        if vocab_size == 0 || vocab_size > Self::MAX_VOCAB_SIZE {
+            return Err(OpError::TokenSelectorVocabOutOfRange { vocab: vocab_size });
+        }
+        if !matches!(top_k, 0 | 20 | 64) {
+            return Err(OpError::TokenSelectorInvalidTopK { top_k });
+        }
+        if top_p.to_bits() != 0.95_f32.to_bits() {
+            return Err(OpError::TokenSelectorInvalidTopP {
+                bits: top_p.to_bits(),
+            });
+        }
+        if top_k == 0 && use_additive {
+            return Err(OpError::TokenSelectorInvalidTopK { top_k });
+        }
+        let mut flags = 0;
+        if use_additive {
+            flags |= Self::FLAG_ADDITIVE_PRESENT;
+        }
+        if use_mask {
+            flags |= Self::FLAG_MASK_PRESENT;
+        }
+        Ok(Self {
+            vocab_size,
+            temperature_bits: 1.0_f32.to_bits(),
+            top_k,
+            top_p_bits: top_p.to_bits(),
+            flags,
+            seed,
+            counter,
+        })
+    }
+
+    pub const FLAG_ADDITIVE_PRESENT: u32 = 1 << 0;
+    pub const FLAG_MASK_PRESENT: u32 = 1 << 1;
 
     pub const fn vocab_size(self) -> u64 {
         self.vocab_size
@@ -217,6 +272,44 @@ impl TokenSelectorContractV1 {
 
     pub const fn counter(self) -> u64 {
         self.counter
+    }
+
+    pub const fn top_k(self) -> u32 {
+        self.top_k
+    }
+
+    pub const fn top_p(self) -> f32 {
+        f32::from_bits(self.top_p_bits)
+    }
+
+    pub const fn top_p_bits(self) -> u32 {
+        self.top_p_bits
+    }
+
+    pub const fn use_additive(self) -> bool {
+        self.flags & Self::FLAG_ADDITIVE_PRESENT != 0
+    }
+
+    pub const fn use_mask(self) -> bool {
+        self.flags & Self::FLAG_MASK_PRESENT != 0
+    }
+
+    pub const fn is_fixed(self) -> bool {
+        self.top_p_bits != 1.0_f32.to_bits()
+    }
+
+    /// Bytes required by fixed selection.  K20/K64 use two ping-pong candidate
+    /// regions; K0 uses the BF16 histogram/prefix workspace. Zero denotes the
+    /// legacy categorical path, which does not require scratch storage.
+    pub const fn workspace_bytes(self) -> u64 {
+        if !self.is_fixed() {
+            return 0;
+        }
+        if self.top_k == 0 {
+            return 532_504;
+        }
+        let blocks = self.vocab_size.div_ceil(1024);
+        blocks * (self.top_k as u64) * 8 * 2
     }
 }
 
@@ -314,6 +407,8 @@ impl SemanticOpKind {
             Self::CausalAttention => (3, 1),
             Self::AttentionPreprocess => (5, 3),
             Self::Argmax => (1, 1),
+            // Fixed top-k/top-p descriptors carry a fourth workspace input;
+            // the legacy contract remains the three-input operation.
             Self::TokenSelect => (3, 1),
             Self::MoeRoute => (1, 1),
             Self::DeepSeekV4MoeRoute => (3, 1),
@@ -1982,7 +2077,14 @@ impl SemanticOpDescriptor {
     }
 
     pub fn validate(&self) -> Result<(), OpError> {
-        let (expected_inputs, expected_outputs) = self.arity();
+        let (mut expected_inputs, expected_outputs) = self.arity();
+        if self.kind == SemanticOpKind::TokenSelect
+            && self
+                .token_selector_contract
+                .is_some_and(TokenSelectorContractV1::is_fixed)
+        {
+            expected_inputs = 4;
+        }
         if self.inputs.len() != expected_inputs || self.outputs.len() != expected_outputs {
             return Err(OpError::Arity {
                 kind: self.kind,
@@ -2724,13 +2826,15 @@ fn validate_token_selector(
     outputs: &[TensorView],
     contract: TokenSelectorContractV1,
 ) -> Result<(), OpError> {
-    let roles = [
+    let mut input_roles = vec![
         (&inputs[0], TokenSelectorTensor::Logits),
         (&inputs[1], TokenSelectorTensor::AdditiveLogits),
         (&inputs[2], TokenSelectorTensor::ValidMask),
-        (&outputs[0], TokenSelectorTensor::Output),
     ];
-    for (tensor, role) in roles {
+    if contract.is_fixed() {
+        input_roles.push((&inputs[3], TokenSelectorTensor::Workspace));
+    }
+    for (tensor, role) in input_roles.iter().copied() {
         if tensor.shape().contains(&0) {
             return Err(OpError::TokenSelectorZeroExtent { tensor: role });
         }
@@ -2743,6 +2847,23 @@ fn validate_token_selector(
                 actual: tensor.encoding(),
             });
         }
+    }
+    let output = &outputs[0];
+    if output.shape().contains(&0) {
+        return Err(OpError::TokenSelectorZeroExtent {
+            tensor: TokenSelectorTensor::Output,
+        });
+    }
+    if !output.is_contiguous() {
+        return Err(OpError::TokenSelectorNonContiguous {
+            tensor: TokenSelectorTensor::Output,
+        });
+    }
+    if output.encoding() != Encoding::Unquantized {
+        return Err(OpError::TokenSelectorUnsupportedEncoding {
+            tensor: TokenSelectorTensor::Output,
+            actual: output.encoding(),
+        });
     }
     let vocab = usize::try_from(contract.vocab_size()).map_err(|_| {
         OpError::TokenSelectorVocabOutOfRange {
@@ -2758,20 +2879,39 @@ fn validate_token_selector(
     if outputs[0].shape() != [16] || outputs[0].payload_bytes() != 16 {
         return Err(OpError::TokenSelectorOutputShapeMismatch);
     }
-    let expected = [
+    if contract.is_fixed() {
+        let workspace_bytes = usize::try_from(contract.workspace_bytes())
+            .map_err(|_| OpError::TokenSelectorShapeMismatch)?;
+        if inputs[3].shape() != [workspace_bytes] {
+            return Err(OpError::TokenSelectorShapeMismatch);
+        }
+    }
+    let expected_inputs = [
         (TokenSelectorTensor::Logits, DType::Bf16),
         (TokenSelectorTensor::AdditiveLogits, DType::F32),
         (TokenSelectorTensor::ValidMask, DType::U8),
-        (TokenSelectorTensor::Output, DType::U8),
+        (TokenSelectorTensor::Workspace, DType::U8),
     ];
-    for ((tensor, role), (_, dtype)) in roles.into_iter().zip(expected) {
-        if tensor.dtype() != dtype {
+    let input_expected = if contract.is_fixed() {
+        &expected_inputs[..4]
+    } else {
+        &expected_inputs[..3]
+    };
+    for ((tensor, role), (_, dtype)) in input_roles.iter().zip(input_expected.iter()) {
+        if tensor.dtype() != *dtype {
             return Err(OpError::TokenSelectorUnsupportedDType {
-                tensor: role,
-                expected: dtype,
+                tensor: *role,
+                expected: *dtype,
                 actual: tensor.dtype(),
             });
         }
+    }
+    if output.dtype() != DType::U8 {
+        return Err(OpError::TokenSelectorUnsupportedDType {
+            tensor: TokenSelectorTensor::Output,
+            expected: DType::U8,
+            actual: output.dtype(),
+        });
     }
     Ok(())
 }
@@ -3703,6 +3843,12 @@ pub enum OpError {
     TokenSelectorInvalidTemperature {
         bits: u32,
     },
+    TokenSelectorInvalidTopK {
+        top_k: u32,
+    },
+    TokenSelectorInvalidTopP {
+        bits: u32,
+    },
     TokenSelectorVocabOutOfRange {
         vocab: u64,
     },
@@ -4155,6 +4301,14 @@ impl fmt::Display for OpError {
             Self::TokenSelectorInvalidTemperature { bits } => write!(
                 formatter,
                 "token_select temperature must be finite and positive (bits 0x{bits:08x})"
+            ),
+            Self::TokenSelectorInvalidTopK { top_k } => write!(
+                formatter,
+                "token_select fixed top-k must be 20 or 64 (got {top_k})"
+            ),
+            Self::TokenSelectorInvalidTopP { bits } => write!(
+                formatter,
+                "token_select fixed top-p must be exactly 0.95 (bits 0x{bits:08x})"
             ),
             Self::TokenSelectorVocabOutOfRange { vocab } => write!(
                 formatter,

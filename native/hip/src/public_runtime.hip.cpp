@@ -1813,6 +1813,7 @@ struct TokenSelectorPlan final : QuarantineNode {
   Buffer *additive_logits;
   Buffer *valid_mask;
   Buffer *output;
+  Buffer *workspace;
   sllm_token_selector::DescriptorMetadata metadata;
   bool release_active;
   bool in_flight;
@@ -1820,11 +1821,12 @@ struct TokenSelectorPlan final : QuarantineNode {
   TokenSelectorPlan(
       Context *const context_value, Buffer *const logits_value,
       Buffer *const additive_value, Buffer *const mask_value,
-      Buffer *const output_value,
+      Buffer *const output_value, Buffer *const workspace_value,
       const sllm_token_selector::DescriptorMetadata &metadata_value)
       : QuarantineNode(HandleKind::TokenSelectorPlan), context(context_value),
         logits(logits_value), additive_logits(additive_value),
-        valid_mask(mask_value), output(output_value), metadata(metadata_value),
+        valid_mask(mask_value), output(output_value),
+        workspace(workspace_value), metadata(metadata_value),
         release_active(false), in_flight(false) {}
 };
 
@@ -1901,6 +1903,7 @@ struct Completion final : QuarantineNode {
   Buffer *token_selector_additive;
   Buffer *token_selector_valid_mask;
   Buffer *token_selector_output;
+  Buffer *token_selector_workspace;
   bool array_operation;
   ArrayOperationPlan *array_operation_plan;
   AttentionBuffers array_operation_buffers;
@@ -2013,7 +2016,7 @@ struct Completion final : QuarantineNode {
         argmax_output(argmax_output_value), token_selector(false),
         token_selector_plan(nullptr), token_selector_logits(nullptr),
         token_selector_additive(nullptr), token_selector_valid_mask(nullptr),
-        token_selector_output(nullptr),
+        token_selector_output(nullptr), token_selector_workspace(nullptr),
         array_operation(array_plan_value != nullptr),
         array_operation_plan(array_plan_value),
         array_operation_buffers(array_buffers_value),
@@ -4646,7 +4649,7 @@ bool rollback_reserved_token_selector_submission(
   if (sllm_public_runtime::AccountingState::rollback_token_selector_submission(
           context->accounting, queue->accounting, plan->logits->accounting,
           plan->additive_logits->accounting, plan->valid_mask->accounting,
-          plan->output->accounting)) {
+          plan->output->accounting, plan->workspace->accounting)) {
     plan->in_flight = false;
     return true;
   }
@@ -4993,7 +4996,8 @@ bool release_submission_references(Completion *const completion) noexcept {
               completion->token_selector_logits->accounting,
               completion->token_selector_additive->accounting,
               completion->token_selector_valid_mask->accounting,
-              completion->token_selector_output->accounting);
+              completion->token_selector_output->accounting,
+              completion->token_selector_workspace->accounting);
     } else if (completion->array_operation) {
       released = release_attention_active(completion->queue->accounting,
                                           completion->array_operation_buffers);
@@ -5173,7 +5177,8 @@ bool rollback_submission_references(Completion *const completion) noexcept {
               completion->token_selector_logits->accounting,
               completion->token_selector_additive->accounting,
               completion->token_selector_valid_mask->accounting,
-              completion->token_selector_output->accounting);
+              completion->token_selector_output->accounting,
+              completion->token_selector_workspace->accounting);
     } else if (completion->array_operation) {
       released = rollback_attention_submission(
           completion->context->accounting, completion->queue->accounting,
@@ -5366,7 +5371,8 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
               completion->token_selector_logits->accounting,
               completion->token_selector_additive->accounting,
               completion->token_selector_valid_mask->accounting,
-              completion->token_selector_output->accounting);
+              completion->token_selector_output->accounting,
+              completion->token_selector_workspace->accounting);
     } else if (completion->array_operation) {
       released = release_attention_completion(
           completion->context->accounting, completion->queue->accounting,

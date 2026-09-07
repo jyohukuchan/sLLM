@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
+use crate::device_sampling::{DeviceSamplingBuffers, decode_selected_record};
 use crate::gemma4_moe::{
     GEMMA4_MOE_LAYER_BLOB_BYTES, GEMMA4_MOE_LAYER_BLOB_PREFIX, GEMMA4_MOE_MODEL_FINGERPRINT,
     GEMMA4_MOE_PER_EXPERT_SCALES_OFFSET, GEMMA4_MOE_REPOSITORY, GEMMA4_MOE_REVISION,
@@ -39,11 +40,11 @@ use crate::weights::{
     WeightConsumerKey, WeightLoadEntry, WeightLoadPlan,
 };
 use crate::{
-    AccessMode, AllocationCategory, CausalAttentionDescriptor, DType, ExecutionBuffer,
-    ExecutionQueue, ExecutionSession, ExecutionSessionId, ExecutionState, ExecutionStateImageV1,
-    KvCacheEncoding, KvPhysicalMemorySnapshot, KvState, KvStateDescriptor, OwnedTensorBinding,
-    PreparedExecutionAudit, PreparedOperation, StateForkAuditV1, StateForkModeV1, TensorDType,
-    TensorView,
+    AccessMode, AllocationCategory, CausalAttentionDescriptor, DType, DeviceTokenSelectorRequestV1,
+    Encoding, ExecutionBuffer, ExecutionQueue, ExecutionSession, ExecutionSessionId,
+    ExecutionState, ExecutionStateImageV1, KvCacheEncoding, KvPhysicalMemorySnapshot, KvState,
+    KvStateDescriptor, OwnedTensorBinding, PreparedExecutionAudit, PreparedOperation,
+    SamplingSelectionV1, StateForkAuditV1, StateForkModeV1, TensorDType, TensorView,
 };
 use crate::{
     CheckpointIdentity, CheckpointPayload, SessionCheckpoint, StateOwnerKindV1, StatePlaneKindV1,
@@ -2017,6 +2018,7 @@ impl Gemma4MoeResidentModel {
             _prepared_cache: provisioned.prepared_cache,
             prepared: provisioned.prepared,
             kv_states: provisioned.kv_states,
+            device_sampling: None,
             transition_committed: false,
             poisoned: false,
             last_output: None,
@@ -2329,9 +2331,10 @@ fn provision_gemma4_moe_request(
     })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Gemma4MoeExecutionOutput {
     token_ids: Vec<i32>,
+    selection: Option<SamplingSelectionV1>,
     audit: PreparedExecutionAudit,
     committed_length: u64,
 }
@@ -2339,6 +2342,10 @@ pub struct Gemma4MoeExecutionOutput {
 impl Gemma4MoeExecutionOutput {
     pub fn token_ids(&self) -> &[i32] {
         &self.token_ids
+    }
+
+    pub fn selection(&self) -> Option<&SamplingSelectionV1> {
+        self.selection.as_ref()
     }
 
     pub const fn audit(&self) -> &PreparedExecutionAudit {
@@ -2389,6 +2396,7 @@ pub struct Gemma4MoeExecutionRequest {
     _prepared_cache: Arc<PreparedSemanticCache>,
     prepared: Vec<Option<PreparedOperation>>,
     kv_states: Vec<KvState>,
+    device_sampling: Option<DeviceSamplingBuffers>,
     transition_committed: bool,
     poisoned: bool,
     last_output: Option<Gemma4MoeExecutionOutput>,
@@ -2651,6 +2659,26 @@ impl Gemma4MoeExecutionRequest {
         &mut self,
         token_ids: &[i32],
     ) -> Result<Gemma4MoeExecutionOutput, Gemma4MoeExecutionError> {
+        self.execute_with_selector(token_ids, None)
+    }
+
+    /// Runs one exact request transition with the terminal Argmax replaced by
+    /// the shared device token selector. The model projection, terminal
+    /// softcap, and all request-local masks remain on the device; only the
+    /// selector's fixed 16-byte result record is read back.
+    pub fn prefill_with_device_selector(
+        &mut self,
+        token_ids: &[i32],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<Gemma4MoeExecutionOutput, Gemma4MoeExecutionError> {
+        self.execute_with_selector(token_ids, Some(selector))
+    }
+
+    fn execute_with_selector(
+        &mut self,
+        token_ids: &[i32],
+        selector: Option<&DeviceTokenSelectorRequestV1>,
+    ) -> Result<Gemma4MoeExecutionOutput, Gemma4MoeExecutionError> {
         self.validate_token_ids(token_ids)?;
         self.ensure_dispatchable()?;
         if self.poisoned {
@@ -2663,7 +2691,7 @@ impl Gemma4MoeExecutionRequest {
                 "current transition is already committed; use execute_next for decode",
             ));
         }
-        match self.execute_transition(token_ids) {
+        match self.execute_transition(token_ids, selector) {
             Ok(output) => {
                 for layer in &mut self.state.layers {
                     layer.committed_length = self.state.expected_length;
@@ -2688,13 +2716,44 @@ impl Gemma4MoeExecutionRequest {
     }
 
     fn execute_transition(
-        &self,
+        &mut self,
         token_ids: &[i32],
+        selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<Gemma4MoeExecutionOutput, Gemma4MoeExecutionError> {
         self.upload_request_inputs(token_ids)?;
         let resident = Arc::clone(&self._resident);
         let mut audit = ExecutionAuditAccumulator::new(1);
+        let mut selector_logits = None;
+        let mut selector_terminal_seen = false;
         for (index, node) in self.layout.nodes.iter().enumerate() {
+            // The ordinary graph ends in an Argmax node. With a device
+            // selector, preserve every preceding GPU operation (including
+            // final normalization and logit softcap) and replace only this
+            // terminal operation with TokenSelect below.
+            if selector.is_some()
+                && matches!(
+                    self.prepared[index]
+                        .as_ref()
+                        .map(|prepared| prepared.operation().descriptor().kind()),
+                    Some(SemanticOpKind::Argmax)
+                )
+            {
+                if node.boundary_after() != Some(Gemma4MoeExecutionBoundary::TerminalReadback)
+                    || node.inputs().len() != 1
+                    || node.outputs().len() != 1
+                {
+                    return Err(Gemma4MoeExecutionError::invalid(
+                        "terminal selector replacement requires one Argmax input/output",
+                    ));
+                }
+                let logits_tensor = node.inputs()[0];
+                let logits = self.layout.tensors.get(logits_tensor).ok_or_else(|| {
+                    Gemma4MoeExecutionError::invalid("terminal selector logits tensor is absent")
+                })?;
+                selector_logits = Some((logits_tensor, logits.view.clone()));
+                selector_terminal_seen = true;
+                continue;
+            }
             match node.lowering() {
                 Gemma4MoeLowering::Semantic(_) => {
                     let prepared = self.prepared[index].as_ref().ok_or_else(|| {
@@ -2816,12 +2875,37 @@ impl Gemma4MoeExecutionRequest {
                     .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
             }
         }
-        let token_ids = self.read_terminal_tokens()?;
+        let selection = if let Some(selector) = selector {
+            if !selector_terminal_seen {
+                return Err(Gemma4MoeExecutionError::invalid(
+                    "device selector did not replace the terminal Argmax",
+                ));
+            }
+            let (logits_tensor, logits) = selector_logits.ok_or_else(|| {
+                Gemma4MoeExecutionError::invalid("device selector logits are absent")
+            })?;
+            let selection =
+                self.execute_device_token_selector(logits_tensor, &logits, selector, &mut audit)?;
+            audit
+                .record_boundary(ExecutionBoundaryKind::TerminalReadback, true)
+                .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+            Some(selection)
+        } else {
+            None
+        };
+        let token_ids = if let Some(selection) = &selection {
+            vec![i32::try_from(selection.token_id).map_err(|_| {
+                Gemma4MoeExecutionError::invalid("selected token ID does not fit i32")
+            })?]
+        } else {
+            self.read_terminal_tokens()?
+        };
         let audit = audit
             .snapshot()
             .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
         Ok(Gemma4MoeExecutionOutput {
             token_ids,
+            selection,
             audit,
             committed_length: self.state.expected_length,
         })
@@ -2911,6 +2995,33 @@ impl Gemma4MoeExecutionRequest {
         }
         self.transition_decode()?;
         self.execute(token_ids)
+    }
+
+    /// Executes one continuation token with the shared device selector after
+    /// rebinding the request to its exact M=1 decode graph.
+    pub fn decode_with_device_selector(
+        &mut self,
+        token_id: i32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<Gemma4MoeExecutionOutput, Gemma4MoeExecutionError> {
+        if !(0..262_144).contains(&token_id) {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "Gemma 4 MoE decode continuation must be one in-vocabulary token",
+            ));
+        }
+        self.transition_decode()?;
+        self.execute_with_selector(&[token_id], Some(selector))
+    }
+
+    /// Invalidates this request owner after host-side cancellation or a
+    /// publication error. Published KV transitions are deliberately retained:
+    /// they may already be visible to the caller, so cancellation cannot
+    /// retract them. The poisoned owner must be dropped and replaced with a
+    /// fresh request before any further execution or state export.
+    pub fn cancel(&mut self) {
+        self.poisoned = true;
+        self.last_output = None;
+        self.device_sampling = None;
     }
 
     /// Rewinds the most recently committed transition on every layer. This is
@@ -3405,6 +3516,120 @@ impl Gemma4MoeExecutionRequest {
             .collect()
     }
 
+    fn execute_device_token_selector(
+        &mut self,
+        logits_tensor: usize,
+        logits: &TensorView,
+        selector: &DeviceTokenSelectorRequestV1,
+        audit: &mut ExecutionAuditAccumulator,
+    ) -> Result<SamplingSelectionV1, Gemma4MoeExecutionError> {
+        let vocab = selector.vocab_size();
+        if logits.dtype() != DType::Bf16
+            || logits.encoding() != Encoding::Unquantized
+            || logits.shape().len() != 2
+            || logits.shape()[0] == 0
+            || logits.shape()[1] != vocab
+            || !logits.is_contiguous()
+        {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "terminal selector logits must be contiguous BF16 [tokens,vocab]",
+            ));
+        }
+        let row_bytes = logits
+            .payload_bytes()
+            .checked_div(u64::try_from(logits.shape()[0]).map_err(|_| {
+                Gemma4MoeExecutionError::invalid("terminal logits row count is too large")
+            })?)
+            .ok_or_else(|| {
+                Gemma4MoeExecutionError::invalid("terminal logits row size overflowed")
+            })?;
+        let row_offset = logits
+            .byte_offset()
+            .checked_add(
+                row_bytes
+                    .checked_mul(u64::try_from(logits.shape()[0] - 1).map_err(|_| {
+                        Gemma4MoeExecutionError::invalid("terminal logits row index is too large")
+                    })?)
+                    .ok_or_else(|| {
+                        Gemma4MoeExecutionError::invalid("terminal logits row offset overflowed")
+                    })?,
+            )
+            .ok_or_else(|| {
+                Gemma4MoeExecutionError::invalid("terminal logits row offset overflowed")
+            })?;
+        let logits_row = TensorView::new(
+            DType::Bf16,
+            Encoding::Unquantized,
+            &[1, vocab],
+            &[vocab, 1],
+            row_offset,
+        )
+        .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+
+        let resident = Arc::clone(&self._resident);
+        if self.device_sampling.is_none() {
+            self.device_sampling = Some(
+                DeviceSamplingBuffers::new(resident.session.as_ref(), vocab)
+                    .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?,
+            );
+        }
+        let binding = resident
+            .session
+            .bind(&self.buffers[logits_tensor], logits_row, AccessMode::Read)
+            .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+        let prepared = self
+            .device_sampling
+            .as_mut()
+            .expect("device sampler initialized")
+            .prepare(
+                resident.session.as_ref(),
+                &resident.queue,
+                binding,
+                selector,
+                resident.completion_timeout,
+            )
+            .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+        let prepared = self
+            ._prepared_cache
+            .prepare(
+                resident.session.as_ref(),
+                prepared.descriptor,
+                prepared.inputs,
+                prepared.outputs,
+                PreparedCachePolicy::Transient,
+            )
+            .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+        let mut submission = resident
+            .session
+            .submit(&prepared, &resident.queue)
+            .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+        require_transfer_success(
+            submission.wait(resident.completion_timeout),
+            "Gemma 4 MoE device selector",
+        )?;
+        audit
+            .record_labeled("gemma4_moe.token_select", submission.dispatch())
+            .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+        let mut readback = submission
+            .start_output_readback(0)
+            .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+        require_transfer_success(
+            readback.wait(resident.completion_timeout),
+            "Gemma 4 MoE device selector readback",
+        )?;
+        let mut bytes = [0_u8; 16];
+        let copied = readback
+            .read_into(&mut bytes)
+            .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+        if copied != bytes.len() as u64 {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "device selector record length differs from 16",
+            ));
+        }
+        decode_selected_record(&bytes, selector)
+            .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))
+    }
+
     fn read_terminal_tokens(&self) -> Result<Vec<i32>, Gemma4MoeExecutionError> {
         let tensor = &self.layout.tensors[self.layout.terminal_readback_tensor];
         let source = self.buffers[tensor.id]
@@ -3740,6 +3965,14 @@ mod tests {
         fork_calls: AtomicUsize,
         fail_fork_call: AtomicUsize,
         append_ranges: Mutex<Vec<(u32, u64, u64)>>,
+        semantic_events: Arc<Mutex<Vec<TestSemanticEvent>>>,
+    }
+
+    #[derive(Clone)]
+    struct TestSemanticEvent {
+        kind: SemanticOpKind,
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
     }
 
     impl TestExecutionAdapter {
@@ -3778,9 +4011,18 @@ mod tests {
                 .expect("append-range lock")
                 .clone()
         }
+
+        fn semantic_events(&self) -> Vec<TestSemanticEvent> {
+            self.semantic_events
+                .lock()
+                .expect("semantic-event lock")
+                .clone()
+        }
     }
 
-    struct TestSemanticSubmission;
+    struct TestSemanticSubmission {
+        bytes: Vec<u8>,
+    }
     struct TestTransfer;
     struct TestReadback {
         bytes: Vec<u8>,
@@ -3846,8 +4088,13 @@ mod tests {
             _access: &ExecutionAdapterAccess<'_>,
             output: &OwnedTensorBinding,
         ) -> Result<Box<dyn ExecutionReadbackAdapter>, ExecutionError> {
+            if self.bytes.len() != output.view().payload_bytes() as usize {
+                return Err(ExecutionError::InvalidRange {
+                    reason: "test semantic output size differs".to_owned(),
+                });
+            }
             Ok(Box::new(TestReadback {
-                bytes: vec![0; output.view().payload_bytes() as usize],
+                bytes: self.bytes.clone(),
             }))
         }
     }
@@ -3920,12 +4167,36 @@ mod tests {
         fn submit(
             &self,
             _access: &ExecutionAdapterAccess<'_>,
-            _prepared: &PreparedOperation,
+            prepared: &PreparedOperation,
             _queue: &ExecutionQueue,
         ) -> Result<(Box<dyn ExecutionSubmissionAdapter>, DispatchEvidence), ExecutionError>
         {
+            let operation = prepared.operation();
+            let descriptor = operation.descriptor();
+            self.semantic_events
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?
+                .push(TestSemanticEvent {
+                    kind: descriptor.kind(),
+                    inputs: descriptor.inputs().to_vec(),
+                    outputs: descriptor.outputs().to_vec(),
+                });
+            let output_bytes = descriptor
+                .outputs()
+                .first()
+                .map_or(0, |output| output.payload_bytes() as usize);
+            let mut bytes = vec![0_u8; output_bytes];
+            if descriptor.kind() == SemanticOpKind::TokenSelect {
+                if bytes.len() != 16 {
+                    return Err(ExecutionError::InvalidRange {
+                        reason: "test token selector output is not 16 bytes".to_owned(),
+                    });
+                }
+                bytes[0..4].copy_from_slice(&7_i32.to_le_bytes());
+                bytes[8..12].copy_from_slice(&0.5_f32.to_le_bytes());
+            }
             Ok((
-                Box::new(TestSemanticSubmission),
+                Box::new(TestSemanticSubmission { bytes }),
                 Self::evidence(1, "test.semantic"),
             ))
         }
@@ -4306,6 +4577,89 @@ mod tests {
             state_capacity,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn device_selector_replaces_terminal_argmax_and_reuses_decode_buffers() {
+        let (mut request, adapter, _model) = test_request(3, 2_048);
+        let parameters = crate::SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).unwrap();
+        let sampler_config = crate::SamplerChainConfigV1::new(parameters)
+            .with_top_k(64)
+            .unwrap();
+        let sampler = crate::SamplerChainV1::new(sampler_config, &[]).unwrap();
+        let selector = sampler
+            .prepare_device_selector(262_144, None, 17, 0)
+            .unwrap();
+
+        let prefill = request
+            .prefill_with_device_selector(&[0; 3], &selector)
+            .unwrap();
+        assert_eq!(prefill.token_ids(), &[7]);
+        let selection = prefill.selection().expect("selector metadata");
+        assert_eq!(selection.token_id, 7);
+        assert_eq!(selection.logprob, 0.5);
+
+        let events = adapter.semantic_events();
+        assert_eq!(
+            events.last().map(|event| event.kind),
+            Some(SemanticOpKind::TokenSelect)
+        );
+        assert_eq!(
+            events
+                .get(events.len().saturating_sub(2))
+                .map(|event| event.kind),
+            Some(SemanticOpKind::TanhSoftcap)
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.kind == SemanticOpKind::Argmax)
+        );
+        let selector_event = events.last().expect("selector submission");
+        assert!(selector_event.inputs.len() >= 3);
+        assert_eq!(selector_event.inputs[0].shape(), &[1, 262_144]);
+        assert_eq!(selector_event.inputs[0].byte_offset(), 2_u64 * 262_144 * 2);
+        assert_eq!(selector_event.inputs[1].shape(), &[1, 262_144]);
+        assert_eq!(selector_event.inputs[2].shape(), &[1, 262_144]);
+        assert_eq!(selector_event.outputs[0].shape(), &[16]);
+
+        let sampler_buffers = request.device_sampling.as_ref().expect("sampler cache");
+        let buffer_ids = (
+            sampler_buffers.additive.id(),
+            sampler_buffers.mask.id(),
+            sampler_buffers.output.id(),
+        );
+
+        let decode = request.decode_with_device_selector(1, &selector).unwrap();
+        assert_eq!(decode.token_ids(), &[7]);
+        assert_eq!(decode.selection().expect("decode metadata").token_id, 7);
+        let sampler_buffers_after = request.device_sampling.as_ref().expect("sampler cache");
+        assert_eq!(
+            (
+                sampler_buffers_after.additive.id(),
+                sampler_buffers_after.mask.id(),
+                sampler_buffers_after.output.id(),
+            ),
+            buffer_ids
+        );
+
+        let events = adapter.semantic_events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == SemanticOpKind::TokenSelect)
+                .count(),
+            2
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.kind == SemanticOpKind::Argmax)
+        );
+        let decode_selector = events.last().expect("decode selector submission");
+        assert_eq!(decode_selector.kind, SemanticOpKind::TokenSelect);
+        assert_eq!(decode_selector.inputs[0].shape(), &[1, 262_144]);
+        assert_eq!(decode_selector.inputs[0].byte_offset(), 0);
     }
 
     fn checkpoint_identity(image: &Gemma4MoeStateImageV1, tokens: &[u32]) -> CheckpointIdentity {
@@ -4830,6 +5184,24 @@ mod tests {
         );
         assert!(!request.transition_committed());
         assert!(!request.is_poisoned());
+    }
+
+    #[test]
+    fn cancel_invalidates_published_request_without_rewinding_or_reusing_it() {
+        let (mut request, adapter, _model) = test_request(17, 2_048);
+        request.execute(&[0; 17]).unwrap();
+        assert!(request.transition_committed());
+        assert!(adapter.lengths().iter().all(|length| *length == 17));
+
+        request.cancel();
+        request.cancel();
+
+        assert!(request.is_poisoned());
+        assert!(request.last_output.is_none());
+        assert!(request.transition_committed());
+        assert!(adapter.lengths().iter().all(|length| *length == 17));
+        assert!(request.execute_next(&[0]).is_err());
+        assert!(request.state_image().is_err());
     }
 
     #[test]

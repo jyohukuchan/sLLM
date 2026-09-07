@@ -110,7 +110,10 @@ def validate(document: object, schema: object) -> None:
     require(set(completion["request"]["prompt_shapes"]) == {"string", "string_array", "token_array", "token_array_array"}, "completion prompt shapes changed")
     require(completion["request"]["max_tokens"] == {"min": 1, "max": 4096, "default": 256}, "completion max_tokens bounds changed")
     require(completion["request"]["n"] == {"min": 1, "max": 8, "default": 1}, "completion n bounds changed")
-    require(completion["request"]["logprobs"] == {"min": 0, "max": 5}, "completion logprobs bounds changed")
+    require(completion["request"]["temperature"] == {"fixed": 1.0, "default": 1.0}, "completion temperature profile changed")
+    require(completion["request"]["top_p"] == {"fixed": 0.95, "default": 0.95}, "completion top-p profile changed")
+    require(completion["request"]["penalties"] == {"fixed": 0.0}, "completion penalty profile changed")
+    require(completion["request"]["logprobs"] == {"fixed": 0}, "completion logprobs profile changed")
 
     embeddings = by_id["openai-embeddings-v1"]
     require(embeddings["endpoint"] == "/v1/embeddings", "embedding endpoint changed")
@@ -150,7 +153,7 @@ def validate(document: object, schema: object) -> None:
         require(case["error"].get("status") in {400, 413}, f"negative case {case.get('id')!r} status is not 4xx")
         require(case["error"].get("code") in {"invalid_json", "invalid_value", "unsupported_parameter", "request_too_large"}, f"negative case {case.get('id')!r} error code is not pinned")
 
-    required_negative = {"completion-unknown-field", "completion-nonfinite", "embedding-mixed-input", "rerank-empty-documents", "template-unverified-model", "infill-production-unsupported", "mi300x-deferred"}
+    required_negative = {"completion-unknown-field", "completion-nonfixed", "embedding-mixed-input", "rerank-empty-documents", "template-unverified-model", "infill-production-unsupported", "mi300x-deferred"}
     require({case["id"] for case in negative} == required_negative, "negative case identity set changed")
     unknown_case = next(case for case in negative if case["id"] == "completion-unknown-field")
     require(unknown_case["error"] == {"status": 400, "code": "invalid_value", "param": "mystery"}, "unknown-field error mapping changed")

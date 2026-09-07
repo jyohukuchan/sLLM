@@ -170,13 +170,19 @@ pub const SLLM_HIP_ARGMAX_WORKGROUP_SIZE: u32 = 256;
 pub const SLLM_HIP_ARGMAX_MAX_V: u64 = 1_048_576;
 pub const SLLM_HIP_ARGMAX_MAX_M: u64 = 4_294_967_295;
 pub const SLLM_HIP_TOKEN_SELECTOR_VERSION: u32 = 1;
+pub const SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP: u32 = 2;
 pub const SLLM_HIP_TOKEN_SELECTOR_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_TOKEN_SELECTOR_KERNEL_ID_BF16_F32_MASK_V1: u32 = 1;
+pub const SLLM_HIP_TOKEN_SELECTOR_KERNEL_ID_FIXED_TOPK_TOPP_V1: u32 = 2;
 pub const SLLM_HIP_TOKEN_SELECTOR_KERNEL_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_TOKEN_SELECTOR_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE: u32 = 256;
+pub const SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE: u32 = 1024;
 pub const SLLM_HIP_TOKEN_SELECTOR_MAX_V: u64 = 1_048_576;
 pub const SLLM_HIP_TOKEN_SELECTOR_OUTPUT_BYTES: u32 = 16;
+pub const SLLM_HIP_TOKEN_SELECTOR_FLAG_ADDITIVE_PRESENT: u32 = 1;
+pub const SLLM_HIP_TOKEN_SELECTOR_FLAG_MASK_PRESENT: u32 = 2;
+pub const SLLM_HIP_TOKEN_SELECTOR_K0_WORKSPACE_BYTES: u64 = 532_504;
 pub const SLLM_HIP_MOE_ROUTE_VERSION: u32 = 1;
 pub const SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_MOE_ROUTE_KERNEL_ID_STABLE_TOPK_V1: u32 = 1;
@@ -1094,6 +1100,11 @@ pub struct sllm_token_selector_desc_t {
     pub temperature: f32,
     pub seed: u64,
     pub counter: u64,
+    pub top_k: u32,
+    pub flags: u32,
+    pub top_p: f32,
+    pub reserved_v2: u32,
+    pub workspace: sllm_tensor_binding_t,
 }
 
 #[repr(C)]

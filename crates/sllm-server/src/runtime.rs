@@ -269,6 +269,13 @@ pub trait ChatGenerationBackendV1: Send + Sync + 'static {
         sink: &mut dyn GenerationDeltaSinkV1,
     ) -> Result<BackendCompletionV1, BackendErrorV1>;
 
+    /// Returns the sampler `top_k` fixed by the served model profile, when
+    /// the profile exposes one.  This is checked at API admission so a
+    /// profile mismatch is reported as a client error before scheduling.
+    fn fixed_sampler_top_k(&self) -> Option<usize> {
+        None
+    }
+
     /// Executes the Phase 42 embedding profile. Backends must override this
     /// only when they expose final-normalized hidden rows with exact model and
     /// tokenizer identity. The default is intentionally fail-closed.
@@ -412,6 +419,10 @@ impl ModelRegistryEntryV1 {
 
     pub fn lock_fingerprint(&self) -> &str {
         &self.lock_fingerprint
+    }
+
+    pub(crate) fn fixed_sampler_top_k(&self) -> Option<usize> {
+        self.backend.fixed_sampler_top_k()
     }
 
     pub fn observability_snapshot(&self) -> BackendObservabilitySnapshotV1 {

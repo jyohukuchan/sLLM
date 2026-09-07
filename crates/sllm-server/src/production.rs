@@ -32,30 +32,30 @@ use sllm_core::{
     QwenGraphStateDescriptor, QwenMultimodalImageEmbedding, QwenMultimodalPrompt,
     QwenPrefixForkAuditV1, QwenPrefixStateV1, QwenResidentModel, QwenVisionExecutionInput,
     QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock, SamplerChainConfigV1,
-    SessionCheckpoint, SpeculativeAccountingV1, VerifiedCache, VerifiedControlVectorPayloadV1,
-    VerifiedFp8Sidecar, VerifiedGgufGemma4Moe, VerifiedGgufGemma4Mtp, VerifiedGgufGemmaSource,
-    VerifiedGgufQwen35Moe, VerifiedGgufWeightSource, VerifiedLoraPayloadV1,
-    VerifiedMinistral3WeightSource, VerifiedNvfp4Sidecar, VerifiedQwen35Moe,
-    VerifiedUnslothQwen38Nvfp4, WeightClassification, WeightLoadPlan,
-    XtcSamplingConfigV1 as CoreXtcSamplingConfigV1, assemble_gguf_qwen35_multimodal_prompt,
-    assemble_qwen35_multimodal_prompt, build_gemma4_execution_layout, build_gemma4_graph,
-    build_gemma4_moe_gguf_graph, build_gemma4_moe_resident_weight_load_plan,
-    build_gemma4_mtp_graph, build_gguf_qwen35_moe_weight_load_plan,
-    build_ministral3_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
-    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph,
-    build_qwen35_gguf_mx_weight_activation_graph, build_qwen35_graph_with_kv_cache_encoding,
-    build_qwen35_graph_with_kv_cache_selection, build_qwen35_graph_with_position_payload_mode,
-    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
-    build_qwen35_nvfp4_graph, build_qwen35_unsloth_qwen38_nvfp4_graph,
-    build_qwen38_nvfp4_weight_load_plan, build_verified_gemma4_mtp_weight_load_plan,
-    build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
-    build_verified_gguf_qwen35_vision_manifest, builtin_reviewed_model_lock,
-    gemma4_mtp_pair_semantic_id, open_and_verify_official_ministral3_gguf,
-    parse_control_vector_lock_v1, parse_gemma4_mtp_model_lock, parse_lora_lock_v1,
-    parse_ministral3_model_lock, qwen_graph_memory_estimate, qwen_prefill_chunk_candidates,
-    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, verify_derived_gguf,
-    verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp, verify_gguf_qwen35_moe,
-    verify_unsloth_qwen38_nvfp4,
+    SamplerChainV1, SessionCheckpoint, SpeculativeAccountingV1, VerifiedCache,
+    VerifiedControlVectorPayloadV1, VerifiedFp8Sidecar, VerifiedGgufGemma4Moe,
+    VerifiedGgufGemma4Mtp, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe,
+    VerifiedGgufWeightSource, VerifiedLoraPayloadV1, VerifiedMinistral3WeightSource,
+    VerifiedNvfp4Sidecar, VerifiedQwen35Moe, VerifiedUnslothQwen38Nvfp4, WeightClassification,
+    WeightLoadPlan, XtcSamplingConfigV1 as CoreXtcSamplingConfigV1,
+    assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
+    build_gemma4_execution_layout, build_gemma4_graph, build_gemma4_moe_gguf_graph,
+    build_gemma4_moe_resident_weight_load_plan, build_gemma4_mtp_graph,
+    build_gguf_qwen35_moe_weight_load_plan, build_ministral3_weight_load_plan,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
+    build_qwen35_gguf_moe_execution_graph, build_qwen35_gguf_mx_weight_activation_graph,
+    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_kv_cache_selection,
+    build_qwen35_graph_with_position_payload_mode, build_qwen35_moe_execution_graph,
+    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    build_qwen35_unsloth_qwen38_nvfp4_graph, build_qwen38_nvfp4_weight_load_plan,
+    build_verified_gemma4_mtp_weight_load_plan, build_verified_gguf_gemma_weight_load_plan,
+    build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
+    builtin_reviewed_model_lock, gemma4_mtp_pair_semantic_id,
+    open_and_verify_official_ministral3_gguf, parse_control_vector_lock_v1,
+    parse_gemma4_mtp_model_lock, parse_lora_lock_v1, parse_ministral3_model_lock,
+    qwen_graph_memory_estimate, qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy,
+    read_derived_gguf_lock, verify_derived_gguf, verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp,
+    verify_gguf_qwen35_moe, verify_unsloth_qwen38_nvfp4,
 };
 use sllm_frontend::{
     ApplyTemplateResultV1, DecodeModeV1, Gemma4MoeChatTemplateV1, Gemma4MtpGenerationExecutorV1,
@@ -73,7 +73,7 @@ use sllm_frontend::{
 };
 use sllm_hip::HipBackend;
 
-use crate::api::{ChatContentPartV1, GenerationRequestInputV1, ResponseFormatV1};
+use crate::api::{ChatContentPartV1, GenerationRequestInputV1, LogprobOptionsV1, ResponseFormatV1};
 use crate::{
     BackendCompletionV1, BackendEmbeddingBatchV1, BackendEmbeddingInputV1,
     BackendEmbeddingRequestV1, BackendEmbeddingVectorV1, BackendErrorV1,
@@ -83,6 +83,13 @@ use crate::{
 };
 
 const MAX_RETAINED_REQUEST_AUDITS: usize = 64;
+const QWEN_FIXED_TOP_K_V1: usize = 20;
+const GEMMA_FIXED_TOP_K_V1: usize = 64;
+// Ministral's locked generation_config has no top_k recommendation.  The
+// reviewed profile therefore keeps top-k disabled and applies only top-p on
+// the full vocabulary.  The device selector must support this tuple before
+// a request can leave the backend (there is no host fallback).
+const MINISTRAL_FIXED_TOP_K_V1: usize = 0;
 const GEMMA4_RAW_CHAT_MAX_BYTES: usize = 16 * 1024 * 1024;
 const GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN: u64 = 172_032;
 const GEMMA4_MTP_MAX_CONTEXT_TOKENS: u32 = 2_048;
@@ -93,6 +100,18 @@ const GEMMA4_MOE_STATIC_FP8_KV_BYTES_PER_TOKEN: u64 = 112_640;
 // 26 full-attention layers, each with 8 KV heads x 128 dimensions, two-byte
 // FP16 elements, and separate K/V planes.
 const MINISTRAL3_FP16_KV_BYTES_PER_TOKEN: u64 = 106_496;
+
+/// Returns whether the logprob controls are semantically disabled.
+///
+/// The public API deliberately accepts `logprobs: false` and
+/// `top_logprobs: 0` as neutral controls.  They must not make the fixed
+/// Ministral profile fail admission, while any request for actual logprob
+/// output remains rejected before model work begins.
+fn ministral_logprobs_are_supported(logprobs: Option<LogprobOptionsV1>) -> bool {
+    !logprobs.is_some_and(|options| {
+        options.enabled() || options.top_logprobs().is_some_and(|value| value != 0)
+    })
+}
 
 fn validate_generation_token_ids(
     tokenizer: &dyn GenerationTextFrontendV1,
@@ -648,10 +667,14 @@ fn generation_config_for_request(
     request: &ChatCompletionRequestV1,
     tokenizer: &TokenizerFrontendV1,
     reasoning_close_token_ids: Option<&[u32]>,
+    fixed_top_k: usize,
 ) -> Result<sllm_frontend::GenerationConfigV1, BackendErrorV1> {
     let mut generation = request.generation().clone();
     let mut chain = SamplerChainConfigV1::new(generation.sampling());
-    let mut advanced = false;
+    let mut advanced = true;
+    chain = chain
+        .with_top_k(fixed_top_k)
+        .map_err(|error| BackendErrorV1::new(format!("fixed top-k failed: {error}")))?;
 
     if let Some(bias) = request.logit_bias() {
         chain = chain
@@ -673,6 +696,11 @@ fn generation_config_for_request(
     }
     if let Some(extension) = request.sampler() {
         if let Some(top_k) = extension.top_k() {
+            if top_k as usize != fixed_top_k {
+                return Err(BackendErrorV1::new(format!(
+                    "requested top_k={top_k} does not match the model fixed top_k={fixed_top_k}"
+                )));
+            }
             chain = chain
                 .with_top_k(top_k as usize)
                 .map_err(|error| BackendErrorV1::new(format!("top-k failed: {error}")))?;
@@ -792,6 +820,67 @@ fn generation_config_for_request(
         return Err(BackendErrorV1::new(
             "reasoning budget requires an enabled reasoning mode",
         ));
+    }
+    Ok(generation)
+}
+
+/// Builds the Ministral fixed profile without borrowing the Qwen tokenizer
+/// used by the general helper.  Ministral's locked generation config has no
+/// top-k recommendation, so zero means the full vocabulary; the device
+/// selector still applies the fixed top-p value.  Neutral extensions are
+/// intentionally omitted because they have no effect on this profile.
+fn ministral_generation_config_for_request(
+    request: &ChatCompletionRequestV1,
+) -> Result<sllm_frontend::GenerationConfigV1, BackendErrorV1> {
+    let mut generation = request.generation().clone();
+    let chain = SamplerChainConfigV1::new(generation.sampling())
+        .with_top_k(MINISTRAL_FIXED_TOP_K_V1)
+        .map_err(|error| BackendErrorV1::new(format!("fixed top-k failed: {error}")))?;
+    if let Some(extension) = request.sampler() {
+        if extension
+            .top_k()
+            .is_some_and(|value| value != MINISTRAL_FIXED_TOP_K_V1 as u32)
+        {
+            return Err(BackendErrorV1::new(
+                "requested top_k does not match the Ministral fixed profile",
+            ));
+        }
+        if extension.min_p().is_some_and(|value| value != 0.0)
+            || extension.typical_p().is_some_and(|value| value != 1.0)
+            || extension.repeat_penalty().is_some_and(|value| value != 1.0)
+            || extension.repeat_last_n() != 0
+            || extension.ignore_eos()
+            || extension
+                .dry()
+                .is_some_and(|value| value.multiplier() != 0.0)
+            || extension
+                .xtc()
+                .is_some_and(|value| value.probability() != 0.0)
+            || extension.mirostat().is_some()
+            || extension.dynamic_temperature().is_some()
+        {
+            return Err(BackendErrorV1::new(
+                "requested sampler extension is outside the Ministral fixed profile",
+            ));
+        }
+        generation = generation.with_ignore_stop_tokens(false);
+    }
+    generation = generation
+        .with_sampler_chain(chain)
+        .map_err(|error| BackendErrorV1::new(format!("sampler chain failed: {error}")))?;
+    if let Some(response_format) = request.response_format() {
+        let grammar = match response_format {
+            ResponseFormatV1::Text => None,
+            ResponseFormatV1::JsonObject => Some(CompiledGrammar::json_object()),
+            ResponseFormatV1::JsonSchema(schema) => {
+                Some(CompiledGrammar::from_json_schema(schema.schema()))
+            }
+        }
+        .transpose()
+        .map_err(|error| BackendErrorV1::new(format!("structured output failed: {error}")))?;
+        if let Some(grammar) = grammar {
+            generation = generation.with_grammar(grammar);
+        }
     }
     Ok(generation)
 }
@@ -4010,6 +4099,10 @@ impl Ministral3ChatBackendV1 {
 }
 
 impl ChatGenerationBackendV1 for Ministral3ChatBackendV1 {
+    fn fixed_sampler_top_k(&self) -> Option<usize> {
+        Some(MINISTRAL_FIXED_TOP_K_V1)
+    }
+
     fn reviewed_chat_template_available(&self) -> bool {
         true
     }
@@ -4135,25 +4228,27 @@ impl ChatGenerationBackendV1 for Ministral3ChatBackendV1 {
     ) -> Result<BackendCompletionV1, BackendErrorV1> {
         let started = Instant::now();
         let sampling = request.generation().sampling();
-        if sampling != sllm_core::SamplingParametersV1::greedy()
-            || request.seed().is_some()
-            || request.sampler().is_some()
+        let fixed_profile = sampling
+            == sllm_core::SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0)
+                .expect("fixed sampling profile is valid");
+        if (!fixed_profile && sampling != sllm_core::SamplingParametersV1::greedy())
             || request.generation().sampler_chain().is_some()
             || request.generation().grammar().is_some()
             || request.generation().ignore_stop_tokens()
             || request.generation().device_selector_seed().is_some()
             || request.generation().reasoning().is_some()
             || request.logit_bias().is_some()
-            || request.logprobs().is_some()
+            || !ministral_logprobs_are_supported(request.logprobs())
             || request.choice_count() != 1
             || request.reasoning().enabled()
             || request.reasoning().separate_reasoning()
             || request.reasoning().max_reasoning_tokens().is_some()
             || !request.model_variant().adapters().is_empty()
             || !request.model_variant().control_vectors().is_empty()
-            || request
-                .response_format()
-                .is_some_and(|format| !matches!(format, ResponseFormatV1::Text))
+            || (!fixed_profile
+                && request
+                    .response_format()
+                    .is_some_and(|format| !matches!(format, ResponseFormatV1::Text)))
             || request.messages().iter().any(|message| {
                 message
                     .parts()
@@ -4186,6 +4281,24 @@ impl ChatGenerationBackendV1 for Ministral3ChatBackendV1 {
         }
         let service = GenerationServiceV1::new(&state.frontend, None, &state.stop_policy)
             .map_err(|error| BackendErrorV1::new(format!("generation service failed: {error}")))?;
+        let mut generation = ministral_generation_config_for_request(request)?;
+        if fixed_profile {
+            let seed = OsSamplingRandom::resolve_seed(request.sampling_seed())
+                .map_err(|error| BackendErrorV1::new(format!("sampling seed failed: {error}")))?;
+            generation = generation.with_device_selector_seed(seed);
+            let supports_device_selector = SamplerChainV1::new(
+                SamplerChainConfigV1::new(generation.sampling())
+                    .with_top_k(MINISTRAL_FIXED_TOP_K_V1)
+                    .map_err(|error| BackendErrorV1::new(format!("fixed top-k failed: {error}")))?,
+                &[],
+            )
+            .is_ok_and(|sampler| sampler.supports_device_selector());
+            if !supports_device_selector {
+                return Err(BackendErrorV1::new(
+                    "Ministral 3 fixed top-k-disabled profile requires the device selector; host sampling is disabled",
+                ));
+            }
+        }
         let prepared = ministral3_generation_prompt(request, &service, &state.frontend)?;
         let prompt = prepared.token_ids().to_vec();
         let assistant_prefill = prepared.assistant_prefill_token_ids().to_vec();
@@ -4218,7 +4331,7 @@ impl ChatGenerationBackendV1 for Ministral3ChatBackendV1 {
             &mut executor,
             &prompt,
             &assistant_prefill,
-            request.generation(),
+            &generation,
             cancellation,
             &mut random,
             &mut output_sink,
@@ -5440,6 +5553,10 @@ impl Gemma4ChatBackendV1 {
 }
 
 impl ChatGenerationBackendV1 for QwenChatBackendV1 {
+    fn fixed_sampler_top_k(&self) -> Option<usize> {
+        Some(QWEN_FIXED_TOP_K_V1)
+    }
+
     fn observability_snapshot(&self) -> BackendObservabilitySnapshotV1 {
         QwenChatBackendV1::observability_snapshot(self)
     }
@@ -5670,6 +5787,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             request,
             &state.tokenizer,
             Some(&state.reasoning_close_token_ids),
+            QWEN_FIXED_TOP_K_V1,
         )?;
         let requires_logits = generation
             .sampler_chain()
@@ -5692,12 +5810,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             .transpose()
             .map_err(|error| BackendErrorV1::new(format!("sampling seed failed: {error}")))?;
         if let Some(seed) = resolved_sampling_seed {
-            if state.qwen38_artifact.is_none() {
-                generation = generation.with_device_selector_seed(seed);
-            }
-            // Qwen3.8's decode/attention graph-span and KV-append fast paths
-            // require the ordinary logits route. Its host sampler still uses
-            // this same resolved seed below, preserving request determinism.
+            generation = generation.with_device_selector_seed(seed);
         }
         let prepared_prompt = qwen_generation_prompt(request, &service, &state.tokenizer)?;
         let assistant_prefill_tokens = prepared_prompt.assistant_prefill_token_ids().to_vec();
@@ -6863,6 +6976,10 @@ impl QwenPersistentChatSessionV1 {
 }
 
 impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
+    fn fixed_sampler_top_k(&self) -> Option<usize> {
+        Some(GEMMA_FIXED_TOP_K_V1)
+    }
+
     fn observability_snapshot(&self) -> BackendObservabilitySnapshotV1 {
         Gemma4ChatBackendV1::observability_snapshot(self)
     }
@@ -7065,7 +7182,8 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
 
         let service = GenerationServiceV1::new(&state.tokenizer, None, &state.stop_policy)
             .map_err(|error| BackendErrorV1::new(format!("generation service failed: {error}")))?;
-        let mut generation = generation_config_for_request(request, &state.tokenizer, None)?;
+        let mut generation =
+            generation_config_for_request(request, &state.tokenizer, None, GEMMA_FIXED_TOP_K_V1)?;
         let requires_logits = generation
             .sampler_chain()
             .map_or(generation.sampling().requires_logits(), |chain| {
@@ -7795,6 +7913,10 @@ impl Gemma4MoeChatBackendV1 {
 }
 
 impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
+    fn fixed_sampler_top_k(&self) -> Option<usize> {
+        Some(GEMMA_FIXED_TOP_K_V1)
+    }
+
     fn observability_snapshot(&self) -> BackendObservabilitySnapshotV1 {
         Gemma4MoeChatBackendV1::observability_snapshot(self)
     }
@@ -7931,22 +8053,26 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
             &state.stop_policy,
         )
         .map_err(|error| BackendErrorV1::new(format!("generation service failed: {error}")))?;
-        let generation = generation_config_for_request(request, &state.tokenizer, None)?;
-        if generation.sampling().requires_logits()
-            || generation
-                .sampler_chain()
-                .is_some_and(|chain| chain.requires_logits())
-            || generation.grammar().is_some()
-            || request.logit_bias().is_some()
-            || request
-                .logprobs()
-                .is_some_and(|logprobs| logprobs.enabled())
-            || generation
-                .sampler_chain()
-                .is_some_and(|chain| chain.requires_randomness())
-        {
+        let mut generation =
+            generation_config_for_request(request, &state.tokenizer, None, GEMMA_FIXED_TOP_K_V1)?;
+        let requires_randomness = generation.sampler_chain().map_or(
+            generation.sampling().requires_logits(),
+            SamplerChainConfigV1::requires_randomness,
+        );
+        let resolved_sampling_seed = requires_randomness
+            .then(|| OsSamplingRandom::resolve_seed(request.sampling_seed()))
+            .transpose()
+            .map_err(|error| BackendErrorV1::new(format!("sampling seed failed: {error}")))?;
+        if let Some(seed) = resolved_sampling_seed {
+            generation = generation.with_device_selector_seed(seed);
+        }
+        let selector_supported = generation.sampler_chain().is_some_and(|chain| {
+            SamplerChainV1::new(chain.clone(), &[])
+                .is_ok_and(|sampler| sampler.supports_device_selector())
+        });
+        if request.logit_bias().is_some() || (requires_randomness && !selector_supported) {
             return Err(BackendErrorV1::new(
-                "Gemma 4 MoE currently exposes device argmax only; sampling, grammar, logprobs, and logit bias are unsupported",
+                "Gemma 4 MoE fixed sampling requires the common device selector; host sampling and logit bias are unsupported",
             ));
         }
         let prepared_prompt = gemma_moe_generation_prompt(request, &service, &state.tokenizer)?;
@@ -8131,9 +8257,16 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
                     .expect("checkpoint save request was recorded before owner creation"),
             );
         }
+        if requires_randomness && !executor.supports_device_selector() {
+            executor.cancel();
+            return Err(BackendErrorV1::new(
+                "Gemma 4 MoE fixed sampling cannot use a prefix or checkpoint restore without the device selector",
+            ));
+        }
         let allocated = state.session.memory_snapshot();
-        let mut random = OsSamplingRandom::for_randomness_and_seed(false, None)
-            .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
+        let mut random =
+            OsSamplingRandom::for_randomness_and_seed(requires_randomness, resolved_sampling_seed)
+                .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
         let mut output_sink = OutputSinkAdapterV1 { inner: sink };
         let mut post_cow_error = None;
         let outcome = generate_with_optional_assistant_prefill(
@@ -8330,9 +8463,8 @@ struct OutputSinkAdapterV1<'a> {
 }
 
 /// Adapter from the Ministral request owner to the shared generation loop.
-/// The Ministral graph exposes exactly one terminal-row device Argmax for
-/// both prefill and decode; any wider result or logits request is rejected at
-/// this boundary instead of being interpreted as a legacy row layout.
+/// Fixed-profile selection uses the terminal-row GPU sampler added to the
+/// verified graph. Legacy calls still expose the single terminal Argmax row.
 struct Ministral3GenerationExecutorV1 {
     inner: sllm_core::Ministral3ExecutionRequest,
 }
@@ -8369,6 +8501,47 @@ impl Ministral3GenerationExecutorV1 {
 }
 
 impl GenerationExecutorV1 for Ministral3GenerationExecutorV1 {
+    fn supports_device_selector(&self) -> bool {
+        true
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        input_token_ids: &[u32],
+        selector: &sllm_core::DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let input = input_token_ids
+            .iter()
+            .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = self
+            .inner
+            .prefill_with_device_selector(&input, selector)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or_else(|| GenerationServiceError::Execution("missing GPU selection".to_owned()))?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        token_id: u32,
+        selector: &sllm_core::DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = self
+            .inner
+            .decode_with_device_selector(token, selector)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or_else(|| GenerationServiceError::Execution("missing GPU selection".to_owned()))?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
     fn prefill(
         &mut self,
         input_token_ids: &[u32],
@@ -8417,10 +8590,9 @@ impl GenerationExecutorV1 for Ministral3GenerationExecutorV1 {
 
 /// Generation-service adapter for the reviewed Gemma 4 MoE request owner.
 ///
-/// The core MoE request currently publishes device Argmax token IDs only.  A
-/// separate adapter keeps that limitation explicit: requests which require
-/// logits or sampling are rejected before a transition is submitted, while
-/// greedy chat/raw/SSE callers still use the real MoE request lifecycle.
+/// The core MoE request publishes either a device Argmax token or the bounded
+/// common-selector record. The adapter keeps selector use explicit while
+/// preserving the existing request lifecycle and restored-state guards.
 struct Gemma4MoeGenerationExecutorV1 {
     inner: Gemma4MoeExecutionRequest,
     prefilled: bool,
@@ -8688,6 +8860,27 @@ impl Gemma4MoeGenerationExecutorV1 {
         self.prefill_chunk_count
     }
 
+    fn selector_step(
+        output: &Gemma4MoeExecutionOutput,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+        let token = *output
+            .token_ids()
+            .last()
+            .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+        if selection.token_id
+            != u32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)?
+        {
+            return Err(GenerationServiceError::Execution(
+                "Gemma 4 MoE selector record disagrees with the execution output".to_owned(),
+            ));
+        }
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
     /// Continue a restored prefix/checkpoint with the request suffix.  The
     /// core restore APIs publish the imported state as a committed boundary,
     /// so every suffix token must use the M=1 decode transition.  In
@@ -8884,13 +9077,133 @@ impl GenerationExecutorV1 for Gemma4MoeGenerationExecutorV1 {
         ))
     }
 
+    fn supports_device_selector(&self) -> bool {
+        self.matched_tokens.is_none() && self.checkpoint_tokens.is_none()
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        input_token_ids: &[u32],
+        selector: &sllm_core::DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.prefilled {
+            return Err(GenerationServiceError::Execution(
+                "Gemma 4 MoE prefill was requested twice".to_owned(),
+            ));
+        }
+        if !self.supports_device_selector() {
+            return Err(GenerationServiceError::DeviceSelectorUnsupported);
+        }
+        let ids = input_token_ids
+            .iter()
+            .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let first_chunk_len = ids.len().min(1_024);
+        let first_chunk = &ids[..first_chunk_len];
+        let output = if ids.len() <= first_chunk_len {
+            let output = self
+                .inner
+                .prefill_with_device_selector(first_chunk, selector)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            self.absorb(&output);
+            self.prefilled = true;
+            self.prefill_chunk_capacity = u64::try_from(first_chunk_len)
+                .map_err(|_| GenerationServiceError::CountOverflow)?;
+            self.prefill_chunk_count = 1;
+            self.committed_length = u64::try_from(first_chunk_len)
+                .map_err(|_| GenerationServiceError::CountOverflow)?;
+            output
+        } else {
+            let first = self
+                .inner
+                .execute(first_chunk)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            let first_token = first
+                .token_ids()
+                .last()
+                .copied()
+                .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
+            self.absorb(&first);
+            self.prefilled = true;
+            self.prefill_chunk_capacity = u64::try_from(first_chunk_len)
+                .map_err(|_| GenerationServiceError::CountOverflow)?;
+            self.prefill_chunk_count = 1;
+            self.committed_length = u64::try_from(first_chunk_len)
+                .map_err(|_| GenerationServiceError::CountOverflow)?;
+            self.last_argmax_token = Some(first_token);
+
+            for token_id in &ids[first_chunk_len..ids.len() - 1] {
+                let output = self
+                    .inner
+                    .execute_next(&[*token_id])
+                    .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+                let next_token = output
+                    .token_ids()
+                    .last()
+                    .copied()
+                    .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
+                self.absorb(&output);
+                self.last_argmax_token = Some(next_token);
+                self.prefill_chunk_count = self
+                    .prefill_chunk_count
+                    .checked_add(1)
+                    .ok_or(GenerationServiceError::CountOverflow)?;
+                self.committed_length = self
+                    .committed_length
+                    .checked_add(1)
+                    .ok_or(GenerationServiceError::CountOverflow)?;
+            }
+            let output = self
+                .inner
+                .decode_with_device_selector(
+                    *ids.last()
+                        .ok_or(GenerationServiceError::MissingDeviceArgmax)?,
+                    selector,
+                )
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            self.absorb(&output);
+            self.prefill_chunk_count = self
+                .prefill_chunk_count
+                .checked_add(1)
+                .ok_or(GenerationServiceError::CountOverflow)?;
+            self.committed_length = self
+                .committed_length
+                .checked_add(1)
+                .ok_or(GenerationServiceError::CountOverflow)?;
+            output
+        };
+        self.last_argmax_token = output.token_ids().last().copied();
+        self.publish_fresh_prefix(input_token_ids.len())?;
+        self.save_checkpoint_after_prefill(input_token_ids.len())?;
+        Self::selector_step(&output)
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        token_id: u32,
+        selector: &sllm_core::DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if !self.prefilled {
+            return Err(GenerationServiceError::Execution(
+                "Gemma 4 MoE decode was requested before prefill".to_owned(),
+            ));
+        }
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = self
+            .inner
+            .decode_with_device_selector(token, selector)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        self.absorb(&output);
+        self.last_argmax_token = output.token_ids().last().copied();
+        self.committed_length = self
+            .committed_length
+            .checked_add(1)
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        Self::selector_step(&output)
+    }
+
     fn cancel(&mut self) {
-        // A generation-service cancellation can happen after one or more
-        // argmax tokens have already been published. Rewinding that
-        // transition would make the request-visible history disagree with
-        // device state. Request drop releases the opaque KV/workspace state;
-        // `cancel_last_transition` remains reserved for speculative output
-        // which has not crossed the publication boundary.
+        self.inner.cancel();
     }
 }
 
@@ -10041,6 +10354,58 @@ impl GenerationExecutorV1 for QwenMultimodalExecutorV1<'_> {
         ))
     }
 
+    fn supports_device_selector(&self) -> bool {
+        true
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        input_token_ids: &[u32],
+        selector: &sllm_core::DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.prefilled {
+            return Err(GenerationServiceError::Execution(
+                "multimodal prefill was requested twice".to_owned(),
+            ));
+        }
+        let token_ids = input_token_ids
+            .iter()
+            .map(|token| i32::try_from(*token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = self
+            .inner
+            .prefill_multimodal_with_device_selector(
+                &token_ids,
+                &self.prompt.embeddings_bf16,
+                &self.prompt.positions,
+                selector,
+            )
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        self.prefilled = true;
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        token_id: u32,
+        selector: &sllm_core::DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = self
+            .inner
+            .decode_with_device_selector(token, selector)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
     fn cancel(&mut self) {
         self.inner.cancel();
     }
@@ -10409,6 +10774,36 @@ mod tests {
                 "context length {context_length} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn ministral3_accepts_explicitly_disabled_logprobs_controls() {
+        let request = crate::api::parse_chat_completion_request(
+            br#"{"model":"ministral3","messages":[{"role":"user","content":"hi"}],"logprobs":false,"top_logprobs":0}"#,
+        )
+        .expect("the neutral logprob controls are valid on the public wire");
+        let logprobs = request.logprobs().expect("explicit controls are retained");
+        assert!(!logprobs.enabled());
+        assert_eq!(logprobs.top_logprobs(), Some(0));
+        assert!(ministral_logprobs_are_supported(Some(logprobs)));
+        assert!(ministral_logprobs_are_supported(None));
+    }
+
+    #[test]
+    fn gemma4_moe_fixed_profile_requires_the_device_selector() {
+        let parameters = sllm_core::SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).unwrap();
+        let config = SamplerChainConfigV1::new(parameters)
+            .with_top_k(GEMMA_FIXED_TOP_K_V1)
+            .unwrap();
+        let sampler = SamplerChainV1::new(config, &[]).unwrap();
+        assert!(sampler.supports_device_selector());
+        let selector = sampler
+            .prepare_device_selector(262_144, None, 81, 0)
+            .unwrap();
+        assert_eq!(selector.top_k(), GEMMA_FIXED_TOP_K_V1);
+        assert_eq!(selector.top_p(), 0.95);
+        assert!(selector.additive_logits().is_empty());
+        assert!(selector.valid_mask().is_empty());
     }
 
     #[test]

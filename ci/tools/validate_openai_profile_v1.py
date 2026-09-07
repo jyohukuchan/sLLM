@@ -23,7 +23,12 @@ def validate(document: object) -> None:
     if not isinstance(positive, dict):
         raise ValueError("positive fixture is absent")
     request = positive.get("request")
-    if not isinstance(request, dict) or request.get("temperature") != 0.0 or request.get("n") != 1:
+    if (
+        not isinstance(request, dict)
+        or request.get("temperature") != 1.0
+        or request.get("top_p") != 0.95
+        or request.get("n") != 1
+    ):
         raise ValueError("positive request does not retain fixed profile boundaries")
     stream = positive.get("stream")
     if not isinstance(stream, dict) or stream.get("terminal") != "[DONE]":

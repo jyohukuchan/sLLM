@@ -28,7 +28,8 @@ use sllm_frontend::{
 };
 
 use crate::api::{
-    ApiErrorV1, ChatCompletionRequestV1, ErrorCodeV1, FinishReasonV1, MAX_REQUEST_BODY_BYTES,
+    ApiErrorV1, ChatCompletionRequestV1, ErrorCodeV1, FIXED_TEMPERATURE_V1, FIXED_TOP_P_V1,
+    FinishReasonV1, MAX_REQUEST_BODY_BYTES, validate_fixed_sampling_value,
 };
 use crate::metrics::{HttpEndpointV1, MetricsRequestHandleV1, RequestOutcomeV1};
 use crate::model_lifecycle::ModelLifecycleLeaseV1;
@@ -46,7 +47,7 @@ use crate::phase43_transport::{
 use crate::resume::{ReplayErrorV1, ResumableStoreV1};
 use crate::runtime::ModelRegistryEntryV1;
 use crate::runtime::{GenerationReceiverV1, SchedulerEventV1};
-use crate::service::{AppStateV1, resolve_model_for_request};
+use crate::service::{AppStateV1, resolve_model_for_request, validate_fixed_sampler_profile};
 
 const ANTHROPIC_VERSION_HEADER: HeaderName = HeaderName::from_static("anthropic-version");
 const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
@@ -195,6 +196,8 @@ fn prepare_responses(
     request: ResponsesRequestV1,
     state: &AppStateV1,
 ) -> Result<PreparedProtocolV1, ApiErrorV1> {
+    validate_fixed_sampling_value("temperature", request.temperature(), FIXED_TEMPERATURE_V1)?;
+    validate_fixed_sampling_value("top_p", request.top_p(), FIXED_TOP_P_V1)?;
     validate_resumable_budget(
         request.sllm().resumable(),
         request.max_output_tokens(),
@@ -249,8 +252,8 @@ fn prepare_responses(
             prompt,
             None,
             request.max_output_tokens(),
-            request.temperature().unwrap_or(1.0),
-            request.top_p().unwrap_or(1.0),
+            FIXED_TEMPERATURE_V1,
+            FIXED_TOP_P_V1,
             Vec::new(),
             request.stream(),
             request.sllm().resumable(),
@@ -274,8 +277,8 @@ fn prepare_responses(
             simple_messages,
             assistant_prefill,
             request.max_output_tokens(),
-            request.temperature().unwrap_or(1.0),
-            request.top_p().unwrap_or(1.0),
+            FIXED_TEMPERATURE_V1,
+            FIXED_TOP_P_V1,
             Vec::new(),
             request.stream(),
             request.sllm().resumable(),
@@ -334,8 +337,8 @@ fn prepare_anthropic(
             prompt,
             None,
             request.max_tokens(),
-            1.0,
-            1.0,
+            FIXED_TEMPERATURE_V1,
+            FIXED_TOP_P_V1,
             request.stop_sequences().to_vec(),
             request.stream(),
             request.sllm().resumable(),
@@ -359,8 +362,8 @@ fn prepare_anthropic(
             simple_messages,
             None,
             request.max_tokens(),
-            1.0,
-            1.0,
+            FIXED_TEMPERATURE_V1,
+            FIXED_TOP_P_V1,
             request.stop_sequences().to_vec(),
             request.stream(),
             request.sllm().resumable(),
@@ -601,6 +604,11 @@ async fn execute_protocol(prepared: PreparedProtocolV1, state: &AppStateV1) -> R
             "resumable streaming is not enabled on this server",
         )
         .into_response();
+    }
+    if let Err(error) =
+        validate_fixed_sampler_profile(prepared.model.fixed_sampler_top_k(), &prepared.request)
+    {
+        return error.into_response();
     }
     let receiver = match state.scheduler.submit_with_lease(
         prepared.model,

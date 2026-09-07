@@ -43,6 +43,25 @@ fn basic_anthropic() -> serde_json::Value {
 }
 
 #[test]
+fn responses_fixed_sampling_defaults_and_rejection() {
+    let request = parse_responses_request_v1(&json(basic_responses())).unwrap();
+    assert_eq!(request.temperature(), None);
+    assert_eq!(request.top_p(), None);
+    for (field, value) in [("temperature", 0.8), ("top_p", 0.9)] {
+        let mut body = basic_responses();
+        body[field] = serde_json::json!(value);
+        let error = parse_responses_request_v1(&json(body)).unwrap_err();
+        assert_eq!(error.param(), Some(field));
+        assert_eq!(error.code(), Phase43ErrorCodeV1::UnsupportedParameter);
+    }
+    for (field, value) in [("temperature", 1.0), ("top_p", 0.95)] {
+        let mut body = basic_responses();
+        body[field] = serde_json::json!(value);
+        parse_responses_request_v1(&json(body)).unwrap();
+    }
+}
+
+#[test]
 fn model_variant_boundaries_and_transport_parity() {
     for count in [0, 1, 4] {
         let adapters = variant_entries("adapter", count);

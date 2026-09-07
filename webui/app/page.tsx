@@ -662,8 +662,8 @@ export default function Home() {
           {
             model: selectedModel,
             messages: requestMessages,
-            temperature: 0,
-            topP: 1,
+            temperature: 1,
+            topP: 0.95,
             maxTokens,
             responseFormat: 'text',
             reasoning: false,
@@ -747,8 +747,8 @@ export default function Home() {
           {
             model: selectedModel,
             messages: [{ role: 'user', content: prompt }],
-            temperature: 0,
-            topP: 1,
+            temperature: 1,
+            topP: 0.95,
             maxTokens: benchmarkTokens,
             responseFormat: 'text',
             reasoning: false,

@@ -688,11 +688,23 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_rmsnorm_residual_fused_wave32_v1",
             "sllm_rmsnorm_residual_fused_wave64_v1",
             "sllm_token_selector_bf16_f32_mask_v1",
+            "sllm_token_selector_fixed_topk_final_v1",
+            "sllm_token_selector_fixed_topk_initial_v1",
+            "sllm_token_selector_fixed_topk_reduce_v1",
+            "sllm_token_selector_fixed_topk_topp_v1",
+            "sllm_token_selector_fixed_topp_boundary_v1",
+            "sllm_token_selector_fixed_topp_count_v1",
+            "sllm_token_selector_fixed_topp_histogram_v1",
+            "sllm_token_selector_fixed_topp_prefix_v1",
+            "sllm_token_selector_fixed_topp_select_key_v1",
+            "sllm_token_selector_fixed_topp_select_v1",
+            "sllm_token_selector_fixed_topp_token_block_prefix_v1",
+            "sllm_token_selector_fixed_topp_weight_prefix_v1",
         }
-        self.assertEqual(len(KERNEL_SYMBOLS), 161)
+        self.assertEqual(len(KERNEL_SYMBOLS), 173)
         self.assertEqual(tuple(sorted(KERNEL_SYMBOLS)), KERNEL_SYMBOLS)
         self.assertTrue(expected_additions <= set(KERNEL_SYMBOLS))
-        self.assertEqual(len(expected_additions), 32)
+        self.assertEqual(len(expected_additions), 44)
 
     def test_causal_attention_stub_allowlist_is_exact_and_duplicate_free(self) -> None:
         expected = (

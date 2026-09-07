@@ -59,16 +59,15 @@
       "normative_pin": "openai-openapi-117ce5680e4269f6656a4fd70d28f9755630d938",
       "request": {
         "required": ["model", "prompt"],
-        "optional": ["max_tokens", "temperature", "top_p", "stop", "presence_penalty", "frequency_penalty", "seed", "stream", "n", "logit_bias", "logprobs"],
+        "optional": ["max_tokens", "temperature", "top_p", "stop", "presence_penalty", "frequency_penalty", "seed", "stream", "n", "logprobs"],
         "prompt_shapes": ["string", "string_array", "token_array", "token_array_array"],
         "max_tokens": {"min": 1, "max": 4096, "default": 256},
-        "temperature": {"min": 0.0, "max": 2.0, "default": 1.0},
-        "top_p": {"min": 0.0, "max": 1.0, "default": 1.0},
-        "penalties": {"min": -2.0, "max": 2.0, "default": 0.0},
+        "temperature": {"fixed": 1.0, "default": 1.0},
+        "top_p": {"fixed": 0.95, "default": 0.95},
+        "penalties": {"fixed": 0.0},
         "stop": {"max_items": 4, "unique": true, "nonempty": true},
         "n": {"min": 1, "max": 8, "default": 1},
-        "logit_bias": {"max_items": 4096, "token_id_max": 4294967295, "value_min": -100.0, "value_max": 100.0},
-        "logprobs": {"min": 0, "max": 5}
+        "logprobs": {"fixed": 0}
       },
       "response": {"stream": "sse-data-json-done", "usage": "prompt-completion-total", "choices": "n-choice-state-from-phase40", "post_header_error": "single-json-error-no-done"},
       "limits": {"body_bytes": 100663296, "model_alias_bytes": 256, "input_tokens": 1048576},
@@ -166,7 +165,7 @@
     ],
     "negative": [
       {"id": "completion-unknown-field", "profile": "openai-completions-v1", "request": {"model": "qwen", "prompt": "x", "mystery": 1}, "error": {"status": 400, "code": "invalid_value", "param": "mystery"}},
-      {"id": "completion-nonfinite", "profile": "openai-completions-v1", "request": {"model": "qwen", "prompt": "x", "temperature": 3}, "error": {"status": 400, "code": "invalid_value", "param": "temperature"}},
+      {"id": "completion-nonfixed", "profile": "openai-completions-v1", "request": {"model": "qwen", "prompt": "x", "temperature": 0.8}, "error": {"status": 400, "code": "unsupported_parameter", "param": "temperature"}},
       {"id": "embedding-mixed-input", "profile": "openai-embeddings-v1", "request": {"model": "qwen", "input": ["x", 1]}, "error": {"status": 400, "code": "invalid_value", "param": "input"}},
       {"id": "rerank-empty-documents", "profile": "sllm-rerank-v1", "request": {"model": "ranker", "query": "q", "documents": []}, "error": {"status": 400, "code": "invalid_value", "param": "documents"}},
       {"id": "template-unverified-model", "profile": "sllm-token-utilities-v1", "request": {"model": "raw-jinja", "messages": [{"role": "user", "content": "x"}], "template": "{{ arbitrary }}"}, "error": {"status": 400, "code": "unsupported_parameter", "param": "template"}},

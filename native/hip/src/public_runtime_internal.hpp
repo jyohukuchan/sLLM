@@ -785,12 +785,12 @@ struct AccountingState final {
     return true;
   }
 
-  /* Token selector owns four descriptor bindings (logits, additive bias,
-   * validity mask, and the fixed-size output record).  Keep alias handling
+  /* Token selector owns five descriptor bindings (the workspace is null for
+   * the legacy operation). Keep alias handling
    * explicit: descriptors may reuse one backing buffer only when their
    * intervals are disjoint, and accounting therefore counts repeated pointer
    * identities with their exact multiplicity. */
-  static constexpr std::size_t token_selector_resource_count = 4U;
+  static constexpr std::size_t token_selector_resource_count = 5U;
 
   static void token_selector_resource_multiplicities(
       AccountingState *const *const resources,
@@ -815,9 +815,9 @@ struct AccountingState final {
   static bool reserve_token_selector_prepared_plan(
       AccountingState &context, AccountingState &logits,
       AccountingState &additive, AccountingState &valid_mask,
-      AccountingState &output) noexcept {
+      AccountingState &output, AccountingState &workspace) noexcept {
     AccountingState *const resources[] = {&logits, &additive, &valid_mask,
-                                          &output};
+                                          &output, &workspace};
     uint64_t multiplicities[token_selector_resource_count] = {};
     token_selector_resource_multiplicities(resources, multiplicities);
     const auto can_add = [](const uint64_t value, const uint64_t amount) {
@@ -848,9 +848,9 @@ struct AccountingState final {
   static bool release_token_selector_prepared_plan(
       AccountingState &context, AccountingState &logits,
       AccountingState &additive, AccountingState &valid_mask,
-      AccountingState &output) noexcept {
+      AccountingState &output, AccountingState &workspace) noexcept {
     AccountingState *const resources[] = {&logits, &additive, &valid_mask,
-                                          &output};
+                                          &output, &workspace};
     uint64_t multiplicities[token_selector_resource_count] = {};
     token_selector_resource_multiplicities(resources, multiplicities);
     if (context.child_count == 0U || context.lifetime_guards == 0U) {
@@ -877,9 +877,9 @@ struct AccountingState final {
   static bool reserve_token_selector_submission(
       AccountingState &context, AccountingState &queue, AccountingState &logits,
       AccountingState &additive, AccountingState &valid_mask,
-      AccountingState &output) noexcept {
+      AccountingState &output, AccountingState &workspace) noexcept {
     AccountingState *const resources[] = {&logits, &additive, &valid_mask,
-                                          &output};
+                                          &output, &workspace};
     uint64_t multiplicities[token_selector_resource_count] = {};
     token_selector_resource_multiplicities(resources, multiplicities);
     const auto can_add = [](const uint64_t value, const uint64_t amount) {
@@ -915,13 +915,12 @@ struct AccountingState final {
     return true;
   }
 
-  static bool release_token_selector_active(AccountingState &queue,
-                                            AccountingState &logits,
-                                            AccountingState &additive,
-                                            AccountingState &valid_mask,
-                                            AccountingState &output) noexcept {
+  static bool release_token_selector_active(
+      AccountingState &queue, AccountingState &logits,
+      AccountingState &additive, AccountingState &valid_mask,
+      AccountingState &output, AccountingState &workspace) noexcept {
     AccountingState *const resources[] = {&logits, &additive, &valid_mask,
-                                          &output};
+                                          &output, &workspace};
     uint64_t multiplicities[token_selector_resource_count] = {};
     token_selector_resource_multiplicities(resources, multiplicities);
     if (queue.active_submissions == 0U) {
@@ -947,9 +946,9 @@ struct AccountingState final {
   static bool rollback_token_selector_submission(
       AccountingState &context, AccountingState &queue, AccountingState &logits,
       AccountingState &additive, AccountingState &valid_mask,
-      AccountingState &output) noexcept {
+      AccountingState &output, AccountingState &workspace) noexcept {
     AccountingState *const resources[] = {&logits, &additive, &valid_mask,
-                                          &output};
+                                          &output, &workspace};
     uint64_t multiplicities[token_selector_resource_count] = {};
     token_selector_resource_multiplicities(resources, multiplicities);
     if (queue.active_submissions == 0U || queue.completion_references == 0U ||
@@ -981,9 +980,9 @@ struct AccountingState final {
   static bool release_token_selector_completion(
       AccountingState &context, AccountingState &queue, AccountingState &logits,
       AccountingState &additive, AccountingState &valid_mask,
-      AccountingState &output) noexcept {
+      AccountingState &output, AccountingState &workspace) noexcept {
     AccountingState *const resources[] = {&logits, &additive, &valid_mask,
-                                          &output};
+                                          &output, &workspace};
     uint64_t multiplicities[token_selector_resource_count] = {};
     token_selector_resource_multiplicities(resources, multiplicities);
     if (queue.completion_references == 0U || context.child_count == 0U ||

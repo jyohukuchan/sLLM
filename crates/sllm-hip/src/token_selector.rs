@@ -18,8 +18,12 @@ pub struct TokenSelectorDescriptor {
     additive_logits: TensorBinding,
     valid_mask: TensorBinding,
     output: TensorBinding,
+    workspace: Option<TensorBinding>,
     vocab_size: u64,
     temperature: f32,
+    top_k: u32,
+    top_p: f32,
+    flags: u32,
     seed: u64,
     counter: u64,
 }
@@ -47,8 +51,61 @@ impl TokenSelectorDescriptor {
             additive_logits,
             valid_mask,
             output,
+            workspace: None,
             vocab_size,
             temperature,
+            top_k: 0,
+            top_p: 1.0,
+            flags: sys::SLLM_HIP_TOKEN_SELECTOR_FLAG_ADDITIVE_PRESENT
+                | sys::SLLM_HIP_TOKEN_SELECTOR_FLAG_MASK_PRESENT,
+            seed,
+            counter,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_fixed(
+        logits: TensorBinding,
+        additive_logits: TensorBinding,
+        valid_mask: TensorBinding,
+        workspace: TensorBinding,
+        output: TensorBinding,
+        vocab_size: u64,
+        top_k: u32,
+        top_p: f32,
+        seed: u64,
+        counter: u64,
+        use_additive: bool,
+        use_mask: bool,
+    ) -> Result<Self, RuntimeError> {
+        if vocab_size == 0
+            || !matches!(top_k, 0 | 20 | 64)
+            || top_p.to_bits() != 0.95_f32.to_bits()
+            || (top_k == 0 && use_additive)
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "token selector fixed top-k/top-p contract is invalid",
+            ));
+        }
+        let mut flags = 0;
+        if use_additive {
+            flags |= sys::SLLM_HIP_TOKEN_SELECTOR_FLAG_ADDITIVE_PRESENT;
+        }
+        if use_mask {
+            flags |= sys::SLLM_HIP_TOKEN_SELECTOR_FLAG_MASK_PRESENT;
+        }
+        Ok(Self {
+            logits,
+            additive_logits,
+            valid_mask,
+            output,
+            workspace: Some(workspace),
+            vocab_size,
+            temperature: 1.0,
+            top_k,
+            top_p,
+            flags,
             seed,
             counter,
         })
@@ -62,11 +119,30 @@ impl TokenSelectorDescriptor {
         &self.output
     }
 
+    fn op_version_for_workspace(workspace_present: bool) -> u32 {
+        // K0 is a fixed top-p profile too. `top_k == 0` alone cannot select
+        // the legacy path because the fixed K0 contract needs its histogram
+        // workspace and must not read neutral additive/mask buffers.
+        if workspace_present {
+            sys::SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP
+        } else {
+            sys::SLLM_HIP_TOKEN_SELECTOR_VERSION
+        }
+    }
+
+    fn op_version(&self) -> u32 {
+        Self::op_version_for_workspace(self.workspace.is_some())
+    }
+
     fn raw(&self) -> Result<sys::sllm_token_selector_desc_t, RuntimeError> {
+        let workspace = match &self.workspace {
+            Some(workspace) => workspace.raw()?,
+            None => unsafe { std::mem::zeroed() },
+        };
         Ok(sys::sllm_token_selector_desc_t {
             struct_size: size_of::<sys::sllm_token_selector_desc_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            op_version: sys::SLLM_HIP_TOKEN_SELECTOR_VERSION,
+            op_version: self.op_version(),
             reserved: [0; 4],
             logits: self.logits.raw()?,
             additive_logits: self.additive_logits.raw()?,
@@ -76,7 +152,56 @@ impl TokenSelectorDescriptor {
             temperature: self.temperature,
             seed: self.seed,
             counter: self.counter,
+            top_k: self.top_k,
+            flags: self.flags,
+            top_p: self.top_p,
+            reserved_v2: 0,
+            workspace,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_k0_uses_v2_descriptor_version() {
+        let context = Context::test_without_native();
+        let binding = || {
+            crate::runtime::Buffer::test_without_native(&context)
+                .binding(sllm_core::TensorView::contiguous(sllm_core::DType::U8, &[1]).unwrap())
+        };
+        let fixed = TokenSelectorDescriptor::new_fixed(
+            binding(),
+            binding(),
+            binding(),
+            binding(),
+            binding(),
+            131_072,
+            0,
+            0.95,
+            123,
+            1,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(fixed.top_k, 0);
+        assert_eq!(fixed.flags, sys::SLLM_HIP_TOKEN_SELECTOR_FLAG_MASK_PRESENT);
+        assert!(fixed.workspace.is_some());
+        assert_eq!(
+            fixed.op_version(),
+            sys::SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP
+        );
+        assert_eq!(
+            TokenSelectorDescriptor::op_version_for_workspace(true),
+            sys::SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP
+        );
+        assert_eq!(
+            TokenSelectorDescriptor::op_version_for_workspace(false),
+            sys::SLLM_HIP_TOKEN_SELECTOR_VERSION
+        );
     }
 }
 

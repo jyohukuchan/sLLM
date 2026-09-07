@@ -960,6 +960,47 @@ impl GenerationTextFrontendV1 for Ministral3TextFrontendV1 {
 }
 
 impl GenerationExecutorV1 for sllm_core::Ministral3ExecutionRequest {
+    fn supports_device_selector(&self) -> bool {
+        true
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        input_token_ids: &[u32],
+        selector: &sllm_core::DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let input = input_token_ids
+            .iter()
+            .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = sllm_core::Ministral3ExecutionRequest::prefill_with_device_selector(
+            self, &input, selector,
+        )
+        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or_else(|| GenerationServiceError::Execution("missing GPU selection".to_owned()))?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        token_id: u32,
+        selector: &sllm_core::DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = sllm_core::Ministral3ExecutionRequest::decode_with_device_selector(
+            self, token, selector,
+        )
+        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or_else(|| GenerationServiceError::Execution("missing GPU selection".to_owned()))?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
     fn prefill(
         &mut self,
         input_token_ids: &[u32],

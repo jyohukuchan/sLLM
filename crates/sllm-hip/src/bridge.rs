@@ -1467,16 +1467,41 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                         reason: "token_select semantic descriptor is missing its contract"
                             .to_owned(),
                     })?;
-                let descriptor = TokenSelectorDescriptor::new(
-                    logits.binding(logits_owned.view().clone()),
-                    additive.binding(additive_owned.view().clone()),
-                    mask.binding(mask_owned.view().clone()),
-                    output.binding(output_owned.view().clone()),
-                    contract.vocab_size(),
-                    contract.temperature(),
-                    contract.seed(),
-                    contract.counter(),
-                )
+                let descriptor = if !contract.is_fixed() {
+                    TokenSelectorDescriptor::new(
+                        logits.binding(logits_owned.view().clone()),
+                        additive.binding(additive_owned.view().clone()),
+                        mask.binding(mask_owned.view().clone()),
+                        output.binding(output_owned.view().clone()),
+                        contract.vocab_size(),
+                        contract.temperature(),
+                        contract.seed(),
+                        contract.counter(),
+                    )
+                } else {
+                    let workspace_owned = operation.inputs().get(3).ok_or_else(|| {
+                        ExecutionError::InvalidRequest {
+                            reason: "fixed token selector is missing workspace input".to_owned(),
+                        }
+                    })?;
+                    let workspace = access
+                        .downcast_buffer_payload::<Buffer>(workspace_owned.buffer())?
+                        .clone();
+                    TokenSelectorDescriptor::new_fixed(
+                        logits.binding(logits_owned.view().clone()),
+                        additive.binding(additive_owned.view().clone()),
+                        mask.binding(mask_owned.view().clone()),
+                        workspace.binding(workspace_owned.view().clone()),
+                        output.binding(output_owned.view().clone()),
+                        contract.vocab_size(),
+                        contract.top_k(),
+                        contract.top_p(),
+                        contract.seed(),
+                        contract.counter(),
+                        contract.use_additive(),
+                        contract.use_mask(),
+                    )
+                }
                 .map_err(map_backend_error)?;
                 self.state.ensure_open()?;
                 HipPreparedPlan::TokenSelector(

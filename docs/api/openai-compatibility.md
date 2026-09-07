@@ -55,27 +55,39 @@ which must be the first message.
 
 Supported generation fields are:
 
-- `temperature`;
-- `top_p`;
+- `temperature`, which defaults to and only accepts `1.0`;
+- `top_p`, which defaults to and only accepts `0.95`;
 - `max_completion_tokens`;
 - `stop` as a string or array of strings;
-- `presence_penalty`;
-- `frequency_penalty`;
+- `presence_penalty: 0.0` and `frequency_penalty: 0.0` (the only accepted values);
 - `seed` as an optional signed 64-bit integer, matching the pinned OpenAPI `int64` schema;
 - `stream`;
 - `n`, an integer in the inclusive range `1..=8`;
-- `logit_bias`, a sparse object whose decimal token-ID keys map to finite values in
-  `[-100,100]` (at most 4,096 entries);
-- `logprobs` and `top_logprobs`. `logprobs` is boolean and
-  `top_logprobs` is an integer in `0..=20`; the latter requires
-  `logprobs: true`;
+- `logprobs: false` and `top_logprobs: 0` may be sent explicitly; logit bias,
+  enabled logprobs, and nonzero top logprobs are rejected;
 - `response_format` with the `text`, `json_object`, or bounded `json_schema`
   variants described below; and
 - the opt-in `sllm` extension object described in [Sampler-chain extension](#sampler-chain-extension).
 
 The server validates the ranges and types defined by the pinned OpenAI schema. It
 must reject any request containing an unsupported field or value even when the
-rest of the request is valid; it must not silently coerce or discard it.
+rest of the request is valid; it must not silently coerce or discard it. Seed,
+stop, tool/JSON grammar, and reasoning controls remain request-selectable. The
+fixed model profile resolves `top_k` to 20 for the reviewed Qwen coding
+profile, 64 for Gemma 4, and 0 (disabled) for Ministral 3;
+explicit sampler values must match that model value.
+
+The fixed GPU selector uses numerical contract version 2. After the internal
+valid-token mask, candidates are ordered by descending score, then ascending
+token ID for ties. Top-k (unless zero) precedes top-p; the first candidate that
+reaches the cumulative probability threshold is included. Sampling uses the
+renormalized retained candidates. Signed API seeds map to the existing unsigned
+64-bit seed representation; GPU draws use SplitMix64 with a request-local
+counter and wrapping 64-bit arithmetic. A repeated seed is reproducible within
+the same model, runtime, target, and request conditions. Switching from the old
+CPU sampler to this GPU contract can change the generated sequence for the same
+seed; CPU/GPU or cross-version sequence equality is not promised.
+
 Phase 17 resource limits cap the JSON body at 96 MiB so two bounded Base64 images fit, the model alias at
 256 UTF-8 bytes, messages at 1,024 entries, and `max_completion_tokens` at
 1–4,096. A `stop` array contains 1–4 nonempty, unique strings; the total stop
@@ -89,12 +101,9 @@ Prompt tokens are counted once while completion tokens are summed across
 choices. Choice zero retains the requested `seed`; later choices use a
 versioned deterministic derivation when a seed is present.
 
-When `logprobs: true`, each generated token exposes the selected token
-log-probability. `top_logprobs` requests up to 20 alternatives at each token.
-The values are computed after all configured masks and sampler stages, so a
-grammar-rejected token never appears as selected or as a top alternative.
-For SSE, profile v1 publishes the accumulated per-choice `logprobs.content`
-array on that choice's terminal chunk; content deltas remain unchanged.
+Logprob output is disabled in the fixed profile. Grammar, tool, and reasoning
+masks still apply to candidate selection and continue to preserve their forced
+token and stop behavior.
 
 For `stream: true`, the response uses Server-Sent Events with content type
 `text/event-stream`. Each event is framed as `data: <JSON>\n\n` and contains a
@@ -252,38 +261,30 @@ and must be documented and versioned independently.
 ### Sampler-chain extension
 
 `sllm.sampling` selects sampler-chain version `1` and keeps the stage order
-transport-independent. The accepted controls are `top_k` (`0..=1,000,000`),
-`min_p` (`0..=1`), `typical_p` (`(0,1]`), `repeat_penalty` (`(0,100]`),
-`repeat_last_n` (`0..=4,096`), and `ignore_eos`. Optional bounded stages are
-`dry`, `xtc`, `mirostat`, and `dynamic_temperature`:
+transport-independent. The fixed profile accepts only neutral controls:
+`top_k` must match the model profile (20 for the Qwen coding profile, 64 for
+Gemma 4, or 0 for Ministral 3),
+`min_p: 0`, `typical_p: 1`, `repeat_penalty: 1`, `repeat_last_n: 0`, and
+`ignore_eos: false`. DRY and XTC may be omitted or supplied with zero
+probability/multiplier; dynamic temperature and Mirostat are disabled.
 
 ```json
 {
   "sllm": {
     "sampling": {
       "chain_version": 1,
-      "top_k": 40,
-      "min_p": 0.05,
-      "repeat_penalty": 1.1,
-      "dry": {
-        "multiplier": 0.5,
-        "base": 1.75,
-        "allowed_length": 2,
-        "penalty_last_n": 64,
-        "sequence_breakers": ["\n", ":"]
-      },
-      "xtc": {"probability": 0.1, "threshold": 0.1, "min_keep": 1},
-      "dynamic_temperature": {"range": 0.2, "exponent": 1.0}
+      "top_k": 20,
+      "min_p": 0,
+      "typical_p": 1,
+      "repeat_penalty": 1,
+      "repeat_last_n": 0
     }
   }
 }
 ```
 
-DRY sequence breakers are limited to 16 unique strings and 1,024 total bytes;
-history and all stage-specific bounds are fail-closed. Mirostat version `1` or
-`2` uses `tau` in `(0,100]` and `eta` in `(0,1]`, and cannot be combined with
-`top_k`, `min_p`, `typical_p`, XTC, or dynamic temperature. Unknown members and
-unsupported combinations return `invalid_value`.
+Unknown members and non-neutral values return `unsupported_parameter`; the
+server never silently rewrites them or falls back to host sampling.
 
 ### Thinking and separated reasoning extension
 
@@ -502,13 +503,13 @@ bitwise-identical across two runs, HIP-only with fallback false, and cleanup/bas
 
 The reviewed `gemma4moe` GGUF uses the existing Chat Completions, Completions,
 Responses, SSE, model-list, metrics, cancellation, and dynamic model-lifecycle
-transports without an architecture-specific wire field. Its current terminal
-provider exposes device Argmax rather than logits, so requests must select
-greedy semantics (`temperature: 0`, `top_p: 1`) and may not request grammar,
-logprobs, logit bias, random sampling, reasoning mode, adapters, embeddings,
-rerank, infill, image input, or draft execution. Unsupported capabilities are
-rejected before request-state allocation and never fall back to CPU or another
-model topology.
+transports without an architecture-specific wire field. Phase81 connects its
+resident terminal row to the common device selector with the locked Gemma K=64
+profile; while that connection is unavailable, Chat, Completions, and Responses
+requests are rejected before request-state allocation and never fall back to CPU
+or another model topology. Grammar, tools, logprobs, logit bias, random
+sampling, reasoning mode, adapters, embeddings, rerank, infill, image input,
+and draft execution retain their existing capability checks.
 
 The artifact fixes KV storage to implicit-unit static E4M3. Process/model
 configuration may omit the KV option or name `fp8-static`; FP16, retired
@@ -516,7 +517,7 @@ block-16, MXFP8, and NVFP4 KV options are rejected for this architecture.
 Prefix-cache and checkpoint startup options use the same 30 opaque KV states;
 an exact hit reuses its terminal Argmax, a partial hit executes only the new
 suffix as M=1 transitions, and a divergent token history fails closed.
-The bundled WebUI sends the same greedy request and continues to expose only
+The bundled WebUI sends the fixed-profile request and continues to expose only
 the output-token limit in its chat settings. It uses the canonical strict-profile
 `max_completion_tokens` field; the legacy `max_tokens` alias remains confined to
 the explicitly selected OpenWebUI compatibility profile.
@@ -526,10 +527,10 @@ the explicitly selected OpenWebUI compatibility profile.
 Gemma 4 MTP adds no architecture-specific JSON field. Chat Completions,
 Completions, model listing, non-stream responses, SSE, usage, stop exclusion,
 cancellation, metrics, and lifecycle admin routes keep their existing wire
-contracts. The initial assistant path is exact `gfx1201`, greedy only,
+contracts. The initial assistant path is exact `gfx1201`, Argmax-only,
 draft width 1, context at most 2,048, and the reviewed target/assistant pair.
-Requests must select greedy semantics with `temperature: 0`; unsupported
-sampling, logprobs, or structured generation fails before request execution.
+It cannot satisfy the fixed stochastic profile; unsupported sampling, logprobs,
+or structured generation fails before request execution.
 
 Static startup supplies `--mtp-assistant-gguf PATH`,
 `--mtp-assistant-derived-lock PATH`, and `--draft mtp-auto` beside the ordinary
@@ -565,7 +566,7 @@ error-diff review.
 
 | profile | endpoint | compatibility claim | fixed semantics |
 | --- | --- | --- | --- |
-| `openai-completions-v1` | `POST /v1/completions` | OpenAI subset only | Four prompt shapes (string, string array, token array, token-array array); `max_tokens` 1–4,096; `n` 1–8; stop strings 1–4, unique and nonempty; `logprobs` 0–5; strict SSE/usage/error framing shared with the transport adapter. |
+| `openai-completions-v1` | `POST /v1/completions` | OpenAI subset only | Four prompt shapes (string, string array, token array, token-array array); `max_tokens` 1–4,096; fixed temperature `1.0`, top-p `0.95`, zero penalties, and logprobs `0`; `n` 1–8; stop strings 1–4, unique and nonempty; strict SSE/usage/error framing shared with the transport adapter. |
 | `openai-embeddings-v1` | `POST /v1/embeddings` | OpenAI subset only | Four input shapes; `float` or `base64` output; arithmetic mean over final hidden rows, L2 normalization, finite F32 output, model-lock dimension and input ordering. Pooling and normalization are not client-selectable. |
 | `sllm-rerank-v1` | `POST /v1/rerank` | sLLM-native, not OpenAI | L2-normalized query/document dot product; higher score wins; ties retain original document order; 1–256 documents; `top_n` is 1 through document count and is never silently clamped. |
 | `sllm-token-utilities-v1` | `POST /v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/input-tokens` | sLLM-native | Shared frontend tokenizer/renderer; model-default special-token policy; lossless byte fallback; verified template digest; no model execution or GPU execution. |
@@ -590,17 +591,21 @@ available; compile-only or host evidence cannot promote that capability.
 
 Phase 42 itself does not expose Responses, Anthropic Messages, tools/MCP, arbitrary
 Jinja or template kwargs, multimodal embedding/rerank/infill, wire session
-resume, or llama.cpp endpoint aliases. It also does not alter the existing
-Chat Completions profile-v1 fields, reject matrix, response envelopes, or SSE
-terminal behavior.
+resume, or llama.cpp endpoint aliases. Its Completions and infill generation
+fields use the same fixed temperature `1.0`, top-p `0.95`, and neutral penalty
+profile described above; explicit nonfixed values are rejected before execution.
 
 ## Phase 60 Ministral 3 API status
 
 Ministral 3 text execution is wired through the existing model-list, Chat
 Completions, non-stream response, SSE, usage, cancellation, and dynamic model
-library contracts. The initial path is greedy text-only generation; image
-input, vision execution, tools, logprobs, structured output, and unsupported
-sampling options fail closed rather than falling back to another model path.
+library contracts. Its verified graph now has the common device-selector seam,
+but the pinned official generation config supplies no top-k recommendation. The
+explicit Ministral profile therefore disables top-k (`top_k=0`) while retaining
+fixed temperature `1.0` and top-p `0.95`; the common selector must support this
+tuple before execution and there is no host-sampling fallback. Image input,
+vision execution, tools, logprobs, and unsupported sampling options fail closed;
+JSON grammar uses the same internal selector mask when requested.
 
 This is an integration-status statement, not a production-quality claim. The
 same official GGUF executes on exact `gfx1030` and `gfx1201`, but its greedy
@@ -618,6 +623,6 @@ profile connects it to OpenWebUI through `/v1/models` and `/v1/chat/completions`
 Tokenization and apply-template utilities use the artifact's verified frontend.
 Embeddings and tool protocol are unavailable for this text-only profile.
 
-This scoped safetensors entrypoint does not complete Phase81 static FP8 KV/MTP
+This scoped safetensors entrypoint does not complete Phase82 static FP8 KV/MTP
 or add batching, vision, MXFP6 KV, other artifacts, or other GPUs. See the
 [deployment and validation record](../history/2026/09/1-10/qwen38-nvfp4-r9700-server.md).

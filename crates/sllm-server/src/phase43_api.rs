@@ -13,6 +13,9 @@ use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Number, Value};
 
+const FIXED_TEMPERATURE_V1: f32 = 1.0;
+const FIXED_TOP_P_V1: f32 = 0.95;
+
 use crate::api::{ModelVariantRequestV1, parse_model_variant_value};
 
 pub const PHASE43_RESPONSES_PROFILE_VERSION: &str = "openai-responses-v1";
@@ -501,11 +504,11 @@ pub fn parse_responses_request_v1(body: &[u8]) -> Result<ResponsesRequestV1, Pha
     }
     let temperature = opt_f32(&map, "temperature")?;
     if let Some(value) = temperature {
-        bounded_float("temperature", value, 0.0, 2.0)?;
+        fixed_sampling_value("temperature", value, FIXED_TEMPERATURE_V1)?;
     }
     let top_p = opt_f32(&map, "top_p")?;
     if let Some(value) = top_p {
-        bounded_float("top_p", value, 0.0, 1.0)?;
+        fixed_sampling_value("top_p", value, FIXED_TOP_P_V1)?;
     }
     let stream = opt_bool(&map, "stream")?.unwrap_or(false);
     let tools = parse_responses_tools(map.get("tools"))?;
@@ -546,6 +549,13 @@ pub fn parse_responses_request_v1(body: &[u8]) -> Result<ResponsesRequestV1, Pha
         store,
         sllm,
     })
+}
+
+fn fixed_sampling_value(param: &str, value: f32, expected: f32) -> Result<(), Phase43ApiErrorV1> {
+    if value != expected {
+        return Err(Phase43ApiErrorV1::unsupported(param));
+    }
+    Ok(())
 }
 
 pub fn parse_anthropic_request_v1(
@@ -1617,15 +1627,6 @@ fn as_f32(value: &Value, param: &str) -> Result<f32, Phase43ApiErrorV1> {
         return Err(invalid(param, "must be a finite number"));
     }
     Ok(value as f32)
-}
-fn bounded_float(param: &str, value: f32, min: f32, max: f32) -> Result<(), Phase43ApiErrorV1> {
-    if !value.is_finite() || !(min..=max).contains(&value) {
-        return Err(invalid(
-            param,
-            format!("must be finite and in [{min},{max}]"),
-        ));
-    }
-    Ok(())
 }
 fn invalid(param: impl Into<String>, message: impl Into<String>) -> Phase43ApiErrorV1 {
     Phase43ApiErrorV1::invalid_value(param, message)

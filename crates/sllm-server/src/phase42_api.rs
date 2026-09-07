@@ -11,6 +11,11 @@ use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Number, Value};
 
+const FIXED_TEMPERATURE_V1: f32 = 1.0;
+const FIXED_TOP_P_V1: f32 = 0.95;
+const FIXED_PRESENCE_PENALTY_V1: f32 = 0.0;
+const FIXED_FREQUENCY_PENALTY_V1: f32 = 0.0;
+
 pub const PHASE42_PROFILE_VERSION: &str = "sllm-inference-endpoints-v1";
 pub const MAX_REQUEST_BODY_BYTES: usize = 96 * 1024 * 1024;
 pub const MAX_MODEL_ALIAS_BYTES: usize = 256;
@@ -22,7 +27,6 @@ pub const MAX_COMPLETION_TOKENS: u32 = 4_096;
 pub const DEFAULT_COMPLETION_TOKENS: u32 = 256;
 pub const MAX_STOP_SEQUENCES: usize = 4;
 pub const MAX_STOP_BYTES: usize = 16 * 1024;
-pub const MAX_LOGIT_BIAS_ENTRIES: usize = 4_096;
 pub const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_DIMENSIONS: u32 = 32_768;
 
@@ -483,13 +487,25 @@ pub fn parse_completion_request(body: &[u8]) -> Result<CompletionRequestV1, ApiE
     if !(1..=MAX_COMPLETION_TOKENS).contains(&max_tokens) {
         return Err(invalid("max_tokens", "must be in [1,4096]"));
     }
-    let temperature = opt_f32(&map, "temperature")?.unwrap_or(1.0);
+    let temperature = fixed_sampling_value(
+        "temperature",
+        opt_f32(&map, "temperature")?,
+        FIXED_TEMPERATURE_V1,
+    )?;
     bounded_float("temperature", temperature, 0.0, 2.0)?;
-    let top_p = opt_f32(&map, "top_p")?.unwrap_or(1.0);
+    let top_p = fixed_sampling_value("top_p", opt_f32(&map, "top_p")?, FIXED_TOP_P_V1)?;
     bounded_float("top_p", top_p, 0.0, 1.0)?;
-    let presence_penalty = opt_f32(&map, "presence_penalty")?.unwrap_or(0.0);
+    let presence_penalty = fixed_sampling_value(
+        "presence_penalty",
+        opt_f32(&map, "presence_penalty")?,
+        FIXED_PRESENCE_PENALTY_V1,
+    )?;
     bounded_float("presence_penalty", presence_penalty, -2.0, 2.0)?;
-    let frequency_penalty = opt_f32(&map, "frequency_penalty")?.unwrap_or(0.0);
+    let frequency_penalty = fixed_sampling_value(
+        "frequency_penalty",
+        opt_f32(&map, "frequency_penalty")?,
+        FIXED_FREQUENCY_PENALTY_V1,
+    )?;
     bounded_float("frequency_penalty", frequency_penalty, -2.0, 2.0)?;
     let stop = parse_stop(&map)?;
     let seed = opt_i64(&map, "seed")?;
@@ -498,13 +514,16 @@ pub fn parse_completion_request(body: &[u8]) -> Result<CompletionRequestV1, ApiE
     if !(1..=8).contains(&n) {
         return Err(invalid("n", "must be in [1,8]"));
     }
-    let logit_bias = parse_logit_bias(&map)?;
+    if map.contains_key("logit_bias") {
+        return Err(ApiErrorV1::unsupported("logit_bias"));
+    }
+    let logit_bias = BTreeMap::new();
     let logprobs = match map.get("logprobs") {
         None | Some(Value::Null) => None,
         Some(value) => {
             let n = as_u64(value, "logprobs")?;
-            if n > 5 {
-                return Err(invalid("logprobs", "must be in [0,5]"));
+            if n != 0 {
+                return Err(ApiErrorV1::unsupported("logprobs"));
             }
             Some(n as u8)
         }
@@ -524,6 +543,14 @@ pub fn parse_completion_request(body: &[u8]) -> Result<CompletionRequestV1, ApiE
         logit_bias,
         logprobs,
     })
+}
+
+fn fixed_sampling_value(param: &str, value: Option<f32>, expected: f32) -> Result<f32, ApiErrorV1> {
+    let value = value.unwrap_or(expected);
+    if value != expected {
+        return Err(ApiErrorV1::unsupported(param));
+    }
+    Ok(value)
 }
 
 pub fn parse_embedding_request(body: &[u8]) -> Result<EmbeddingRequestV1, ApiErrorV1> {
@@ -721,9 +748,13 @@ pub fn parse_infill_request(body: &[u8]) -> Result<InfillRequestV1, ApiErrorV1> 
     if !(1..=MAX_COMPLETION_TOKENS).contains(&max_tokens) {
         return Err(invalid("max_tokens", "must be in [1,4096]"));
     }
-    let temperature = opt_f32(&map, "temperature")?.unwrap_or(1.0);
+    let temperature = fixed_sampling_value(
+        "temperature",
+        opt_f32(&map, "temperature")?,
+        FIXED_TEMPERATURE_V1,
+    )?;
     bounded_float("temperature", temperature, 0.0, 2.0)?;
-    let top_p = opt_f32(&map, "top_p")?.unwrap_or(1.0);
+    let top_p = fixed_sampling_value("top_p", opt_f32(&map, "top_p")?, FIXED_TOP_P_V1)?;
     bounded_float("top_p", top_p, 0.0, 1.0)?;
     let stop = parse_stop(&map)?;
     let seed = opt_i64(&map, "seed")?;
@@ -917,35 +948,6 @@ fn parse_stop(map: &Map<String, Value>) -> Result<Vec<String>, ApiErrorV1> {
         }
     }
     Ok(std::mem::take(&mut values))
-}
-
-fn parse_logit_bias(map: &Map<String, Value>) -> Result<BTreeMap<u32, f32>, ApiErrorV1> {
-    let Some(value) = map.get("logit_bias") else {
-        return Ok(BTreeMap::new());
-    };
-    let object = value
-        .as_object()
-        .ok_or_else(|| invalid("logit_bias", "must be an object"))?;
-    if object.len() > MAX_LOGIT_BIAS_ENTRIES {
-        return Err(invalid("logit_bias", "must contain at most 4096 entries"));
-    }
-    let mut result = BTreeMap::new();
-    for (raw_id, value) in object {
-        let id = raw_id
-            .parse::<u64>()
-            .ok()
-            .filter(|id| *id <= u64::from(u32::MAX))
-            .ok_or_else(|| {
-                invalid(
-                    format!("logit_bias.{raw_id}"),
-                    "key must be an unsigned 32-bit token ID",
-                )
-            })?;
-        let bias = as_f32(value, &format!("logit_bias.{raw_id}"))?;
-        bounded_float(&format!("logit_bias.{raw_id}"), bias, -100.0, 100.0)?;
-        result.insert(id as u32, bias);
-    }
-    Ok(result)
 }
 
 fn parse_messages(value: &Value) -> Result<Vec<TemplateMessageV1>, ApiErrorV1> {

@@ -1032,14 +1032,17 @@ pub struct SamplingSelectionV1 {
     pub top_logprobs: Vec<SamplingLogprobV1>,
 }
 
-/// Inputs for the bounded M=1 prepared device selector subset.  The vectors
-/// are vocabulary-sized and are uploaded on the model execution queue; only
-/// the fixed-size selected record is read back.
+/// Inputs for the bounded M=1 prepared device selector subset. Empty additive
+/// and mask vectors mean all-zero corrections and all-valid tokens. This
+/// avoids vocabulary-sized host work for the fixed sampling profile.
 #[derive(Clone, PartialEq)]
 pub struct DeviceTokenSelectorRequestV1 {
+    vocab_size: usize,
     additive_logits: Vec<f32>,
     valid_mask: Vec<u8>,
     temperature: f32,
+    top_k: usize,
+    top_p: f32,
     seed: u64,
     counter: u64,
     return_logprob: bool,
@@ -1049,15 +1052,34 @@ impl fmt::Debug for DeviceTokenSelectorRequestV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("DeviceTokenSelectorRequestV1")
+            .field("vocab_size", &self.vocab_size)
             .field("additive_logits_len", &self.additive_logits.len())
             .field("valid_mask_len", &self.valid_mask.len())
             .field("temperature", &self.temperature)
+            .field("top_k", &self.top_k)
+            .field("top_p", &self.top_p)
             .field("return_logprob", &self.return_logprob)
             .finish()
     }
 }
 
 impl DeviceTokenSelectorRequestV1 {
+    pub const fn vocab_size(&self) -> usize {
+        self.vocab_size
+    }
+
+    pub const fn top_k(&self) -> usize {
+        self.top_k
+    }
+
+    pub const fn top_p(&self) -> f32 {
+        self.top_p
+    }
+
+    pub fn is_token_valid(&self, token: usize) -> bool {
+        token < self.vocab_size && (self.valid_mask.is_empty() || self.valid_mask[token] != 0)
+    }
+
     pub fn additive_logits(&self) -> &[f32] {
         &self.additive_logits
     }
@@ -1263,15 +1285,44 @@ impl SamplerChainV1 {
     }
 
     pub fn supports_device_selector(&self) -> bool {
-        self.config.parameters.temperature() > 0.0
-            && self.config.parameters.top_p() == 1.0
-            && !self.config.top_k.is_some_and(|top_k| top_k > 0)
+        self.supports_fixed_device_selector()
+            || self.config.parameters.temperature() > 0.0
+                && self.config.parameters.top_p() == 1.0
+                && !self.config.top_k.is_some_and(|top_k| top_k > 0)
+                && self.config.min_p == 0.0
+                && self.config.typical_p == 1.0
+                && (self.config.repeat_penalty == 1.0 || self.config.repeat_last_n == 0)
+                && self.config.dynamic_temperature.is_none()
+                && !self.config.xtc.is_some_and(|xtc| xtc.probability > 0.0)
+                && self.config.mirostat.is_none()
+                && self.config.top_logprobs == 0
+    }
+
+    fn supports_fixed_device_selector(&self) -> bool {
+        self.config.parameters.temperature() == 1.0
+            && self.config.parameters.top_p() == 0.95
+            && matches!(self.config.top_k, None | Some(0 | 20 | 64))
+            && self.config.parameters.presence_penalty() == 0.0
+            && self.config.parameters.frequency_penalty() == 0.0
+            && self.config.repeat_penalty == 1.0
+            && self.config.repeat_last_n == 0
             && self.config.min_p == 0.0
             && self.config.typical_p == 1.0
-            && (self.config.repeat_penalty == 1.0 || self.config.repeat_last_n == 0)
             && self.config.dynamic_temperature.is_none()
-            && !self.config.xtc.is_some_and(|xtc| xtc.probability > 0.0)
+            && self
+                .config
+                .dry
+                .as_ref()
+                .is_none_or(|dry| dry.multiplier == 0.0)
+            && self
+                .config
+                .xtc
+                .as_ref()
+                .is_none_or(|xtc| xtc.probability == 0.0)
             && self.config.mirostat.is_none()
+            && self.config.logit_bias.is_empty()
+            && self.config.ignore_eos_token.is_none()
+            && !self.config.return_logprobs
             && self.config.top_logprobs == 0
     }
 
@@ -1287,6 +1338,29 @@ impl SamplerChainV1 {
         }
         if valid_mask.is_some_and(|mask| mask.len() != vocab_size) {
             return Err(SamplingError::InvalidMaskLength);
+        }
+        if self.supports_fixed_device_selector() {
+            let mask = valid_mask
+                .map(|mask| {
+                    mask.iter()
+                        .map(|&valid| u8::from(valid))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !mask.is_empty() && !mask.iter().any(|&valid| valid != 0) {
+                return Err(SamplingError::EmptyDistribution);
+            }
+            return Ok(DeviceTokenSelectorRequestV1 {
+                vocab_size,
+                additive_logits: Vec::new(),
+                valid_mask: mask,
+                temperature: 1.0,
+                top_k: self.config.top_k.unwrap_or(0),
+                top_p: 0.95,
+                seed,
+                counter,
+                return_logprob: false,
+            });
         }
         let mut additive_logits = vec![0.0_f32; vocab_size];
         let mut output_mask = valid_mask.map_or_else(
@@ -1338,9 +1412,12 @@ impl SamplerChainV1 {
             return Err(SamplingError::EmptyDistribution);
         }
         Ok(DeviceTokenSelectorRequestV1 {
+            vocab_size,
             additive_logits,
             valid_mask: output_mask,
             temperature: self.config.parameters.temperature(),
+            top_k: 0,
+            top_p: 1.0,
             seed,
             counter,
             return_logprob: self.config.return_logprobs,
@@ -2477,6 +2554,43 @@ mod tests {
                 .token_id,
             7
         );
+    }
+
+    #[test]
+    fn fixed_device_selector_omits_neutral_arrays_and_preserves_constraints() {
+        for k in [0_usize, 20, 64] {
+            let config = SamplerChainConfigV1::new(params(1.0, 0.95, 0.0, 0.0))
+                .with_top_k(k)
+                .unwrap();
+            let chain = SamplerChainV1::new(config, &[1, 1, 2]).unwrap();
+            for vocab in [k.saturating_sub(1).max(1), k.max(1), k + 1, 248_320] {
+                let request = chain.prepare_device_selector(vocab, None, 7, 9).unwrap();
+                assert_eq!(request.vocab_size(), vocab);
+                assert_eq!(request.top_k(), k);
+                assert_eq!(request.top_p(), 0.95);
+                assert!(request.additive_logits().is_empty());
+                assert!(request.valid_mask().is_empty());
+                assert!(request.is_token_valid(vocab - 1));
+                assert!(!request.is_token_valid(vocab));
+            }
+            let mask = [false, true, false];
+            let request = chain
+                .prepare_device_selector(3, Some(&mask), 11, 5)
+                .unwrap();
+            assert_eq!(request.valid_mask(), &[0, 1, 0]);
+            assert!(!request.is_token_valid(0));
+            assert!(request.is_token_valid(1));
+            assert_eq!(request.seed(), 11);
+            assert_eq!(request.counter(), 5);
+            assert_eq!(
+                chain.prepare_device_selector(3, Some(&[false; 3]), 0, 0),
+                Err(SamplingError::EmptyDistribution)
+            );
+            assert_eq!(
+                chain.prepare_device_selector(4, Some(&mask), 0, 0),
+                Err(SamplingError::InvalidMaskLength)
+            );
+        }
     }
 
     #[test]

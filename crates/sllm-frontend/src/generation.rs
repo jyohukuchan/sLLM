@@ -7,10 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use sllm_core::{
     CompiledGrammar, DeviceTokenSelectorRequestV1, DraftProposalV1, DraftProviderV1,
-    Gemma4ExecutionRequest, Gemma4ModelLock, GrammarError, MAX_SPECULATIVE_DRAFT_WIDTH_V1,
-    QwenExecutionRequest, SamplerChainConfigV1, SamplerChainV1, SamplingError,
-    SamplingParametersV1, SamplingRandomSource, SamplingSelectionV1, SpeculativeAccountingV1,
-    SpeculativeError, TokenTrie, verify_target_selected,
+    Gemma4ExecutionRequest, Gemma4ModelLock, Gemma4MoeExecutionRequest, GrammarError,
+    MAX_SPECULATIVE_DRAFT_WIDTH_V1, QwenExecutionRequest, SamplerChainConfigV1, SamplerChainV1,
+    SamplingError, SamplingParametersV1, SamplingRandomSource, SamplingSelectionV1,
+    SpeculativeAccountingV1, SpeculativeError, TokenTrie, verify_target_selected,
 };
 
 use crate::reasoning::{ReasoningControllerV1, ReasoningErrorV1, ReasoningPolicyV1};
@@ -1769,6 +1769,103 @@ impl GenerationExecutorV1 for Gemma4ExecutionRequest {
 
     fn cancel(&mut self) {
         Gemma4ExecutionRequest::cancel(self);
+    }
+}
+
+impl GenerationExecutorV1 for Gemma4MoeExecutionRequest {
+    fn prefill(
+        &mut self,
+        input_token_ids: &[u32],
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if include_last_logits {
+            return Err(GenerationServiceError::Execution(
+                "Gemma 4 MoE exposes device Argmax only; full logits are unsupported".to_owned(),
+            ));
+        }
+        let input = input_token_ids
+            .iter()
+            .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = self
+            .execute(&input)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let argmax = output
+            .token_ids()
+            .last()
+            .copied()
+            .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
+        Ok(GenerationStepV1::new(
+            u32::try_from(argmax).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+            None,
+        ))
+    }
+
+    fn decode(
+        &mut self,
+        token_id: u32,
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if include_last_logits {
+            return Err(GenerationServiceError::Execution(
+                "Gemma 4 MoE exposes device Argmax only; full logits are unsupported".to_owned(),
+            ));
+        }
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = self
+            .execute_next(&[token])
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        if output.token_ids().len() != 1 {
+            return Err(GenerationServiceError::MissingDeviceArgmax);
+        }
+        Ok(GenerationStepV1::new(
+            u32::try_from(output.token_ids()[0])
+                .map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+            None,
+        ))
+    }
+
+    fn supports_device_selector(&self) -> bool {
+        true
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        input_token_ids: &[u32],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let input = input_token_ids
+            .iter()
+            .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = self
+            .prefill_with_device_selector(&input, selector)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        token_id: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = self
+            .decode_with_device_selector(token, selector)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
+    fn cancel(&mut self) {
+        Gemma4MoeExecutionRequest::cancel(self);
     }
 }
 

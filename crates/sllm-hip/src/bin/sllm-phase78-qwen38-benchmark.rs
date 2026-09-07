@@ -3,8 +3,9 @@
 //!
 //! The binary deliberately accepts configuration only through explicit
 //! environment variables so the emitted JSON contains a compact, repeatable
-//! execution contract. It never enables MTP, sampling, EOS termination, stop
-//! strings, batching, or a non-HIP fallback.
+//! execution contract. The default remains the Phase 78 greedy benchmark.
+//! Phase 81 explicitly opts into host/GPU fixed sampling and matched input replay.
+//! It never enables MTP, EOS termination, stop strings, batching, or non-HIP fallback.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -18,12 +19,12 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sllm_core::{
-    AllocationSnapshot, Backend, ExecutionSessionRequest, KvCacheEncoding, QWEN35_VOCAB_SIZE,
-    QwenExecutionAudit, QwenRequestMemoryAudit, QwenResidentModel,
-    UNSLOTH_QWEN38_NVFP4_MODEL_SHA256, UNSLOTH_QWEN38_NVFP4_MODEL_SIZE,
-    UNSLOTH_QWEN38_NVFP4_REPOSITORY, UNSLOTH_QWEN38_NVFP4_REVISION,
-    build_qwen35_unsloth_qwen38_nvfp4_graph, build_qwen38_nvfp4_weight_load_plan, read_model_lock,
-    verify_unsloth_qwen38_nvfp4,
+    AllocationSnapshot, Backend, ExecutionSessionRequest, KvCacheEncoding, OsSamplingRandom,
+    QWEN35_VOCAB_SIZE, QwenExecutionAudit, QwenRequestMemoryAudit, QwenResidentModel,
+    SamplerChainConfigV1, SamplerChainV1, SamplingParametersV1, UNSLOTH_QWEN38_NVFP4_MODEL_SHA256,
+    UNSLOTH_QWEN38_NVFP4_MODEL_SIZE, UNSLOTH_QWEN38_NVFP4_REPOSITORY,
+    UNSLOTH_QWEN38_NVFP4_REVISION, build_qwen35_unsloth_qwen38_nvfp4_graph,
+    build_qwen38_nvfp4_weight_load_plan, read_model_lock, verify_unsloth_qwen38_nvfp4,
 };
 use sllm_hip::HipBackend;
 use tokenizers::Tokenizer;
@@ -87,6 +88,67 @@ const ROWS: [RowSpec; 4] = [
     },
 ];
 
+/// Internal performance comparison only; public API sampling remains fixed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SamplingMode {
+    #[default]
+    Greedy,
+    HostFixed,
+    GpuFixed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct SamplingBench {
+    mode: SamplingMode,
+    replay_inputs: bool,
+    seed: u64,
+}
+
+impl SamplingBench {
+    fn from_env() -> Result<Self, String> {
+        let mode = match env::var("SLLM_PHASE81_SAMPLING").as_deref() {
+            Err(env::VarError::NotPresent) | Ok("greedy") => SamplingMode::Greedy,
+            Ok("host-fixed") => SamplingMode::HostFixed,
+            Ok("gpu-fixed") => SamplingMode::GpuFixed,
+            _ => {
+                return Err("SLLM_PHASE81_SAMPLING must be greedy, host-fixed or gpu-fixed".into());
+            }
+        };
+        let replay_inputs = match env::var("SLLM_PHASE81_REPLAY").as_deref() {
+            Err(env::VarError::NotPresent) | Ok("0") => false,
+            Ok("1") => true,
+            _ => return Err("SLLM_PHASE81_REPLAY must be 0 or 1".into()),
+        };
+        Ok(Self {
+            mode,
+            replay_inputs,
+            seed: 123,
+        })
+    }
+
+    fn input_token(self, step: usize, generated: i32) -> i32 {
+        if self.replay_inputs {
+            // Independent of selected tokens in every A/B/C run.
+            ((step * 7919 + 17) % QWEN35_VOCAB_SIZE) as i32
+        } else {
+            generated
+        }
+    }
+
+    fn generation(self) -> &'static str {
+        match self.mode {
+            SamplingMode::Greedy => "greedy device Argmax; no logits readback",
+            SamplingMode::HostFixed => {
+                "host sampling: temperature=1 top_k=20 top_p=0.95; full logits readback"
+            }
+            SamplingMode::GpuFixed => {
+                "GPU sampling: temperature=1 top_k=20 top_p=0.95; 16-byte record readback"
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Config {
     target: String,
@@ -97,6 +159,7 @@ struct Config {
     measured: usize,
     chunk_capacity: u64,
     rows: Vec<RowSpec>,
+    sampling: SamplingBench,
 }
 
 #[derive(Serialize)]
@@ -108,6 +171,7 @@ struct Report {
     device_index: u32,
     model: ModelReport,
     protocol: ProtocolReport,
+    sampling: SamplingBench,
     fixture: FixtureReport,
     tokenizer: TokenizerReport,
     is_phase78_final: bool,
@@ -244,6 +308,7 @@ struct RunReport {
     prefill_output_rows: usize,
     decode_transition_count: usize,
     timing: TimingReport,
+    cpu: CpuReport,
     generated_tokens: Vec<i32>,
     generated_tokens_sha256: String,
     visible_tokens_sha256: String,
@@ -256,6 +321,41 @@ struct RunReport {
     allocation_before_request: AllocationReport,
     allocation_while_request_alive: AllocationReport,
     allocation_after_request_drop: AllocationReport,
+}
+
+#[derive(Serialize)]
+struct CpuReport {
+    source: &'static str,
+    prefill_user_system_ticks: Option<u64>,
+    decode_user_system_ticks: Option<u64>,
+}
+
+// Linux /proc units are USER_HZ; report raw ticks rather than inventing a
+// conversion. The controller records `getconf CLK_TCK` for the measured host.
+fn process_cpu_ticks(enabled: bool) -> Option<u64> {
+    if !enabled {
+        return None;
+    }
+    parse_process_cpu_ticks(&fs::read_to_string("/proc/self/stat").ok()?)
+}
+
+fn parse_process_cpu_ticks(stat: &str) -> Option<u64> {
+    // comm can contain spaces and parentheses; fields following its last ')'
+    // start at state (field 3). utime/stime are fields 14/15.
+    let fields = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    fields
+        .get(11)?
+        .parse::<u64>()
+        .ok()?
+        .checked_add(fields.get(12)?.parse::<u64>().ok()?)
+}
+
+fn cpu_delta(start: Option<u64>, end: Option<u64>) -> Option<u64> {
+    end?.checked_sub(start?)
 }
 
 #[derive(Clone, Serialize)]
@@ -418,10 +518,17 @@ impl Config {
             measured,
             chunk_capacity,
             rows,
+            sampling: SamplingBench::from_env()?,
         })
     }
 
     fn mode(&self) -> &'static str {
+        if self.sampling.replay_inputs {
+            return "phase81-matched-input-replay";
+        }
+        if self.sampling.mode != SamplingMode::Greedy {
+            return "phase81-fixed-sampling-free-generation";
+        }
         match (self.warmups, self.measured) {
             (3, 10) => "phase78-final-3-warmup-10-measured",
             (1, 3) => "phase78-exploration-1-warmup-3-measured",
@@ -430,7 +537,9 @@ impl Config {
     }
 
     fn is_phase78_final(&self) -> bool {
-        self.warmups == DEFAULT_WARMUPS
+        self.sampling.mode == SamplingMode::Greedy
+            && !self.sampling.replay_inputs
+            && self.warmups == DEFAULT_WARMUPS
             && self.measured == DEFAULT_MEASURED
             && self.rows.as_slice() == ROWS
     }
@@ -503,6 +612,7 @@ fn run(config: Config) -> Result<Report, String> {
                 config.measured,
                 &config.target,
                 &locked_tokenizer.tokenizer,
+                config.sampling,
             )?);
         }
         drop(resident);
@@ -558,6 +668,7 @@ fn run(config: Config) -> Result<Report, String> {
             model_bytes: UNSLOTH_QWEN38_NVFP4_MODEL_SIZE,
             model_sha256: UNSLOTH_QWEN38_NVFP4_MODEL_SHA256,
         },
+        sampling: config.sampling,
         protocol: ProtocolReport {
             active_requests: 1,
             parallel_requests: 1,
@@ -566,11 +677,11 @@ fn run(config: Config) -> Result<Report, String> {
             state_capacity_tokens: STATE_CAPACITY,
             prefill_chunk_capacity_tokens: config.chunk_capacity,
             mtp: "disabled; only non-MTP graph and prefill/decode APIs are called",
-            generation: "greedy default device Argmax; no sampler or logits readback",
+            generation: config.sampling.generation(),
             eos_termination: false,
             stop_sequences: false,
             termination: "fixed total output-token budget; generated EOS-like IDs are not inspected",
-            output_accounting: "generated_tokens starts with the terminal prefill Argmax, followed by output_tokens-1 decode() results; TPOT and decode throughput count only those decode transitions",
+            output_accounting: "generated_tokens contains selected tokens; sampling.replay_inputs replaces only subsequent inputs with (step*7919+17)%248320; TPOT and decode throughput count only those decode transitions",
         },
         fixture: FixtureReport {
             schema_version: "phase78-qwen38-fixed-token-fixture-v1",
@@ -619,6 +730,7 @@ fn run_row(
     measured: usize,
     target: &str,
     tokenizer: &Tokenizer,
+    sampling: SamplingBench,
 ) -> Result<RowReport, String> {
     let prompt = fixture
         .get(..row.prompt_tokens)
@@ -637,6 +749,7 @@ fn run_row(
                 sample_index,
                 target,
                 tokenizer,
+                sampling,
             )?;
             if let Some(expected) = &expected_tokens {
                 if expected != &report.generated_tokens {
@@ -697,6 +810,7 @@ fn run_one(
     sample_index: usize,
     target: &str,
     tokenizer: &Tokenizer,
+    sampling: SamplingBench,
 ) -> Result<RunReport, String> {
     let before_request = allocation_report(session.memory_snapshot());
     // Phase 78 compares time-to-first-token and request E2E after the model is
@@ -707,49 +821,75 @@ fn run_one(
         .new_request(graph.clone())
         .map_err(|error| format!("request creation failed: {error}"))?;
     let request_setup_elapsed = e2e_started.elapsed();
+    let mut sampling_state = if sampling.mode == SamplingMode::Greedy {
+        None
+    } else {
+        let parameters =
+            SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).map_err(|error| error.to_string())?;
+        let prior = prompt.iter().map(|&token| token as u32).collect::<Vec<_>>();
+        let sampler = SamplerChainV1::new(
+            SamplerChainConfigV1::new(parameters)
+                .with_top_k(20)
+                .map_err(|error| error.to_string())?,
+            &prior,
+        )
+        .map_err(|error| error.to_string())?;
+        let random = OsSamplingRandom::for_parameters_and_seed(parameters, Some(sampling.seed))
+            .map_err(|error| error.to_string())?;
+        Some((sampler, random))
+    };
+    let observe_cpu = sampling.mode != SamplingMode::Greedy || sampling.replay_inputs;
+    let prefill_cpu_started = process_cpu_ticks(observe_cpu);
     let prefill_started = Instant::now();
-    let prefill = request
-        .prefill(prompt)
-        .map_err(|error| format!("prefill failed: {error}"))?;
+    let prefill = match sampling.mode {
+        SamplingMode::Greedy => request.prefill(prompt),
+        SamplingMode::HostFixed => request.prefill_with_last_logits(prompt),
+        SamplingMode::GpuFixed => {
+            let selector = sampling_state
+                .as_ref()
+                .expect("sampling mode state")
+                .0
+                .prepare_device_selector(QWEN35_VOCAB_SIZE, None, sampling.seed, 0)
+                .map_err(|error| error.to_string())?;
+            request.prefill_with_device_selector(prompt, &selector)
+        }
+    }
+    .map_err(|error| format!("prefill failed: {error}"))?;
+    let mut current = selected_token(&prefill, sampling.mode, &mut sampling_state)?;
     let prefill_elapsed = prefill_started.elapsed();
     let ttft_elapsed = e2e_started.elapsed();
-    if !matches!(prefill.token_ids().len(), 1) && prefill.token_ids().len() != prompt.len() {
-        return Err(format!(
-            "prefill returned unsupported row count {} for {} prompt tokens",
-            prefill.token_ids().len(),
-            prompt.len()
-        ));
-    }
-    if prefill.selection().is_some() || prefill.last_logits().is_some() {
-        return Err("prefill left the default Argmax/no-logits route".to_owned());
-    }
-    let mut current = *prefill
-        .token_ids()
-        .last()
-        .ok_or_else(|| "prefill produced no terminal token".to_owned())?;
+    let prefill_cpu = cpu_delta(prefill_cpu_started, process_cpu_ticks(observe_cpu));
     validate_token(current)?;
-
     let mut generated = Vec::with_capacity(output_tokens);
     generated.push(current);
+    let decode_cpu_started = process_cpu_ticks(observe_cpu);
     let decode_started = Instant::now();
     for step in 1..output_tokens {
-        let output = request
-            .decode(current)
-            .map_err(|error| format!("decode step {step} failed: {error}"))?;
-        if output.token_ids().len() != 1
-            || output.selection().is_some()
-            || output.last_logits().is_some()
-        {
-            return Err(format!(
-                "decode step {step} left the one-row default Argmax/no-logits route"
-            ));
+        let input = sampling.input_token(step, current);
+        let output = match sampling.mode {
+            SamplingMode::Greedy => request.decode(input),
+            SamplingMode::HostFixed => request.decode_with_last_logits(input),
+            SamplingMode::GpuFixed => {
+                let selector = sampling_state
+                    .as_ref()
+                    .expect("sampling mode state")
+                    .0
+                    .prepare_device_selector(QWEN35_VOCAB_SIZE, None, sampling.seed, step as u64)
+                    .map_err(|error| error.to_string())?;
+                request.decode_with_device_selector(input, &selector)
+            }
         }
-        current = output.token_ids()[0];
+        .map_err(|error| format!("decode step {step} failed: {error}"))?;
+        if output.token_ids().len() != 1 {
+            return Err(format!("decode step {step} returned more than one row"));
+        }
+        current = selected_token(&output, sampling.mode, &mut sampling_state)?;
         validate_token(current)?;
         generated.push(current);
     }
     let decode_elapsed = decode_started.elapsed();
     let e2e_elapsed = e2e_started.elapsed();
+    let decode_cpu = cpu_delta(decode_cpu_started, process_cpu_ticks(observe_cpu));
     if request_setup_elapsed.is_zero()
         || prefill_elapsed.is_zero()
         || ttft_elapsed.is_zero()
@@ -799,6 +939,11 @@ fn run_one(
         prefill_output_rows: prefill.token_ids().len(),
         decode_transition_count: generated.len() - 1,
         timing,
+        cpu: CpuReport {
+            source: "/proc/self/stat utime+stime; raw USER_HZ ticks; null when unavailable/disabled",
+            prefill_user_system_ticks: prefill_cpu,
+            decode_user_system_ticks: decode_cpu,
+        },
         generated_tokens_sha256: hash_tokens(&generated),
         visible_tokens_sha256: decoded.visible_tokens_sha256,
         visible_token_count: decoded.visible_token_count,
@@ -812,6 +957,39 @@ fn run_one(
         allocation_while_request_alive: while_request_alive,
         allocation_after_request_drop: after_request_drop,
     })
+}
+
+fn selected_token(
+    output: &sllm_core::QwenExecutionOutput,
+    mode: SamplingMode,
+    sampling_state: &mut Option<(SamplerChainV1, OsSamplingRandom)>,
+) -> Result<i32, String> {
+    let token = *output.token_ids().last().ok_or("terminal token missing")?;
+    match mode {
+        SamplingMode::Greedy => {
+            if output.selection().is_some() || output.last_logits().is_some() {
+                return Err("greedy comparison left device Argmax/no-logits route".into());
+            }
+            Ok(token)
+        }
+        SamplingMode::HostFixed => {
+            if output.selection().is_some() || output.last_logits().is_none() {
+                return Err("host comparison did not return full logits".into());
+            }
+            let (sampler, random) = sampling_state.as_mut().ok_or("host sampler missing")?;
+            sampler
+                .select_token(token as u32, output.last_logits(), random)
+                .map(|token| token as i32)
+                .map_err(|error| error.to_string())
+        }
+        SamplingMode::GpuFixed => {
+            let selection = output.selection().ok_or("GPU selection missing")?;
+            if output.last_logits().is_some() || token as u32 != selection.token_id {
+                return Err("GPU comparison returned logits or inconsistent selection".into());
+            }
+            Ok(token)
+        }
+    }
 }
 
 fn timing_report(
@@ -1339,6 +1517,38 @@ fn emit_failure(error: String) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_stat_parser_handles_parentheses_and_missing_fields() {
+        assert_eq!(
+            parse_process_cpu_ticks("12 (worker (test)) R 0 0 0 0 0 0 0 0 0 0 17 9 0"),
+            Some(26)
+        );
+        assert_eq!(parse_process_cpu_ticks("12 (worker) R"), None);
+        assert_eq!(cpu_delta(Some(3), Some(8)), Some(5));
+        assert_eq!(cpu_delta(Some(8), Some(3)), None);
+    }
+
+    #[test]
+    fn phase81_replay_inputs_do_not_depend_on_sampler_output() {
+        for step in [1, 19, 20, 63, 64, 127] {
+            let replay = SamplingBench {
+                mode: SamplingMode::GpuFixed,
+                replay_inputs: true,
+                seed: 123,
+            };
+            assert_eq!(
+                replay.input_token(step, 0),
+                replay.input_token(step, 248319)
+            );
+            let free = SamplingBench {
+                replay_inputs: false,
+                ..replay
+            };
+            assert_eq!(free.input_token(step, 41), 41);
+            assert!((0..QWEN35_VOCAB_SIZE as i32).contains(&replay.input_token(step, 0)));
+        }
+    }
 
     #[test]
     fn fixed_fixture_has_locked_digest_and_nested_prefixes() {

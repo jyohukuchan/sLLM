@@ -363,7 +363,7 @@ async fn models_non_stream_and_sse_share_text_usage_and_finish_reason() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn requested_logprobs_are_mapped_for_buffered_and_streaming_responses() {
+async fn fixed_profile_rejects_enabled_logprobs_for_buffered_and_streaming_requests() {
     let backend: Arc<dyn ChatGenerationBackendV1> = Arc::new(ScriptBackend {
         deltas: vec!["ok".to_owned()],
         finish_reason: FinishReasonV1::Stop,
@@ -389,17 +389,8 @@ async fn requested_logprobs_are_mapped_for_buffered_and_streaming_responses() {
         ),
     )
     .await;
-    assert_eq!(buffered.status, 200);
-    let json = buffered.json();
-    assert_eq!(json["choices"][0]["logprobs"]["content"][0]["token"], "ok");
-    assert_eq!(
-        json["choices"][0]["logprobs"]["content"][0]["bytes"],
-        serde_json::json!([111, 107])
-    );
-    assert_eq!(
-        json["choices"][0]["logprobs"]["content"][0]["top_logprobs"][0]["token"],
-        "alt"
-    );
+    assert_eq!(buffered.status, 400);
+    assert_eq!(buffered.json()["error"]["code"], "unsupported_parameter");
 
     let streaming = raw_http(
         address,
@@ -411,10 +402,8 @@ async fn requested_logprobs_are_mapped_for_buffered_and_streaming_responses() {
         ),
     )
     .await;
-    assert_eq!(streaming.status, 200);
-    let text = String::from_utf8(streaming.body).unwrap();
-    assert!(text.contains(r#""logprobs":{"content":[{"token":"ok""#));
-    assert!(text.ends_with("data: [DONE]\n\n"));
+    assert_eq!(streaming.status, 400);
+    assert_eq!(streaming.json()["error"]["code"], "unsupported_parameter");
 
     scheduler.shutdown();
     server.abort();

@@ -438,14 +438,9 @@ async fn phase42_completion_embeddings_rerank_and_infill_routes() {
         ),
     )
     .await;
-    assert_eq!(status, 200);
+    assert_eq!(status, 400, "{body}");
     let json: Value = serde_json::from_str(&body).unwrap();
-    let logprobs = &json["choices"][0]["logprobs"];
-    assert_eq!(logprobs["tokens"], json!(["ok"]));
-    assert_eq!(logprobs["token_logprobs"], json!([-0.25]));
-    assert_eq!(logprobs["text_offset"], json!([0]));
-    assert_eq!(logprobs["top_logprobs"][0]["ok"], -0.25);
-    assert!(logprobs.get("content").is_none());
+    assert_eq!(json["error"]["code"], "unsupported_parameter");
 
     let (status, body) = raw_http(
         address,

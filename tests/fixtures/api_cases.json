@@ -17,29 +17,28 @@
           {"role": "user", "content": "hello"},
           {"role": "assistant", "content": "hi"}
         ],
-        "temperature": 0.0,
-        "top_p": 0.9,
+        "temperature": 1.0,
+        "top_p": 0.95,
         "max_completion_tokens": 7,
         "stop": ["\n"],
-        "presence_penalty": -2.0,
-        "frequency_penalty": 2.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
         "stream": false,
         "n": 1
       }
     },
     {
-      "id": "phase40_sampling_logprobs_and_json_schema",
+      "id": "fixed_sampling_and_json_schema",
       "request": {
         "model": "fixture-model",
         "messages": [{"role": "user", "content": "Return JSON with an answer."}],
-        "temperature": 0.8,
+        "temperature": 1.0,
         "top_p": 0.95,
         "max_completion_tokens": 32,
         "seed": -41,
         "n": 2,
-        "logit_bias": {"0": -100, "7": 2.5, "4294967295": 100},
-        "logprobs": true,
-        "top_logprobs": 20,
+        "logprobs": false,
+        "top_logprobs": 0,
         "response_format": {
           "type": "json_schema",
           "json_schema": {
@@ -57,15 +56,12 @@
         "sllm": {
           "sampling": {
             "chain_version": 1,
-            "top_k": 17,
-            "min_p": 0.05,
-            "typical_p": 0.9,
-            "repeat_penalty": 1.1,
-            "repeat_last_n": 64,
-            "ignore_eos": true,
-            "dry": {"multiplier": 0.5, "base": 1.75, "allowed_length": 2, "penalty_last_n": 64},
-            "xtc": {"probability": 0.2, "threshold": 0.1, "min_keep": 1},
-            "dynamic_temperature": {"range": 0.25, "exponent": 1.2}
+            "top_k": 20,
+            "min_p": 0,
+            "typical_p": 1,
+            "repeat_penalty": 1,
+            "repeat_last_n": 0,
+            "ignore_eos": false
           }
         }
       }
@@ -168,7 +164,7 @@
         "top_logprobs": 1
       },
       "status": 400,
-      "code": "invalid_value",
+      "code": "unsupported_parameter",
       "param": "top_logprobs"
     },
     {

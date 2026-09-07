@@ -1071,6 +1071,11 @@ async fn create_chat_completion(
             return *response;
         }
     };
+    if let Err(error) = validate_fixed_sampler_profile(model.fixed_sampler_top_k(), &request) {
+        let response = error.into_response();
+        record_http(&state, HttpEndpointV1::ChatCompletions, &response);
+        return response;
+    }
     let context = ResponseContextV1::new(model.alias(), request.reasoning());
     let stream_response = request.stream();
     let resumable = request.resumable();
@@ -1262,6 +1267,12 @@ async fn handle_completion(state: &AppStateV1, request: CompletionRequestV1) -> 
                     None => (Arc::clone(&model), None),
                 }
             };
+            if let Err(error) =
+                validate_fixed_sampler_profile(choice_model.fixed_sampler_top_k(), &generated)
+            {
+                drop(receivers);
+                return error.into_response();
+            }
             match state
                 .scheduler
                 .submit_with_lease(choice_model, generated, lease)
@@ -1969,6 +1980,27 @@ pub(crate) fn resolve_model(
     alias: &str,
 ) -> Result<(Arc<ModelRegistryEntryV1>, Option<ModelLifecycleLeaseV1>), Box<Response>> {
     resolve_model_for_request(state, alias).map_err(|error| Box::new(error.into_response()))
+}
+
+pub(crate) fn validate_fixed_sampler_profile(
+    fixed_top_k: Option<usize>,
+    request: &ChatCompletionRequestV1,
+) -> Result<(), ApiErrorV1> {
+    let Some(fixed_top_k) = fixed_top_k else {
+        return Ok(());
+    };
+    let Some(requested_top_k) = request.sampler().and_then(|sampler| sampler.top_k()) else {
+        return Ok(());
+    };
+    if requested_top_k as usize == fixed_top_k {
+        return Ok(());
+    }
+    Err(ApiErrorV1::invalid_value(
+        "sllm.sampling.top_k",
+        format!(
+            "requested top_k={requested_top_k} does not match the model fixed top_k={fixed_top_k}"
+        ),
+    ))
 }
 
 pub(crate) fn resolve_model_for_request(
@@ -3365,8 +3397,9 @@ struct StreamDeltaV1<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServerConfigV1, authorize_admin};
-    use axum::http::HeaderMap;
+    use super::{ServerConfigV1, authorize_admin, validate_fixed_sampler_profile};
+    use crate::api::{ErrorCodeV1, parse_chat_completion_request};
+    use axum::http::{HeaderMap, StatusCode};
 
     #[test]
     fn credential_free_admin_can_only_be_enabled_for_loopback() {
@@ -3377,5 +3410,32 @@ mod tests {
 
         let remote = ServerConfigV1::default().with_loopback_admin("0.0.0.0:8080".parse().unwrap());
         assert!(remote.is_err());
+    }
+
+    #[test]
+    fn fixed_sampler_profile_rejects_mismatched_top_k_before_admission() {
+        let request = parse_chat_completion_request(
+            br#"{
+                "model":"gemma4moe",
+                "messages":[{"role":"user","content":"hi"}],
+                "sllm":{"sampling":{"top_k":20}}
+            }"#,
+        )
+        .unwrap();
+        let error = validate_fixed_sampler_profile(Some(64), &request).unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.code(), ErrorCodeV1::InvalidValue);
+        assert_eq!(error.param(), Some("sllm.sampling.top_k"));
+
+        let matching = parse_chat_completion_request(
+            br#"{
+                "model":"gemma4moe",
+                "messages":[{"role":"user","content":"hi"}],
+                "sllm":{"sampling":{"top_k":64}}
+            }"#,
+        )
+        .unwrap();
+        assert!(validate_fixed_sampler_profile(Some(64), &matching).is_ok());
+        assert!(validate_fixed_sampler_profile(None, &request).is_ok());
     }
 }
