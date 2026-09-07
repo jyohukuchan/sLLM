@@ -2,6 +2,10 @@
 //!
 //! The Phase 53 block16 route is retained below only as historical oracle code.  Argument
 //! parsing rejects it, so this executable cannot admit the retired runtime path.
+//!
+//! `--q-heads` defaults to 16 for the historical oracle shape.  Qwen3.8-27B
+//! full-attention layers can be covered with `--q-heads 24` while retaining the
+//! same four-KV-head MXFP8 state and host numerical oracle.
 
 use std::env;
 use std::fs;
@@ -22,7 +26,7 @@ use sllm_hip::HipBackend;
 const DIMENSIONS: [usize; 6] = [15, 16, 17, 255, 256, 257];
 const MX_DIMENSIONS: [usize; 6] = [31, 32, 33, 255, 256, 257];
 const HEADS: usize = 4;
-const Q_HEADS: usize = 16;
+const DEFAULT_Q_HEADS: usize = 16;
 const WAIT: Duration = Duration::from_secs(30);
 const SHUTDOWN: Duration = Duration::from_secs(16);
 
@@ -36,6 +40,7 @@ enum EvidenceFormat {
 struct Config {
     device_index: u32,
     target: String,
+    query_heads: usize,
     policy_sha256: String,
     encoding: KvCacheEncoding,
     variant: KvFp8PhysicalVariant,
@@ -97,6 +102,7 @@ struct Report {
     state: &'static str,
     target: String,
     device_index: u32,
+    query_heads: usize,
     encoding: &'static str,
     physical_variant: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -119,6 +125,7 @@ fn digest(bytes: &[u8]) -> String {
 fn parse() -> Result<Config, String> {
     let mut device_index = None;
     let mut target = None;
+    let mut query_heads = DEFAULT_Q_HEADS;
     let mut policy = None;
     let mut format = EvidenceFormat::Mxfp8;
     let mut arguments = env::args().skip(1);
@@ -134,6 +141,13 @@ fn parse() -> Result<Config, String> {
                 );
             }
             "--target" => target = Some(arguments.next().ok_or("--target needs a value")?),
+            "--q-heads" => {
+                query_heads = arguments
+                    .next()
+                    .ok_or("--q-heads needs a value")?
+                    .parse::<usize>()
+                    .map_err(|_| "--q-heads must be a positive integer")?;
+            }
             "--policy" => {
                 policy = Some(PathBuf::from(
                     arguments.next().ok_or("--policy needs a value")?,
@@ -170,14 +184,28 @@ fn parse() -> Result<Config, String> {
     if policy_bytes.is_empty() {
         return Err("policy is empty".to_owned());
     }
+    validate_query_heads(query_heads)?;
     Ok(Config {
         device_index: device_index.ok_or("missing --device-index")?,
         target,
+        query_heads,
         policy_sha256: digest(&policy_bytes),
         encoding,
         variant,
         format,
     })
+}
+
+fn validate_query_heads(query_heads: usize) -> Result<(), String> {
+    if query_heads == 0 || query_heads % HEADS != 0 {
+        return Err(format!(
+            "--q-heads must be a positive multiple of KV heads ({HEADS})"
+        ));
+    }
+    if !matches!(query_heads / HEADS, 2 | 4 | 6 | 8 | 16) {
+        return Err("--q-heads/KV-heads must be one of 2, 4, 6, 8, or 16".to_owned());
+    }
+    Ok(())
 }
 
 fn encoding_name(encoding: KvCacheEncoding) -> &'static str {
@@ -447,8 +475,9 @@ fn run_attention(
     queue: &sllm_core::ExecutionQueue,
     state: &sllm_core::KvState,
     expected_values: &[f32],
+    query_heads: usize,
 ) -> Result<(bool, bool), String> {
-    let query_words = vec![0_u16; Q_HEADS * 256];
+    let query_words = vec![0_u16; query_heads * 256];
     let bytes = words_to_bytes(&query_words);
     let query_buffer = session
         .allocate(bytes.len() as u64)
@@ -457,7 +486,7 @@ fn run_attention(
         .allocate(bytes.len() as u64)
         .map_err(|error| error.to_string())?;
     upload(session, queue, &query_buffer, &query_words)?;
-    let shape = [1, Q_HEADS, 256];
+    let shape = [1, query_heads, 256];
     let query = binding(session, &query_buffer, &shape, AccessMode::Read)?;
     let output = binding(session, &output_buffer, &shape, AccessMode::Write)?;
     let descriptor =
@@ -489,9 +518,9 @@ fn run_attention(
         .chunks_exact(2)
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect::<Vec<_>>();
-    let mut expected = Vec::with_capacity(Q_HEADS * 256);
-    for query_head in 0..Q_HEADS {
-        let kv_head = query_head / (Q_HEADS / HEADS);
+    let mut expected = Vec::with_capacity(query_heads * 256);
+    for query_head in 0..query_heads {
+        let kv_head = query_head / (query_heads / HEADS);
         expected.extend(
             expected_values[kv_head * 256..(kv_head + 1) * 256]
                 .iter()
@@ -601,7 +630,13 @@ fn run_cases(
             });
         let (attention_direct, numerical_match) = if dimension == 256 {
             attention_dispatches += 1;
-            run_attention(session, &queue, &state, &value_oracle.dequantized)?
+            run_attention(
+                session,
+                &queue,
+                &state,
+                &value_oracle.dequantized,
+                config.query_heads,
+            )?
         } else {
             (false, true)
         };
@@ -643,6 +678,7 @@ fn base_report(
         state,
         target: config.target.clone(),
         device_index: config.device_index,
+        query_heads: config.query_heads,
         encoding: encoding_name(config.encoding),
         physical_variant: variant_name(config.variant, config.format),
         descriptor_id: block16_descriptor_id(config.encoding),
@@ -739,6 +775,7 @@ fn run(config: &Config) -> Report {
                 state: if pass { "PASS" } else { "FAIL" },
                 target: config.target.clone(),
                 device_index: config.device_index,
+                query_heads: config.query_heads,
                 encoding: encoding_name(config.encoding),
                 physical_variant: variant_name(config.variant, config.format),
                 descriptor_id: block16_descriptor_id(config.encoding),
@@ -848,6 +885,15 @@ mod tests {
         assert!(evidence.key_value_scales_independent);
         assert_eq!(evidence.head_dimensions, MX_DIMENSIONS);
         assert_eq!(evidence.variants, ["E4M3-OCP"]);
+    }
+
+    #[test]
+    fn query_head_configuration_keeps_default_and_qwen27b_shapes() {
+        assert!(validate_query_heads(DEFAULT_Q_HEADS).is_ok());
+        assert!(validate_query_heads(24).is_ok());
+        assert!(validate_query_heads(0).is_err());
+        assert!(validate_query_heads(23).is_err());
+        assert!(validate_query_heads(25).is_err());
     }
 
     #[test]

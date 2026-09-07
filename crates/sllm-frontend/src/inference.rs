@@ -14,8 +14,8 @@ use crate::{
     ChatRenderError, DecodeModeV1, GENERIC_TEMPLATE_PROFILE_VERSION_V1, GenericTemplateContextV1,
     GenericTemplateErrorV1, GenericTemplateIdentityV1, GenericTemplateProviderV1,
     QWEN35_CHAT_RENDERER_VERSION, QWEN35_CHAT_TEMPLATE_SHA256, QWEN35_CHAT_TEMPLATE_SIZE_BYTES,
-    Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, TokenIdsV1, TokenizerError,
-    TokenizerFrontendV1,
+    QWEN38_NVFP4_CHAT_TEMPLATE_SHA256, QWEN38_NVFP4_CHAT_TEMPLATE_SIZE_BYTES, Qwen35ChatMessageV1,
+    Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, TokenIdsV1, TokenizerError, TokenizerFrontendV1,
 };
 
 /// Version of the transport-independent tokenizer utility contract.
@@ -262,12 +262,25 @@ pub struct TemplateIdentityV1 {
 
 impl TemplateIdentityV1 {
     fn qwen35(renderer: &Qwen35ChatTemplateV1) -> Self {
+        let (kind, digest, size_bytes) = if renderer.is_unsloth_qwen38_nvfp4() {
+            (
+                "qwen38-nvfp4-chat-template-v1",
+                QWEN38_NVFP4_CHAT_TEMPLATE_SHA256,
+                QWEN38_NVFP4_CHAT_TEMPLATE_SIZE_BYTES,
+            )
+        } else {
+            (
+                "qwen35-chat-template-v1",
+                QWEN35_CHAT_TEMPLATE_SHA256,
+                QWEN35_CHAT_TEMPLATE_SIZE_BYTES,
+            )
+        };
         Self {
-            kind: "qwen35-chat-template-v1".to_owned(),
+            kind: kind.to_owned(),
             version: renderer.version(),
             consistency_label: renderer.consistency_label().to_owned(),
-            digest: QWEN35_CHAT_TEMPLATE_SHA256.to_owned(),
-            size_bytes: QWEN35_CHAT_TEMPLATE_SIZE_BYTES,
+            digest: digest.to_owned(),
+            size_bytes,
         }
     }
 
@@ -907,4 +920,21 @@ fn ensure_input_size(text: &str) -> Result<(), TokenizerUtilityErrorV1> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qwen38_renderer_identity_does_not_publish_qwen35_metadata() {
+        let renderer = Qwen35ChatTemplateV1::qwen38_for_test();
+        let identity = TemplateIdentityV1::qwen35(&renderer);
+        assert_eq!(identity.kind(), "qwen38-nvfp4-chat-template-v1");
+        assert_eq!(identity.version(), QWEN35_CHAT_RENDERER_VERSION);
+        assert_eq!(identity.digest(), QWEN38_NVFP4_CHAT_TEMPLATE_SHA256);
+        assert_eq!(identity.size_bytes(), QWEN38_NVFP4_CHAT_TEMPLATE_SIZE_BYTES);
+        assert_ne!(identity.digest(), QWEN35_CHAT_TEMPLATE_SHA256);
+        assert_ne!(identity.size_bytes(), QWEN35_CHAT_TEMPLATE_SIZE_BYTES);
+    }
 }

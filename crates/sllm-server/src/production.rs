@@ -35,25 +35,27 @@ use sllm_core::{
     SessionCheckpoint, SpeculativeAccountingV1, VerifiedCache, VerifiedControlVectorPayloadV1,
     VerifiedFp8Sidecar, VerifiedGgufGemma4Moe, VerifiedGgufGemma4Mtp, VerifiedGgufGemmaSource,
     VerifiedGgufQwen35Moe, VerifiedGgufWeightSource, VerifiedLoraPayloadV1,
-    VerifiedMinistral3WeightSource, VerifiedNvfp4Sidecar, VerifiedQwen35Moe, WeightClassification,
-    WeightLoadPlan, XtcSamplingConfigV1 as CoreXtcSamplingConfigV1,
-    assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
-    build_gemma4_execution_layout, build_gemma4_graph, build_gemma4_moe_gguf_graph,
-    build_gemma4_moe_resident_weight_load_plan, build_gemma4_mtp_graph,
-    build_gguf_qwen35_moe_weight_load_plan, build_ministral3_weight_load_plan,
-    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
-    build_qwen35_gguf_moe_execution_graph, build_qwen35_gguf_mx_weight_activation_graph,
-    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_kv_cache_selection,
-    build_qwen35_graph_with_position_payload_mode, build_qwen35_moe_execution_graph,
-    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
-    build_verified_gemma4_mtp_weight_load_plan, build_verified_gguf_gemma_weight_load_plan,
-    build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
-    builtin_reviewed_model_lock, gemma4_mtp_pair_semantic_id,
-    open_and_verify_official_ministral3_gguf, parse_control_vector_lock_v1,
-    parse_gemma4_mtp_model_lock, parse_lora_lock_v1, parse_ministral3_model_lock,
-    qwen_graph_memory_estimate, qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy,
-    read_derived_gguf_lock, verify_derived_gguf, verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp,
-    verify_gguf_qwen35_moe,
+    VerifiedMinistral3WeightSource, VerifiedNvfp4Sidecar, VerifiedQwen35Moe,
+    VerifiedUnslothQwen38Nvfp4, WeightClassification, WeightLoadPlan,
+    XtcSamplingConfigV1 as CoreXtcSamplingConfigV1, assemble_gguf_qwen35_multimodal_prompt,
+    assemble_qwen35_multimodal_prompt, build_gemma4_execution_layout, build_gemma4_graph,
+    build_gemma4_moe_gguf_graph, build_gemma4_moe_resident_weight_load_plan,
+    build_gemma4_mtp_graph, build_gguf_qwen35_moe_weight_load_plan,
+    build_ministral3_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
+    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph,
+    build_qwen35_gguf_mx_weight_activation_graph, build_qwen35_graph_with_kv_cache_encoding,
+    build_qwen35_graph_with_kv_cache_selection, build_qwen35_graph_with_position_payload_mode,
+    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
+    build_qwen35_nvfp4_graph, build_qwen35_unsloth_qwen38_nvfp4_graph,
+    build_qwen38_nvfp4_weight_load_plan, build_verified_gemma4_mtp_weight_load_plan,
+    build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
+    build_verified_gguf_qwen35_vision_manifest, builtin_reviewed_model_lock,
+    gemma4_mtp_pair_semantic_id, open_and_verify_official_ministral3_gguf,
+    parse_control_vector_lock_v1, parse_gemma4_mtp_model_lock, parse_lora_lock_v1,
+    parse_ministral3_model_lock, qwen_graph_memory_estimate, qwen_prefill_chunk_candidates,
+    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, verify_derived_gguf,
+    verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp, verify_gguf_qwen35_moe,
+    verify_unsloth_qwen38_nvfp4,
 };
 use sllm_frontend::{
     ApplyTemplateResultV1, DecodeModeV1, Gemma4MoeChatTemplateV1, Gemma4MtpGenerationExecutorV1,
@@ -1361,6 +1363,45 @@ pub struct QwenBackendConfigV1 {
     pub adapter_catalog: Option<QwenAdapterCatalogConfigV1>,
 }
 
+/// Startup configuration for the fixed Unsloth Qwen3.8-27B NVFP4 artifact.
+///
+/// This path intentionally has a separate configuration type: the artifact is
+/// a verified safetensors directory with a mixed NVFP4/FP8 recipe, while the
+/// existing Qwen config accepts derived GGUF and its optional dense-Qwen
+/// lifecycle features. Qwen3.8 production is scoped to one exact R9700
+/// target, one active request, and either FP16 or standard OCP MXFP8 E4 KV.
+#[derive(Clone, Debug)]
+pub struct Qwen38Nvfp4BackendConfigV1 {
+    pub artifact_root: PathBuf,
+    pub device_index: u32,
+    pub target: String,
+    pub completion_timeout: Duration,
+    pub shutdown_timeout: Duration,
+    pub context_length: u32,
+    pub kv_cache_encoding: KvCacheEncoding,
+}
+
+impl Qwen38Nvfp4BackendConfigV1 {
+    pub fn validate(&self) -> Result<(), BackendErrorV1> {
+        if self.artifact_root.as_os_str().is_empty()
+            || self.device_index != 0
+            || self.target != "gfx1201"
+            || self.completion_timeout.is_zero()
+            || self.shutdown_timeout.is_zero()
+            || self.context_length == 0
+            || !matches!(
+                self.kv_cache_encoding,
+                KvCacheEncoding::Fp16 | KvCacheEncoding::Mxfp8E4
+            )
+        {
+            return Err(BackendErrorV1::new(
+                "Qwen3.8 NVFP4 requires a non-empty artifact root, logical device index 0, exact target gfx1201, valid timeouts, nonzero context length, and FP16 or MXFP8 E4 KV",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KvCacheExplicitSourceV1 {
     Process,
@@ -1379,6 +1420,34 @@ pub struct KvCacheSelectionReportV1 {
 }
 
 impl KvCacheSelectionReportV1 {
+    /// Fixed selection report for the direct Unsloth Qwen3.8-27B NVFP4
+    /// Production report for the direct Unsloth Qwen3.8-27B NVFP4 lane.
+    /// The dedicated profile admits only FP16 and standard OCP MXFP8 E4M3 KV.
+    pub fn qwen38_nvfp4(encoding: KvCacheEncoding) -> Self {
+        match encoding {
+            KvCacheEncoding::Fp16 => Self {
+                requested: "fp16".to_owned(),
+                resolved: "fp16".to_owned(),
+                selection_source: "model-fixed-fp16".to_owned(),
+                reason: "Qwen3.8 NVFP4 server profile selects FP16 KV".to_owned(),
+                physical_variant: None,
+                descriptor_id: None,
+                policy_version: sllm_core::KV_CACHE_SELECTION_POLICY_VERSION_V1,
+            },
+            KvCacheEncoding::Mxfp8E4 => Self {
+                requested: "kv-mxfp8-e4".to_owned(),
+                resolved: "kv-mxfp8-e4".to_owned(),
+                selection_source: "model-fixed-mxfp8-e4".to_owned(),
+                reason: "Qwen3.8 NVFP4 server profile selects standard OCP MXFP8 E4M3 KV"
+                    .to_owned(),
+                physical_variant: Some("E4M3-OCP".to_owned()),
+                descriptor_id: Some("kv-mxfp8-e4-v1".to_owned()),
+                policy_version: sllm_core::KV_CACHE_SELECTION_POLICY_VERSION_V1,
+            },
+            _ => Self::explicit_legacy(encoding),
+        }
+    }
+
     pub fn from_core(
         selection: KvCacheSelection,
         explicit_source: KvCacheExplicitSourceV1,
@@ -2806,6 +2875,7 @@ fn checked_prefix_request_state_baseline(
 struct QwenBackendStateV1 {
     lock: Option<ModelLock>,
     moe_artifact: Option<Arc<VerifiedQwen35Moe>>,
+    qwen38_artifact: Option<Arc<VerifiedUnslothQwen38Nvfp4>>,
     gguf_moe: Option<Arc<VerifiedGgufQwen35Moe>>,
     reasoning_close_token_ids: Vec<u32>,
     stop_policy: GenerationStopPolicyV1,
@@ -4250,6 +4320,146 @@ impl ChatGenerationBackendV1 for Ministral3ChatBackendV1 {
 }
 
 impl QwenChatBackendV1 {
+    fn is_unsloth_qwen38_nvfp4(&self) -> bool {
+        self.identity.model_fingerprint
+            == format!("sha256:{}", sllm_core::UNSLOTH_QWEN38_NVFP4_MODEL_SHA256)
+    }
+
+    /// Open the fixed Unsloth Qwen3.8-27B mixed NVFP4 artifact directly from
+    /// its verified safetensors directory. This production entrypoint keeps
+    /// the existing Qwen generation service and request owner; only model
+    /// verification, graph construction, and resident provisioning differ.
+    pub fn open_unsloth_qwen38_nvfp4(
+        config: Qwen38Nvfp4BackendConfigV1,
+    ) -> Result<Self, BackendErrorV1> {
+        config.validate()?;
+        let artifact = Arc::new(verify_unsloth_qwen38_nvfp4(&config.artifact_root).map_err(
+            |error| {
+                BackendErrorV1::new(format!(
+                    "Qwen3.8 NVFP4 artifact verification failed: {error}"
+                ))
+            },
+        )?);
+        let lock =
+            match builtin_reviewed_model_lock(&[sllm_core::QWEN35_27B_FINGERPRINT.to_owned()])
+                .map_err(|error| {
+                    BackendErrorV1::new(format!(
+                        "Qwen3.5-27B semantic lock resolution failed: {error}"
+                    ))
+                })? {
+                ReviewedModelLock::Qwen35(lock) => lock,
+                _ => {
+                    return Err(BackendErrorV1::new(
+                        "Qwen3.8 NVFP4 semantic lock is not a reviewed Qwen lock",
+                    ));
+                }
+            };
+        let plan = build_qwen38_nvfp4_weight_load_plan(&lock, &artifact).map_err(|error| {
+            BackendErrorV1::new(format!("Qwen3.8 NVFP4 load plan failed: {error}"))
+        })?;
+        let seed_graph = build_qwen35_unsloth_qwen38_nvfp4_graph(
+            &lock,
+            &plan,
+            &artifact,
+            1,
+            u64::from(config.context_length),
+            config.kv_cache_encoding,
+        )
+        .map_err(|error| {
+            BackendErrorV1::new(format!("Qwen3.8 NVFP4 resident graph failed: {error}"))
+        })?;
+        let tokenizer =
+            TokenizerFrontendV1::from_unsloth_qwen38_nvfp4(&artifact).map_err(|error| {
+                BackendErrorV1::new(format!("Qwen3.8 tokenizer construction failed: {error}"))
+            })?;
+        let reasoning_close_token_ids = validate_qwen_reasoning_close_marker(&tokenizer)?;
+        let renderer =
+            Qwen35ChatTemplateV1::from_unsloth_qwen38_nvfp4(&artifact).map_err(|error| {
+                BackendErrorV1::new(format!(
+                    "Qwen3.8 chat renderer construction failed: {error}"
+                ))
+            })?;
+        let stop_policy = lock.generation_stop_policy().clone();
+        let backend = HipBackend::connect()
+            .map_err(|error| BackendErrorV1::new(format!("HIP backend is unavailable: {error}")))?;
+        let session_request = ExecutionSessionRequest::new(config.device_index, &config.target)
+            .map_err(|error| BackendErrorV1::new(format!("HIP session request failed: {error}")))?;
+        let session = backend
+            .open_execution_session(session_request)
+            .map_err(|error| {
+                BackendErrorV1::new(format!("exact HIP execution session failed: {error}"))
+            })?;
+        let resident = QwenResidentModel::new_unsloth_qwen38_nvfp4(
+            Arc::clone(&session),
+            seed_graph,
+            plan.clone(),
+            Arc::clone(&artifact),
+            config.completion_timeout,
+        )
+        .map_err(|error| {
+            BackendErrorV1::new(format!("Qwen3.8 resident model load failed: {error}"))
+        })?;
+        let ready = session.memory_snapshot();
+        require_clean_request_memory(ready, "Qwen3.8 model-ready")?;
+        let model_ready_current_bytes = ready.model_resident().current_bytes();
+        if model_ready_current_bytes == 0 || ready.current_bytes() != model_ready_current_bytes {
+            return Err(BackendErrorV1::new(
+                "Qwen3.8 model-ready accounting is not resident-only",
+            ));
+        }
+        let kv_cache_selection = KvCacheSelectionReportV1::qwen38_nvfp4(config.kv_cache_encoding);
+        let phase41 = Phase41ProductionConfigV1::default();
+        let identity = BackendIdentityV1 {
+            target: config.target.clone(),
+            model_fingerprint: format!("sha256:{}", sllm_core::UNSLOTH_QWEN38_NVFP4_MODEL_SHA256),
+            plan_digest: plan.digest_hex(),
+            model_ready_current_bytes,
+            context_length: config.context_length,
+            recommended_context_tokens: QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32,
+        };
+        Ok(Self {
+            state: Mutex::new(Some(QwenBackendStateV1 {
+                lock: Some(lock),
+                moe_artifact: None,
+                qwen38_artifact: Some(artifact),
+                gguf_moe: None,
+                reasoning_close_token_ids,
+                stop_policy,
+                tokenizer,
+                renderer,
+                plan,
+                resident,
+                mtp_resident: None,
+                mtp_plan: None,
+                session,
+                target: config.target,
+                model_ready_current_bytes,
+                sidecar: None,
+                nvfp4_sidecar: None,
+                fp8_provider: Some("qwen38-mixed-nvfp4-v1".to_owned()),
+                cache: None,
+                gguf_source: None,
+                vision_manifest: None,
+                vision_resident: None,
+                completion_timeout: config.completion_timeout,
+                kv_cache_encoding: config.kv_cache_encoding,
+                kv_cache_resolved_selection: None,
+                kv_cache_selection,
+                phase41,
+                prefix_cache: QwenPrefixCacheRuntimeV1::Disabled,
+                checkpoint: None,
+                persistent_checkpoint_descriptor_digest: None,
+                persistent_capture_requested: false,
+                persistent_capture: None,
+                adapter_catalog: None,
+            })),
+            audits: Mutex::new(Vec::new()),
+            shutdown: Mutex::new(ShutdownStateV1::Active),
+            shutdown_timeout: config.shutdown_timeout,
+            identity,
+        })
+    }
+
     pub fn open(config: QwenBackendConfigV1) -> Result<Self, BackendErrorV1> {
         config.validate()?;
         let kv_cache_selection = config
@@ -4501,6 +4711,7 @@ impl QwenChatBackendV1 {
                 stop_policy: lock.generation_stop_policy().clone(),
                 lock: Some(lock),
                 moe_artifact: None,
+                qwen38_artifact: None,
                 gguf_moe: None,
                 tokenizer,
                 renderer,
@@ -4606,6 +4817,7 @@ impl QwenChatBackendV1 {
                 reasoning_close_token_ids,
                 lock: None,
                 moe_artifact: None,
+                qwen38_artifact: None,
                 gguf_moe: Some(source),
                 stop_policy: qwen35_moe_generation_stop_policy(),
                 tokenizer,
@@ -5233,7 +5445,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
     }
 
     fn embedding_dimension(&self) -> Option<u32> {
-        Some(QWEN35_HIDDEN_SIZE as u32)
+        (!self.is_unsloth_qwen38_nvfp4()).then_some(QWEN35_HIDDEN_SIZE as u32)
     }
 
     fn reviewed_chat_template_available(&self) -> bool {
@@ -5241,7 +5453,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
     }
 
     fn tool_protocol_v1_available(&self) -> bool {
-        true
+        !self.is_unsloth_qwen38_nvfp4()
     }
 
     fn validate_embedding_input(
@@ -5255,6 +5467,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let state = state_guard
             .as_ref()
             .ok_or_else(|| BackendErrorV1::new("Qwen backend is shut down"))?;
+        if state.qwen38_artifact.is_some() {
+            return Err(BackendErrorV1::new(
+                "Qwen3.8 NVFP4 production does not support embeddings",
+            ));
+        }
         let tokens = match input {
             BackendEmbeddingInputV1::Text(text) => state
                 .tokenizer
@@ -5354,6 +5571,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let state = state_guard
             .as_mut()
             .ok_or_else(|| BackendErrorV1::new("Qwen backend is shut down"))?;
+        if state.qwen38_artifact.is_some() {
+            return Err(BackendErrorV1::new(
+                "Qwen3.8 NVFP4 production does not support embeddings",
+            ));
+        }
         let ready = state.session.memory_snapshot();
         require_request_memory_baseline(
             ready,
@@ -5470,7 +5692,12 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             .transpose()
             .map_err(|error| BackendErrorV1::new(format!("sampling seed failed: {error}")))?;
         if let Some(seed) = resolved_sampling_seed {
-            generation = generation.with_device_selector_seed(seed);
+            if state.qwen38_artifact.is_none() {
+                generation = generation.with_device_selector_seed(seed);
+            }
+            // Qwen3.8's decode/attention graph-span and KV-append fast paths
+            // require the ordinary logits route. Its host sampler still uses
+            // this same resolved seed below, preserving request determinism.
         }
         let prepared_prompt = qwen_generation_prompt(request, &service, &state.tokenizer)?;
         let assistant_prefill_tokens = prepared_prompt.assistant_prefill_token_ids().to_vec();
@@ -5665,6 +5892,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         if context_policy.is_some()
             && (multimodal_prompt.is_some()
                 || state.moe_artifact.is_some()
+                || state.qwen38_artifact.is_some()
                 || state.gguf_moe.is_some()
                 || state
                     .gguf_source
@@ -5768,7 +5996,16 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             } else {
                 chunk_rows
             };
-            if let Some(artifact) = &state.moe_artifact {
+            if let Some(artifact) = &state.qwen38_artifact {
+                build_qwen35_unsloth_qwen38_nvfp4_graph(
+                    state.lock.as_ref().expect("Qwen3.8 semantic lock"),
+                    &state.plan,
+                    artifact,
+                    target_rows,
+                    state_capacity,
+                    state.kv_cache_encoding,
+                )
+            } else if let Some(artifact) = &state.moe_artifact {
                 build_qwen35_moe_execution_graph(artifact, &state.plan, target_rows, state_capacity)
             } else if let Some(source) = &state.gguf_moe {
                 build_qwen35_gguf_moe_execution_graph(
@@ -6345,6 +6582,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 Some("native-fnuz") => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32".to_owned(),
                 Some("nvfp4-packed-dequant") => "nvfp4-e2m1-block16-e4m3fn-tensor-f32".to_owned(),
                 Some("ocp-mxfp4-w4a4-mixed") => "ocp-mxfp4-e2m1-block32-e8m0-mixed".to_owned(),
+                Some("qwen38-mixed-nvfp4-v1") => "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16".to_owned(),
                 Some("mxfp8-e4m3-w8a8") => "mxfp8-e4m3-block32-e8m0-w8a8".to_owned(),
                 Some("mxfp6-e3m2-w6a6") => "mxfp6-e3m2-block32-e8m0-w6a6".to_owned(),
                 Some(_) => "ocp-e4m3fn-outer-f32".to_owned(),
@@ -10059,6 +10297,70 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn qwen38_nvfp4_config_is_host_validated_without_loading_artifacts() {
+        let config = Qwen38Nvfp4BackendConfigV1 {
+            artifact_root: PathBuf::from("/models/Qwen3.8-27B-NVFP4"),
+            device_index: 0,
+            target: "gfx1201".to_owned(),
+            completion_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_secs(1),
+            context_length: 16_384,
+            kv_cache_encoding: KvCacheEncoding::Mxfp8E4,
+        };
+        config
+            .validate()
+            .expect("the fixed Qwen3.8 production profile should validate on host");
+
+        for (device_index, target, context_length) in [
+            (1, "gfx1201", 16_384),
+            (0, "gfx1100", 16_384),
+            (0, "gfx1201", 0),
+        ] {
+            let invalid = Qwen38Nvfp4BackendConfigV1 {
+                artifact_root: config.artifact_root.clone(),
+                device_index,
+                target: target.to_owned(),
+                completion_timeout: config.completion_timeout,
+                shutdown_timeout: config.shutdown_timeout,
+                context_length,
+                kv_cache_encoding: config.kv_cache_encoding,
+            };
+            assert!(
+                invalid.validate().is_err(),
+                "invalid fixed-profile tuple must be rejected before HIP/model load"
+            );
+        }
+        for kv_cache_encoding in [KvCacheEncoding::Mxfp8E5, KvCacheEncoding::Nvfp4] {
+            let invalid = Qwen38Nvfp4BackendConfigV1 {
+                kv_cache_encoding,
+                ..config.clone()
+            };
+            assert!(
+                invalid.validate().is_err(),
+                "unsupported Qwen3.8 KV encoding must be rejected before HIP/model load"
+            );
+        }
+    }
+
+    #[test]
+    fn qwen38_nvfp4_kv_selection_report_matches_selected_encoding() {
+        let fp16 = KvCacheSelectionReportV1::qwen38_nvfp4(KvCacheEncoding::Fp16);
+        assert_eq!(fp16.requested, "fp16");
+        assert_eq!(fp16.resolved, "fp16");
+        assert_eq!(fp16.selection_source, "model-fixed-fp16");
+        assert_eq!(fp16.physical_variant, None);
+        assert_eq!(fp16.descriptor_id, None);
+
+        let mxfp8 = KvCacheSelectionReportV1::qwen38_nvfp4(KvCacheEncoding::Mxfp8E4);
+        assert_eq!(mxfp8.requested, "kv-mxfp8-e4");
+        assert_eq!(mxfp8.resolved, KvCacheEncoding::Mxfp8E4.canonical_name());
+        assert_eq!(mxfp8.selection_source, "model-fixed-mxfp8-e4");
+        assert_eq!(mxfp8.physical_variant.as_deref(), Some("E4M3-OCP"));
+        assert_eq!(mxfp8.descriptor_id.as_deref(), Some("kv-mxfp8-e4-v1"));
+        assert!(mxfp8.reason.contains("selects standard OCP MXFP8 E4M3 KV"));
     }
 
     #[test]

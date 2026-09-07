@@ -1,0 +1,1171 @@
+{
+  "scope": "local integration; uncommitted source",
+  "base_commit": "40ab582b049cff7effadbca75fe951d6cef5bd96",
+  "binary_sha256": "373e2ad55d25fdadb9c2aac379b29a51bb44c0f31195ab3cafffd2d81b7914b9",
+  "changed_source_sha256": {
+    "crates/sllm-server/src/production.rs": "c73709cb9b99b6994a498a19849adbefd3dcd645504bc3349a6e68cdfa3d2605",
+    "crates/sllm-server/src/bin/sllm-server.rs": "fda99f6363d675c6ca740c5728e0f3e842289bed7026c48b1831b05e88bf7903"
+  },
+  "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+  "target": "gfx1201",
+  "environment": {
+    "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P32": "1",
+    "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1201_ROCBLAS_F32": "1",
+    "SLLM_NVFP4_ACTIVATION_QUANTIZE_WAVE8": "1",
+    "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4": "1",
+    "SLLM_QWEN38_GFX1201_DEFERRED_COMPLETION": "1",
+    "SLLM_QWEN38_GFX1201_KV_APPEND_ATTENTION_CHAIN": "1",
+    "SLLM_QWEN38_NVFP4_PROJECTION_PACK2": "1",
+    "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P64": "1",
+    "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_F16_STAGING": "1",
+    "SLLM_NVFP4_W4A4_DECODE_FORCE_LDS_F32_LUT": "1",
+    "SLLM_QWEN38_GFX1201_GRAPH_SPANS": "1",
+    "SLLM_QWEN38_FP8_GDN_PROJECTION_PACK2": "1"
+  },
+  "before": {
+    "request": {
+      "model": "qwen3.8-27b-nvfp4",
+      "messages": [
+        {
+          "role": "user",
+          "content": "List the integers from 1 to 200 in ascending order, separated by commas. Do not add explanations."
+        }
+      ],
+      "temperature": 0,
+      "max_completion_tokens": 128,
+      "stream": true
+    },
+    "runs": [
+      {
+        "repeat": 0,
+        "warmup": true,
+        "ttft_seconds": 2.804555008886382,
+        "elapsed_seconds": 18.703105718828738,
+        "generation_window_seconds": 15.882933733984828,
+        "completion_tokens": 128,
+        "decode_tokens_per_second_estimate": 7.996003894938955,
+        "usage": {
+          "prompt_tokens": 36,
+          "completion_tokens": 128,
+          "total_tokens": 164
+        },
+        "content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 3"
+      },
+      {
+        "repeat": 1,
+        "warmup": false,
+        "ttft_seconds": 2.8416477809660137,
+        "elapsed_seconds": 18.973687773104757,
+        "generation_window_seconds": 16.114407571963966,
+        "completion_tokens": 128,
+        "decode_tokens_per_second_estimate": 7.881146075823233,
+        "usage": {
+          "prompt_tokens": 36,
+          "completion_tokens": 128,
+          "total_tokens": 164
+        },
+        "content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 3"
+      }
+    ]
+  },
+  "after": {
+    "request": {
+      "model": "qwen3.8-27b-nvfp4",
+      "messages": [
+        {
+          "role": "user",
+          "content": "List the integers from 1 to 200 in ascending order, separated by commas. Do not add explanations."
+        }
+      ],
+      "temperature": 0,
+      "max_completion_tokens": 128,
+      "stream": true
+    },
+    "runs": [
+      {
+        "repeat": 0,
+        "warmup": true,
+        "ttft_seconds": 4.083501137094572,
+        "elapsed_seconds": 10.481172431027517,
+        "generation_window_seconds": 6.372939260909334,
+        "completion_tokens": 128,
+        "decode_tokens_per_second_estimate": 19.928010420403535,
+        "usage": {
+          "prompt_tokens": 36,
+          "completion_tokens": 128,
+          "total_tokens": 164
+        },
+        "content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 3"
+      },
+      {
+        "repeat": 1,
+        "warmup": false,
+        "ttft_seconds": 0.474737336859107,
+        "elapsed_seconds": 6.874766679946333,
+        "generation_window_seconds": 6.37479027104564,
+        "completion_tokens": 128,
+        "decode_tokens_per_second_estimate": 19.922224041916365,
+        "usage": {
+          "prompt_tokens": 36,
+          "completion_tokens": 128,
+          "total_tokens": 164
+        },
+        "content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 3"
+      }
+    ]
+  },
+  "after_sampling": {
+    "request": {
+      "model": "qwen3.8-27b-nvfp4",
+      "messages": [
+        {
+          "role": "user",
+          "content": "List the integers from 1 to 200 in ascending order, separated by commas. Do not add explanations."
+        }
+      ],
+      "temperature": 0.7,
+      "max_completion_tokens": 128,
+      "stream": true,
+      "seed": 12345
+    },
+    "runs": [
+      {
+        "repeat": 0,
+        "warmup": true,
+        "ttft_seconds": 0.3648976779077202,
+        "elapsed_seconds": 10.21726835379377,
+        "generation_window_seconds": 9.825706809060648,
+        "completion_tokens": 128,
+        "decode_tokens_per_second_estimate": 12.92527880873553,
+        "usage": {
+          "prompt_tokens": 36,
+          "completion_tokens": 128,
+          "total_tokens": 164
+        },
+        "content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 3"
+      },
+      {
+        "repeat": 1,
+        "warmup": false,
+        "ttft_seconds": 0.3338141858112067,
+        "elapsed_seconds": 10.263518144842237,
+        "generation_window_seconds": 9.90481776301749,
+        "completion_tokens": 128,
+        "decode_tokens_per_second_estimate": 12.822043074249315,
+        "usage": {
+          "prompt_tokens": 36,
+          "completion_tokens": 128,
+          "total_tokens": 164
+        },
+        "content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 3"
+      }
+    ]
+  },
+  "greedy_speedup": 2.5278333696962174,
+  "http_smoke": {
+    "stream": {
+      "elapsed_seconds": 7.019696468953043,
+      "events": [
+        {
+          "id": "chatcmpl-sllm-000000006a9ced830000000000000005",
+          "object": "chat.completion.chunk",
+          "created": 1788669315,
+          "model": "qwen3.8-27b-nvfp4",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": ""
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-sllm-000000006a9ced830000000000000005",
+          "object": "chat.completion.chunk",
+          "created": 1788669315,
+          "model": "qwen3.8-27b-nvfp4",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "こんにちは"
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-sllm-000000006a9ced830000000000000005",
+          "object": "chat.completion.chunk",
+          "created": 1788669315,
+          "model": "qwen3.8-27b-nvfp4",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "、"
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-sllm-000000006a9ced830000000000000005",
+          "object": "chat.completion.chunk",
+          "created": 1788669315,
+          "model": "qwen3.8-27b-nvfp4",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "お"
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-sllm-000000006a9ced830000000000000005",
+          "object": "chat.completion.chunk",
+          "created": 1788669315,
+          "model": "qwen3.8-27b-nvfp4",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "元気"
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-sllm-000000006a9ced830000000000000005",
+          "object": "chat.completion.chunk",
+          "created": 1788669315,
+          "model": "qwen3.8-27b-nvfp4",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "ですか"
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-sllm-000000006a9ced830000000000000005",
+          "object": "chat.completion.chunk",
+          "created": 1788669315,
+          "model": "qwen3.8-27b-nvfp4",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "。"
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-sllm-000000006a9ced830000000000000005",
+          "object": "chat.completion.chunk",
+          "created": 1788669315,
+          "model": "qwen3.8-27b-nvfp4",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "logprobs": null,
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 21,
+            "completion_tokens": 7,
+            "total_tokens": 28
+          }
+        }
+      ]
+    },
+    "sampling": {
+      "elapsed_seconds": 0.3959958921186626,
+      "response": {
+        "id": "chatcmpl-sllm-000000006a9ced8a0000000000000006",
+        "object": "chat.completion",
+        "created": 1788669322,
+        "model": "qwen3.8-27b-nvfp4",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Blue"
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 24,
+          "completion_tokens": 2,
+          "total_tokens": 26
+        }
+      }
+    },
+    "cancel": {
+      "closed_after_first_content_event": true
+    },
+    "after_cancel": {
+      "elapsed_seconds": 0.36720845894888043,
+      "response": {
+        "id": "chatcmpl-sllm-000000006a9ced8b0000000000000008",
+        "object": "chat.completion",
+        "created": 1788669323,
+        "model": "qwen3.8-27b-nvfp4",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "4"
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 26,
+          "completion_tokens": 2,
+          "total_tokens": 28
+        }
+      }
+    },
+    "concurrent_requests": [
+      {
+        "elapsed_seconds": 0.3495988370850682,
+        "response": {
+          "id": "chatcmpl-sllm-000000006a9ced8b0000000000000009",
+          "object": "chat.completion",
+          "created": 1788669323,
+          "model": "qwen3.8-27b-nvfp4",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "3"
+              },
+              "logprobs": null,
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 26,
+            "completion_tokens": 2,
+            "total_tokens": 28
+          }
+        }
+      },
+      {
+        "elapsed_seconds": 0.6977669391781092,
+        "response": {
+          "id": "chatcmpl-sllm-000000006a9ced8b000000000000000a",
+          "object": "chat.completion",
+          "created": 1788669323,
+          "model": "qwen3.8-27b-nvfp4",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "5"
+              },
+              "logprobs": null,
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 26,
+            "completion_tokens": 2,
+            "total_tokens": 28
+          }
+        }
+      }
+    ]
+  },
+  "active_cancel": {
+    "cancelled_after_generated_content": "1",
+    "after_cancel": {
+      "id": "chatcmpl-sllm-000000006a9cedac000000000000000c",
+      "object": "chat.completion",
+      "created": 1788669356,
+      "model": "qwen3.8-27b-nvfp4",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "4"
+          },
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 26,
+        "completion_tokens": 2,
+        "total_tokens": 28
+      }
+    }
+  },
+  "shutdown": {
+    "event": "shutdown_audit",
+    "report": {
+      "schema_version": "openai-chat-production-shutdown-v1",
+      "target": "gfx1201",
+      "model_fingerprint": "sha256:c473512c70eace07e2256fe9fd76596ac03e3295bee7d54cfb72676416afcc05",
+      "plan_digest": "sha256:5bbe6315e7af85d68bab7f902b9b36cc3f1629dde10723c09782bcb90ec72489",
+      "model_ready_current_bytes": 21650549568,
+      "final_current_bytes": 0,
+      "final_request_state_bytes": 0,
+      "final_workspace_bytes": 0,
+      "retryable_cleanup": 0,
+      "durable_quarantine": 0,
+      "requests": [
+        {
+          "outcome": "completed",
+          "target": "gfx1201",
+          "weight_encoding": "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16",
+          "kv_cache_encoding": "fp16",
+          "kv_cache_selection": {
+            "requested": "fp16",
+            "resolved": "fp16",
+            "selection_source": "model-fixed-fp16",
+            "reason": "Qwen3.8 NVFP4 server profile selects FP16 KV",
+            "physical_variant": null,
+            "descriptor_id": null,
+            "policy_version": 1
+          },
+          "fp8_provider": "qwen38-mixed-nvfp4-v1",
+          "prompt_tokens": 36,
+          "requested_max_completion_tokens": 128,
+          "completion_tokens": 128,
+          "elapsed_ns": 10460696671,
+          "selected_backend": "hip",
+          "fallback_used": false,
+          "all_dispatches_hip": true,
+          "submission_count": 106088,
+          "kernel_dispatch_count": 163656,
+          "full_attention_layers": 16,
+          "linear_attention_layers": 48,
+          "logical_kv_capacity_tokens": 164,
+          "observed_kv_length_tokens": 163,
+          "physical_page_bytes": 2097152,
+          "kv_memory_kind": "virtual-contiguous",
+          "tokens_per_page": 1024,
+          "mapped_kv_capacity_tokens": 164,
+          "committed_kv_bytes": 67108864,
+          "prefill_chunk_capacity_tokens": 36,
+          "prefill_chunk_count": 1,
+          "placement_total_memory_bytes": 34208743424,
+          "placement_available_memory_bytes": 34135343104,
+          "placement_required_bytes": 23576904819,
+          "placement_incremental_required_bytes": 1926355251,
+          "workspace_separate_allocation_bytes": 525030144,
+          "workspace_arena_bytes": 51226112,
+          "allocated_request_state_bytes": 164691968,
+          "allocated_workspace_bytes": 51226112,
+          "cleanup_request_state_bytes": 0,
+          "cleanup_workspace_bytes": 0,
+          "phase41": {
+            "prefix_cache_result": null,
+            "prefix_shared_pages": 0,
+            "prefix_cow_pages": 0,
+            "prefix_copied_bytes": 0,
+            "checkpoint_operation": null,
+            "checkpoint_result": null,
+            "context_shift_count": 0,
+            "draft_provider": null,
+            "draft_proposed_tokens": 0,
+            "draft_accepted_tokens": 0,
+            "draft_rejected_tokens": 0
+          }
+        },
+        {
+          "outcome": "completed",
+          "target": "gfx1201",
+          "weight_encoding": "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16",
+          "kv_cache_encoding": "fp16",
+          "kv_cache_selection": {
+            "requested": "fp16",
+            "resolved": "fp16",
+            "selection_source": "model-fixed-fp16",
+            "reason": "Qwen3.8 NVFP4 server profile selects FP16 KV",
+            "physical_variant": null,
+            "descriptor_id": null,
+            "policy_version": 1
+          },
+          "fp8_provider": "qwen38-mixed-nvfp4-v1",
+          "prompt_tokens": 36,
+          "requested_max_completion_tokens": 128,
+          "completion_tokens": 128,
+          "elapsed_ns": 6873853315,
+          "selected_backend": "hip",
+          "fallback_used": false,
+          "all_dispatches_hip": true,
+          "submission_count": 106088,
+          "kernel_dispatch_count": 163656,
+          "full_attention_layers": 16,
+          "linear_attention_layers": 48,
+          "logical_kv_capacity_tokens": 164,
+          "observed_kv_length_tokens": 163,
+          "physical_page_bytes": 2097152,
+          "kv_memory_kind": "virtual-contiguous",
+          "tokens_per_page": 1024,
+          "mapped_kv_capacity_tokens": 164,
+          "committed_kv_bytes": 67108864,
+          "prefill_chunk_capacity_tokens": 36,
+          "prefill_chunk_count": 1,
+          "placement_total_memory_bytes": 34208743424,
+          "placement_available_memory_bytes": 34135343104,
+          "placement_required_bytes": 23576904819,
+          "placement_incremental_required_bytes": 1926355251,
+          "workspace_separate_allocation_bytes": 525030144,
+          "workspace_arena_bytes": 51226112,
+          "allocated_request_state_bytes": 164691968,
+          "allocated_workspace_bytes": 51226112,
+          "cleanup_request_state_bytes": 0,
+          "cleanup_workspace_bytes": 0,
+          "phase41": {
+            "prefix_cache_result": null,
+            "prefix_shared_pages": 0,
+            "prefix_cow_pages": 0,
+            "prefix_copied_bytes": 0,
+            "checkpoint_operation": null,
+            "checkpoint_result": null,
+            "context_shift_count": 0,
+            "draft_provider": null,
+            "draft_proposed_tokens": 0,
+            "draft_accepted_tokens": 0,
+            "draft_rejected_tokens": 0
+          }
+        },
+        {
+          "outcome": "completed",
+          "target": "gfx1201",
+          "weight_encoding": "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16",
+          "kv_cache_encoding": "fp16",
+          "kv_cache_selection": {
+            "requested": "fp16",
+            "resolved": "fp16",
+            "selection_source": "model-fixed-fp16",
+            "reason": "Qwen3.8 NVFP4 server profile selects FP16 KV",
+            "physical_variant": null,
+            "descriptor_id": null,
+            "policy_version": 1
+          },
+          "fp8_provider": "qwen38-mixed-nvfp4-v1",
+          "prompt_tokens": 36,
+          "requested_max_completion_tokens": 128,
+          "completion_tokens": 128,
+          "elapsed_ns": 10196812503,
+          "selected_backend": "hip",
+          "fallback_used": false,
+          "all_dispatches_hip": true,
+          "submission_count": 106088,
+          "kernel_dispatch_count": 163656,
+          "full_attention_layers": 16,
+          "linear_attention_layers": 48,
+          "logical_kv_capacity_tokens": 164,
+          "observed_kv_length_tokens": 163,
+          "physical_page_bytes": 2097152,
+          "kv_memory_kind": "virtual-contiguous",
+          "tokens_per_page": 1024,
+          "mapped_kv_capacity_tokens": 164,
+          "committed_kv_bytes": 67108864,
+          "prefill_chunk_capacity_tokens": 36,
+          "prefill_chunk_count": 1,
+          "placement_total_memory_bytes": 34208743424,
+          "placement_available_memory_bytes": 34135343104,
+          "placement_required_bytes": 23576904819,
+          "placement_incremental_required_bytes": 1926355251,
+          "workspace_separate_allocation_bytes": 525030144,
+          "workspace_arena_bytes": 51226112,
+          "allocated_request_state_bytes": 164691968,
+          "allocated_workspace_bytes": 51226112,
+          "cleanup_request_state_bytes": 0,
+          "cleanup_workspace_bytes": 0,
+          "phase41": {
+            "prefix_cache_result": null,
+            "prefix_shared_pages": 0,
+            "prefix_cow_pages": 0,
+            "prefix_copied_bytes": 0,
+            "checkpoint_operation": null,
+            "checkpoint_result": null,
+            "context_shift_count": 0,
+            "draft_provider": null,
+            "draft_proposed_tokens": 0,
+            "draft_accepted_tokens": 0,
+            "draft_rejected_tokens": 0
+          }
+        },
+        {
+          "outcome": "completed",
+          "target": "gfx1201",
+          "weight_encoding": "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16",
+          "kv_cache_encoding": "fp16",
+          "kv_cache_selection": {
+            "requested": "fp16",
+            "resolved": "fp16",
+            "selection_source": "model-fixed-fp16",
+            "reason": "Qwen3.8 NVFP4 server profile selects FP16 KV",
+            "physical_variant": null,
+            "descriptor_id": null,
+            "policy_version": 1
+          },
+          "fp8_provider": "qwen38-mixed-nvfp4-v1",
+          "prompt_tokens": 36,
+          "requested_max_completion_tokens": 128,
+          "completion_tokens": 128,
+          "elapsed_ns": 10262713171,
+          "selected_backend": "hip",
+          "fallback_used": false,
+          "all_dispatches_hip": true,
+          "submission_count": 106088,
+          "kernel_dispatch_count": 163656,
+          "full_attention_layers": 16,
+          "linear_attention_layers": 48,
+          "logical_kv_capacity_tokens": 164,
+          "observed_kv_length_tokens": 163,
+          "physical_page_bytes": 2097152,
+          "kv_memory_kind": "virtual-contiguous",
+          "tokens_per_page": 1024,
+          "mapped_kv_capacity_tokens": 164,
+          "committed_kv_bytes": 67108864,
+          "prefill_chunk_capacity_tokens": 36,
+          "prefill_chunk_count": 1,
+          "placement_total_memory_bytes": 34208743424,
+          "placement_available_memory_bytes": 34135343104,
+          "placement_required_bytes": 23576904819,
+          "placement_incremental_required_bytes": 1926355251,
+          "workspace_separate_allocation_bytes": 525030144,
+          "workspace_arena_bytes": 51226112,
+          "allocated_request_state_bytes": 164691968,
+          "allocated_workspace_bytes": 51226112,
+          "cleanup_request_state_bytes": 0,
+          "cleanup_workspace_bytes": 0,
+          "phase41": {
+            "prefix_cache_result": null,
+            "prefix_shared_pages": 0,
+            "prefix_cow_pages": 0,
+            "prefix_copied_bytes": 0,
+            "checkpoint_operation": null,
+            "checkpoint_result": null,
+            "context_shift_count": 0,
+            "draft_provider": null,
+            "draft_proposed_tokens": 0,
+            "draft_accepted_tokens": 0,
+            "draft_rejected_tokens": 0
+          }
+        },
+        {
+          "outcome": "completed",
+          "target": "gfx1201",
+          "weight_encoding": "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16",
+          "kv_cache_encoding": "fp16",
+          "kv_cache_selection": {
+            "requested": "fp16",
+            "resolved": "fp16",
+            "selection_source": "model-fixed-fp16",
+            "reason": "Qwen3.8 NVFP4 server profile selects FP16 KV",
+            "physical_variant": null,
+            "descriptor_id": null,
+            "policy_version": 1
+          },
+          "fp8_provider": "qwen38-mixed-nvfp4-v1",
+          "prompt_tokens": 21,
+          "requested_max_completion_tokens": 64,
+          "completion_tokens": 7,
+          "elapsed_ns": 588456028,
+          "selected_backend": "hip",
+          "fallback_used": false,
+          "all_dispatches_hip": true,
+          "submission_count": 5900,
+          "kernel_dispatch_count": 9139,
+          "full_attention_layers": 16,
+          "linear_attention_layers": 48,
+          "logical_kv_capacity_tokens": 85,
+          "observed_kv_length_tokens": 27,
+          "physical_page_bytes": 2097152,
+          "kv_memory_kind": "virtual-contiguous",
+          "tokens_per_page": 1024,
+          "mapped_kv_capacity_tokens": 85,
+          "committed_kv_bytes": 67108864,
+          "prefill_chunk_capacity_tokens": 21,
+          "prefill_chunk_count": 1,
+          "placement_total_memory_bytes": 34208743424,
+          "placement_available_memory_bytes": 34135343104,
+          "placement_required_bytes": 23550383219,
+          "placement_incremental_required_bytes": 1899833651,
+          "workspace_separate_allocation_bytes": 306263808,
+          "workspace_arena_bytes": 29881856,
+          "allocated_request_state_bytes": 159514624,
+          "allocated_workspace_bytes": 29881856,
+          "cleanup_request_state_bytes": 0,
+          "cleanup_workspace_bytes": 0,
+          "phase41": {
+            "prefix_cache_result": null,
+            "prefix_shared_pages": 0,
+            "prefix_cow_pages": 0,
+            "prefix_copied_bytes": 0,
+            "checkpoint_operation": null,
+            "checkpoint_result": null,
+            "context_shift_count": 0,
+            "draft_provider": null,
+            "draft_proposed_tokens": 0,
+            "draft_accepted_tokens": 0,
+            "draft_rejected_tokens": 0
+          }
+        },
+        {
+          "outcome": "completed",
+          "target": "gfx1201",
+          "weight_encoding": "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16",
+          "kv_cache_encoding": "fp16",
+          "kv_cache_selection": {
+            "requested": "fp16",
+            "resolved": "fp16",
+            "selection_source": "model-fixed-fp16",
+            "reason": "Qwen3.8 NVFP4 server profile selects FP16 KV",
+            "physical_variant": null,
+            "descriptor_id": null,
+            "policy_version": 1
+          },
+          "fp8_provider": "qwen38-mixed-nvfp4-v1",
+          "prompt_tokens": 24,
+          "requested_max_completion_tokens": 16,
+          "completion_tokens": 2,
+          "elapsed_ns": 394829732,
+          "selected_backend": "hip",
+          "fallback_used": false,
+          "all_dispatches_hip": true,
+          "submission_count": 1760,
+          "kernel_dispatch_count": 2754,
+          "full_attention_layers": 16,
+          "linear_attention_layers": 48,
+          "logical_kv_capacity_tokens": 40,
+          "observed_kv_length_tokens": 25,
+          "physical_page_bytes": 2097152,
+          "kv_memory_kind": "virtual-contiguous",
+          "tokens_per_page": 1024,
+          "mapped_kv_capacity_tokens": 40,
+          "committed_kv_bytes": 67108864,
+          "prefill_chunk_capacity_tokens": 24,
+          "prefill_chunk_count": 1,
+          "placement_total_memory_bytes": 34208743424,
+          "placement_available_memory_bytes": 34135343104,
+          "placement_required_bytes": 23551702643,
+          "placement_incremental_required_bytes": 1901153075,
+          "workspace_separate_allocation_bytes": 350012160,
+          "workspace_arena_bytes": 34150400,
+          "allocated_request_state_bytes": 156565504,
+          "allocated_workspace_bytes": 34150400,
+          "cleanup_request_state_bytes": 0,
+          "cleanup_workspace_bytes": 0,
+          "phase41": {
+            "prefix_cache_result": null,
+            "prefix_shared_pages": 0,
+            "prefix_cow_pages": 0,
+            "prefix_copied_bytes": 0,
+            "checkpoint_operation": null,
+            "checkpoint_result": null,
+            "context_shift_count": 0,
+            "draft_provider": null,
+            "draft_proposed_tokens": 0,
+            "draft_accepted_tokens": 0,
+            "draft_rejected_tokens": 0
+          }
+        },
+        {
+          "outcome": "cancelled",
+          "target": "gfx1201",
+          "weight_encoding": "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16",
+          "kv_cache_encoding": "fp16",
+          "kv_cache_selection": {
+            "requested": "fp16",
+            "resolved": "fp16",
+            "selection_source": "model-fixed-fp16",
+            "reason": "Qwen3.8 NVFP4 server profile selects FP16 KV",
+            "physical_variant": null,
+            "descriptor_id": null,
+            "policy_version": 1
+          },
+          "fp8_provider": "qwen38-mixed-nvfp4-v1",
+          "prompt_tokens": 28,
+          "requested_max_completion_tokens": 1024,
+          "completion_tokens": null,
+          "elapsed_ns": 24501809,
+          "selected_backend": null,
+          "fallback_used": null,
+          "all_dispatches_hip": null,
+          "submission_count": null,
+          "kernel_dispatch_count": null,
+          "full_attention_layers": 16,
+          "linear_attention_layers": 48,
+          "logical_kv_capacity_tokens": 1052,
+          "observed_kv_length_tokens": 0,
+          "physical_page_bytes": 2097152,
+          "kv_memory_kind": "virtual-contiguous",
+          "tokens_per_page": 1024,
+          "mapped_kv_capacity_tokens": 0,
+          "committed_kv_bytes": 0,
+          "prefill_chunk_capacity_tokens": 28,
+          "prefill_chunk_count": 0,
+          "placement_total_memory_bytes": 34208743424,
+          "placement_available_memory_bytes": 34135343104,
+          "placement_required_bytes": 23623717491,
+          "placement_incremental_required_bytes": 1973167923,
+          "workspace_separate_allocation_bytes": 408359680,
+          "workspace_arena_bytes": 39842816,
+          "allocated_request_state_bytes": 222887936,
+          "allocated_workspace_bytes": 39842816,
+          "cleanup_request_state_bytes": 0,
+          "cleanup_workspace_bytes": 0,
+          "phase41": {
+            "prefix_cache_result": null,
+            "prefix_shared_pages": 0,
+            "prefix_cow_pages": 0,
+            "prefix_copied_bytes": 0,
+            "checkpoint_operation": null,
+            "checkpoint_result": null,
+            "context_shift_count": 0,
+            "draft_provider": null,
+            "draft_proposed_tokens": 0,
+            "draft_accepted_tokens": 0,
+            "draft_rejected_tokens": 0
+          }
+        },
+        {
+          "outcome": "completed",
+          "target": "gfx1201",
+          "weight_encoding": "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16",
+          "kv_cache_encoding": "fp16",
+          "kv_cache_selection": {
+            "requested": "fp16",
+            "resolved": "fp16",
+            "selection_source": "model-fixed-fp16",
+            "reason": "Qwen3.8 NVFP4 server profile selects FP16 KV",
+            "physical_variant": null,
+            "descriptor_id": null,
+            "policy_version": 1
+          },
+          "fp8_provider": "qwen38-mixed-nvfp4-v1",
+          "prompt_tokens": 26,
+          "requested_max_completion_tokens": 16,
+          "completion_tokens": 2,
+          "elapsed_ns": 342440505,
+          "selected_backend": "hip",
+          "fallback_used": false,
+          "all_dispatches_hip": true,
+          "submission_count": 1760,
+          "kernel_dispatch_count": 2754,
+          "full_attention_layers": 16,
+          "linear_attention_layers": 48,
+          "logical_kv_capacity_tokens": 42,
+          "observed_kv_length_tokens": 27,
+          "physical_page_bytes": 2097152,
+          "kv_memory_kind": "virtual-contiguous",
+          "tokens_per_page": 1024,
+          "mapped_kv_capacity_tokens": 42,
+          "committed_kv_bytes": 67108864,
+          "prefill_chunk_capacity_tokens": 26,
+          "prefill_chunk_count": 1,
+          "placement_total_memory_bytes": 34208743424,
+          "placement_available_memory_bytes": 34135343104,
+          "placement_required_bytes": 23554679923,
+          "placement_incremental_required_bytes": 1904130355,
+          "workspace_separate_allocation_bytes": 379185920,
+          "workspace_arena_bytes": 36996608,
+          "allocated_request_state_bytes": 156696576,
+          "allocated_workspace_bytes": 36996608,
+          "cleanup_request_state_bytes": 0,
+          "cleanup_workspace_bytes": 0,
+          "phase41": {
+            "prefix_cache_result": null,
+            "prefix_shared_pages": 0,
+            "prefix_cow_pages": 0,
+            "prefix_copied_bytes": 0,
+            "checkpoint_operation": null,
+            "checkpoint_result": null,
+            "context_shift_count": 0,
+            "draft_provider": null,
+            "draft_proposed_tokens": 0,
+            "draft_accepted_tokens": 0,
+            "draft_rejected_tokens": 0
+          }
+        },
+        {
+          "outcome": "completed",
+          "target": "gfx1201",
+          "weight_encoding": "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16",
+          "kv_cache_encoding": "fp16",
+          "kv_cache_selection": {
+            "requested": "fp16",
+            "resolved": "fp16",
+            "selection_source": "model-fixed-fp16",
+            "reason": "Qwen3.8 NVFP4 server profile selects FP16 KV",
+            "physical_variant": null,
+            "descriptor_id": null,
+            "policy_version": 1
+          },
+          "fp8_provider": "qwen38-mixed-nvfp4-v1",
+          "prompt_tokens": 26,
+          "requested_max_completion_tokens": 16,
+          "completion_tokens": 2,
+          "elapsed_ns": 348278055,
+          "selected_backend": "hip",
+          "fallback_used": false,
+          "all_dispatches_hip": true,
+          "submission_count": 1760,
+          "kernel_dispatch_count": 2754,
+          "full_attention_layers": 16,
+          "linear_attention_layers": 48,
+          "logical_kv_capacity_tokens": 42,
+          "observed_kv_length_tokens": 27,
+          "physical_page_bytes": 2097152,
+          "kv_memory_kind": "virtual-contiguous",
+          "tokens_per_page": 1024,
+          "mapped_kv_capacity_tokens": 42,
+          "committed_kv_bytes": 67108864,
+          "prefill_chunk_capacity_tokens": 26,
+          "prefill_chunk_count": 1,
+          "placement_total_memory_bytes": 34208743424,
+          "placement_available_memory_bytes": 34135343104,
+          "placement_required_bytes": 23554679923,
+          "placement_incremental_required_bytes": 1904130355,
+          "workspace_separate_allocation_bytes": 379185920,
+          "workspace_arena_bytes": 36996608,
+          "allocated_request_state_bytes": 156696576,
+          "allocated_workspace_bytes": 36996608,
+          "cleanup_request_state_bytes": 0,
+          "cleanup_workspace_bytes": 0,
+          "phase41": {
+            "prefix_cache_result": null,
+            "prefix_shared_pages": 0,
+            "prefix_cow_pages": 0,
+            "prefix_copied_bytes": 0,
+            "checkpoint_operation": null,
+            "checkpoint_result": null,
+            "context_shift_count": 0,
+            "draft_provider": null,
+            "draft_proposed_tokens": 0,
+            "draft_accepted_tokens": 0,
+            "draft_rejected_tokens": 0
+          }
+        },
+        {
+          "outcome": "completed",
+          "target": "gfx1201",
+          "weight_encoding": "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16",
+          "kv_cache_encoding": "fp16",
+          "kv_cache_selection": {
+            "requested": "fp16",
+            "resolved": "fp16",
+            "selection_source": "model-fixed-fp16",
+            "reason": "Qwen3.8 NVFP4 server profile selects FP16 KV",
+            "physical_variant": null,
+            "descriptor_id": null,
+            "policy_version": 1
+          },
+          "fp8_provider": "qwen38-mixed-nvfp4-v1",
+          "prompt_tokens": 26,
+          "requested_max_completion_tokens": 16,
+          "completion_tokens": 2,
+          "elapsed_ns": 348662781,
+          "selected_backend": "hip",
+          "fallback_used": false,
+          "all_dispatches_hip": true,
+          "submission_count": 1760,
+          "kernel_dispatch_count": 2754,
+          "full_attention_layers": 16,
+          "linear_attention_layers": 48,
+          "logical_kv_capacity_tokens": 42,
+          "observed_kv_length_tokens": 27,
+          "physical_page_bytes": 2097152,
+          "kv_memory_kind": "virtual-contiguous",
+          "tokens_per_page": 1024,
+          "mapped_kv_capacity_tokens": 42,
+          "committed_kv_bytes": 67108864,
+          "prefill_chunk_capacity_tokens": 26,
+          "prefill_chunk_count": 1,
+          "placement_total_memory_bytes": 34208743424,
+          "placement_available_memory_bytes": 34135343104,
+          "placement_required_bytes": 23554679923,
+          "placement_incremental_required_bytes": 1904130355,
+          "workspace_separate_allocation_bytes": 379185920,
+          "workspace_arena_bytes": 36996608,
+          "allocated_request_state_bytes": 156696576,
+          "allocated_workspace_bytes": 36996608,
+          "cleanup_request_state_bytes": 0,
+          "cleanup_workspace_bytes": 0,
+          "phase41": {
+            "prefix_cache_result": null,
+            "prefix_shared_pages": 0,
+            "prefix_cow_pages": 0,
+            "prefix_copied_bytes": 0,
+            "checkpoint_operation": null,
+            "checkpoint_result": null,
+            "context_shift_count": 0,
+            "draft_provider": null,
+            "draft_proposed_tokens": 0,
+            "draft_accepted_tokens": 0,
+            "draft_rejected_tokens": 0
+          }
+        },
+        {
+          "outcome": "cancelled",
+          "target": "gfx1201",
+          "weight_encoding": "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16",
+          "kv_cache_encoding": "fp16",
+          "kv_cache_selection": {
+            "requested": "fp16",
+            "resolved": "fp16",
+            "selection_source": "model-fixed-fp16",
+            "reason": "Qwen3.8 NVFP4 server profile selects FP16 KV",
+            "physical_variant": null,
+            "descriptor_id": null,
+            "policy_version": 1
+          },
+          "fp8_provider": "qwen38-mixed-nvfp4-v1",
+          "prompt_tokens": 28,
+          "requested_max_completion_tokens": 1024,
+          "completion_tokens": null,
+          "elapsed_ns": 346087429,
+          "selected_backend": "hip",
+          "fallback_used": false,
+          "all_dispatches_hip": true,
+          "submission_count": 1760,
+          "kernel_dispatch_count": 2754,
+          "full_attention_layers": 16,
+          "linear_attention_layers": 48,
+          "logical_kv_capacity_tokens": 1052,
+          "observed_kv_length_tokens": 29,
+          "physical_page_bytes": 2097152,
+          "kv_memory_kind": "virtual-contiguous",
+          "tokens_per_page": 1024,
+          "mapped_kv_capacity_tokens": 1024,
+          "committed_kv_bytes": 67108864,
+          "prefill_chunk_capacity_tokens": 28,
+          "prefill_chunk_count": 1,
+          "placement_total_memory_bytes": 34208743424,
+          "placement_available_memory_bytes": 34135343104,
+          "placement_required_bytes": 23623717491,
+          "placement_incremental_required_bytes": 1973167923,
+          "workspace_separate_allocation_bytes": 408359680,
+          "workspace_arena_bytes": 39842816,
+          "allocated_request_state_bytes": 222887936,
+          "allocated_workspace_bytes": 39842816,
+          "cleanup_request_state_bytes": 0,
+          "cleanup_workspace_bytes": 0,
+          "phase41": {
+            "prefix_cache_result": null,
+            "prefix_shared_pages": 0,
+            "prefix_cow_pages": 0,
+            "prefix_copied_bytes": 0,
+            "checkpoint_operation": null,
+            "checkpoint_result": null,
+            "context_shift_count": 0,
+            "draft_provider": null,
+            "draft_proposed_tokens": 0,
+            "draft_accepted_tokens": 0,
+            "draft_rejected_tokens": 0
+          }
+        },
+        {
+          "outcome": "completed",
+          "target": "gfx1201",
+          "weight_encoding": "qwen38-mixed-nvfp4-w4a4-fp8-w8a8-bf16",
+          "kv_cache_encoding": "fp16",
+          "kv_cache_selection": {
+            "requested": "fp16",
+            "resolved": "fp16",
+            "selection_source": "model-fixed-fp16",
+            "reason": "Qwen3.8 NVFP4 server profile selects FP16 KV",
+            "physical_variant": null,
+            "descriptor_id": null,
+            "policy_version": 1
+          },
+          "fp8_provider": "qwen38-mixed-nvfp4-v1",
+          "prompt_tokens": 26,
+          "requested_max_completion_tokens": 16,
+          "completion_tokens": 2,
+          "elapsed_ns": 341814396,
+          "selected_backend": "hip",
+          "fallback_used": false,
+          "all_dispatches_hip": true,
+          "submission_count": 1760,
+          "kernel_dispatch_count": 2754,
+          "full_attention_layers": 16,
+          "linear_attention_layers": 48,
+          "logical_kv_capacity_tokens": 42,
+          "observed_kv_length_tokens": 27,
+          "physical_page_bytes": 2097152,
+          "kv_memory_kind": "virtual-contiguous",
+          "tokens_per_page": 1024,
+          "mapped_kv_capacity_tokens": 42,
+          "committed_kv_bytes": 67108864,
+          "prefill_chunk_capacity_tokens": 26,
+          "prefill_chunk_count": 1,
+          "placement_total_memory_bytes": 34208743424,
+          "placement_available_memory_bytes": 34135343104,
+          "placement_required_bytes": 23554679923,
+          "placement_incremental_required_bytes": 1904130355,
+          "workspace_separate_allocation_bytes": 379185920,
+          "workspace_arena_bytes": 36996608,
+          "allocated_request_state_bytes": 156696576,
+          "allocated_workspace_bytes": 36996608,
+          "cleanup_request_state_bytes": 0,
+          "cleanup_workspace_bytes": 0,
+          "phase41": {
+            "prefix_cache_result": null,
+            "prefix_shared_pages": 0,
+            "prefix_cow_pages": 0,
+            "prefix_copied_bytes": 0,
+            "checkpoint_operation": null,
+            "checkpoint_result": null,
+            "context_shift_count": 0,
+            "draft_provider": null,
+            "draft_proposed_tokens": 0,
+            "draft_accepted_tokens": 0,
+            "draft_rejected_tokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "publication_format_mapping": {
+    "method": "cargo fmt --all (rustfmt only: whitespace/layout and import ordering); original tested source retained in the changed_source_sha256 map",
+    "formatter": "rustfmt 1.9.0-stable (8bab26f4f6 2026-07-14)",
+    "files": {
+      "crates/sllm-server/src/production.rs": {
+        "before": "c73709cb9b99b6994a498a19849adbefd3dcd645504bc3349a6e68cdfa3d2605",
+        "after": "ab1062f05b6f7d4567dfde4148b635977642081e329dfb79ffab869f6f75eacb"
+      }
+    },
+    "validation": "Published source verified to equal rustfmt of the original tested source; frontend and server host tests rerun and passed. Original deployed binary identity and GPU evidence remain unchanged.",
+    "publication_identity": "Enclosing Git commit"
+  }
+}

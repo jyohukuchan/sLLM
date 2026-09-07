@@ -31,10 +31,10 @@ use sllm_server::{
     ModelLibraryDeviceV1, ModelLibraryRegistrationV1, ModelLibraryV1, ModelLifecycleConfigV1,
     ModelLifecycleDescriptorV1, ModelLifecycleLoadedV1, ModelLifecycleRegistryV1,
     ModelRegistryEntryV1, ModelRegistryV1, Phase41ProductionConfigV1, PrefixCacheStartupConfigV1,
-    ProductionShutdownAuditV1, QwenAdapterArtifactConfigV1, QwenAdapterCatalogConfigV1,
-    QwenBackendConfigV1, QwenChatBackendV1, ResumableStoreV1, SchedulerConfigV1, SchedulerV1,
-    ServerConfigV1, ServerLifecycleStateV1, ServerLifecycleV1, ServerMetricsV1,
-    build_dynamic_router_v1, build_router_v1, dynamic_model_plan_digest_preflight,
+    ProductionShutdownAuditV1, Qwen38Nvfp4BackendConfigV1, QwenAdapterArtifactConfigV1,
+    QwenAdapterCatalogConfigV1, QwenBackendConfigV1, QwenChatBackendV1, ResumableStoreV1,
+    SchedulerConfigV1, SchedulerV1, ServerConfigV1, ServerLifecycleStateV1, ServerLifecycleV1,
+    ServerMetricsV1, build_dynamic_router_v1, build_router_v1, dynamic_model_plan_digest_preflight,
     ministral3_model_plan_preflight_v1, qwen_adapter_catalog_identity_preflight,
     read_model_manifest_v1,
 };
@@ -127,6 +127,7 @@ fn main() -> ExitCode {
 struct Config {
     models: Option<PathBuf>,
     library_only: bool,
+    qwen38_nvfp4: Option<PathBuf>,
     gguf: PathBuf,
     derived_lock: Option<PathBuf>,
     mtp_assistant_gguf_path: Option<PathBuf>,
@@ -184,6 +185,13 @@ where
     if models.as_ref().is_some_and(|path| !path.is_absolute()) {
         return Err("--models manifest path must be absolute".to_owned());
     }
+    let qwen38_nvfp4 = values.remove("--qwen38-nvfp4").map(PathBuf::from);
+    if qwen38_nvfp4
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute())
+    {
+        return Err("--qwen38-nvfp4 model directory must be absolute".to_owned());
+    }
     let legacy_gguf = values.remove("--gguf");
     let legacy_derived_lock = values.remove("--derived-lock");
     let mtp_assistant_gguf_path = values.remove("--mtp-assistant-gguf").map(PathBuf::from);
@@ -210,6 +218,7 @@ where
             || legacy_device_index.is_some()
             || legacy_target.is_some()
             || requested_model.is_some()
+            || qwen38_nvfp4.is_some()
         {
             return Err(
                 "--models is mutually exclusive with --gguf, --derived-lock, --device-index, --target, and --model"
@@ -226,6 +235,33 @@ where
             0,
             String::new(),
             "dynamic".to_owned(),
+        )
+    } else if qwen38_nvfp4.is_some() {
+        if legacy_gguf.is_some()
+            || legacy_derived_lock.is_some()
+            || mtp_assistant_gguf_path.is_some()
+        {
+            return Err(
+                "--qwen38-nvfp4 is mutually exclusive with GGUF and MTP sources".to_owned(),
+            );
+        }
+        let device_index = legacy_device_index
+            .map(|value| parse_value::<u32>(&value, "device index"))
+            .transpose()?
+            .unwrap_or(0);
+        let target = legacy_target.unwrap_or_else(|| "gfx1201".to_owned());
+        if target != "gfx1201" || device_index != 0 {
+            return Err(
+                "--qwen38-nvfp4 requires R9700 gfx1201 at visible device index 0".to_owned(),
+            );
+        }
+        (
+            false,
+            PathBuf::new(),
+            None,
+            device_index,
+            target,
+            requested_model.unwrap_or_else(|| "qwen3.8-27b-nvfp4".to_owned()),
         )
     } else if !has_legacy_source {
         (
@@ -352,10 +388,19 @@ where
     if context_length == Some(0) {
         return Err("context length must be nonzero".to_owned());
     }
-    let kv_cache_encoding = values
+    let mut kv_cache_encoding = values
         .remove("--kv-cache-encoding")
         .map(|value| parse_kv_cache_encoding(&value))
         .transpose()?;
+
+    if qwen38_nvfp4.is_some() {
+        if kv_cache_encoding.is_some_and(|encoding| {
+            !matches!(encoding, KvCacheEncoding::Fp16 | KvCacheEncoding::Mxfp8E4)
+        }) {
+            return Err("--qwen38-nvfp4 supports fp16 or kv-mxfp8-e4".to_owned());
+        }
+        kv_cache_encoding = Some(kv_cache_encoding.unwrap_or(KvCacheEncoding::Mxfp8E4));
+    }
 
     let prefix_cache_mode = values
         .remove("--prefix-cache")
@@ -499,6 +544,17 @@ where
         checkpoint,
         draft,
     };
+    if qwen38_nvfp4.is_some()
+        && (!matches!(phase41.prefix_cache, PrefixCacheStartupConfigV1::Disabled)
+            || !matches!(
+                phase41.context_window,
+                ContextWindowStartupConfigV1::Disabled
+            )
+            || !matches!(phase41.checkpoint, CheckpointStartupConfigV1::Disabled)
+            || !matches!(phase41.draft, DraftStartupConfigV1::Disabled))
+    {
+        return Err("--qwen38-nvfp4 supports single-request text generation with prefix cache, context policy, checkpoint and draft disabled".to_owned());
+    }
     if mtp_assistant_gguf_path.is_some() {
         if models.is_some() || library_only {
             return Err(
@@ -517,6 +573,7 @@ where
         return Err(format!("unknown argument {flag}\n{}", usage()));
     }
     Ok(Config {
+        qwen38_nvfp4,
         models,
         library_only,
         gguf,
@@ -591,7 +648,19 @@ fn run(config: Config) -> Result<(), String> {
             return run_dynamic_manifest(config, Some(manifest_path), credentials, tls).await;
         }
         let lifecycle = ServerLifecycleV1::new(ServerLifecycleStateV1::Loading);
-        let (backend, startup_kv_selection) = if let Some(derived_lock_path) = config.derived_lock.clone() {
+        let (backend, startup_kv_selection) = if let Some(artifact_root) = config.qwen38_nvfp4.clone() {
+            let kv_cache_encoding = config.kv_cache_encoding.unwrap_or(KvCacheEncoding::Mxfp8E4);
+            let backend = QwenChatBackendV1::open_unsloth_qwen38_nvfp4(Qwen38Nvfp4BackendConfigV1 {
+                artifact_root,
+                kv_cache_encoding,
+                device_index: config.device_index,
+                target: config.target.clone(),
+                completion_timeout: config.completion_timeout,
+                shutdown_timeout: config.shutdown_timeout,
+                context_length: config.context_length.unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
+            }).map_err(|error| error.to_string())?;
+            (ActiveBackend::Qwen(Arc::new(backend)), KvCacheSelectionReportV1::qwen38_nvfp4(kv_cache_encoding))
+        } else if let Some(derived_lock_path) = config.derived_lock.clone() {
         let derived = read_derived_gguf_lock(&derived_lock_path)
             .map_err(|error| format!("derived GGUF lock validation failed: {error}"))?;
         let gguf_moe = derived.semantic_model_id.starts_with("qwen35moe:");
@@ -2080,7 +2149,7 @@ fn reject_disabled_options(
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server [--models PATH | --gguf PATH [--derived-lock PATH] --device-index N --target GFX [--mtp-assistant-gguf PATH --mtp-assistant-derived-lock PATH --draft mtp-auto]] [--listen HOST:PORT] [--webui true|false] [--webui-port PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4|kv-mxfp8-e4|kv-mxfp8-e5] (Qwen default: kv-mxfp8-e4; Gemma 4 MoE: auto or fp8-static only; direct official Ministral 3: FP16 only; FP16 rollback applies to Qwen) [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
+    "usage: sllm-server [--qwen38-nvfp4 ABSOLUTE_DIRECTORY (R9700, single request, FP16 or MXFP8 E4 KV) | --models PATH | --gguf PATH [--derived-lock PATH] --device-index N --target GFX [--mtp-assistant-gguf PATH --mtp-assistant-derived-lock PATH --draft mtp-auto]] [--listen HOST:PORT] [--webui true|false] [--webui-port PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4|kv-mxfp8-e4|kv-mxfp8-e5] (Qwen default: kv-mxfp8-e4; Gemma 4 MoE: auto or fp8-static only; direct official Ministral 3: FP16 only; FP16 rollback applies to Qwen) [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
 }
 
 #[cfg(test)]
@@ -2120,6 +2189,54 @@ mod tests {
         ];
         args.extend_from_slice(extra);
         args.into_iter().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn qwen38_nvfp4_cli_selects_scoped_runtime() {
+        let config = parse_args_from(["--qwen38-nvfp4", "/models/qwen38"]).unwrap();
+        assert!(!config.library_only);
+        assert_eq!(config.target, "gfx1201");
+        assert_eq!(config.device_index, 0);
+        assert_eq!(config.model, "qwen3.8-27b-nvfp4");
+        assert_eq!(config.kv_cache_encoding, Some(KvCacheEncoding::Mxfp8E4));
+        let fp16 = parse_args_from([
+            "--qwen38-nvfp4",
+            "/models/qwen38",
+            "--kv-cache-encoding",
+            "fp16",
+        ])
+        .unwrap();
+        assert_eq!(fp16.kv_cache_encoding, Some(KvCacheEncoding::Fp16));
+        for context in [1, 16383, 16384, 16385] {
+            let value = context.to_string();
+            let config = parse_args_from([
+                "--qwen38-nvfp4",
+                "/models/qwen38",
+                "--context-length",
+                &value,
+            ])
+            .unwrap();
+            assert_eq!(config.context_length, Some(context));
+        }
+    }
+
+    #[test]
+    fn qwen38_nvfp4_cli_rejects_out_of_scope_combinations() {
+        for extra in [
+            vec!["--target", "gfx1030"],
+            vec!["--device-index", "1"],
+            vec!["--kv-cache-encoding", "fp8"],
+            vec!["--gguf", "/models/other.gguf"],
+            vec!["--derived-lock", "/models/other.lock"],
+            vec!["--models", "/models/manifest.json"],
+            vec!["--draft", "mtp-auto"],
+            vec!["--context-length", "0"],
+        ] {
+            let mut args = vec!["--qwen38-nvfp4", "/models/qwen38"];
+            args.extend(extra);
+            assert!(parse_args_from(args).is_err());
+        }
+        assert!(parse_args_from(["--qwen38-nvfp4", "relative"]).is_err());
     }
 
     #[test]

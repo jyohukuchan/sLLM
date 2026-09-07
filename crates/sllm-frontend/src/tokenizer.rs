@@ -1,6 +1,8 @@
 use core::fmt;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs;
 
+use sha2::{Digest, Sha256};
 use sllm_core::{
     GEMMA4_MOE_MODEL_FINGERPRINT, Gemma4ModelLock, Gemma4TokenizerContract, ModelLock,
     StopIdentity, TokenizerContract, VerifiedCache, VerifiedGguf,
@@ -25,6 +27,42 @@ const QWEN35_MOE_TOKENIZER_CONTRACT: &str = r#"{
     "budget_boundary":"stop_token_wins","max_new_tokens_zero":"max_new_tokens_before_decode","reason_version":1
   }
 }"#;
+
+/// Exact frontend identity for `unsloth/Qwen3.8-27B-NVFP4`.
+///
+/// The tokenizer occupies IDs through 248076 while the Qwen3.8 graph keeps
+/// 248320 LM-head rows.  Keep those values distinct: the former is observed
+/// tokenizer data and the latter is the model capacity used by the graph.
+const QWEN38_NVFP4_TOKENIZER_CONTRACT: &str = r#"{
+  "files":["chat_template.jinja","tokenizer.json","tokenizer_config.json","vocab.json"],
+  "chat_template_path":"chat_template.jinja",
+  "vocab_size":248320,
+  "eos_token_id":248044,
+  "special_token_ids":{"vision_start":248053,"vision_end":248054,"vision_pad":248055,"image_pad":248056,"video_pad":248057},
+  "stop_identity":{
+    "config_eos":{"token":"<|endoftext|>","token_id":248044,"source_file":"config.json"},
+    "tokenizer_eos":{"token":"<|im_end|>","token_id":248046,"source_files":["tokenizer_config.json","tokenizer.json"]}
+  },
+  "generation_stop_policy":{
+    "version":1,"stop_token_ids":[248046,248044],"evaluation":"newly_generated_after_argmax",
+    "prompt_evaluation":"never_stop","stop_token":{"visible_output":false,"subsequent_decode_input":false},
+    "budget_boundary":"stop_token_wins","max_new_tokens_zero":"max_new_tokens_before_decode","reason_version":1
+  }
+}"#;
+
+pub const QWEN38_NVFP4_TOKENIZER_FILENAME: &str = "tokenizer.json";
+pub const QWEN38_NVFP4_TOKENIZER_SIZE_BYTES: u64 = 19_989_325;
+pub const QWEN38_NVFP4_TOKENIZER_SHA256: &str =
+    "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523";
+pub const QWEN38_NVFP4_TOKENIZER_VOCAB_SIZE: usize = 248_077;
+pub const QWEN38_NVFP4_TOKENIZER_VOCAB_SPAN: u32 = 248_077;
+// Short aliases retain the benchmark's public spelling while the NVFP4
+// prefix keeps the artifact-specific contract unambiguous.
+pub const QWEN38_TOKENIZER_FILENAME: &str = QWEN38_NVFP4_TOKENIZER_FILENAME;
+pub const QWEN38_TOKENIZER_SIZE_BYTES: u64 = QWEN38_NVFP4_TOKENIZER_SIZE_BYTES;
+pub const QWEN38_TOKENIZER_SHA256: &str = QWEN38_NVFP4_TOKENIZER_SHA256;
+pub const QWEN38_TOKENIZER_VOCAB_SIZE: usize = QWEN38_NVFP4_TOKENIZER_VOCAB_SIZE;
+pub const QWEN38_TOKENIZER_VOCAB_SPAN: u32 = QWEN38_NVFP4_TOKENIZER_VOCAB_SPAN;
 
 const GEMMA4_MOE_SEMANTIC_PREFIX: &str = "gemma4moe:";
 
@@ -596,6 +634,28 @@ impl TokenizerFrontendV1 {
         Self::from_qwen35_bytes(bytes, &contract, sllm_core::QWEN35_MOE_MODEL_FINGERPRINT)
     }
 
+    /// Constructs the tokenizer for the exact reviewed
+    /// `unsloth/Qwen3.8-27B-NVFP4` source artifact.
+    ///
+    /// Qwen3.8 intentionally has its own contract even though its tokenizer
+    /// uses the same Qwen special-token IDs as Qwen3.5.  In particular, the
+    /// observed tokenizer span is 248077 and must not be replaced with the
+    /// graph's padded 248320 capacity or with a Qwen3.5 lock label.
+    pub fn from_unsloth_qwen38_nvfp4(
+        artifact: &sllm_core::VerifiedUnslothQwen38Nvfp4,
+    ) -> Result<Self, TokenizerError> {
+        let bytes = read_qwen38_frontend_asset(
+            artifact,
+            QWEN38_NVFP4_TOKENIZER_FILENAME,
+            QWEN38_NVFP4_TOKENIZER_SIZE_BYTES,
+            QWEN38_NVFP4_TOKENIZER_SHA256,
+        )?;
+        let contract: TokenizerContract = serde_json::from_str(QWEN38_NVFP4_TOKENIZER_CONTRACT)
+            .map_err(|_| TokenizerError::InvalidTokenizer)?;
+        let fingerprint = format!("sha256:{}", sllm_core::UNSLOTH_QWEN38_NVFP4_MODEL_SHA256);
+        Self::from_qwen35_bytes(bytes, &contract, &fingerprint)
+    }
+
     pub fn from_qwen35_moe_gguf(
         source: &sllm_core::VerifiedGgufQwen35Moe,
     ) -> Result<Self, TokenizerError> {
@@ -940,6 +1000,32 @@ impl TokenizerFrontendV1 {
             .decode(token_ids.as_slice(), mode.skip_special_tokens())
             .map_err(|_| TokenizerError::Decode)
     }
+}
+
+fn read_qwen38_frontend_asset(
+    artifact: &sllm_core::VerifiedUnslothQwen38Nvfp4,
+    file_name: &str,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<Vec<u8>, TokenizerError> {
+    // The core importer verifies the model containers.  These support files
+    // are independently bound here so an artifact directory cannot silently
+    // borrow a tokenizer from another Qwen revision.
+    let path = artifact.root().join(file_name);
+    let metadata = fs::symlink_metadata(&path).map_err(|_| TokenizerError::FrontendAssetRead)?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(TokenizerError::FrontendAssetRead);
+    }
+    if metadata.len() != expected_size {
+        return Err(TokenizerError::FrontendAssetRead);
+    }
+    let bytes = fs::read(&path).map_err(|_| TokenizerError::FrontendAssetRead)?;
+    if bytes.len() as u64 != expected_size
+        || format!("{:x}", Sha256::digest(&bytes)) != expected_sha256
+    {
+        return Err(TokenizerError::FrontendAssetRead);
+    }
+    Ok(bytes)
 }
 
 #[derive(Clone, Debug, Default)]

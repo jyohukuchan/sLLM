@@ -9,6 +9,7 @@
     "schema_version": {"const": "sllm-phase53-kv-mxfp8-evidence-v1"},
     "state": {"enum": ["PASS", "FAIL", "UNAVAILABLE"]},
     "target": {"enum": ["gfx942", "gfx942:sramecc+:xnack-", "gfx1201", "gfx1030"]}, "device_index": {"type": "integer", "minimum": 0},
+    "query_heads": {"type": "integer", "enum": [8, 16, 24, 32, 64], "description": "Attention query heads; absent in historical evidence where the fixed value was 16."},
     "encoding": {"const": "kv-mxfp8-e4"}, "physical_variant": {"const": "E4M3-OCP"},
     "policy_sha256": {"$ref": "#/$defs/digest"}, "binary_sha256": {"$ref": "#/$defs/digest"},
     "host": {

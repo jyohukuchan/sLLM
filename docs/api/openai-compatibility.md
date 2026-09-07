@@ -606,3 +606,18 @@ This is an integration-status statement, not a production-quality claim. The
 same official GGUF executes on exact `gfx1030` and `gfx1201`, but its greedy
 output currently diverges from the fixed llama.cpp oracle. The alias must not
 be presented as quality-accepted until that numerical mismatch is resolved.
+
+## Qwen3.8 NVFP4 R9700 text server (2026-09-06)
+
+The dedicated `--qwen38-nvfp4 ABSOLUTE_DIRECTORY` profile serves the verified
+Unsloth Qwen3.8-27B-NVFP4 artifact on exact gfx1201, logical device 0, using
+FP16 or standard OCP MXFP8 E4 KV (`--kv-cache-encoding`; omitted selects MXFP8 E4).
+The current local deployment explicitly selects FP16 and the Phase78 fast paths. It reuses Chat Completions, sampling, SSE, cancellation,
+and the existing single-active-request scheduler. The `openwebui` compatibility
+profile connects it to OpenWebUI through `/v1/models` and `/v1/chat/completions`.
+Tokenization and apply-template utilities use the artifact's verified frontend.
+Embeddings and tool protocol are unavailable for this text-only profile.
+
+This scoped safetensors entrypoint does not complete Phase80 static FP8 KV/MTP
+or add batching, vision, MXFP6 KV, other artifacts, or other GPUs. See the
+[deployment and validation record](../history/2026/09/1-10/qwen38-nvfp4-r9700-server.md).

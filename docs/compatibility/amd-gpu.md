@@ -813,3 +813,17 @@ SGPR/VGPR 38/156、ID57は26,112 B、40/151で、両方private/spill 0、WG256�
 | CDNA 5 | target未確定 | `planned` | `unverified` |
 
 未知のAMD targetは未分類であり、自動的に`unsupported`とはしない。
+
+### 2026-09-06 Qwen3.8 NVFP4 HTTP server scope
+
+Canonical R9700 `gfx1201`をUUIDで単一GPU可視化し、固定Unsloth Qwen3.8-27B-NVFP4と
+standard OCP MXFP8 E4 KVの同時実行1要求HTTP経路を追加検証した。
+query heads24／KV heads4／head dimension256の直接attention数値oracleと、非整列KV append、
+実モデルChat／SSE／キャンセル後の再利用を確認した。既存のFP16限定GQA6融合経路は
+MXFP8へ拡張せず、既存の汎用量子化KV経路を使用する。GPU/SKU全体の昇格ではない。
+[配置・検証記録](../history/2026/09/1-10/qwen38-nvfp4-r9700-server.md)を参照。
+
+同日の後続指示で、この常駐serverをFP16 KV＋Phase78 R9700 opt-inへ変更した。
+HTTP greedy decodeは固定36/128の探索測定で7.881から19.922 tok/sへ改善し、
+生成・SSE・sampling・キャンセル後の再利用・終了時GPU memory0を確認した。
+[高速経路の配置記録](../history/2026/09/1-10/qwen38-r9700-server-fastpath.md)を現在の配置状態とする。

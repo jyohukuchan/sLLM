@@ -1,4 +1,5 @@
 use core::fmt;
+use std::fs;
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -15,6 +16,14 @@ pub const QWEN35_CHAT_TEMPLATE_FILENAME: &str = "chat_template.jinja";
 pub const QWEN35_CHAT_TEMPLATE_SIZE_BYTES: u64 = 7_756;
 pub const QWEN35_CHAT_TEMPLATE_SHA256: &str =
     "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715";
+
+pub const QWEN38_NVFP4_CHAT_TEMPLATE_FILENAME: &str = "chat_template.jinja";
+pub const QWEN38_NVFP4_CHAT_TEMPLATE_SIZE_BYTES: u64 = 9_993;
+pub const QWEN38_NVFP4_CHAT_TEMPLATE_SHA256: &str =
+    "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce";
+pub const QWEN38_CHAT_TEMPLATE_FILENAME: &str = QWEN38_NVFP4_CHAT_TEMPLATE_FILENAME;
+pub const QWEN38_CHAT_TEMPLATE_SIZE_BYTES: u64 = QWEN38_NVFP4_CHAT_TEMPLATE_SIZE_BYTES;
+pub const QWEN38_CHAT_TEMPLATE_SHA256: &str = QWEN38_NVFP4_CHAT_TEMPLATE_SHA256;
 
 pub const GEMMA4_MOE_CHAT_TEMPLATE_FILENAME: &str = "chat_template.jinja";
 pub const GEMMA4_MOE_CHAT_TEMPLATE_SIZE_BYTES: usize = 16_934;
@@ -41,6 +50,7 @@ const THINK_OPEN: &str = "<think>";
 const THINK_CLOSE: &str = "</think>";
 const GENERATION_THINKING: &str = "<|im_start|>assistant\n<think>\n";
 const GENERATION_DISABLED: &str = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+const QWEN38_REASONING_XHIGH: &str = "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Qwen35ChatMessageV1 {
@@ -722,6 +732,7 @@ fn generic_text_message(role: &str, content: &str) -> Value {
 pub struct Qwen35ChatTemplateV1 {
     consistency_label: String,
     default_thinking: bool,
+    qwen38_nvfp4: bool,
 }
 
 impl Qwen35ChatTemplateV1 {
@@ -761,6 +772,7 @@ impl Qwen35ChatTemplateV1 {
         Ok(Self {
             consistency_label: lock.fingerprint().to_owned(),
             default_thinking,
+            qwen38_nvfp4: false,
         })
     }
 
@@ -777,6 +789,26 @@ impl Qwen35ChatTemplateV1 {
         Ok(Self {
             consistency_label: sllm_core::QWEN35_MOE_MODEL_FINGERPRINT.to_owned(),
             default_thinking: true,
+            qwen38_nvfp4: false,
+        })
+    }
+
+    /// Constructs the renderer for the exact reviewed
+    /// `unsloth/Qwen3.8-27B-NVFP4` artifact.
+    ///
+    /// The source template is read and hashed from the artifact root at this
+    /// boundary.  Its plain text path is rendered with the same typed message
+    /// API as Qwen3.5, while retaining Qwen3.8's system reasoning preamble and
+    /// thinking delimiters.
+    pub fn from_unsloth_qwen38_nvfp4(
+        artifact: &sllm_core::VerifiedUnslothQwen38Nvfp4,
+    ) -> Result<Self, ChatRenderError> {
+        let bytes = read_qwen38_chat_template(artifact)?;
+        validate_template_bytes(&bytes, QWEN38_NVFP4_CHAT_TEMPLATE_SHA256)?;
+        Ok(Self {
+            consistency_label: format!("sha256:{}", sllm_core::UNSLOTH_QWEN38_NVFP4_MODEL_SHA256),
+            default_thinking: true,
+            qwen38_nvfp4: true,
         })
     }
 
@@ -794,6 +826,7 @@ impl Qwen35ChatTemplateV1 {
         Ok(Self {
             consistency_label: sllm_core::QWEN35_MOE_MODEL_FINGERPRINT.to_owned(),
             default_thinking: true,
+            qwen38_nvfp4: false,
         })
     }
 
@@ -863,6 +896,7 @@ impl Qwen35ChatTemplateV1 {
         Ok(Self {
             consistency_label: lock.fingerprint().to_owned(),
             default_thinking,
+            qwen38_nvfp4: false,
         })
     }
 
@@ -872,6 +906,21 @@ impl Qwen35ChatTemplateV1 {
 
     pub fn consistency_label(&self) -> &str {
         &self.consistency_label
+    }
+
+    /// Identifies the exact Unsloth Qwen3.8 NVFP4 renderer variant for
+    /// downstream apply-template identity reporting.
+    pub(crate) const fn is_unsloth_qwen38_nvfp4(&self) -> bool {
+        self.qwen38_nvfp4
+    }
+
+    #[cfg(test)]
+    pub(crate) fn qwen38_for_test() -> Self {
+        Self {
+            consistency_label: "sha256:test-qwen38-nvfp4".to_owned(),
+            default_thinking: true,
+            qwen38_nvfp4: true,
+        }
     }
 
     pub fn render(
@@ -890,6 +939,14 @@ impl Qwen35ChatTemplateV1 {
     ) -> Result<String, ChatRenderError> {
         if output_limit_bytes > QWEN35_CHAT_MAX_OUTPUT_BYTES {
             return Err(ChatRenderError::OutputLimitExceedsHostCap);
+        }
+        if self.qwen38_nvfp4 {
+            return render_qwen38_with_output_limit(
+                messages,
+                options,
+                output_limit_bytes,
+                self.default_thinking,
+            );
         }
         let last_user = validate_typed_messages(messages)?;
         let planned = plan_output(
@@ -930,6 +987,13 @@ impl Qwen35ChatTemplateV1 {
     ) -> Result<String, ChatRenderError> {
         if output_limit_bytes > QWEN35_CHAT_MAX_OUTPUT_BYTES {
             return Err(ChatRenderError::OutputLimitExceedsHostCap);
+        }
+        if self.qwen38_nvfp4 {
+            return render_qwen38_history_prefix_with_output_limit(
+                messages,
+                output_limit_bytes,
+                self.default_thinking,
+            );
         }
         validate_typed_messages(messages)?;
         let mut planned = 0usize;
@@ -974,6 +1038,15 @@ impl Qwen35ChatTemplateV1 {
     ) -> Result<String, ChatRenderError> {
         if output_limit_bytes > QWEN35_CHAT_MAX_OUTPUT_BYTES {
             return Err(ChatRenderError::OutputLimitExceedsHostCap);
+        }
+        if self.qwen38_nvfp4 {
+            return render_qwen38_with_assistant_prefill_output_limit(
+                messages,
+                options,
+                assistant_prefill,
+                output_limit_bytes,
+                self.default_thinking,
+            );
         }
         let last_user = validate_typed_messages(messages)?;
         let history_options = Qwen35RenderOptionsV1 {
@@ -1023,6 +1096,192 @@ impl Qwen35ChatTemplateV1 {
         let (messages, options) = validate_untrusted_request(request)?;
         self.render(&messages, options)
     }
+}
+
+fn read_qwen38_chat_template(
+    artifact: &sllm_core::VerifiedUnslothQwen38Nvfp4,
+) -> Result<Vec<u8>, ChatRenderError> {
+    let path = artifact.root().join(QWEN38_NVFP4_CHAT_TEMPLATE_FILENAME);
+    let metadata =
+        fs::symlink_metadata(&path).map_err(|_| ChatRenderError::TemplateAssetUnavailable)?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(ChatRenderError::TemplateAssetUnavailable);
+    }
+    if metadata.len() != QWEN38_NVFP4_CHAT_TEMPLATE_SIZE_BYTES {
+        return Err(ChatRenderError::UnsupportedTemplateIdentity);
+    }
+    let bytes = fs::read(&path).map_err(|_| ChatRenderError::TemplateAssetUnavailable)?;
+    if bytes.len() as u64 != QWEN38_NVFP4_CHAT_TEMPLATE_SIZE_BYTES {
+        return Err(ChatRenderError::UnsupportedTemplateIdentity);
+    }
+    Ok(bytes)
+}
+
+fn qwen38_reasoning_instruction(
+    thinking: ThinkingModeV1,
+    default_thinking: bool,
+) -> Option<&'static str> {
+    match thinking {
+        ThinkingModeV1::Enabled => Some(QWEN38_REASONING_XHIGH),
+        ThinkingModeV1::TemplateDefault if default_thinking => Some(QWEN38_REASONING_XHIGH),
+        ThinkingModeV1::TemplateDefault | ThinkingModeV1::Disabled => None,
+    }
+}
+
+fn visit_qwen38_fragments(
+    messages: &[Qwen35ChatMessageV1],
+    options: Qwen35RenderOptionsV1,
+    default_thinking: bool,
+    mut visit: impl FnMut(&str),
+) {
+    // The reviewed Qwen3.8 template folds a leading system message into a
+    // single frame and adds its reasoning instruction there.  The typed API
+    // admits at most one system message, so this is the exact text-only path.
+    let reasoning_instruction = qwen38_reasoning_instruction(options.thinking, default_thinking);
+    let system = messages.iter().find_map(|message| match message {
+        Qwen35ChatMessageV1::System { content } => {
+            let content = trim_qwen(content);
+            (!content.is_empty()).then_some(content)
+        }
+        _ => None,
+    });
+    if system.is_some() || reasoning_instruction.is_some() {
+        visit(IM_START);
+        visit("system\n");
+        if let Some(instruction) = reasoning_instruction {
+            visit(instruction);
+            if system.is_some() {
+                visit("\n\n");
+            }
+        }
+        if let Some(content) = system {
+            visit(content);
+        }
+        visit(IM_END_LINE);
+    }
+
+    for message in messages {
+        match message {
+            Qwen35ChatMessageV1::System { .. } => {}
+            Qwen35ChatMessageV1::User { content } => {
+                visit(IM_START);
+                visit("user\n");
+                visit(trim_qwen(content));
+                visit(IM_END_LINE);
+            }
+            Qwen35ChatMessageV1::Assistant {
+                content,
+                reasoning_content,
+            } => {
+                visit(IM_START);
+                visit("assistant\n<think>\n");
+                if let Some(reasoning) = reasoning_content {
+                    visit(trim_qwen(reasoning));
+                }
+                visit("\n</think>\n\n");
+                visit(trim_qwen(content));
+                visit(IM_END_LINE);
+            }
+        }
+    }
+
+    if options.add_generation_prompt {
+        visit(IM_START);
+        visit("assistant\n");
+        match options.thinking {
+            ThinkingModeV1::Disabled => visit("<think>\n\n</think>\n\n"),
+            ThinkingModeV1::Enabled | ThinkingModeV1::TemplateDefault => visit("<think>\n"),
+        }
+    }
+}
+
+fn render_qwen38_with_output_limit(
+    messages: &[Qwen35ChatMessageV1],
+    options: Qwen35RenderOptionsV1,
+    output_limit_bytes: usize,
+    default_thinking: bool,
+) -> Result<String, ChatRenderError> {
+    validate_typed_messages(messages)?;
+    let mut planned = 0usize;
+    let mut result = Ok(());
+    visit_qwen38_fragments(messages, options, default_thinking, |fragment| {
+        if result.is_ok() {
+            result = checked_fragment(&mut planned, fragment, output_limit_bytes);
+        }
+    });
+    result?;
+    let mut output = String::with_capacity(planned);
+    visit_qwen38_fragments(messages, options, default_thinking, |fragment| {
+        output.push_str(fragment)
+    });
+    debug_assert_eq!(output.len(), planned);
+    Ok(output)
+}
+
+fn render_qwen38_history_prefix_with_output_limit(
+    messages: &[Qwen35ChatMessageV1],
+    output_limit_bytes: usize,
+    default_thinking: bool,
+) -> Result<String, ChatRenderError> {
+    validate_typed_messages(messages)?;
+    let options = Qwen35RenderOptionsV1 {
+        add_generation_prompt: false,
+        thinking: ThinkingModeV1::TemplateDefault,
+    };
+    let mut planned = 0usize;
+    let mut result = Ok(());
+    visit_qwen38_fragments(messages, options, default_thinking, |fragment| {
+        if result.is_ok() {
+            result = checked_fragment(&mut planned, fragment, output_limit_bytes);
+        }
+    });
+    result?;
+    let mut output = String::with_capacity(planned);
+    visit_qwen38_fragments(messages, options, default_thinking, |fragment| {
+        output.push_str(fragment)
+    });
+    debug_assert_eq!(output.len(), planned);
+    Ok(output)
+}
+
+fn render_qwen38_with_assistant_prefill_output_limit(
+    messages: &[Qwen35ChatMessageV1],
+    options: Qwen35RenderOptionsV1,
+    assistant_prefill: &str,
+    output_limit_bytes: usize,
+    default_thinking: bool,
+) -> Result<String, ChatRenderError> {
+    validate_typed_messages(messages)?;
+    let history_options = Qwen35RenderOptionsV1 {
+        add_generation_prompt: false,
+        thinking: options.thinking,
+    };
+    let generation_prompt = match options.thinking {
+        ThinkingModeV1::Disabled => GENERATION_DISABLED,
+        ThinkingModeV1::Enabled | ThinkingModeV1::TemplateDefault => GENERATION_THINKING,
+    };
+    let mut planned = 0usize;
+    let mut result = Ok(());
+    visit_qwen38_fragments(messages, history_options, default_thinking, |fragment| {
+        if result.is_ok() {
+            result = checked_fragment(&mut planned, fragment, output_limit_bytes);
+        }
+    });
+    if result.is_ok() {
+        result = checked_fragment(&mut planned, generation_prompt, output_limit_bytes);
+    }
+    if result.is_ok() {
+        result = checked_fragment(&mut planned, assistant_prefill, output_limit_bytes);
+    }
+    result?;
+    let mut output = String::with_capacity(planned);
+    visit_qwen38_fragments(messages, history_options, default_thinking, |fragment| {
+        output.push_str(fragment)
+    });
+    output.push_str(generation_prompt);
+    output.push_str(assistant_prefill);
+    debug_assert_eq!(output.len(), planned);
+    Ok(output)
 }
 
 fn reviewed_template_identity(
@@ -2240,6 +2499,64 @@ mod tests {
             Err(ChatRenderError::OutputTooLarge {
                 limit_bytes: QWEN35_CHAT_MAX_OUTPUT_BYTES,
             })
+        );
+    }
+
+    #[test]
+    fn qwen38_text_renderer_matches_pinned_template_semantics() {
+        let renderer = Qwen35ChatTemplateV1 {
+            consistency_label: "test-qwen38".to_owned(),
+            default_thinking: true,
+            qwen38_nvfp4: true,
+        };
+        let messages = [
+            Qwen35ChatMessageV1::system("  Sys\n"),
+            Qwen35ChatMessageV1::user("\n hello \t"),
+            Qwen35ChatMessageV1::assistant(" Answer ", Some(" hidden ".to_owned())),
+            Qwen35ChatMessageV1::user("next"),
+        ];
+        let expected = format!(
+            "<|im_start|>system\n{QWEN38_REASONING_XHIGH}\n\nSys<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\nhidden\n</think>\n\nAnswer<|im_end|>\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        );
+        assert_eq!(
+            renderer.render(&messages, Qwen35RenderOptionsV1::default()),
+            Ok(expected)
+        );
+
+        let disabled = renderer
+            .render(
+                &[
+                    Qwen35ChatMessageV1::system(" "),
+                    Qwen35ChatMessageV1::user("hello"),
+                ],
+                Qwen35RenderOptionsV1 {
+                    add_generation_prompt: true,
+                    thinking: ThinkingModeV1::Disabled,
+                },
+            )
+            .expect("disabled thinking renders");
+        assert_eq!(
+            disabled,
+            "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        );
+
+        let inline = renderer
+            .render(
+                &[
+                    Qwen35ChatMessageV1::user("Q"),
+                    Qwen35ChatMessageV1::assistant("<think>raw</think> Answer", None),
+                ],
+                Qwen35RenderOptionsV1 {
+                    add_generation_prompt: false,
+                    thinking: ThinkingModeV1::Enabled,
+                },
+            )
+            .expect("inline assistant content renders");
+        assert_eq!(
+            inline,
+            format!(
+                "<|im_start|>system\n{QWEN38_REASONING_XHIGH}<|im_end|>\n<|im_start|>user\nQ<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<think>raw</think> Answer<|im_end|>\n"
+            )
         );
     }
 }
