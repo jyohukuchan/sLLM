@@ -94,8 +94,8 @@
 
 - 2026-09-07のユーザー決定により、主要モデルをコーディングエージェントタスクで使うことを優先し、
   当面の公開APIとnon-greedy GPU samplingを以下の固定設定へ絞る。任意のsampler設定への対応拡大は
-  後続とし、この固定設定への対応の完了条件には含めない。次の
-  [Phase 81](active/2026/09/1-10/phase81-fixed-gpu-sampling.md)で、この経路の高速化とAPI統合を行う。
+  後続とし、この固定設定への対応の完了条件には含めない。
+  [Phase 81](archive/2026/09/1-10/phase81-fixed-gpu-sampling.md)で、この経路の高速化とAPI統合を完了した。
 
 | 設定 | 固定値・動作 |
 | --- | --- |
@@ -138,9 +138,10 @@
   例えば[Qwen3.5公式](https://huggingface.co/Qwen/Qwen3.5-4B#best-practices)は精密なcoding用途に
   `temperature=0.6`を推奨するが、当面の共通方針は`1.0`とする。penalty無効化で反復抑制を手放す点も含め、
   速度と代表的なcoding・tool呼び出しの実用動作を確認する。
-- この記載は対応方針の決定であり、GPU実装完了・性能確認済み・全モデルへの接続完了を意味しない。
+- 固定値の決定と、実装・実機確認の証拠を区別する。全モデル・全形式の実機成功を一括して主張しない。
   Phase 81着手前の公開版はAPI既定値`temperature=1.0`／`top_p=1.0`と可変設定を持つ。
-  固定profileへの切替はPhase 81で実装・検証中であり、公開版への反映は完了時のpush・CI確認で確定する。
+  固定profileへの切替はPhase 81で実装・実機確認・公開CI確認を完了した。性能・未対応範囲は
+  [Phase 81履歴](../history/2026/09/1-10/phase81-fixed-gpu-sampling.md)へ記録する。
 
 ### モデルアーキテクチャ
 
@@ -342,9 +343,9 @@
   push失敗時は原因と未公開範囲を記録し、実装完了と公開待ちを区別する。
 
 [Phase 80: CI修復](archive/2026/09/1-10/phase80-ci-restoration.md)でhost／基本H3／public-runtime H3の復旧を確認した。
-次は[Phase 81: 固定サンプリングの共通GPU経路とAPI性能](active/2026/09/1-10/phase81-fixed-gpu-sampling.md)で、
-上記固定profileを適用し、既存の高速greedy経路に対するprefill／decode・TTFT／TPOTの追加負担をほぼなくす。
-同条件のgreedy、固定profileのhost sampler、共通GPU samplerを比較し、内部計測と実API性能を分けて確認する。
+[Phase 81: 固定サンプリングの共通GPU経路とAPI性能](archive/2026/09/1-10/phase81-fixed-gpu-sampling.md)で、
+上記固定profileの共通GPU経路とAPI統合を完了した。同条件のgreedy／host固定／GPU固定と実APIを比較し、
+代表条件でprefill／decodeの追加負担がほぼないことを確認した。次はPhase 82のstatic FP8 KV／MTP／文章生成へ進む。
 旧Phase 81〜83は内容を保持して82〜84へ繰り下げる。
 
 ### 最適化の共通化と既定採用の方針
@@ -562,7 +563,7 @@ gfx942実機は今後の検証項目との一括実行へ延期し、local RDNA 
 直前のPhase 81 static FP8 KV／MTP／文章生成はPhase 82、Phase 82他精度最適化はPhase 83、
 Phase 83 NVFP4 batchingはPhase 84へ繰り下げる。内容は保持する。
 以下の日付付き経過に残る旧番号と旧gateは当時の記録であり、現在の順序は上の一覧と
-[Phase 81計画](active/2026/09/1-10/phase81-fixed-gpu-sampling.md)、
+[Phase 81計画](archive/2026/09/1-10/phase81-fixed-gpu-sampling.md)、
 [現行ロードマップ](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正とする。
 
 2026-09-05の最新ユーザー指示によりPhase 78は完了扱いとする。

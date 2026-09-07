@@ -1,6 +1,6 @@
 # Phase 76以降: Qwen3.8-27B NVFP4優先ロードマップ
 
-> 状態: Phase 76〜80完了。Phase 78は2026-09-05のユーザー承認により旧目標の未達・未実施を記録して終了。Phase 81〜84は未完了。2026-09-07のユーザー指示により、CI修復をPhase 80で完了後、固定GPU samplingを新Phase 81へ挿入した。直前のPhase 81〜83は82〜84へ繰り下げた。
+> 状態: Phase 76〜81完了。Phase 78は2026-09-05のユーザー承認により旧目標の未達・未実施を記録して終了。Phase 82〜84は未完了。2026-09-07のユーザー指示により、CI修復をPhase 80で完了後、固定GPU samplingを新Phase 81へ挿入した。直前のPhase 81〜83は82〜84へ繰り下げた。
 > 作成日: 2026-09-03
 
 ## 現在の完了判断
@@ -12,7 +12,7 @@
 ## 2026-09-07の順序変更
 
 新[Phase 79](../../../../archive/2026/09/1-10/phase79-common-optimization.md)の既存最適化共通化・条件付き既定採用と、
-Phase 80のCI確認・修復・再実行確認は完了した。次のPhase 81では固定設定のGPU samplingを最適化する。
+Phase 80のCI修復とPhase 81の固定GPU samplingを完了した。次はPhase 82のstatic FP8 KV／MTP／文章生成とする。
 これにより従来Phase 81（static FP8 KV・MTP・文章生成）を82、従来Phase 82（他精度）を83、従来Phase 83（batching）を84へ繰り下げる。
 以下のPhase 76〜78 checkpointに残る旧番号・開始gateは当時の履歴であり、この順序変更とPhase 78完了判断を上書きしない。
 共通化Phaseは既存経路を対象とし、新しい精度形式・汎用FP8 artifact互換の追加は含めない。
@@ -21,7 +21,7 @@ Phase 80のCI確認・修復・再実行確認は完了した。次のPhase 81�
 
 2026-09-03のユーザー指示により、次の最優先目標を、手持ちGPU上で
 `unsloth/Qwen3.8-27B-NVFP4`を実用的な単一要求速度で文章生成できる状態とする。
-現在はPhase 78のユーザー承認済み完了判断を維持し、Phase 81で固定設定GPU sampling、Phase 82で実用closeout、
+現在はPhase 78のユーザー承認済み完了判断とPhase 81の固定GPU sampling完了を踏まえ、Phase 82で実用closeout、
 Phase 83で他精度の単一要求最適化、Phase 84でNVFP4 batchingの順とする。Phase 81の共通samplerは既存モデル経路を
 対象とし、旧exact-model目標の再達成やPhase 82の完了を開始条件にしない。
 2026-09-07の変更により、既存NVFP4/FP8経路のモデル横断共通化は新Phase 79として先行する。
@@ -1232,7 +1232,7 @@ host／HIP compile-only／契約検査、Rustビルド時のメモリ予算を�
 
 ## Phase 81: 固定設定GPU sampling最適化
 
-[専用計画](phase81-fixed-gpu-sampling.md)を正本とする。main-planで定めた固定profile
+[完了計画](../../../../archive/2026/09/1-10/phase81-fixed-gpu-sampling.md)と[履歴](../../../../../history/2026/09/1-10/phase81-fixed-gpu-sampling.md)を正本とする。以下の作業は完了した。main-planで定めた固定profile
 （`temperature=1.0`、`top_p=0.95`、presence/frequency penalty `0`、repeat penalty `1.0`、
 `repeat_last_n=0`、`min_p=0`、`typical_p=1`、DRY・XTC・Mirostat・dynamic temperature無効、
 `logit_bias`なし、`logprobs`／`top_logprobs=0`、`ignore_eos=false`）をAPIと共通GPU samplerへ接続する。

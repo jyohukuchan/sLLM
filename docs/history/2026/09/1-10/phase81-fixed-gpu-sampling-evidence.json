@@ -1,6 +1,6 @@
 {
   "schema": "phase81-fixed-gpu-sampling-evidence-v1",
-  "state": "local implementation and scoped verification complete; published CI pending",
+  "state": "implementation and scoped verification complete; implementation published CI passed",
   "source_mapping": {
     "r3_manifest_sha256": "a0ae444e2ab33572423d5ea949e9f197c6546773feb511df95f0c7513634ba8c",
     "final_manifest_sha256": "9cf9d6b92342fed5fe97926bb3e0fcfd64e407d6c584926fc632ca7c40b51c94",
@@ -434,5 +434,29 @@
       "durable_quarantine": 0
     },
     "additional_api_scope": "Completions/Responses reject unsupported sllm extension at parser, documented by sampler-extension-rejections.json; initial probe expected the wrong parameter path."
-  }
+  },
+  "implementation_commit": "fe8bb12644da237da8c35e94b656852742371326",
+  "published_implementation_ci": [
+    {
+      "conclusion": "success",
+      "databaseId": 34160168408,
+      "name": "h3-compile-only (non-required)",
+      "status": "completed",
+      "url": "https://github.com/jyohukuchan/sLLM/actions/runs/34160168408"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 34160168438,
+      "name": "h3-public-runtime-compile-only (non-required)",
+      "status": "completed",
+      "url": "https://github.com/jyohukuchan/sLLM/actions/runs/34160168438"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 34160168406,
+      "name": "host-required",
+      "status": "completed",
+      "url": "https://github.com/jyohukuchan/sLLM/actions/runs/34160168406"
+    }
+  ]
 }

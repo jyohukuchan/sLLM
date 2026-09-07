@@ -1,6 +1,6 @@
 # Phase 81: 固定サンプリングの共通GPU経路とAPI性能
 
-> 状態: 実装・ローカル検証完了。公開CIと完了処理は未完了。
+> 状態: 完了（2026-09-08）。実装commitの公開CI成功を確認。
 > 開始日: 2026-09-08
 
 ## 方針と順序
@@ -90,8 +90,6 @@ Phase82でstatic FP8 KV／MTPを共通固定samplerへ接続する。確率的MT
 既存Qwen3.8専用APIで未対応のtool等の新規bring-upは本Phaseの成功へ含めない。
 未対応の組合せをgreedyやCPU fallbackへ変換して動作したことにはしない。
 
-[計画](../../../../plans/active/2026/09/1-10/phase81-fixed-gpu-sampling.md) /
-[メイン計画](../../../../plans/main-plan.md)
 
 ## 初回公開CIと修復
 
@@ -104,9 +102,22 @@ package191個、依存edge454本は不変で、正規化したCargo metadataと�
 
 [公開runtime H3](https://github.com/jyohukuchan/sLLM/actions/runs/34159104829)はgfx1201が成功した。
 gfx1030はcompile/link/inspection後に`/proc observation failed for 212`で停止し、必要artifactの欠落によって
-aggregateとcleanupの検査も失敗した。プロセス終了付近の短いreadへ1回だけ再読を追加し、再読後も読めないlive entryは
+aggregateとcleanupの検査も失敗した。旧ログは例外種別を残さず、終了競合・短いreadは原因候補として扱った。
+ProcessLookupErrorを終了として処理し、その他のread異常は1回だけ再読する。例外種別も診断へ追加した。再読後も読めないlive entryは
 失敗とする。正常化、消滅、永続異常を含むrunnerの43 testが成功した。CIを無条件skipしたり、観測不能をPASSに変えたりしていない。
-修正HEADの公開CIを引き続き確認する。これらはCIの変更で、GPUの演算sourceと実機artifactは不変である。
+この修正後、次項の公開CI成功を確認した。これらはCIの変更で、GPUの演算sourceと実機artifactは不変である。
 
-[計画](../../../../plans/active/2026/09/1-10/phase81-fixed-gpu-sampling.md) /
-[メイン計画](../../../../plans/main-plan.md)
+
+## 公開CIと完了
+
+実装commit `fe8bb12644da237da8c35e94b656852742371326`は以下の同一HEAD検査を通過した。
+
+- [h3-compile-only (non-required)](https://github.com/jyohukuchan/sLLM/actions/runs/34160168408): PASS
+- [h3-public-runtime-compile-only (non-required)](https://github.com/jyohukuchan/sLLM/actions/runs/34160168438): PASS
+- [host-required](https://github.com/jyohukuchan/sLLM/actions/runs/34160168406): PASS
+
+計画をarchiveへ移し、main-planとロードマップのPhase81を完了に更新した。
+この完了記録は文書のみの変更で、実装・build inputs・toolchain・モデル・GPU artifactは不変である。
+完了記録commitのCI成功とremote同期も公開後に確認し、最終commitとrun URLを完了報告へ記載する。
+
+[計画](../../../../plans/archive/2026/09/1-10/phase81-fixed-gpu-sampling.md) / [メイン計画](../../../../plans/main-plan.md)

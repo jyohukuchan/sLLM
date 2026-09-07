@@ -1,6 +1,6 @@
 # Phase 81: 固定サンプリングの共通GPU経路とAPI性能
 
-> 状態: 実装・実機検証完了（2026-09-08）。初回公開CIの台帳・proc観測不具合を修復し、再公開確認待ち。
+> 状態: 完了（2026-09-08）。実装・CI修正commitの公開host／HIP compile-only CI成功を確認。
 > 作成日: 2026-09-07
 > 根拠: ユーザーによる固定設定の全面採用と、prefill／decode等への速度影響をほぼなくすPhaseの優先実施指示。
 
@@ -145,7 +145,7 @@ manifestも同期し、Phase 80で修復した検査を無効化しない。
   ユーザー目標への達成判断を根拠とともに記録する。性能と数値correctnessの証拠は分ける。
 - [x] 対象host・compile-only検査を通し、GPU PASSはexact target・数値oracle・fallbackなし・cleanup成功を伴う。
   CPU CIでfull-modelやGPU規模の正しさを代替しない。
-- [ ] main-plan、API仕様、計画・履歴を更新し、完了計画をarchiveへ移す。commit・push後に最終HEADの
+- [x] main-plan、API仕様、計画・履歴を更新し、完了計画をarchiveへ移す。commit・push後に最終HEADの
   対象CI成功とremote同期を確認し、必要な修正・再検証・再pushまで完了する。
 
 検証入口は`sllm-validation`スキルと既存CI戦略に従い、影響範囲に絞る。実機作業時は互換性文書と
@@ -263,20 +263,33 @@ local QwenのGPU占有規則を守る。参照実装の流用は既存provenance
   Gemma Denseではprefill＋0.49%／TPOT＋0.68%、Ministral K0ではprefill＋1.20%／TPOT−4.40%。
   選んだ代表条件では「ほぼ影響しない」を支持する。詳細・ばらつき・制限は履歴と集約evidenceへ記録した。
 
-## 後続への引継ぎ（実装完了後）
+## 後続への引継ぎ
 
 Phase 82は本Phaseの固定target samplingを前提にstatic FP8 KVとMTPを接続する。Phase 83／84も同じprofile、
 共通sampler、API契約を再利用し、別のhost sampling経路を新設しない。batching時のRNG状態と作業領域は
 要求ごとに独立させる設計を維持するが、本PhaseでB>1や新規MTPの性能達成を要求しない。
 
 [メイン計画](../../../../main-plan.md) ·
-[Phase 76〜84ロードマップ](phase76-qwen38-27b-nvfp4-priority-roadmap.md)
+[Phase 76〜84ロードマップ](../../../../active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)
 
 [実装・検証履歴](../../../../../history/2026/09/1-10/phase81-fixed-gpu-sampling.md)へ結果を記録する。
-公開CI確認と完了判定の後にarchiveへ移し、参照を同期する。
+実装commitの公開CI成功を確認してarchiveへ移した。完了記録のcommitも公開CIを確認し、最終報告へ記載する。
 
 初回公開CIは基本H3・H1・H2が成功した。H0の新規Cargo target台帳未登録と、公開H3の短い`/proc` readを修正した。
-Rust依存validator／MSRVとrunner43件が成功した。詳細は上記履歴へ記録し、修正HEADのCI成功後に完了処理を行う。
+Rust依存validator／MSRVとrunner43件が成功した。詳細は上記履歴へ記録し、修正HEADのCI成功を確認して完了処理を行った。
 
 [メイン計画](../../../../main-plan.md) /
 [履歴](../../../../../history/2026/09/1-10/phase81-fixed-gpu-sampling.md)
+
+## 公開時の完了確認
+
+実装commit `fe8bb12644da237da8c35e94b656852742371326`で以下がすべて成功した。
+
+- [h3-compile-only (non-required)](https://github.com/jyohukuchan/sLLM/actions/runs/34160168408): PASS
+- [h3-public-runtime-compile-only (non-required)](https://github.com/jyohukuchan/sLLM/actions/runs/34160168438): PASS
+- [host-required](https://github.com/jyohukuchan/sLLM/actions/runs/34160168406): PASS
+
+完了記録の変更は文書のみで、source／build inputs／toolchain／モデル／実機artifactを変えない。
+記録commitの最終公開CIとremote同期は、公開後の完了報告で確認する。
+
+[メイン計画](../../../../main-plan.md) / [履歴](../../../../../history/2026/09/1-10/phase81-fixed-gpu-sampling.md)
