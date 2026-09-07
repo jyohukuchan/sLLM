@@ -620,6 +620,20 @@
           "doctest": false
         },
         {
+          "name": "phase81_fixed_sampling_actual_gpu",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "sllm-attention-preprocess-g1-evidence",
           "kind": [
             "bin"
@@ -1015,6 +1029,34 @@
         },
         {
           "name": "sllm-phase79-gemma-logits",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-phase81-gemma-sampling",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-phase81-ministral-sampling",
           "kind": [
             "bin"
           ],

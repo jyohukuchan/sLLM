@@ -92,3 +92,21 @@ Phase82でstatic FP8 KV／MTPを共通固定samplerへ接続する。確率的MT
 
 [計画](../../../../plans/active/2026/09/1-10/phase81-fixed-gpu-sampling.md) /
 [メイン計画](../../../../plans/main-plan.md)
+
+## 初回公開CIと修復
+
+実装commit `f5e7568ac281c6148c3f395e8c03073cf12138f3`の
+[基本H3](https://github.com/jyohukuchan/sLLM/actions/runs/34159104866)、host H1／H2は成功した。
+[host H0](https://github.com/jyohukuchan/sLLM/actions/runs/34159104838)は40 commandを資源内で実行し、
+Rust dependency validatorだけが失敗した。duration 615.998秒、peak RSS 1,530,863,616 Bで、OOM／timeoutではない。
+新設binary2本とGPU test1本のCargo自動検出targetが台帳に未登録だったため、該当workspace memberのtarget一覧だけを同期した。
+package191個、依存edge454本は不変で、正規化したCargo metadataとの完全比較とMSRV checkが成功した。
+
+[公開runtime H3](https://github.com/jyohukuchan/sLLM/actions/runs/34159104829)はgfx1201が成功した。
+gfx1030はcompile/link/inspection後に`/proc observation failed for 212`で停止し、必要artifactの欠落によって
+aggregateとcleanupの検査も失敗した。プロセス終了付近の短いreadへ1回だけ再読を追加し、再読後も読めないlive entryは
+失敗とする。正常化、消滅、永続異常を含むrunnerの43 testが成功した。CIを無条件skipしたり、観測不能をPASSに変えたりしていない。
+修正HEADの公開CIを引き続き確認する。これらはCIの変更で、GPUの演算sourceと実機artifactは不変である。
+
+[計画](../../../../plans/active/2026/09/1-10/phase81-fixed-gpu-sampling.md) /
+[メイン計画](../../../../plans/main-plan.md)

@@ -1,6 +1,6 @@
 # Phase 81: 固定サンプリングの共通GPU経路とAPI性能
 
-> 状態: 実装・ローカル検証完了（2026-09-08）。公開CI確認と完了処理待ち。
+> 状態: 実装・実機検証完了（2026-09-08）。初回公開CIの台帳・proc観測不具合を修復し、再公開確認待ち。
 > 作成日: 2026-09-07
 > 根拠: ユーザーによる固定設定の全面採用と、prefill／decode等への速度影響をほぼなくすPhaseの優先実施指示。
 
@@ -274,3 +274,9 @@ Phase 82は本Phaseの固定target samplingを前提にstatic FP8 KVとMTPを接
 
 [実装・検証履歴](../../../../../history/2026/09/1-10/phase81-fixed-gpu-sampling.md)へ結果を記録する。
 公開CI確認と完了判定の後にarchiveへ移し、参照を同期する。
+
+初回公開CIは基本H3・H1・H2が成功した。H0の新規Cargo target台帳未登録と、公開H3の短い`/proc` readを修正した。
+Rust依存validator／MSRVとrunner43件が成功した。詳細は上記履歴へ記録し、修正HEADのCI成功後に完了処理を行う。
+
+[メイン計画](../../../../main-plan.md) /
+[履歴](../../../../../history/2026/09/1-10/phase81-fixed-gpu-sampling.md)

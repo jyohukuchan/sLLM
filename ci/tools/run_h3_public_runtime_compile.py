@@ -1528,13 +1528,51 @@ def _process_observation_scope() -> Any:
                 _set_child_subreaper(False)
 
 
+def _read_proc_record(entry: Path, page_size: int) -> ProcRecord | None:
+    """Read one process record, retrying one transient proc-file race.
+
+    A process can exit after the directory listing but before either proc file
+    is read.  Linux may expose that race as a short or malformed read instead
+    of ENOENT.  One immediate retry handles only that bounded race; a second
+    failure while the entry remains readable still fails closed.
+    """
+
+    for attempt in range(2):
+        try:
+            stat = (entry / "stat").read_text(encoding="ascii")
+            right_paren = stat.rfind(")")
+            if right_paren < 0:
+                raise ValueError("malformed /proc stat")
+            fields = stat[right_paren + 2 :].split()
+            if len(fields) < 20:
+                raise ValueError("short /proc stat")
+            parent_pid, process_group = int(fields[1]), int(fields[2])
+            start_time = int(fields[19])
+            statm = (entry / "statm").read_text(encoding="ascii").split()
+            if len(statm) < 2:
+                raise ValueError("short /proc statm")
+            rss = int(statm[1]) * page_size
+            return parent_pid, process_group, rss, start_time
+        except (FileNotFoundError, ProcessLookupError):
+            # The PID exited after enumeration. It cannot be killed by this
+            # invocation, and treating the disappearance as safe avoids a
+            # false failure in the normal proc race window.
+            return None
+        except (OSError, UnicodeError, ValueError) as exc:
+            if attempt == 0:
+                continue
+            raise RuntimeContractError(
+                f"/proc observation failed for {entry.name}: {type(exc).__name__}"
+            ) from exc
+    raise AssertionError("unreachable proc record retry state")
+
+
 def _proc_snapshot() -> ProcSnapshot:
     """Return pid -> (parent pid, process-group id, RSS bytes, start time).
 
-    A process disappearing between the directory listing and either proc file
-    read is a safe race and is ignored.  Failure to enumerate /proc or read a
-    still-present entry is different: resource and descendant guarantees then
-    cannot be made, so the runner fails closed.
+    Failure to enumerate /proc or read a still-present entry after the bounded
+    race retry is different from a normal process exit: resource and
+    descendant guarantees then cannot be made, so the runner fails closed.
     """
 
     try:
@@ -1552,29 +1590,10 @@ def _proc_snapshot() -> ProcSnapshot:
     for entry in entries:
         if not entry.name.isdigit():
             continue
-        try:
-            pid = int(entry.name)
-            stat = (entry / "stat").read_text(encoding="ascii")
-            right_paren = stat.rfind(")")
-            if right_paren < 0:
-                raise ValueError("malformed /proc stat")
-            fields = stat[right_paren + 2 :].split()
-            if len(fields) < 20:
-                raise ValueError("short /proc stat")
-            parent_pid, process_group = int(fields[1]), int(fields[2])
-            start_time = int(fields[19])
-            statm = (entry / "statm").read_text(encoding="ascii").split()
-            if len(statm) < 2:
-                raise ValueError("short /proc statm")
-            rss = int(statm[1]) * page_size
-        except FileNotFoundError:
-            # The PID exited after enumeration.  It cannot be killed by this
-            # invocation, and treating the disappearance as safe avoids a
-            # false failure in the normal proc race window.
-            continue
-        except (OSError, UnicodeError, ValueError) as exc:
-            raise RuntimeContractError(f"/proc observation failed for {entry.name}") from exc
-        snapshot[pid] = (parent_pid, process_group, rss, start_time)
+        pid = int(entry.name)
+        record = _read_proc_record(entry, page_size)
+        if record is not None:
+            snapshot[pid] = record
     return snapshot
 
 

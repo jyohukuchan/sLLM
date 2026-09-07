@@ -114,6 +114,19 @@ Notes [
 
 
 class H3PublicRuntimeRunnerTests(unittest.TestCase):
+    def test_proc_record_retries_one_transient_short_read_but_remains_fail_closed(self) -> None:
+        valid_stat = "212 (fake) S " + " ".join(str(value) for value in range(1, 30))
+        with patch.object(Path, "read_text", side_effect=["", valid_stat, "10 20"]):
+            self.assertEqual(
+                runner._read_proc_record(Path("/proc/212"), 4096),
+                (1, 2, 81920, 19),
+            )
+        with patch.object(Path, "read_text", side_effect=["", FileNotFoundError("exited")]):
+            self.assertIsNone(runner._read_proc_record(Path("/proc/212"), 4096))
+        with patch.object(Path, "read_text", side_effect=["", ""]):
+            with self.assertRaisesRegex(runner.RuntimeContractError, r"/proc observation failed for 212: ValueError"):
+                runner._read_proc_record(Path("/proc/212"), 4096)
+
     def test_runner_json_and_all_sidecars_never_follow_preplanted_symlinks(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sllm-h3-public-publication-") as directory:
             root = Path(directory)
