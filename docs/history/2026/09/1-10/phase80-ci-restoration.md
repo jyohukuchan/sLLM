@@ -1,6 +1,6 @@
 # Phase 80: CI修復の履歴
 
-> 状態: 実装・検証中。最終公開CI成功前の記録。
+> 状態: 完了（2026-09-07）。実装修正commitの全CI成功を確認。
 > 開始日: 2026-09-07
 
 ## 開始時の状態
@@ -68,7 +68,28 @@ closed environmentを検査する負例がGitHubのPython実行ファイルとlo
 実際の環境guardで拒否されることを検査する。production source/pinは不変で、fixtureをGPU証拠にはしない。
 controller全14 testはPASS（1.781秒）。
 
+## 完了時の公開CI
+
+実装修正の最終commitは `bea35c9c37afda928644338434c1a42b7075cba7`。
+以下はすべてこの同一HEADの成功結果であり、過去commitのPASSで置き換えていない。
+
+| CI | 結果・範囲 |
+| --- | --- |
+| [host-required](https://github.com/jyohukuchan/sLLM/actions/runs/34111302411) | H0 627件、H1 1,479件、H2 38件とrequired集約がPASS。semantic契約97件を含む |
+| [基本H3](https://github.com/jyohukuchan/sLLM/actions/runs/34111302373) | gfx1030、gfx1201、集約PASS |
+| [public-runtime H3](https://github.com/jyohukuchan/sLLM/actions/runs/34111302300) | 両targetのcompile/link/extract/inspectとstrict集約PASS |
+
+H0は612.461秒、peak RSS 1,522,634,752 B。H1は214.736秒、build peak RSS 1,849,626,624 B、
+test peak RSS 1,524,707,328 Bで、cold runner上の明示資源予算内に収まった。
+zero selection、想定外skip、timeout、RSS超過を成功へ読み替えていない。
+HIP証拠はcompile-onlyであり、新しいGPU numerical correctnessや性能測定は主張しない。
+
+受入条件を完了し、計画をarchiveへ移した。後続はPhase81 static FP8 KV／MTP／文章生成、
+Phase82他精度、Phase83 NVFP4 batchingとする。以後もPhase完了時のpushとCI確認・必要な修正を継続する。
+この完了記録のcommitは文書だけを変更し、実装修正commitからsource／build inputs／toolchain／モデル／artifactを変更しない。
+完了記録の最終公開HEADもCIを監視し、そのcommitとrun URLは公開後の完了報告に記載する。
+
 生ログ、生成binary、モデルは追跡しない。
 
-[計画](../../../../plans/active/2026/09/1-10/phase80-ci-restoration.md) /
+[計画](../../../../plans/archive/2026/09/1-10/phase80-ci-restoration.md) /
 [メイン計画](../../../../plans/main-plan.md)

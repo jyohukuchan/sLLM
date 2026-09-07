@@ -1,6 +1,6 @@
 # Phase 76以降: Qwen3.8-27B NVFP4優先ロードマップ
 
-> 状態: Phase 76〜79完了。Phase 78は2026-09-05のユーザー承認により旧目標の未達・未実施を記録して終了。Phase 80〜83は未完了。2026-09-07のユーザー指示により、CI修復を新Phase 80へ挿入し、既存Phase 80〜82を81〜83へ繰り下げた。
+> 状態: Phase 76〜80完了。Phase 78は2026-09-05のユーザー承認により旧目標の未達・未実施を記録して終了。Phase 81〜83は未完了。2026-09-07のユーザー指示により、CI修復を新Phase 80へ挿入し、既存Phase 80〜82を81〜83へ繰り下げた。
 > 作成日: 2026-09-03
 
 ## 現在の完了判断
@@ -1219,9 +1219,11 @@ HIP device orderingと`rocm-smi` orderingは一致しないため、既存のR97
 
 [専用計画](../../../../archive/2026/09/1-10/phase79-common-optimization.md)を正本とする。
 
-## Phase 80: CI修復・再確認
+## Phase 80: CI修復・再確認（完了）
 
-[専用計画](phase80-ci-restoration.md)を正本とする。Phase 79までの実装を対象に、公開関数検査、Rust依存関係検査、
+host、基本H3、public-runtime H3の両targetと集約が公開commit `bea35c9c`ですべて成功した。
+
+[専用計画](../../../../archive/2026/09/1-10/phase80-ci-restoration.md)を正本とする。Phase 79までの実装を対象に、公開関数検査、Rust依存関係検査、
 host／HIP compile-only／契約検査、Rustビルド時のメモリ予算を確認し、失敗原因に応じてCI設定・検査データ・
 必要な実装を修正する。修正後は対象CIを再実行し、失敗が残る場合は原因と未完了範囲をPhase履歴へ記録する。
 各Phaseの完了時はmain-planに従い、必要なCI検査と公開後の結果確認を完了手順へ含める。

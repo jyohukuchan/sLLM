@@ -117,7 +117,7 @@ Phase 83へ繰り下げる。詳細は[Phase 76〜83計画](../../09/1-10/phase7
 | 77 | complete-functional-speed-carried-to-78 | single-request decode専用経路 | NVFP4 W4A4／FP8 W8A8の両target M=1 dispatchはPASS。whole-model decode速度残差はPhase 78 hard gateへ統合 |
 | 78 | complete-user-accepted | single-request最適化 | 旧速度目標の未達・未実施を記録し、2026-09-05のユーザー承認により完了扱い。correctness／dispatchと採否記録をPhase 78履歴へ固定 |
 | 79 | complete | 既存最適化の共通化・条件付き既定採用 | Phase 76〜78完了、target共通化の採否記録 |
-| 80 | in-progress | CIの現状確認、必要な修正、再実行確認 | Phase 79完了。専用[Phase 80計画](../../09/1-10/phase80-ci-restoration.md) |
+| 80 | complete | CIの現状確認、必要な修正、再実行確認 | Phase 79完了。専用[Phase 80計画](../../../../archive/2026/09/1-10/phase80-ci-restoration.md) |
 | 81 | planned | static FP8 KV、MTP、文章生成実用closeout | Phase 76〜80完了、target-only基準 |
 | 82 | planned | 他精度の未最適化経路を一巡 | Phase 81完了 |
 | 83 | planned | NVFP4 GPU batching最適化 | Phase 81〜82完了、single-request基準 |

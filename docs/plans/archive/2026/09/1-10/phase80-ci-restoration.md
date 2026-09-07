@@ -1,6 +1,6 @@
 # Phase 80: CI修復と公開後の結果確認
 
-> 状態: 実装・検証中（2026-09-07着手）
+> 状態: 完了（2026-09-07）。実装修正commitの全CI成功を確認。完了記録の公開HEADも公開後に確認する。
 > 作成日: 2026-09-07
 > 根拠: ユーザー指示によるCI確認・必要な修正の完了手順への追加と、既存後続Phaseの繰り下げ。
 
@@ -73,9 +73,9 @@ H0再実行中のrunner更新でsource hashの一時的不一致も出たため�
 - [x] 公開APIと依存closureが現行コードに一致し、不足・意図しない差分のnegative testも機能する。
 - [x] Rust host build/testが明示した資源予算で完走し、重複削除前の必要coverageを維持する。
 - [x] 確認済みH0失敗を解消し、H0/H1/H2が成功する。
-- [ ] 基本H3とpublic-runtime H3が成功し、public-runtimeのgfx1030/gfx1201の両rowでcompile/link/inspectが実行される。
+- [x] 基本H3とpublic-runtime H3が成功し、public-runtimeのgfx1030/gfx1201の両rowでcompile/link/inspectが実行される。
 - [x] 失敗fixtureで診断・制限付きログが残り、失敗／欠落／想定外skip／cancelを成功として集約しない。
-- [ ] 最終公開HEADの対象CI成功、commitとrun URL、資源観測値と適用範囲を記録する。
+- [x] 最終公開HEADの対象CI成功、commitとrun URL、資源観測値と適用範囲を記録する。
 
 変更中はfocused test、統合時に影響する登録済みrow、公開後に実際のGitHub CIを確認する。
 CI復旧のために過去Phaseの全GPU測定を再実行しない。runtime/kernelの意味を変更する修正が必要と判明した場合は、
@@ -83,10 +83,10 @@ CI復旧のために過去Phaseの全GPU測定を再実行しない。runtime/ke
 
 ## 記録と引継ぎ
 
-完了時に本計画をarchiveへ移し、`docs/history/2026/09/1-10/phase80-ci-restoration.md`へ
-原因・変更・検証・最終公開commit/runを記録して計画と相互リンクする。現在は未完了なので履歴の完了記録は作らない。
-後続のPhase 81はCI修復完了後に開始する。
+本計画をarchiveへ移し、[完了履歴](../../../../../history/2026/09/1-10/phase80-ci-restoration.md)へ
+原因・変更・検証・公開commit/runを記録した。`bea35c9c`でhost／基本H3／public-runtime H3がすべて成功した。
+後続のPhase 81はstatic FP8 KV／MTP／文章生成の実用closeoutとする。
 
 [メイン計画](../../../../main-plan.md) /
-[後続ロードマップ](phase76-qwen38-27b-nvfp4-priority-roadmap.md) /
-[CI・テスト方針](../../08/1-10/ci-test-strategy.md)
+[後続ロードマップ](../../../../active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md) /
+[CI・テスト方針](../../../../active/2026/08/1-10/ci-test-strategy.md)

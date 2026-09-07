@@ -33,7 +33,7 @@
 [main-planの完了手順](../../../../main-plan.md)を正とする。
 required／non-requiredの失敗をともに調査し、対象CIが未確認または失敗なら全作業完了とは報告しない。
 既存H0/H1/H2・public-runtime H3の修復は
-[Phase 80計画](../../09/1-10/phase80-ci-restoration.md)で先行する。
+[Phase 80計画](../../../../archive/2026/09/1-10/phase80-ci-restoration.md)で先行する。
 テスト実行の資源制限とコンパイルの資源予算を分け、CPUによるGPU-scale検証禁止は維持する。
 
 ## 調査結果

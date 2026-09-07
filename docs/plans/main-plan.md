@@ -288,8 +288,8 @@
 - 最後にremoteとの同期とworking treeを確認し、完了報告へ最終commit、CI run／結果、検証範囲と残件を記載する。
   push失敗時は原因と未公開範囲を記録し、実装完了と公開待ちを区別する。
 
-実施中の[Phase 80: CI修復](active/2026/09/1-10/phase80-ci-restoration.md)で、
-既存CIをこの運用で使える状態へ戻す。
+[Phase 80: CI修復](archive/2026/09/1-10/phase80-ci-restoration.md)でhost／基本H3／public-runtime H3の復旧を確認した。
+次はPhase 81のstatic FP8 KV／MTP／文章生成の実用closeoutへ進む。
 
 ### 最適化の共通化と既定採用の方針
 
@@ -481,7 +481,7 @@
 | 完了・decode機能／dispatch PASS（速度残差はPhase 78へ統合） | 77 | 同artifactのsingle-request decode専用経路を成立。実用速度は未達のため、whole-model速度gateをPhase 78で閉じる |
 | 完了・ユーザー承認による目標変更／未達受容 | 78 | r25を到達点として終了。V620 decode基準を実artifact帯域へ変更し、prefill等の旧目標未達・正式比較未実施を明記。モデル固有の追加最適化は要求しない |
 | 完了・条件付き既定採用 | 79 | NVFP4/FP8 decode既定化、projection/実行制御共通化、prefill基準加算順復元 |
-| 実装・検証中 | 80 | CI修復、公開API／依存manifest同期、Rust資源設定、失敗診断と公開後CI確認 |
+| 完了・公開CI成功 | 80 | CI修復、公開API／依存manifest同期、Rust資源設定、失敗診断と公開後CI確認 |
 | 計画済み | 81 | static FP8 KV、MTP、文章生成の実用closeout |
 | 計画済み | 82 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了 |
 | 計画済み | 83 | NVFP4のGPU batching最適化 |
@@ -503,7 +503,7 @@ gfx942実機は今後の検証項目との一括実行へ延期し、local RDNA 
 直前のPhase 80 static FP8 KV／MTP／文章生成はPhase 81、Phase 81他精度最適化はPhase 82、
 Phase 82 NVFP4 batchingはPhase 83へ繰り下げる。内容は保持する。
 以下の日付付き経過に残る旧番号と旧gateは当時の記録であり、現在の順序は上の一覧と
-[Phase 80計画](active/2026/09/1-10/phase80-ci-restoration.md)、
+[Phase 80計画](archive/2026/09/1-10/phase80-ci-restoration.md)、
 [現行ロードマップ](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正とする。
 
 2026-09-05の最新ユーザー指示によりPhase 78は完了扱いとする。
