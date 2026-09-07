@@ -2,7 +2,7 @@
   "$schema": "https://sllm-project.local/ci/schema/rmsnorm-h3-compile-v1.schema.json",
   "schema_version": "rmsnorm-h3-compile-v1",
   "matrix_id": "rmsnorm-h3-compile-v1",
-  "revision": 7,
+  "revision": 8,
   "suite_id": "h3-rmsnorm-compile-only",
   "tier": "tier_h3_rmsnorm",
   "toolchain_id": "rocm-7.14.0",
@@ -31,7 +31,7 @@
       "files": [
         {
           "path": "include/sllm/hip.h",
-          "sha256": "f2eb4fb380a3d69e128ebabd384cb86c01fb44c58e329c3ada206c6fe3e938ee"
+          "sha256": "28521c2fad2770d3d01ea562e63c0118f6308c4812afb5446a7b71625d3309ef"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel.hip.cpp",
@@ -42,7 +42,7 @@
           "sha256": "dc9d910305791097ae32463ba134da4c4aa398fdc55d40e59e4eb2b70f0c84d6"
         }
       ],
-      "source_set_sha256": "60720dd5d06354c96d54c86e038b2d77273cfc74b45570a9453c8793a03c6f37"
+      "source_set_sha256": "59d0f42889818bbdd59496cf34c91d8eac1926d371d86d78a422b7d946d1667a"
     },
     "host_abi": {
       "canonical_order": [
@@ -59,7 +59,7 @@
         },
         {
           "path": "native/hip/src/public_runtime.hip.cpp",
-          "sha256": "42777b4b6db5baef4a5a674deac0d7cfe3f0018d5db6f14ade2e1e8025de71ef"
+          "sha256": "89b4d21c03d1b652a9d4f2ea30c9b79a820c7f32603e5dd899f3dcb484311763"
         },
         {
           "path": "native/hip/src/public_runtime_internal.hpp",
@@ -74,7 +74,7 @@
           "sha256": "62675cd693719f711541768a2f52182fdc22a98fc70d21fe66f6ea041df4be19"
         }
       ],
-      "source_set_sha256": "18ca39393b62f25faf19d8c544783de0d25b804d4a532ea7c56000693f71b2b5"
+      "source_set_sha256": "df31120c530712023bf0cc4ca544850a02c000f650496c10164bbaf54434ef2a"
     },
     "binding_build": {
       "canonical_order": [
@@ -87,26 +87,26 @@
       "files": [
         {
           "path": "crates/sllm-hip-sys/build.rs",
-          "sha256": "ab3a698975cf4dc8cd62b65ad51d5f3f756df1adeea0e1061b39cbc1ccbc0b20"
+          "sha256": "8f5cf4884bc19d4e96e721cd2188861a0c519a23ce7b435d7d6fbd42a1445706"
         },
         {
           "path": "crates/sllm-hip-sys/src/bindings.rs",
-          "sha256": "979fbfd2418dee23a79727dc3e6701523f371e4c67d278691200d3c63c154202"
+          "sha256": "435c55dac7afa0ef642c7ff9243fecf3796bc17e058a183d48be9b0d1a4f746e"
         },
         {
           "path": "crates/sllm-hip/src/rmsnorm.rs",
-          "sha256": "0c79ed7e59742b59b4c608281a382f60ded925ba58ecf0145e93e7d440290e7e"
+          "sha256": "6ac1f336238786b04ea1001d65a37c86f53487a3f5e8d1eb68bc54f61aacc168"
         },
         {
           "path": "crates/sllm-core/src/op.rs",
-          "sha256": "cee637fa890c817e8894c886ea2c632ffc0f8476486cd6de37719e9ffaecdcac"
+          "sha256": "ecba7e4a73810963c3baebf9a3ddee61569163a570fcbf608068205f14194e28"
         },
         {
           "path": "native/hip/CMakeLists.txt",
-          "sha256": "4d2add813a6f1fba56787eb3b61867e9cdcab1ebfc8d9559a5c386021cf008f4"
+          "sha256": "105e67c8ab9f4a77acba2b778f3935476f0069398d42faf950c37ab84f2118e4"
         }
       ],
-      "source_set_sha256": "9d0612092e91617c46c2d8564e1e1287b77a11ee4fcbb9d69069391a2f55c754"
+      "source_set_sha256": "efe2a5f0aa50c54a86e6c79d1d70397e039637bd648ed4c96f0189749e52d281"
     },
     "ci_contract": {
       "canonical_order": [
@@ -128,7 +128,7 @@
       "files": [
         {
           "path": "ci/schema/rmsnorm-h3-compile-v1.schema.json",
-          "sha256": "082d1c1494921c9f6d88a48ad7c950a68ff474693f3732f1609185810e4bedcf"
+          "sha256": "577d89c16511c686e3d0d7a260173ff9cd0e65d00bc1156fbcc0dc3d55384c37"
         },
         {
           "path": "ci/schema/rmsnorm-h3-artifact-v1.schema.json",
@@ -148,15 +148,15 @@
         },
         {
           "path": "ci/tools/run_rmsnorm_h3_compile.py",
-          "sha256": "c8d60c1d53c64049587905bd7db0ef09448d73b1e2fc5bb806b40cefae4f5d55"
+          "sha256": "971e8245d182cea419e3bf1a0ed805408c6211cd11a5a16d5b9b19281381a38a"
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "47af6c583c2a44877858123f425f6ced93b8523fa79413b377c139fcb9aa7018"
+          "sha256": "0598e4671095e091959568144de750f6ca591d361e88ab1db9abd5db184a30f9"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "415cc6feee9a0181579657ac9a322be567b8103fa3a29f1425a3de5c39d0b200"
+          "sha256": "30c38b427709a0ef95b4081e5782cb7e0687539b50101c24d516ea92b9ac328d"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -183,7 +183,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "fb9425e0a3f9726aa2121f78ea7f75b1c898c953ac937242fa920ac144fba5e1"
+      "source_set_sha256": "a976ca8f07df7bff0f5512da0c762880adf7e326f5d747ae0cefc672a30e2ee6"
     }
   },
   "source_symbol_map": [
@@ -228,6 +228,7 @@
     "sllm_buffer_release",
     "sllm_buffer_size",
     "sllm_causal_attention_execute",
+    "sllm_causal_attention_execute_after_kv_append",
     "sllm_completion_finalize_after",
     "sllm_completion_query",
     "sllm_completion_read",
@@ -255,6 +256,10 @@
     "sllm_gdn_projection_bundle_plan_release",
     "sllm_gdn_projection_bundle_prepare",
     "sllm_get_abi_version",
+    "sllm_graph_span_create",
+    "sllm_graph_span_execute",
+    "sllm_graph_span_node_count",
+    "sllm_graph_span_release",
     "sllm_kv_state_append",
     "sllm_kv_state_append_cancel",
     "sllm_kv_state_create",
@@ -308,6 +313,9 @@
     "sllm_queue_fence",
     "sllm_queue_release",
     "sllm_queue_set_completion_mode",
+    "sllm_qwen38_projection_pack2_execute",
+    "sllm_qwen38_projection_pack2_plan_release",
+    "sllm_qwen38_projection_pack2_prepare",
     "sllm_residual_rmsnorm_execute",
     "sllm_residual_rmsnorm_plan_release",
     "sllm_residual_rmsnorm_prepare",
@@ -373,6 +381,7 @@
             "-D__HIP_ROCclr__=1",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -394,6 +403,7 @@
             "-D__HIP_ROCclr__=1",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -414,6 +424,7 @@
             "/opt/rocm/bin/amdclang++",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -432,6 +443,7 @@
             "/opt/rocm/bin/amdclang++",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "--offload-arch={target}",
             "-mcode-object-version=6",
@@ -561,6 +573,7 @@
             "-D__HIP_ROCclr__=1",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -582,6 +595,7 @@
             "-D__HIP_ROCclr__=1",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -602,6 +616,7 @@
             "/opt/rocm/bin/amdclang++",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -620,6 +635,7 @@
             "/opt/rocm/bin/amdclang++",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "--offload-arch={target}",
             "-mcode-object-version=6",

@@ -606,6 +606,20 @@
           "doctest": false
         },
         {
+          "name": "phase76_qwen38_actual_gpu",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "sllm-attention-preprocess-g1-evidence",
           "kind": [
             "bin"
@@ -733,6 +747,20 @@
         },
         {
           "name": "sllm-gemma4-slice-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-gqa6-attention-evidence",
           "kind": [
             "bin"
           ],
@@ -959,6 +987,34 @@
         },
         {
           "name": "sllm-phase24-terminal-row-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-phase78-qwen38-benchmark",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-phase79-gemma-logits",
           "kind": [
             "bin"
           ],
@@ -9452,6 +9508,20 @@
     },
     {
       "from": "workspace:sllm-hip@0.1.0",
+      "to": "registry:tokenizers@0.21.4",
+      "name": "tokenizers",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.21.4",
+      "requested_features": [
+        "onig"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-hip@0.1.0",
       "to": "workspace:sllm-core@0.1.0",
       "name": "sllm-core",
       "kind": "normal",
@@ -9760,11 +9830,11 @@
     "packages": 191,
     "registry_packages": 184,
     "workspace_packages": 7,
-    "edges": 453,
+    "edges": 454,
     "edge_kinds": {
       "build": 14,
       "dev": 1,
-      "normal": 438
+      "normal": 439
     },
     "target_specific_edges": 66,
     "target_expressions": 37

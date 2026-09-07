@@ -797,9 +797,7 @@ struct SelectorDecision final {
   bool adopted;
   const char *reason;
 
-  constexpr bool runnable() const noexcept {
-    return supported && enabled;
-  }
+  constexpr bool runnable() const noexcept { return supported && enabled; }
 };
 
 constexpr const char *kSelectorReasonBaseline =
@@ -853,9 +851,10 @@ inline const char *baseline_selector_reason(
   return kSelectorReasonBaseline;
 }
 
-inline SelectorDecision make_selector_decision(
-    const KernelVariant variant, const bool supported, const bool enabled,
-    const bool adopted, const char *const reason) noexcept {
+inline SelectorDecision
+make_selector_decision(const KernelVariant variant, const bool supported,
+                       const bool enabled, const bool adopted,
+                       const char *const reason) noexcept {
   return {variant, supported, enabled, adopted, reason};
 }
 
@@ -1614,10 +1613,11 @@ static_assert(nvfp4_w4a4_decode_activation_shared_lds_bytes(17408U) == 21760U);
 
 // Phase79: shared decode adoption is an operator/target range, independent
 // of model identity and KV storage. Tiny projections keep the old provider.
-constexpr bool nvfp4_w4a4_decode_wave4_adopted_shape(
-    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
-  return phase78_nvfp4_w4a4_decode_wave4col32_shape(m, k, n) &&
-         k >= 1024U && n >= 1024U;
+constexpr bool
+nvfp4_w4a4_decode_wave4_adopted_shape(const uint64_t m, const uint64_t k,
+                                      const uint64_t n) noexcept {
+  return phase78_nvfp4_w4a4_decode_wave4col32_shape(m, k, n) && k >= 1024U &&
+         n >= 1024U;
 }
 
 static_assert(!nvfp4_w4a4_decode_wave4_adopted_shape(1U, 1008U, 1024U));
@@ -1755,35 +1755,35 @@ inline KernelVariant select_nvfp4_w4a4_variant(const uint64_t m) noexcept {
   return select_nvfp4_w4a4_variant(m, 0U, 0U, "");
 }
 
-inline SelectorDecision select_nvfp4_w4a4_decision(
-    const uint64_t m, const uint64_t k, const uint64_t n,
-    const char *const target) noexcept {
-  const KernelVariant variant =
-      select_nvfp4_w4a4_variant(m, k, n, target);
+inline SelectorDecision
+select_nvfp4_w4a4_decision(const uint64_t m, const uint64_t k, const uint64_t n,
+                           const char *const target) noexcept {
+  const KernelVariant variant = select_nvfp4_w4a4_variant(m, k, n, target);
   const bool exact_gfx1030 = target_is(target, "gfx1030");
   const bool exact_gfx1201 = target_is(target, "gfx1201");
-  const bool known_target = exact_gfx1030 || exact_gfx1201 ||
-                            target_is(target, "gfx942");
+  const bool known_target =
+      exact_gfx1030 || exact_gfx1201 || target_is(target, "gfx942");
   const bool supported_decode_target = exact_gfx1030 || exact_gfx1201;
   switch (variant) {
   case KernelVariant::Nvfp4W4A4DecodeWave4Column32: {
-    const bool supported =
-        supported_decode_target &&
-        phase78_nvfp4_w4a4_decode_wave4col32_shape(m, k, n);
-    const bool adopted = exact_gfx1030 &&
+    const bool supported = supported_decode_target &&
+                           phase78_nvfp4_w4a4_decode_wave4col32_shape(m, k, n);
+    const bool adopted =
+        exact_gfx1030 &&
         !selector_env_is_present(kNvfp4W4A4DecodeWave4Column32Environment) &&
         nvfp4_w4a4_decode_wave4_adopted_shape(m, k, n);
     return make_selector_decision(
-        variant, supported, adopted || selector_env_is_one(
-                               kNvfp4W4A4DecodeWave4Column32Environment),
-        adopted, !supported ? kSelectorReasonUnsupported
-                            : adopted ? kSelectorReasonAdopted
-                                      : kSelectorReasonForced);
+        variant, supported,
+        adopted ||
+            selector_env_is_one(kNvfp4W4A4DecodeWave4Column32Environment),
+        adopted,
+        !supported ? kSelectorReasonUnsupported
+        : adopted  ? kSelectorReasonAdopted
+                   : kSelectorReasonForced);
   }
   case KernelVariant::Nvfp4W4A4DecodeColumns128: {
-    const bool supported =
-        supported_decode_target &&
-        phase78_nvfp4_w4a4_decode_columns128_shape(m, k, n);
+    const bool supported = supported_decode_target &&
+                           phase78_nvfp4_w4a4_decode_columns128_shape(m, k, n);
     return make_selector_decision(
         variant, supported,
         selector_env_is_one(kNvfp4W4A4DecodeColumns128Environment), false,
@@ -1795,9 +1795,8 @@ inline SelectorDecision select_nvfp4_w4a4_decision(
         phase78_nvfp4_w4a4_decode_activation_shared_shape(m, k, n);
     return make_selector_decision(
         variant, supported,
-        selector_env_is_one(kNvfp4W4A4DecodeActivationSharedEnvironment),
-        false, supported ? kSelectorReasonForcedShape
-                         : kSelectorReasonUnsupported);
+        selector_env_is_one(kNvfp4W4A4DecodeActivationSharedEnvironment), false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
   }
   case KernelVariant::Nvfp4W4A4DecodeScaleLut: {
     const bool supported =
@@ -1818,8 +1817,8 @@ inline SelectorDecision select_nvfp4_w4a4_decision(
         supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
   }
   case KernelVariant::Nvfp4W4A4PrefillDp4a64x64: {
-    const bool supported = known_target && k != 0U && (k % 16U) == 0U &&
-                           n != 0U && m > 1U;
+    const bool supported =
+        known_target && k != 0U && (k % 16U) == 0U && n != 0U && m > 1U;
     return make_selector_decision(
         variant, supported,
         selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A"), false,
@@ -1832,8 +1831,8 @@ inline SelectorDecision select_nvfp4_w4a4_decision(
         exact_gfx1201 && phase78_gfx1201_nvfp4_w4a4_wmma128x64_shape(m, k, n);
     const bool force_wmma =
         selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA");
-    const bool force_wmma128x32 = selector_env_is_one(
-        kNvfp4W4A4PrefillGfx1201Wmma128x32Environment);
+    const bool force_wmma128x32 =
+        selector_env_is_one(kNvfp4W4A4PrefillGfx1201Wmma128x32Environment);
     const bool force_f16_staging =
         selector_env_is_one(kNvfp4W4A4PrefillGfx1201F16StagingEnvironment);
     const bool enabled =
@@ -1843,34 +1842,33 @@ inline SelectorDecision select_nvfp4_w4a4_decision(
          force_wmma128x32) ||
         (variant == KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64 &&
          selector_env_is_one(kNvfp4W4A4PrefillGfx1201WmmaF16ScaleEnvironment));
-    return make_selector_decision(
-        variant, supported, enabled, false,
-        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
+    return make_selector_decision(variant, supported, enabled, false,
+                                  supported ? kSelectorReasonForcedShape
+                                            : kSelectorReasonUnsupported);
   }
   case KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging: {
     const bool supported =
-        exact_gfx1201 &&
-        phase78_gfx1201_nvfp4_w4a4_f16_staging_shape(m, k, n);
+        exact_gfx1201 && phase78_gfx1201_nvfp4_w4a4_f16_staging_shape(m, k, n);
     return make_selector_decision(
         variant, supported,
         selector_env_is_one(kNvfp4W4A4PrefillGfx1201F16StagingEnvironment),
-        false, supported ? kSelectorReasonForcedShape
-                         : kSelectorReasonUnsupported);
+        false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
   }
   case KernelVariant::Nvfp4W4A4PrefillRow8Col8Tiled256:
     return make_selector_decision(
-        variant, known_target && m > 1U && k != 0U && (k % 16U) == 0U &&
-                     n != 0U,
+        variant,
+        known_target && m > 1U && k != 0U && (k % 16U) == 0U && n != 0U,
         selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_COL8"), false,
         kSelectorReasonForced);
   case KernelVariant::Nvfp4W4A4PrefillRow8Tiled256: {
-    const bool supported = known_target && m > 1U && k != 0U &&
-                           (k % 16U) == 0U && n != 0U;
+    const bool supported =
+        known_target && m > 1U && k != 0U && (k % 16U) == 0U && n != 0U;
     const bool forced =
         selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8");
-    return make_selector_decision(
-        variant, supported, true, !forced,
-        forced ? kSelectorReasonForced : kSelectorReasonAdopted);
+    return make_selector_decision(variant, supported, true, !forced,
+                                  forced ? kSelectorReasonForced
+                                         : kSelectorReasonAdopted);
   }
   case KernelVariant::Nvfp4W4A4Packed:
     return make_selector_decision(
@@ -1878,8 +1876,8 @@ inline SelectorDecision select_nvfp4_w4a4_decision(
         selector_env_is_one("SLLM_NVFP4_W4A4_FORCE_BASELINE"), false,
         kSelectorReasonExplicitBaseline);
   case KernelVariant::Nvfp4W4A4Decode: {
-    const bool supported = known_target && m == 1U && k != 0U &&
-                           (k % 16U) == 0U && n != 0U;
+    const bool supported =
+        known_target && m == 1U && k != 0U && (k % 16U) == 0U && n != 0U;
     const bool candidate_requested =
         selector_env_is_one(kNvfp4W4A4DecodeScaleLutEnvironment) ||
         selector_env_is_one(kNvfp4W4A4DecodeActivationSharedEnvironment) ||
@@ -2516,10 +2514,10 @@ static_assert([] {
 // workgroup reuses activation/weight tiles across output rows and columns.
 // Each lane of the decode candidate loads one activation pair and shares it
 // across four adjacent weight rows before the wave reduction.
-constexpr bool fp8_outer_decode_dword8_adopted_shape(
-    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
-  return fp8_outer_decode_gfx1030_half2_shape(m, k, n) &&
-         k >= 128U && n >= 64U;
+constexpr bool
+fp8_outer_decode_dword8_adopted_shape(const uint64_t m, const uint64_t k,
+                                      const uint64_t n) noexcept {
+  return fp8_outer_decode_gfx1030_half2_shape(m, k, n) && k >= 128U && n >= 64U;
 }
 
 static_assert(!fp8_outer_decode_dword8_adopted_shape(1U, 64U, 64U));
@@ -2628,14 +2626,14 @@ select_fp8_outer_variant(const uint64_t m, const uint64_t k, const uint64_t n,
                : KernelVariant::Fp8OuterPrefillTiled16;
 }
 
-inline SelectorDecision select_fp8_outer_decision(
-    const uint64_t m, const uint64_t k, const uint64_t n,
-    const char *const target, const bool fnuz = false) noexcept {
-  const KernelVariant variant =
-      select_fp8_outer_variant(m, k, n, target, fnuz);
+inline SelectorDecision
+select_fp8_outer_decision(const uint64_t m, const uint64_t k, const uint64_t n,
+                          const char *const target,
+                          const bool fnuz = false) noexcept {
+  const KernelVariant variant = select_fp8_outer_variant(m, k, n, target, fnuz);
   const bool exact_gfx1030 = target_is(target, "gfx1030");
-  const bool native_target = target_is(target, "gfx1201") ||
-                             target_is(target, "gfx942");
+  const bool native_target =
+      target_is(target, "gfx1201") || target_is(target, "gfx942");
   switch (variant) {
   case KernelVariant::Fp8Native:
     return make_selector_decision(variant, native_target, native_target, true,
@@ -2643,8 +2641,7 @@ inline SelectorDecision select_fp8_outer_decision(
                                                 : kSelectorReasonUnsupported);
   case KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32: {
     const bool supported =
-        exact_gfx1030 && !fnuz &&
-        fp8_outer_decode_gfx1030_half2_shape(m, k, n);
+        exact_gfx1030 && !fnuz && fp8_outer_decode_gfx1030_half2_shape(m, k, n);
     return make_selector_decision(
         variant, supported,
         selector_env_is_one(kFp8OuterDecodeGfx1030Half2Environment), false,
@@ -2652,20 +2649,20 @@ inline SelectorDecision select_fp8_outer_decision(
   }
   case KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32: {
     const bool supported =
-        exact_gfx1030 && !fnuz &&
-        fp8_outer_decode_gfx1030_half2_shape(m, k, n);
+        exact_gfx1030 && !fnuz && fp8_outer_decode_gfx1030_half2_shape(m, k, n);
     const bool direct_force =
         selector_env_is_one(kFp8OuterDecodeGfx1030Dword8Environment);
     const bool shared_force =
         selector_env_is_one(kFp8OuterDecodeGfx1030ActivationSharedEnvironment);
-    const bool adopted = supported && !direct_force && !shared_force &&
+    const bool adopted =
+        supported && !direct_force && !shared_force &&
         !selector_env_is_present(kFp8OuterDecodeGfx1030Dword8Environment) &&
         !selector_env_is_present(kFp8OuterDecodeGfx1030Half2Environment) &&
         fp8_outer_decode_dword8_adopted_shape(m, k, n);
     return make_selector_decision(
         variant, supported, adopted || direct_force || shared_force, adopted,
-        !supported ? kSelectorReasonUnsupported
-        : adopted ? kSelectorReasonAdopted
+        !supported                      ? kSelectorReasonUnsupported
+        : adopted                       ? kSelectorReasonAdopted
         : shared_force && !direct_force ? kSelectorReasonForcedShape
                                         : kSelectorReasonForced);
   }
@@ -2676,8 +2673,8 @@ inline SelectorDecision select_fp8_outer_decision(
     return make_selector_decision(
         variant, supported,
         selector_env_is_one(kFp8OuterDecodeGfx1030ActivationSharedEnvironment),
-        false, supported ? kSelectorReasonForcedShape
-                         : kSelectorReasonUnsupported);
+        false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
   }
   case KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64: {
     const bool supported =
@@ -2686,8 +2683,8 @@ inline SelectorDecision select_fp8_outer_decision(
     return make_selector_decision(
         variant, supported,
         selector_env_is_one(kFp8OuterDecodeGfx1030ActivationSharedEnvironment),
-        false, supported ? kSelectorReasonForcedShape
-                         : kSelectorReasonUnsupported);
+        false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
   }
   case KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32: {
     const bool supported =
@@ -2698,8 +2695,8 @@ inline SelectorDecision select_fp8_outer_decision(
         supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
   }
   case KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64: {
-    const bool supported = exact_gfx1030 && !fnuz && m > 1U && k != 0U &&
-                           n != 0U;
+    const bool supported =
+        exact_gfx1030 && !fnuz && m > 1U && k != 0U && n != 0U;
     const bool forced =
         selector_env_is_one(kFp8OuterPrefillGfx1030Half2_64x64Environment);
     return make_selector_decision(variant, supported, true, !forced,
@@ -2715,23 +2712,21 @@ inline SelectorDecision select_fp8_outer_decision(
         false, supported ? kSelectorReasonForced : kSelectorReasonUnsupported);
   }
   case KernelVariant::Fp8OuterPrefillGfx1030LdsLut: {
-    const bool supported =
-        exact_gfx1030 && !fnuz &&
-        fp8_outer_prefill_gfx1030_lds_lut_shape(m, k, n);
+    const bool supported = exact_gfx1030 && !fnuz &&
+                           fp8_outer_prefill_gfx1030_lds_lut_shape(m, k, n);
     return make_selector_decision(
         variant, supported,
         selector_env_is_one(kFp8OuterPrefillGfx1030LdsLutEnvironment), false,
         supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
   }
   case KernelVariant::Fp8OuterPrefillGfx1030F16Staging: {
-    const bool supported =
-        exact_gfx1030 && !fnuz &&
-        fp8_outer_prefill_gfx1030_f16_staging_shape(m, k, n);
+    const bool supported = exact_gfx1030 && !fnuz &&
+                           fp8_outer_prefill_gfx1030_f16_staging_shape(m, k, n);
     return make_selector_decision(
         variant, supported,
         selector_env_is_one(kFp8OuterPrefillGfx1030F16StagingEnvironment),
-        false, supported ? kSelectorReasonForcedShape
-                         : kSelectorReasonUnsupported);
+        false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
   }
   case KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging: {
     const bool supported =
@@ -2740,8 +2735,8 @@ inline SelectorDecision select_fp8_outer_decision(
     return make_selector_decision(
         variant, supported,
         selector_env_is_one(kFp8OuterPrefillGfx1030F16TileStagingEnvironment),
-        false, supported ? kSelectorReasonForcedShape
-                         : kSelectorReasonUnsupported);
+        false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
   }
   case KernelVariant::Fp8OuterPrefillTiled16: {
     const bool supported = exact_gfx1030 && m > 1U && k != 0U && n != 0U;
@@ -2760,7 +2755,8 @@ inline SelectorDecision select_fp8_outer_decision(
     const bool decode_candidate_requested =
         m == 1U &&
         (selector_env_is_one(kFp8OuterDecodeGfx1030LdsLutEnvironment) ||
-         selector_env_is_one(kFp8OuterDecodeGfx1030ActivationSharedEnvironment) ||
+         selector_env_is_one(
+             kFp8OuterDecodeGfx1030ActivationSharedEnvironment) ||
          selector_env_is_one(kFp8OuterDecodeGfx1030Dword8Environment) ||
          selector_env_is_one(kFp8OuterDecodeGfx1030Half2Environment));
     const bool decode_candidate_configured =
@@ -2772,13 +2768,12 @@ inline SelectorDecision select_fp8_outer_decision(
          selector_env_is_present(kFp8OuterDecodeGfx1030Half2Environment));
     const char *reason = kSelectorReasonUnsupported;
     if (exact_gfx1030) {
-      reason = baseline_selector_reason(
-          forced_decode || forced_prefill, fnuz, decode_candidate_requested,
-          decode_candidate_configured);
+      reason = baseline_selector_reason(forced_decode || forced_prefill, fnuz,
+                                        decode_candidate_requested,
+                                        decode_candidate_configured);
     }
     return make_selector_decision(variant, supported, true,
-                                  !forced_decode && !forced_prefill,
-                                  reason);
+                                  !forced_decode && !forced_prefill, reason);
   }
   default:
     return make_selector_decision(variant, false, false, false,

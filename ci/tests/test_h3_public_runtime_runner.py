@@ -2227,6 +2227,61 @@ class H3PublicRuntimeRunnerTests(unittest.TestCase):
                 self.assertTrue(runner._child_subreaper_enabled())
         self.assertEqual(runner._child_subreaper_enabled(), before)
 
+    def test_run_commands_preserves_passed_step_results_on_success_then_failure(self) -> None:
+        row = {
+            "row_id": "h3-public-gfx1030",
+            "resource": {
+                "timeout_seconds": 5,
+                "max_rss_bytes": 4096,
+                "max_output_bytes": 128,
+            },
+        }
+        prior = {"step_id": "pre-existing", "state": "PASS"}
+        step_results = [prior]
+        command_results = iter(
+            (
+                (0, b"compiler output", b"", 0.01, False, 1024),
+                (7, b"", b"x" * 12000, 0.02, False, 2048),
+            )
+        )
+        with patch.object(runner, "run_argv", side_effect=lambda *args, **kwargs: next(command_results)):
+            with self.assertRaises(runner.RuntimeContractError) as failure:
+                runner.run_commands(
+                    [["fake-compiler", "--success"], ["fake-compiler", "--failure"]],
+                    row,
+                    Path("."),
+                    {"PATH": "/usr/bin:/bin"},
+                    step_results=step_results,
+                )
+
+        self.assertIs(step_results[0], prior)
+        self.assertEqual([step["state"] for step in step_results[1:]], ["PASS", "FAIL"])
+        failed_step = step_results[-1]
+        self.assertEqual(failed_step["exit_code"], 7)
+        self.assertIn("exit_code=7", failed_step["diagnostic"])
+        self.assertIn("output_limit_exceeded=true", failed_step["diagnostic"])
+        self.assertEqual(failed_step["resource"]["output_bytes"], 12000)
+        self.assertEqual(failed_step["resource"]["max_rss_bytes"], 2048)
+        self.assertFalse(failed_step["resource"]["timed_out"])
+        self.assertLessEqual(len(str(failure.exception)), 3200)
+
+    def test_public_runtime_workflow_keeps_gfx1201_and_diagnostics_before_cleanup(self) -> None:
+        workflow = (ROOT / ".github/workflows/h3-public-runtime-compile.yml").read_text(encoding="utf-8")
+        gfx1201_start = workflow.index("      - name: Compile, link, extract, and inspect gfx1201")
+        needs_start = workflow.index("      - name: Prepare exact public-runtime needs input")
+        upload_start = workflow.index("      - name: Upload public-runtime reports and bounded diagnostics")
+        cleanup_start = workflow.index("      - name: Cleanup generated public-H3 rows and needs")
+        gfx1201_block = workflow[gfx1201_start:needs_start]
+        upload_block = workflow[upload_start:cleanup_start]
+
+        self.assertIn("if: ${{ always() && !cancelled() && steps.pinned_image.outcome == 'success' }}", gfx1201_block)
+        self.assertIn("--strict-ci --pinned-container", gfx1201_block)
+        self.assertIn("gfx1201.log", gfx1201_block)
+        self.assertIn("if: ${{ always() }}", upload_block)
+        self.assertIn("h3-public-runtime-diagnostics/*.log", upload_block)
+        self.assertLess(gfx1201_start, upload_start)
+        self.assertLess(upload_start, cleanup_start)
+
     def test_device_inspection_rejects_wrong_target_codegen_and_public_runtime_symbols(self) -> None:
         row = {"target": "gfx1030", "resource": {"max_rss_bytes": 256 * 1024 * 1024, "max_output_bytes": 1024}}
         with tempfile.TemporaryDirectory(prefix="sllm-h3-device-") as directory:
@@ -2377,6 +2432,12 @@ Sections [
                 causal_stub_report = runner.inspect_host(path, Path("/fake/llvm-readobj"), row, expected_bundles)
             self.assertEqual(causal_stub_report["stub_symbols"], [])
             with patch.object(runner, "readobj", return_value=host_text + causal_stub_text.replace("scaled_prefill_scatter_kernel", "scaled_prefill_scatter_kernel_extra", 1)), self.assertRaises(runner.RuntimeContractError):
+                runner.inspect_host(path, Path("/fake/llvm-readobj"), row, expected_bundles)
+            additional_stub = runner.ADDITIONAL_DEVICE_STUB_SYMBOLS[0]
+            with patch.object(runner, "readobj", return_value=host_text + host_symbol(additional_stub, "Function (0x2)", ".text")):
+                additional_stub_report = runner.inspect_host(path, Path("/fake/llvm-readobj"), row, expected_bundles)
+            self.assertEqual(additional_stub_report["stub_symbols"], [])
+            with patch.object(runner, "readobj", return_value=host_text + host_symbol(additional_stub + "extra", "Function (0x2)", ".text")), self.assertRaises(runner.RuntimeContractError):
                 runner.inspect_host(path, Path("/fake/llvm-readobj"), row, expected_bundles)
             hip_mutations = (
                 (host_text.replace(host_symbol("hipMalloc", "None (0x0)", "Undefined (0x0)"), "", 1), "missing HIP runtime symbol"),

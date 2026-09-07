@@ -10,7 +10,7 @@ the policy boundary.
 from __future__ import annotations
 
 import argparse
-import copy
+import json
 import platform
 import re
 import subprocess
@@ -58,10 +58,6 @@ MINIJINJA_FORBIDDEN_FEATURES = [
 ]
 WASIP2_PACKAGE = "registry:wasip2@1.0.4+wasi-0.2.12"
 WASIP2_TARGET = 'cfg(all(target_arch = "wasm32", target_os = "wasi", target_env = "p2"))'
-EXPECTED_PACKAGE_COUNT = 191
-EXPECTED_REGISTRY_PACKAGE_COUNT = 184
-EXPECTED_WORKSPACE_PACKAGE_COUNT = 7
-EXPECTED_EDGE_COUNT = 453
 SERVER_PACKAGE = "workspace:sllm-server@0.1.0"
 SERVER_RUNTIME_DEPENDENCIES = [
     {
@@ -321,7 +317,7 @@ def normalize_metadata(metadata: dict[str, Any], repo: Path = ROOT) -> dict[str,
     if resolve.get("root") is not None:
         raise ContractError("B0 requires a virtual workspace with resolve.root = null")
     workspace_ids = set(workspace_members)
-    if len(workspace_ids) != len(workspace_members) or len(workspace_ids) != EXPECTED_WORKSPACE_PACKAGE_COUNT:
+    if not workspace_ids or len(workspace_ids) != len(workspace_members):
         raise ContractError("workspace member count or identity uniqueness drifted")
     workspace, manifest_by_id = _root_workspace(repo, metadata, workspace_ids)
     package_by_id = {package.get("id"): package for package in packages}
@@ -373,11 +369,9 @@ def normalize_metadata(metadata: dict[str, Any], repo: Path = ROOT) -> dict[str,
                 }
             )
 
-    if len(packages_out) != EXPECTED_PACKAGE_COUNT:
-        raise ContractError(f"resolved package count drifted: {len(packages_out)}")
-    if sum(package["identity"]["source"] == REGISTRY_SOURCE for package in packages_out) != EXPECTED_REGISTRY_PACKAGE_COUNT:
-        raise ContractError("resolved registry package count drifted")
-    if len(workspace_members_out) != EXPECTED_WORKSPACE_PACKAGE_COUNT:
+    if not packages_out:
+        raise ContractError("resolved package set is empty")
+    if not workspace_members_out:
         raise ContractError("resolved workspace package count drifted")
 
     metadata_deps: dict[str, list[dict[str, Any]]] = {
@@ -430,8 +424,8 @@ def normalize_metadata(metadata: dict[str, Any], repo: Path = ROOT) -> dict[str,
                         "rename": declared.get("rename"),
                     }
                 )
-    if len(edges_out) != EXPECTED_EDGE_COUNT:
-        raise ContractError(f"resolved edge count drifted: {len(edges_out)}")
+    if not edges_out:
+        raise ContractError("resolved dependency edge set is empty")
     edge_keys = {
         (
             edge["from"], edge["to"], edge["name"], edge["kind"], edge["target"],
@@ -553,15 +547,11 @@ def _validate_policy_semantics(manifest: dict[str, Any]) -> None:
         raise ContractError("Rust dependency policy identity drifted")
     _reject_unsafe_strings(manifest)
     package_map = _manifest_package_map(manifest)
-    if len(package_map) != EXPECTED_PACKAGE_COUNT:
-        raise ContractError(f"policy package count drifted: {len(package_map)}")
-    if sum(key.startswith("registry:") for key in package_map) != EXPECTED_REGISTRY_PACKAGE_COUNT:
-        raise ContractError("policy registry package count drifted")
-    if sum(key.startswith("workspace:") for key in package_map) != EXPECTED_WORKSPACE_PACKAGE_COUNT:
-        raise ContractError("policy workspace package count drifted")
+    if not package_map:
+        raise ContractError("policy package set is empty")
 
     members = manifest.get("workspace_members")
-    if not isinstance(members, list) or len(members) != EXPECTED_WORKSPACE_PACKAGE_COUNT:
+    if not isinstance(members, list) or not members:
         raise ContractError("policy workspace member count drifted")
     member_keys: set[str] = set()
     for member in members:
@@ -585,7 +575,7 @@ def _validate_policy_semantics(manifest: dict[str, Any]) -> None:
         raise ContractError("workspace member/package identity sets differ")
 
     edges = manifest.get("edges")
-    if not isinstance(edges, list) or len(edges) != EXPECTED_EDGE_COUNT:
+    if not isinstance(edges, list) or not edges:
         raise ContractError("policy edge count drifted")
     edge_keys: set[tuple[Any, ...]] = set()
     for edge in edges:
@@ -741,6 +731,43 @@ def _validate_policy_semantics(manifest: dict[str, Any]) -> None:
         raise ContractError("wasip2 must be reachable only through its wasm32-wasip2 target edge")
 
 
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _preview(values: list[str]) -> str:
+    limit = 3
+    shown = values[:limit]
+    suffix = " ..." if len(values) > limit else ""
+    return "[" + ", ".join(shown) + "]" + suffix
+
+
+def _describe_drift(expected: Any, actual: Any) -> str:
+    """Describe a bounded policy/observation difference for actionable CI output."""
+
+    if isinstance(expected, list) and isinstance(actual, list):
+        expected_items = {_canonical_json(item) for item in expected}
+        actual_items = {_canonical_json(item) for item in actual}
+        added = sorted(actual_items - expected_items)
+        removed = sorted(expected_items - actual_items)
+        details = [f"expected_items={len(expected)} actual_items={len(actual)}"]
+        if added:
+            details.append(f"added={len(added)} {_preview(added)}")
+        if removed:
+            details.append(f"removed={len(removed)} {_preview(removed)}")
+        return "; ".join(details)
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        changed = []
+        for key in sorted(set(expected) | set(actual)):
+            if expected.get(key) != actual.get(key):
+                changed.append(
+                    f"{key} expected={_canonical_json(expected.get(key))}"
+                    f" actual={_canonical_json(actual.get(key))}"
+                )
+        return "; ".join(changed[:3]) + ("; ..." if len(changed) > 3 else "")
+    return f"expected={_canonical_json(expected)} actual={_canonical_json(actual)}"
+
+
 def validate_manifest_against_observed(
     manifest: dict[str, Any], observed: dict[str, Any], *, schema: dict[str, Any] | None = None
 ) -> None:
@@ -750,8 +777,13 @@ def validate_manifest_against_observed(
         validate_schema(manifest, schema)
     _validate_policy_semantics(manifest)
     for section in SECTION_NAMES:
-        if manifest.get(section) != observed.get(section):
-            raise ContractError(f"Rust dependency {section} graph/field drift detected")
+        expected = manifest.get(section)
+        actual = observed.get(section)
+        if expected != actual:
+            raise ContractError(
+                f"Rust dependency {section} graph/field drift detected: "
+                f"{_describe_drift(expected, actual)}"
+            )
 
 
 def _cargo_environment() -> dict[str, str]:

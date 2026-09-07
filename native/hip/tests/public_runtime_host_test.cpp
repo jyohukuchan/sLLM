@@ -4049,8 +4049,7 @@ sllm_qwen38_projection_pack2_desc_t qwen38_projection_pack2_nvfp4_descriptor(
   descriptor.role = SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_NVFP4_MLP_GATE_UP;
   descriptor.input_global_scale_f32_bits = UINT32_C(0x44000000); // 512.0F
   descriptor.activation = matmul_binding(activation, 0U, 1U, k);
-  descriptor.gate_weight =
-      matmul_binding(weights[0], 0U, gate_n, k);
+  descriptor.gate_weight = matmul_binding(weights[0], 0U, gate_n, k);
   descriptor.up_weight = matmul_binding(weights[1], 0U, up_n, k);
   descriptor.gate_weight.dtype = SLLM_TENSOR_DTYPE_U8;
   descriptor.up_weight.dtype = SLLM_TENSOR_DTYPE_U8;
@@ -4391,31 +4390,29 @@ bool qwen38_projection_pack2_nvfp4_generic_contract() {
     sllm_qwen38_projection_pack2_plan_t *plan = nullptr;
     sllm_completion_t *completion = nullptr;
     Error error;
-    bool valid = create_context_for_arch(target, &context) &&
-                 create_queue(context, &queue) &&
-                 create_buffer_sized(context, k * sizeof(uint16_t),
-                                     &activation) &&
-                 create_buffer_sized(context, max_weight_bytes, &weights[0]) &&
-                 create_buffer_sized(context, max_weight_bytes, &weights[1]) &&
-                 create_buffer_sized(context, gate_n * sizeof(uint16_t),
-                                     &outputs[0]) &&
-                 create_buffer_sized(context, up_n * sizeof(uint16_t),
-                                     &outputs[1]);
+    bool valid =
+        create_context_for_arch(target, &context) &&
+        create_queue(context, &queue) &&
+        create_buffer_sized(context, k * sizeof(uint16_t), &activation) &&
+        create_buffer_sized(context, max_weight_bytes, &weights[0]) &&
+        create_buffer_sized(context, max_weight_bytes, &weights[1]) &&
+        create_buffer_sized(context, gate_n * sizeof(uint16_t), &outputs[0]) &&
+        create_buffer_sized(context, up_n * sizeof(uint16_t), &outputs[1]);
     if (valid) {
       const auto descriptor = qwen38_projection_pack2_nvfp4_descriptor(
           activation, weights, outputs, k, gate_n, up_n);
       valid = expect_status(sllm_qwen38_projection_pack2_prepare(
                                 context, &descriptor, &plan, &error.sink),
-                            SLLM_STATUS_OK,
-                            "Qwen3.8 generic NVFP4 prepare", error) &&
+                            SLLM_STATUS_OK, "Qwen3.8 generic NVFP4 prepare",
+                            error) &&
               plan != nullptr;
     }
     if (valid) {
       auto info = qwen38_projection_pack2_dispatch_info();
       valid = expect_status(sllm_qwen38_projection_pack2_execute(
                                 plan, queue, &completion, &info, &error.sink),
-                            SLLM_STATUS_OK,
-                            "Qwen3.8 generic NVFP4 execute", error) &&
+                            SLLM_STATUS_OK, "Qwen3.8 generic NVFP4 execute",
+                            error) &&
               completion != nullptr && info.m == 1U && info.k == k &&
               info.n == gate_n && info.output_elements == gate_n + up_n &&
               info.workspace_bytes == k / UINT64_C(2) + k / UINT64_C(16) &&
@@ -4424,45 +4421,43 @@ bool qwen38_projection_pack2_nvfp4_generic_contract() {
               release_completion(&completion) && valid;
     }
     if (plan != nullptr) {
-      valid = expect_status(
-                  sllm_qwen38_projection_pack2_plan_release(
-                      &plan, &error.sink),
-                  SLLM_STATUS_OK, "Qwen3.8 generic NVFP4 plan release",
-                  error) &&
-              valid;
+      valid =
+          expect_status(
+              sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
+              SLLM_STATUS_OK, "Qwen3.8 generic NVFP4 plan release", error) &&
+          valid;
     }
 
     if (valid) {
       const auto invalid_descriptor = qwen38_projection_pack2_nvfp4_descriptor(
           activation, weights, outputs, invalid_k, gate_n, up_n);
-      valid = expect_status(
-                  sllm_qwen38_projection_pack2_prepare(
-                      context, &invalid_descriptor, &plan, &error.sink),
-                  SLLM_STATUS_UNSUPPORTED,
-                  "Qwen3.8 generic NVFP4 K boundary rejection", error) &&
-              plan == nullptr && valid;
+      valid =
+          expect_status(sllm_qwen38_projection_pack2_prepare(
+                            context, &invalid_descriptor, &plan, &error.sink),
+                        SLLM_STATUS_UNSUPPORTED,
+                        "Qwen3.8 generic NVFP4 K boundary rejection", error) &&
+          plan == nullptr && valid;
     }
     if (valid) {
       auto mismatch_descriptor = qwen38_projection_pack2_nvfp4_descriptor(
           activation, weights, outputs, k, gate_n, up_n);
       mismatch_descriptor.up_weight.shape[1] = mismatch_k;
       mismatch_descriptor.up_weight.stride_elements[0] = mismatch_k;
-      valid = expect_status(
-                  sllm_qwen38_projection_pack2_prepare(
-                      context, &mismatch_descriptor, &plan, &error.sink),
-                  SLLM_STATUS_SHAPE_MISMATCH,
-                  "Qwen3.8 generic NVFP4 K mismatch rejection", error) &&
-              plan == nullptr && valid;
+      valid =
+          expect_status(sllm_qwen38_projection_pack2_prepare(
+                            context, &mismatch_descriptor, &plan, &error.sink),
+                        SLLM_STATUS_SHAPE_MISMATCH,
+                        "Qwen3.8 generic NVFP4 K mismatch rejection", error) &&
+          plan == nullptr && valid;
     }
     if (completion != nullptr)
       valid = release_completion(&completion) && valid;
     if (plan != nullptr)
-      valid = expect_status(
-                  sllm_qwen38_projection_pack2_plan_release(
-                      &plan, &error.sink),
-                  SLLM_STATUS_OK, "Qwen3.8 generic NVFP4 cleanup release",
-                  error) &&
-              valid;
+      valid =
+          expect_status(
+              sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
+              SLLM_STATUS_OK, "Qwen3.8 generic NVFP4 cleanup release", error) &&
+          valid;
     for (sllm_buffer_t *&output : outputs)
       valid = release_buffer(&output) && valid;
     for (sllm_buffer_t *&weight : weights)
@@ -4473,8 +4468,7 @@ bool qwen38_projection_pack2_nvfp4_generic_contract() {
     if (context != nullptr)
       valid = release_context(&context) && valid;
     return valid && fake_hip::live_events() == 0U &&
-           fake_hip::live_streams() == 0U &&
-           fake_hip::live_allocations() == 0U;
+           fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
   };
   const bool valid = run_for_target("gfx1030") && run_for_target("gfx1201");
   fake_hip::set_gcn_arch_name("gfx1201");
@@ -6646,9 +6640,8 @@ bool matmul_fp8_outer_decode_selector_contract() {
   valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
   unsetenv(variables[2]);
   setenv(variables[4], "yes", 1);
-  valid = valid &&
-          select(1U, 5120U, 17408U) ==
-              KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32;
+  valid = valid && select(1U, 5120U, 17408U) ==
+                       KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32;
   unsetenv(variables[4]);
 
   setenv(variables[2], "1", 1);
@@ -6664,8 +6657,7 @@ bool matmul_fp8_outer_decode_selector_contract() {
 
   // The adopted dword8 default is present only at its lower K/N boundary;
   // an explicit zero on either direct candidate rolls back to emulation.
-  valid = valid &&
-          select(1U, 127U, 64U) == KernelVariant::Fp8Emulation &&
+  valid = valid && select(1U, 127U, 64U) == KernelVariant::Fp8Emulation &&
           select(1U, 128U, 63U) == KernelVariant::Fp8Emulation &&
           select(1U, 128U, 64U) ==
               KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
@@ -6756,9 +6748,8 @@ bool matmul_fp8_outer_decode_selector_contract() {
   valid = valid && select(1U, 5120U, 17408U) == KernelVariant::Fp8Emulation;
   unsetenv(variables[2]);
   setenv(variables[3], "yes", 1);
-  valid = valid &&
-          select(1U, 5120U, 17408U) ==
-              KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32;
+  valid = valid && select(1U, 5120U, 17408U) ==
+                       KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32;
   unsetenv(variables[3]);
   setenv(variables[0], "1", 1);
 
@@ -6843,7 +6834,7 @@ bool matmul_fp8_outer_decode_selector_contract() {
           prepared_inner_product ==
               static_cast<uint32_t>(
                   sllm_lowp::InnerProduct::E4M3Fp16Dot2Fp32) &&
-      valid;
+          valid;
 
       unsetenv(variables[0]);
       setenv(variables[1], "1", 1);
@@ -7537,12 +7528,9 @@ bool matmul_nvfp4_w4a4_selector_contract() {
       select(1U, 15U) == KernelVariant::Nvfp4W4A4Decode &&
       select(1U, 1024U, "gfx1030", 1024U) ==
           KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
-      select(1U, 1008U, "gfx1030", 1024U) ==
-          KernelVariant::Nvfp4W4A4Decode &&
-      select(1U, 1024U, "gfx1030", 1023U) ==
-          KernelVariant::Nvfp4W4A4Decode &&
-      select(1U, 1024U, "gfx1201", 17408U) ==
-          KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 1008U, "gfx1030", 1024U) == KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 1024U, "gfx1030", 1023U) == KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 1024U, "gfx1201", 17408U) == KernelVariant::Nvfp4W4A4Decode &&
       select(2U, 5120U) == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
       select(2U, 5120U, "gfx1201") ==
           KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
@@ -8152,16 +8140,16 @@ bool matmul_selector_decision_contract() {
   using sllm_matmul_kernel::KernelVariant;
   bool valid = true;
 
-  const auto fp8_baseline = sllm_matmul_kernel::select_fp8_outer_decision(
-      1U, 64U, 33U, "gfx1030");
+  const auto fp8_baseline =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx1030");
   valid = valid && fp8_baseline.variant == KernelVariant::Fp8Emulation &&
           fp8_baseline.supported && fp8_baseline.enabled &&
           fp8_baseline.adopted &&
           std::strcmp(fp8_baseline.reason, "baseline selected; optimized "
-                                         "candidate is not adopted") == 0;
+                                           "candidate is not adopted") == 0;
 
-  const auto fp8_adopted = sllm_matmul_kernel::select_fp8_outer_decision(
-      1U, 128U, 64U, "gfx1030");
+  const auto fp8_adopted =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 128U, 64U, "gfx1030");
   const auto fp8_k_adoption_boundary =
       sllm_matmul_kernel::select_fp8_outer_decision(1U, 127U, 64U, "gfx1030");
   const auto fp8_n_adoption_boundary =
@@ -8178,32 +8166,33 @@ bool matmul_selector_decision_contract() {
           fp8_n_adoption_boundary.adopted;
 
   setenv(variables[0], "0", 1);
-  const auto fp8_half2_off = sllm_matmul_kernel::select_fp8_outer_decision(
-      1U, 64U, 33U, "gfx1030");
-  valid = valid && fp8_half2_off.variant == KernelVariant::Fp8Emulation &&
-          fp8_half2_off.adopted &&
-          std::strcmp(fp8_half2_off.reason,
-                      "baseline selected; optimized candidate flag is off") ==
-              0;
+  const auto fp8_half2_off =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx1030");
+  valid =
+      valid && fp8_half2_off.variant == KernelVariant::Fp8Emulation &&
+      fp8_half2_off.adopted &&
+      std::strcmp(fp8_half2_off.reason,
+                  "baseline selected; optimized candidate flag is off") == 0;
   unsetenv(variables[0]);
 
   setenv(variables[1], "0", 1);
-  const auto fp8_dword8_off = sllm_matmul_kernel::select_fp8_outer_decision(
-      1U, 128U, 64U, "gfx1030");
-  valid = valid && fp8_dword8_off.variant == KernelVariant::Fp8Emulation &&
-          fp8_dword8_off.adopted &&
-          std::strcmp(fp8_dword8_off.reason,
-                      "baseline selected; optimized candidate flag is off") ==
-              0;
+  const auto fp8_dword8_off =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 128U, 64U, "gfx1030");
+  valid =
+      valid && fp8_dword8_off.variant == KernelVariant::Fp8Emulation &&
+      fp8_dword8_off.adopted &&
+      std::strcmp(fp8_dword8_off.reason,
+                  "baseline selected; optimized candidate flag is off") == 0;
   unsetenv(variables[1]);
 
   setenv(variables[0], "1", 1);
-  const auto fp8_half2 = sllm_matmul_kernel::select_fp8_outer_decision(
-      1U, 64U, 33U, "gfx1030");
+  const auto fp8_half2 =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx1030");
   const auto fp8_half2_k_boundary =
       sllm_matmul_kernel::select_fp8_outer_decision(1U, 63U, 33U, "gfx1030");
-  valid = valid && fp8_half2.variant ==
-                      KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32 &&
+  valid = valid &&
+          fp8_half2.variant ==
+              KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32 &&
           fp8_half2.supported && fp8_half2.enabled && !fp8_half2.adopted &&
           fp8_half2_k_boundary.variant == KernelVariant::Fp8Emulation &&
           fp8_half2_k_boundary.adopted &&
@@ -8215,93 +8204,88 @@ bool matmul_selector_decision_contract() {
   setenv(variables[11], "1", 1);
   const auto fp8_explicit_baseline =
       sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx1030");
-  valid = valid && fp8_explicit_baseline.variant == KernelVariant::Fp8Emulation &&
+  valid = valid &&
+          fp8_explicit_baseline.variant == KernelVariant::Fp8Emulation &&
           !fp8_explicit_baseline.adopted &&
           std::strcmp(fp8_explicit_baseline.reason,
                       "explicit baseline override selected") == 0;
   unsetenv(variables[11]);
 
   setenv(variables[1], "1", 1);
-  const auto fp8_dword8 = sllm_matmul_kernel::select_fp8_outer_decision(
-      1U, 64U, 33U, "gfx1030");
-  valid = valid && fp8_dword8.variant ==
-                      KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
+  const auto fp8_dword8 =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx1030");
+  valid = valid &&
+          fp8_dword8.variant ==
+              KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
           fp8_dword8.supported && fp8_dword8.enabled && !fp8_dword8.adopted;
   unsetenv(variables[1]);
 
-  const auto fp8_native = sllm_matmul_kernel::select_fp8_outer_decision(
-      1U, 64U, 33U, "gfx1201");
-  const auto fp8_unknown = sllm_matmul_kernel::select_fp8_outer_decision(
-      1U, 64U, 33U, "gfx900");
+  const auto fp8_native =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx1201");
+  const auto fp8_unknown =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx900");
   valid = valid && fp8_native.variant == KernelVariant::Fp8Native &&
           fp8_native.supported && fp8_native.enabled && fp8_native.adopted &&
           fp8_unknown.variant == KernelVariant::Fp8Emulation &&
           !fp8_unknown.supported;
 
   const auto nvfp4_baseline =
-      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 16U, 33U,
-                                                     "gfx1030");
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 16U, 33U, "gfx1030");
   const auto nvfp4_unaligned =
-      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 15U, 33U,
-                                                     "gfx1030");
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 15U, 33U, "gfx1030");
   valid = valid && nvfp4_baseline.variant == KernelVariant::Nvfp4W4A4Decode &&
           nvfp4_baseline.supported && nvfp4_baseline.enabled &&
           nvfp4_baseline.adopted &&
           nvfp4_unaligned.variant == KernelVariant::Nvfp4W4A4Decode &&
           !nvfp4_unaligned.supported;
 
-  const auto nvfp4_adopted =
-      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1024U, 1024U,
-                                                     "gfx1030");
+  const auto nvfp4_adopted = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+      1U, 1024U, 1024U, "gfx1030");
   const auto nvfp4_k_adoption_boundary =
       sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1008U, 1024U,
                                                      "gfx1030");
   const auto nvfp4_n_adoption_boundary =
       sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1024U, 1023U,
                                                      "gfx1030");
-  valid = valid &&
-          nvfp4_adopted.variant == KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
-          nvfp4_adopted.supported && nvfp4_adopted.enabled &&
-          nvfp4_adopted.adopted &&
-          std::strcmp(nvfp4_adopted.reason,
-                      "adopted default for target and shape") == 0 &&
-          nvfp4_k_adoption_boundary.variant == KernelVariant::Nvfp4W4A4Decode &&
-          nvfp4_k_adoption_boundary.supported &&
-          nvfp4_k_adoption_boundary.adopted &&
-          nvfp4_n_adoption_boundary.variant == KernelVariant::Nvfp4W4A4Decode &&
-          nvfp4_n_adoption_boundary.supported &&
-          nvfp4_n_adoption_boundary.adopted;
+  valid =
+      valid &&
+      nvfp4_adopted.variant == KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      nvfp4_adopted.supported && nvfp4_adopted.enabled &&
+      nvfp4_adopted.adopted &&
+      std::strcmp(nvfp4_adopted.reason,
+                  "adopted default for target and shape") == 0 &&
+      nvfp4_k_adoption_boundary.variant == KernelVariant::Nvfp4W4A4Decode &&
+      nvfp4_k_adoption_boundary.supported &&
+      nvfp4_k_adoption_boundary.adopted &&
+      nvfp4_n_adoption_boundary.variant == KernelVariant::Nvfp4W4A4Decode &&
+      nvfp4_n_adoption_boundary.supported && nvfp4_n_adoption_boundary.adopted;
 
   setenv(variables[4], "0", 1);
   const auto nvfp4_wave4_off =
-      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 16U, 33U,
-                                                     "gfx1030");
-  valid = valid && nvfp4_wave4_off.variant == KernelVariant::Nvfp4W4A4Decode &&
-          nvfp4_wave4_off.adopted &&
-          std::strcmp(nvfp4_wave4_off.reason,
-                      "baseline selected; optimized candidate flag is off") ==
-              0;
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 16U, 33U, "gfx1030");
+  valid =
+      valid && nvfp4_wave4_off.variant == KernelVariant::Nvfp4W4A4Decode &&
+      nvfp4_wave4_off.adopted &&
+      std::strcmp(nvfp4_wave4_off.reason,
+                  "baseline selected; optimized candidate flag is off") == 0;
   unsetenv(variables[4]);
 
   setenv(variables[4], "0", 1);
-  const auto nvfp4_adopted_off =
-      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1024U, 1024U,
-                                                     "gfx1030");
-  valid = valid && nvfp4_adopted_off.variant == KernelVariant::Nvfp4W4A4Decode &&
-          nvfp4_adopted_off.supported && nvfp4_adopted_off.enabled &&
-          nvfp4_adopted_off.adopted &&
-          std::strcmp(nvfp4_adopted_off.reason,
-                      "baseline selected; optimized candidate flag is off") ==
-              0;
+  const auto nvfp4_adopted_off = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+      1U, 1024U, 1024U, "gfx1030");
+  valid =
+      valid && nvfp4_adopted_off.variant == KernelVariant::Nvfp4W4A4Decode &&
+      nvfp4_adopted_off.supported && nvfp4_adopted_off.enabled &&
+      nvfp4_adopted_off.adopted &&
+      std::strcmp(nvfp4_adopted_off.reason,
+                  "baseline selected; optimized candidate flag is off") == 0;
   unsetenv(variables[4]);
 
   setenv(variables[4], "1", 1);
   const auto nvfp4_wave4 =
-      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 16U, 33U,
-                                                     "gfx1030");
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 16U, 33U, "gfx1030");
   const auto nvfp4_wave4_k_boundary =
-      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 15U, 33U,
-                                                     "gfx1030");
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 15U, 33U, "gfx1030");
   valid = valid &&
           nvfp4_wave4.variant == KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
           nvfp4_wave4.supported && nvfp4_wave4.enabled &&
@@ -8314,16 +8298,15 @@ bool matmul_selector_decision_contract() {
   unsetenv(variables[4]);
 
   setenv(variables[7], "1", 1);
-  const auto nvfp4_lut =
-      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 5120U, 17408U,
-                                                     "gfx1201");
+  const auto nvfp4_lut = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+      1U, 5120U, 17408U, "gfx1201");
   const auto nvfp4_lut_adjacent =
       sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 17424U, 5120U,
                                                      "gfx1201");
-  const auto nvfp4_lut_gemma =
-      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 3840U, 15360U,
-                                                     "gfx1201");
-  valid = valid && nvfp4_lut.variant == KernelVariant::Nvfp4W4A4DecodeScaleLut &&
+  const auto nvfp4_lut_gemma = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+      1U, 3840U, 15360U, "gfx1201");
+  valid = valid &&
+          nvfp4_lut.variant == KernelVariant::Nvfp4W4A4DecodeScaleLut &&
           nvfp4_lut.supported && nvfp4_lut.enabled && !nvfp4_lut.adopted &&
           std::strcmp(nvfp4_lut.reason,
                       "explicit force selected supported shape-specific "
@@ -8335,8 +8318,7 @@ bool matmul_selector_decision_contract() {
 
   setenv(variables[12], "1", 1);
   const auto nvfp4_wmma128x32_fallback =
-      sllm_matmul_kernel::select_nvfp4_w4a4_decision(513U, 48U, 33U,
-                                                     "gfx1201");
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(513U, 48U, 33U, "gfx1201");
   valid = valid &&
           nvfp4_wmma128x32_fallback.variant ==
               KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
@@ -8358,10 +8340,9 @@ bool matmul_selector_decision_contract() {
 
   setenv(variables[8], "1", 1);
   const auto nvfp4_dp4a =
-      sllm_matmul_kernel::select_nvfp4_w4a4_decision(2U, 16U, 33U,
-                                                     "gfx1030");
-  valid = valid && nvfp4_dp4a.variant ==
-                      KernelVariant::Nvfp4W4A4PrefillDp4a64x64 &&
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(2U, 16U, 33U, "gfx1030");
+  valid = valid &&
+          nvfp4_dp4a.variant == KernelVariant::Nvfp4W4A4PrefillDp4a64x64 &&
           nvfp4_dp4a.supported && nvfp4_dp4a.enabled && !nvfp4_dp4a.adopted;
 
   restore();

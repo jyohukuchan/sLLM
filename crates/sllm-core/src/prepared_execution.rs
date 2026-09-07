@@ -389,7 +389,7 @@ pub(crate) fn prepared_projection_pair_compatible(
         || activation.encoding() != crate::Encoding::Unquantized
         || !activation.is_contiguous()
         || activation.shape().len() != 2
-        || activation.shape().iter().any(|extent| *extent == 0)
+        || activation.shape().contains(&0)
     {
         return false;
     }

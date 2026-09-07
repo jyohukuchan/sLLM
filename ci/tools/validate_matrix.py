@@ -999,8 +999,8 @@ def main() -> int:
             raise ContractError("host-v1 has unknown or missing top-level key")
         if set(paths) != {"schema_version", "revision", "default_suite_ids", "rules"}:
             raise ContractError("path-to-suite-v1 has unknown or missing top-level key")
-        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 32:
-            raise ContractError("suites-v1 identity is not revision 32")
+        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 35:
+            raise ContractError("suites-v1 identity is not revision 35")
         if host.get("schema_version") != "host-v1" or host.get("revision") != 22:
             raise ContractError("host-v1 identity is not revision 22")
         if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 46:
@@ -1019,9 +1019,14 @@ def main() -> int:
                 raise ContractError(f"zero command collection in {sid}")
             command_ids: set[str] = set()
             for command in suite["commands"]:
-                if set(command) != {"command_id", "argv"} or command["command_id"] in command_ids:
+                if set(command) - {"command_id", "argv", "resource"} or not {"command_id", "argv"} <= set(command) or command["command_id"] in command_ids:
                     raise ContractError(f"invalid or duplicate command in {sid}")
                 command_ids.add(command["command_id"])
+                command_resource = command.get("resource", {})
+                if not isinstance(command_resource, dict) or set(command_resource) - {"max_command_seconds", "max_rss_bytes"}:
+                    raise ContractError(f"invalid command resource budget in {sid}")
+                if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in command_resource.values()):
+                    raise ContractError(f"invalid command resource budget in {sid}")
                 argv = command["argv"]
                 if not isinstance(argv, list) or not argv or not all(isinstance(arg, str) and arg for arg in argv):
                     raise ContractError(f"invalid command argv in {sid}")

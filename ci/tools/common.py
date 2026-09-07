@@ -474,10 +474,16 @@ def load_manifests(repo: Path = ROOT) -> tuple[dict[str, Any], dict[str, Any], d
         if not isinstance(commands, list) or not commands:
             raise ContractError(f"zero command collection for {sid}")
         for command in commands:
-            if set(command) != {"command_id", "argv"}:
+            if set(command) - {"command_id", "argv", "resource"} or not {"command_id", "argv"} <= set(command):
                 raise ContractError(f"invalid command keys for {sid}")
             if not isinstance(command.get("command_id"), str) or not isinstance(command.get("argv"), list) or not command["argv"] or any(not isinstance(arg, str) or not arg for arg in command["argv"]):
                 raise ContractError(f"invalid command registration for {sid}")
+            command_resource = command.get("resource", {})
+            if not isinstance(command_resource, dict) or set(command_resource) - {"max_command_seconds", "max_rss_bytes"}:
+                raise ContractError(f"invalid command resource budget for {sid}")
+            for resource_name, resource_value in command_resource.items():
+                if not isinstance(resource_value, int) or isinstance(resource_value, bool) or resource_value <= 0:
+                    raise ContractError(f"invalid command resource budget {resource_name} for {sid}")
             executable = command["argv"][0]
             if executable != "{python}" and executable not in SAFE_COMMANDS:
                 raise ContractError(f"command executable is not allowlisted for {sid}: {executable}")
@@ -527,6 +533,12 @@ def load_manifests(repo: Path = ROOT) -> tuple[dict[str, Any], dict[str, Any], d
         for sid in row["suite_ids"]:
             if sid not in by_id or by_id[sid]["tier"] != row["tier"]:
                 raise ContractError(f"row {row['row_id']} references unknown/wrong-tier suite {sid}")
+            for command in by_id[sid]["commands"]:
+                command_resource = command.get("resource", {})
+                if command_resource.get("max_command_seconds", row["max_command_seconds"]) > row["max_command_seconds"]:
+                    raise ContractError(f"command timeout budget exceeds row budget: {row['row_id']}.{sid}.{command['command_id']}")
+                if command_resource.get("max_rss_bytes", row["max_rss_bytes"]) > row["max_rss_bytes"]:
+                    raise ContractError(f"command RSS budget exceeds row budget: {row['row_id']}.{sid}.{command['command_id']}")
     if set(paths.get("default_suite_ids", [])) - set(by_id):
         raise ContractError("path mapping references unknown default suite")
     if (
@@ -971,10 +983,19 @@ def ensure_local_command(argv: list[str], repo: Path) -> list[str]:
 def registered_row_commands(
     suites: dict[str, Any], row: dict[str, Any], repo: Path = ROOT
 ) -> list[tuple[str, list[str]]]:
+    return [
+        (command_id, command)
+        for command_id, command, _resource in registered_row_command_specs(suites, row, repo)
+    ]
+
+
+def registered_row_command_specs(
+    suites: dict[str, Any], row: dict[str, Any], repo: Path = ROOT
+) -> list[tuple[str, list[str], dict[str, int]]]:
     """Expand one row's immutable command list and reject duplicate IDs."""
 
     suite_by_id = {suite["suite_id"]: suite for suite in suites["suites"]}
-    commands: list[tuple[str, list[str]]] = []
+    commands: list[tuple[str, list[str], dict[str, int]]] = []
     seen: set[str] = set()
     for suite_id in row["suite_ids"]:
         suite = suite_by_id[suite_id]
@@ -984,7 +1005,7 @@ def registered_row_commands(
                 raise ContractError(f"duplicate command id: {command_id}")
             seen.add(command_id)
             commands.append(
-                (command_id, ensure_local_command(command["argv"], repo))
+                (command_id, ensure_local_command(command["argv"], repo), command.get("resource", {}))
             )
     if not commands:
         raise ContractError(f"row {row['row_id']} collected zero commands")
@@ -1008,6 +1029,13 @@ def isolated_env() -> dict[str, str]:
         "JAX_PLATFORMS": "cpu",
         "CARGO_NET_OFFLINE": "true",
         "RUSTUP_AUTO_INSTALL": "0",
+        # Keep local host-row execution identical to the required workflow.
+        # The workflow repeats these values as visible job configuration, but
+        # the runner must also enforce them when invoked outside Actions.
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0",
     })
     return env
 

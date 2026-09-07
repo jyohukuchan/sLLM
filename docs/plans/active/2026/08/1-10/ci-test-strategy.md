@@ -26,6 +26,16 @@
 - 同一unitを2回reject、review時間がimplementation時間を超過、function progressが1時間以上ない、verification/docsが作業の30%を超過、経過時間がestimateの1.5倍を超過、またはgate/acceptanceが変更された場合は、新規review/verificationを止めてreplanする。
 - GPU resultのfail-closed意味は変更しない。GPU不在、timeout、crash、zero selection、CPU fallback、staleまたは不一致のtarget/artifact/model lockはPASSにしない。exact target、artifact、model lock、numerical oracleを引き続き必須のevidenceとする。
 
+## Phase完了時の公開後CI確認（2026-09-07追加）
+
+ユーザー指示により、Phase完了時はcommit・pushに続けて最終公開HEADのCIを確認し、
+必要な修正・検証・再pushまで行う。継続的な許可、失敗時の状態、適用範囲は
+[main-planの完了手順](../../../../main-plan.md)を正とする。
+required／non-requiredの失敗をともに調査し、対象CIが未確認または失敗なら全作業完了とは報告しない。
+既存H0/H1/H2・public-runtime H3の修復は
+[Phase 80計画](../../09/1-10/phase80-ci-restoration.md)で先行する。
+テスト実行の資源制限とコンパイルの資源予算を分け、CPUによるGPU-scale検証禁止は維持する。
+
 ## 調査結果
 
 ### ローカル参照実装

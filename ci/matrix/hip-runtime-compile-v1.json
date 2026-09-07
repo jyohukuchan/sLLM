@@ -2,7 +2,7 @@
   "$schema": "https://sllm-project.local/ci/schema/hip-runtime-compile-v1.schema.json",
   "schema_version": "hip-runtime-compile-v1",
   "matrix_id": "hip-runtime-compile-v1",
-  "revision": 11,
+  "revision": 12,
   "toolchain_id": "rocm-7.14.0",
   "container": {
     "image_reference": "docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7",
@@ -25,7 +25,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "f2eb4fb380a3d69e128ebabd384cb86c01fb44c58e329c3ada206c6fe3e938ee"
+        "sha256": "28521c2fad2770d3d01ea562e63c0118f6308c4812afb5446a7b71625d3309ef"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -40,7 +40,7 @@
         "sha256": "f937004e7c768dca3eb590572bbc0917d183531753c7e03c35de2841ddc2b901"
       }
     ],
-    "source_set_sha256": "6a14c8b05a1acf5c1dc07c823f994a5f56d9ceb5e6b4fc12418ee3b323b9672c"
+    "source_set_sha256": "0bf5d1efc2014a4d769b1777803c197a0fc0b02671c514b428788979d53572e9"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -80,6 +80,7 @@
       "native/hip/src/gdn_projection_bundle_runtime.inc",
       "native/hip/src/gemma_attention_kernel.hip.cpp",
       "native/hip/src/gemma_attention_kernel_internal.hpp",
+      "native/hip/src/graph_span_runtime.inc",
       "native/hip/src/hip_compile_probe.hip.cpp",
       "native/hip/src/kv_state_api.cpp",
       "native/hip/src/kv_state_api.hpp",
@@ -123,6 +124,7 @@
       "native/hip/src/moe_route_runtime.inc",
       "native/hip/src/public_runtime.hip.cpp",
       "native/hip/src/public_runtime_internal.hpp",
+      "native/hip/src/qwen38_projection_pack_runtime.inc",
       "native/hip/src/residual_rmsnorm_api.cpp",
       "native/hip/src/residual_rmsnorm_api.hpp",
       "native/hip/src/rmsnorm_api.cpp",
@@ -146,7 +148,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "f2eb4fb380a3d69e128ebabd384cb86c01fb44c58e329c3ada206c6fe3e938ee"
+        "sha256": "28521c2fad2770d3d01ea562e63c0118f6308c4812afb5446a7b71625d3309ef"
       },
       {
         "path": "native/hip/src/argmax_api.cpp",
@@ -186,7 +188,7 @@
       },
       {
         "path": "native/hip/src/attention_preprocess_runtime.inc",
-        "sha256": "e6c652aff772b003e36a784a6b13104adc13e93c91fe4d8e1c619a2926adab20"
+        "sha256": "3582948bfdf24a0e21b8e3c828c2b0a36a9eb43b5a011df7423b5b27dcb2a18c"
       },
       {
         "path": "native/hip/src/causal_attention_api.cpp",
@@ -198,15 +200,15 @@
       },
       {
         "path": "native/hip/src/causal_attention_kernel.hip.cpp",
-        "sha256": "7511038c5feb28f7bde231f0bc6f6fcdc7bb0d0d84a06388517a3b5d1fe01373"
+        "sha256": "4c815135a0571620bde49e9b858f1730f4b1f871d08d63f8fa8e15e912af57d3"
       },
       {
         "path": "native/hip/src/causal_attention_kernel_internal.hpp",
-        "sha256": "f668c7b7ab732cb9f6487d480f17f564167fde929b1c006bd4b40d8808701b46"
+        "sha256": "290b46a9374f3dbec196bf115af98a181252e0b1cf51aae9146f8ffdf191582f"
       },
       {
         "path": "native/hip/src/causal_attention_runtime.inc",
-        "sha256": "92f8f3b558ed227948b54fe83448bba636c4379274d71dbb3516a72633228c38"
+        "sha256": "0944e15c4c9835491b5dd0526106bb6a32c50ce0de00190114df0f8dcdb8e9b3"
       },
       {
         "path": "native/hip/src/deepseek_v4_moe_route_api.cpp",
@@ -289,6 +291,10 @@
         "sha256": "825bcd094164ed868a895e241fc4bbfe9b317bccf280e6f921bc1a8863dfd314"
       },
       {
+        "path": "native/hip/src/graph_span_runtime.inc",
+        "sha256": "c8e770ec6a0c2cd1da5f96cb687eeb3515c6810609c4cab647badcf80d2af873"
+      },
+      {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
         "sha256": "c8d726552cfdc3196f1e42dbc8b4107b63562f219dc8d437a89172cbf0beb65b"
       },
@@ -318,23 +324,23 @@
       },
       {
         "path": "native/hip/src/linear_attention_kernel.hip.cpp",
-        "sha256": "57dd3b7b778d435f12520b5ea6ccf8a5670f05dbc11c56b23c71ab36a708d2ce"
+        "sha256": "ee2b21ec03e68cebd1a9ef41080b190e8ff6d9a8c32cc2789985301e24027e2a"
       },
       {
         "path": "native/hip/src/linear_attention_kernel_internal.hpp",
-        "sha256": "1d03e8b2409f4675bf01322370c82c98516ced3ae497e488b1fe0ddc8574f8a0"
+        "sha256": "dd174a48d5bf82aa92612aa2f07b154016a415b7e1534019e96bb5a556909850"
       },
       {
         "path": "native/hip/src/linear_attention_runtime.inc",
-        "sha256": "66ee19824d09ed494a8f63e296dafc52fa509f44c2a5bad57a9f0f2b2c7e8841"
+        "sha256": "d72eb5ccea0d8f9c8b819bb23dd34fffdc1d4879ed3accff056881ef97fc369f"
       },
       {
         "path": "native/hip/src/low_precision_block_codec.hpp",
-        "sha256": "7a44f32a435db41caffe4ffaaa3cbaa1138de4244f39ab8c5e87e21a36893555"
+        "sha256": "7a424062e4ca1d8e0e3022a32af3830a65a7127c9acccdee8499eab32340d9cd"
       },
       {
         "path": "native/hip/src/low_precision_matmul_provider.hpp",
-        "sha256": "6d6a7289614ffb2d76a2486c83b4ca4b0c39458c257ff27ad253011def725279"
+        "sha256": "7bc071c7bd2f06a4f463acd9196ec362b4cc3c98c4c0b4ad7f40ecb01eb95013"
       },
       {
         "path": "native/hip/src/matmul_api.cpp",
@@ -346,15 +352,15 @@
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
-        "sha256": "669652cd484acacba0d02be3380542e8574a114255087bf4120e1d826cf933d8"
+        "sha256": "33b7f43a9ea58325514374b73f870a6bba06e76690d7c3ff85c3102625cb6b60"
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "312716b101fca819c342bbf68c86973a40b4b37dc34bbc1b64d1215b260227ff"
+        "sha256": "1e27adc56983364ff93fd9a5b9a922df822c9028a9f20f8b59c245b0d83dbc01"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
-        "sha256": "a8c492aa94c5f6a755bb13fa8ea8b943b15362916e5634af677f000aa2c411cb"
+        "sha256": "19da7f457c5670d74982babedbb0e5e38be4ff9f15643bc2ad3fa56a980a342d"
       },
       {
         "path": "native/hip/src/minimax_m3_moe_route_api.cpp",
@@ -454,11 +460,15 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "42777b4b6db5baef4a5a674deac0d7cfe3f0018d5db6f14ade2e1e8025de71ef"
+        "sha256": "89b4d21c03d1b652a9d4f2ea30c9b79a820c7f32603e5dd899f3dcb484311763"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
         "sha256": "f937004e7c768dca3eb590572bbc0917d183531753c7e03c35de2841ddc2b901"
+      },
+      {
+        "path": "native/hip/src/qwen38_projection_pack_runtime.inc",
+        "sha256": "35cdf0a1c5834dff8e125646a79c3362b389f88eb92d78878c9456128a7c62ce"
       },
       {
         "path": "native/hip/src/residual_rmsnorm_api.cpp",
@@ -537,7 +547,7 @@
         "sha256": "e6d480204c7f49f0385ca511cdb2080372e114d2befa5f345a97b7d5bd0eb8f1"
       }
     ],
-    "source_set_sha256": "0735eed0ae4e59b25c5253a0b8b94476f04b91432bd8e6ffe5411f0ff5db9aa9"
+    "source_set_sha256": "3ad937085fbf1df7fed1b3cbe8517a8e63eb79617de1961cd2cba179c36725f6"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",
@@ -554,6 +564,7 @@
     "sllm_buffer_release",
     "sllm_buffer_size",
     "sllm_causal_attention_execute",
+    "sllm_causal_attention_execute_after_kv_append",
     "sllm_completion_finalize_after",
     "sllm_completion_query",
     "sllm_completion_read",
@@ -581,6 +592,10 @@
     "sllm_gdn_projection_bundle_plan_release",
     "sllm_gdn_projection_bundle_prepare",
     "sllm_get_abi_version",
+    "sllm_graph_span_create",
+    "sllm_graph_span_execute",
+    "sllm_graph_span_node_count",
+    "sllm_graph_span_release",
     "sllm_kv_state_append",
     "sllm_kv_state_append_cancel",
     "sllm_kv_state_create",
@@ -634,6 +649,9 @@
     "sllm_queue_fence",
     "sllm_queue_release",
     "sllm_queue_set_completion_mode",
+    "sllm_qwen38_projection_pack2_execute",
+    "sllm_qwen38_projection_pack2_plan_release",
+    "sllm_qwen38_projection_pack2_prepare",
     "sllm_residual_rmsnorm_execute",
     "sllm_residual_rmsnorm_plan_release",
     "sllm_residual_rmsnorm_prepare",
@@ -690,6 +708,7 @@
             "-D__HIP_ROCclr__=1",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -710,6 +729,7 @@
             "-D__HIP_ROCclr__=1",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -730,6 +750,7 @@
             "-D__HIP_ROCclr__=1",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -750,6 +771,7 @@
             "/opt/rocm/bin/amdclang++",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -781,6 +803,7 @@
             "{build_dir}/rmsnorm-kernel-{target}.o",
             "{build_dir}/rmsnorm-api-{target}.o",
             "-D__HIP_ROCclr__=1",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -903,6 +926,7 @@
             "-D__HIP_ROCclr__=1",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -923,6 +947,7 @@
             "-D__HIP_ROCclr__=1",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -943,6 +968,7 @@
             "-D__HIP_ROCclr__=1",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -963,6 +989,7 @@
             "/opt/rocm/bin/amdclang++",
             "-O3",
             "-DNDEBUG",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
@@ -994,6 +1021,7 @@
             "{build_dir}/rmsnorm-kernel-{target}.o",
             "{build_dir}/rmsnorm-api-{target}.o",
             "-D__HIP_ROCclr__=1",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",

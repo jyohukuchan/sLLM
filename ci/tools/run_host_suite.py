@@ -10,6 +10,7 @@ import os
 import re
 import resource
 import selectors
+import shlex
 import signal
 import subprocess
 import sys
@@ -35,6 +36,7 @@ from common import (  # noqa: E402
     manifest_bundle_hash,
     matrix_manifest_hash,
     registered_row_commands,
+    registered_row_command_specs,
     result_report_bytes,
     sha256_bytes,
     sha256_json,
@@ -56,6 +58,11 @@ EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_INFRA = 2
 EXIT_HARNESS = 3
+
+# Keep the human-readable failure summary small enough for a job summary and
+# artifact upload even when a command emits a large compiler diagnostic.  The
+# complete output remains bounded separately by the versioned row limits.
+DIAGNOSTIC_SUMMARY_LIMIT_BYTES = 64 * 1024
 
 COUNT_KEYS = ("collected", "selected", "passed", "failed", "skipped", "deselected")
 EVIDENCE_MODE_REQUIRED_CI = "required-ci"
@@ -167,6 +174,17 @@ def empty_counts() -> dict[str, int]:
 
 def is_cargo_test(argv: list[str]) -> bool:
     return bool(argv) and argv[0] == "cargo" and "test" in argv[1:]
+
+
+def is_cargo_test_build(argv: list[str]) -> bool:
+    """Recognize the registered Cargo compile-only test command.
+
+    Cargo emits no test-harness summary for ``--no-run``.  Treat the
+    successful build itself as one selected host check so the runner retains
+    its zero-selection fail-closed invariant while the following command
+    remains responsible for actual test outcomes.
+    """
+    return is_cargo_test(argv) and "--no-run" in argv[1:]
 
 
 def is_pytest(argv: list[str]) -> bool:
@@ -283,6 +301,18 @@ def actual_counts(
     """Read framework outcomes; never substitute registry declarations."""
     if is_pytest(argv):
         return _machine_counts(output, prefix="SLLM_PYTEST_COUNTS", source="pytest-machine")
+    if is_cargo_test_build(argv):
+        return {
+            "collected": 1,
+            "selected": 1,
+            "passed": 1 if exit_code == 0 else 0,
+            "failed": 0 if exit_code == 0 else 1,
+            "skipped": 0,
+            "deselected": 0,
+        # The result schema intentionally keeps compile-only checks in the
+        # existing validator-command category: no test harness ran, so the
+        # synthetic selected outcome describes the registered build check.
+        }, None, "validator-command"
     if is_cargo_test(argv):
         counts = empty_counts()
         matches = re.findall(
@@ -914,6 +944,74 @@ def write_result(output_dir: Path, payload: dict[str, Any]) -> None:
     )
 
 
+def write_diagnostic_summary(
+    output_dir: Path,
+    payload: dict[str, Any],
+    commands: list[list[str]],
+    *,
+    report_validated: bool = False,
+) -> None:
+    """Write a bounded, secret-free summary suitable for GITHUB_STEP_SUMMARY.
+
+    The report remains the machine-readable source of truth.  This companion
+    file deliberately includes only registered argv, exit/resource outcomes,
+    and short runner diagnostics; it never serializes the process environment
+    or command output.
+    """
+    validation_status = "report validated" if report_validated else "report validation pending"
+    lines = [
+        f"## host {payload['matrix_row_id']}: {validation_status}",
+        f"reported state: {payload['state']}",
+        f"commands: {payload['resource']['commands_executed']}/{payload['resource']['commands_expected']}",
+        (
+            "row resource: "
+            f"duration={payload['duration_seconds']:.3f}s/"
+            f"{payload['resource']['wall_time_limit_seconds']}s "
+            f"rss={payload['resource']['max_rss_bytes']}/"
+            f"{payload['resource']['max_rss_limit_bytes']} bytes "
+            f"timeout={'yes' if payload['resource']['wall_time_breach'] else 'no'}"
+        ),
+        "",
+    ]
+    indexed_steps = list(enumerate(payload["steps"]))
+    # Put actionable failures first so truncation can never hide a late failed
+    # command behind a long list of successful commands.
+    indexed_steps.sort(key=lambda item: item[1]["state"] == "PASS")
+    for index, step in indexed_steps:
+        command = commands[index] if index < len(commands) else []
+        resource_record = step["resource"]
+        lines.extend(
+            [
+                f"### {step['step_id']}: {step['state']}",
+                (
+                    f"exit={step['exit_code']} "
+                    f"duration={step['duration_seconds']:.3f}s/"
+                    f"{resource_record['wall_time_limit_seconds']}s "
+                    f"rss={resource_record['max_rss_bytes']}/"
+                    f"{resource_record['max_rss_limit_bytes']} bytes "
+                    f"timed_out={'yes' if resource_record['timed_out'] else 'no'} "
+                    f"output={resource_record['output_bytes']}/"
+                    f"{resource_record['output_limit_bytes']} bytes"
+                ),
+                f"command: `{shlex.join(command)}`" if command else "command: unavailable",
+            ]
+        )
+        if step["diagnostic"]:
+            lines.append(f"diagnostic: {step['diagnostic']}")
+        lines.append("")
+    errors = payload["diagnostic"]["errors"]
+    if errors:
+        lines.append("### runner diagnostics")
+        lines.extend(f"- {error}" for error in errors)
+    summary = "\n".join(lines).rstrip() + "\n"
+    summary_bytes = summary.encode("utf-8", "replace")
+    if len(summary_bytes) > DIAGNOSTIC_SUMMARY_LIMIT_BYTES:
+        suffix = b"\n[diagnostic summary truncated]\n"
+        summary_bytes = summary_bytes[: DIAGNOSTIC_SUMMARY_LIMIT_BYTES - len(suffix)] + suffix
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "diagnostic.md").write_bytes(summary_bytes)
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -958,7 +1056,14 @@ def main(argv: list[str] | None = None) -> int:
                 require_dev_rust=args.row in {"h0", "h1"},
                 require_msrv_rust=args.row == "h0",
             )
+        # Keep the long-standing command-list seam used by the fail-closed
+        # self-test while deriving optional per-command budgets from the same
+        # immutable registry.
         commands = registered_row_commands(suites, row, repo)
+        command_resources = {
+            command_id: resource
+            for command_id, _command, resource in registered_row_command_specs(suites, row, repo)
+        }
         fixture_bytes = fixture_size_bytes(repo)
         started = utc_now()
         started_monotonic = time.monotonic()
@@ -966,6 +1071,7 @@ def main(argv: list[str] | None = None) -> int:
         diagnostics: list[str] = []
         row_output_exhausted = row_timeout_exhausted = False
         for command_id, command in commands:
+            command_resource = command_resources.get(command_id, {})
             elapsed_before = time.monotonic() - started_monotonic
             remaining_wall = row["timeout_seconds"] - elapsed_before
             remaining_output = row["max_row_output_bytes"] - sum(
@@ -982,10 +1088,17 @@ def main(argv: list[str] | None = None) -> int:
             step, detail = run_command(
                 command_id,
                 command,
-                timeout_seconds=min(float(row["max_command_seconds"]), remaining_wall),
+                timeout_seconds=min(
+                    float(row["max_command_seconds"]),
+                    float(command_resource.get("max_command_seconds", row["max_command_seconds"])),
+                    remaining_wall,
+                ),
                 repo=repo,
                 output_dir=output_dir,
-                max_rss_bytes=row["max_rss_bytes"],
+                max_rss_bytes=min(
+                    row["max_rss_bytes"],
+                    command_resource.get("max_rss_bytes", row["max_rss_bytes"]),
+                ),
                 output_limit_bytes=min(row["max_command_output_bytes"], remaining_output),
                 address_space_limit_bytes=row["address_space_limit_bytes"],
             )
@@ -1114,8 +1227,17 @@ def main(argv: list[str] | None = None) -> int:
                 "network_guard_self_test": bool(steps) and all(step["resource"]["network_isolated"] for step in steps),
             },
         }
+        # Generate this before schema validation so a future report-contract
+        # failure still leaves a bounded summary for the CI job to display.
+        write_diagnostic_summary(output_dir, payload, [command for _, command in commands])
         validate_result_payload(payload)
         write_result(output_dir, payload)
+        write_diagnostic_summary(
+            output_dir,
+            payload,
+            [command for _, command in commands],
+            report_validated=True,
+        )
         immutable = evidence_mode == EVIDENCE_MODE_REQUIRED_CI and state == "PASS" and worktree_clean
         print(
             f"{args.row}: {state} collected={counts['collected']} selected={counts['selected']} "

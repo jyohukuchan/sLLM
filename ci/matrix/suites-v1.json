@@ -1,7 +1,7 @@
 {
   "schema_version": "suites-v1",
   "registry_id": "sLLM-host-suites",
-  "revision": 32,
+  "revision": 35,
   "allowed_tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_h3_rmsnorm", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"],
   "allowed_attributes": ["requires_gpu", "requires_model", "slow", "network", "quarantined"],
   "suites": [
@@ -249,9 +249,8 @@
       "tier": "tier_h0",
       "marker": "tier_h0",
       "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
-      "test_ids": ["phase46.tools.rust", "phase46.schema.policy"],
+      "test_ids": ["phase46.schema.policy"],
       "commands": [
-        {"command_id": "phase46-tools-rust", "argv": ["cargo", "+1.97.1", "test", "-p", "sllm-tools", "--locked", "--offline"]},
         {"command_id": "phase46-schema-policy", "argv": ["{python}", "-m", "unittest", "ci.tests.test_phase46_ci_contract"]}
       ]
     },
@@ -295,9 +294,10 @@
       "tier": "tier_h1",
       "marker": "tier_h1",
       "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
-      "test_ids": ["h1.cargo.test.workspace", "h1.pytest.marker.tier_h1", "h1.ci.contracts", "h1.model-lock.contracts"],
+      "test_ids": ["h1.cargo.build.workspace", "h1.cargo.test.workspace", "h1.pytest.marker.tier_h1", "h1.ci.contracts", "h1.model-lock.contracts"],
       "commands": [
-        {"command_id": "cargo-test-workspace", "argv": ["cargo", "+1.97.1", "test", "--workspace", "--jobs", "4", "--locked", "--offline", "--", "--test-threads=4"]},
+        {"command_id": "cargo-build-workspace", "argv": ["cargo", "+1.97.1", "test", "--workspace", "--jobs", "2", "--locked", "--offline", "--no-run"]},
+        {"command_id": "cargo-test-workspace", "argv": ["cargo", "+1.97.1", "test", "--workspace", "--jobs", "2", "--locked", "--offline", "--", "--test-threads=4"], "resource": {"max_rss_bytes": 3221225472}},
         {"command_id": "pytest-tier-h1", "argv": ["{python}", "-m", "pytest", "--durations=0", "-m", "tier_h1", "tests"]},
         {"command_id": "ci-contract-tests", "argv": ["{python}", "ci/tests/test_h1_contracts.py"]},
         {"command_id": "model-lock-contracts", "argv": ["{python}", "ci/tests/test_model_lock_contracts.py"]}

@@ -45,7 +45,17 @@ class IsolationPlan:
     execution_environment: tuple[tuple[str, str], ...]
 
 
-EXECUTION_ENVIRONMENT_KEYS = ("PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "VIRTUAL_ENV")
+EXECUTION_ENVIRONMENT_KEYS = (
+    "PATH", "HOME", "CARGO_HOME", "CARGO_TARGET_DIR", "RUSTUP_HOME", "VIRTUAL_ENV",
+    "CARGO_BUILD_JOBS", "CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG",
+    "CARGO_PROFILE_TEST_DEBUG",
+)
+EXECUTION_ENVIRONMENT_DEFAULTS = {
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+}
 LOOPBACK_INIT_SCRIPT = '"$1" link set dev lo up && shift && exec "$@"'
 SUDO_FALLBACK_TOOL_CANDIDATES = (
     ("sudo", ("/usr/bin/sudo",)),
@@ -396,7 +406,11 @@ def _candidate_plans(parent_netns: str) -> list[IsolationPlan]:
         raise NetworkIsolationError("unshare is unavailable")
     uid = os.getuid()
     gid = os.getgid()
-    environment = tuple((name, os.environ[name]) for name in EXECUTION_ENVIRONMENT_KEYS if name in os.environ)
+    environment = tuple(
+        (name, EXECUTION_ENVIRONMENT_DEFAULTS[name] if name in EXECUTION_ENVIRONMENT_DEFAULTS else os.environ[name])
+        for name in EXECUTION_ENVIRONMENT_KEYS
+        if name in os.environ or name in EXECUTION_ENVIRONMENT_DEFAULTS
+    )
     plans = [IsolationPlan(
         strategy="user-network-namespace",
         prefix=(unshare, "--user", "--map-root-user", "--net", "--fork"),

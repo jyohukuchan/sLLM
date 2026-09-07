@@ -13,6 +13,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -38,6 +39,7 @@ from network_guard import (  # noqa: E402
     _validate_trusted_system_metadata,
     _assert_external_connect_fails,
     _probe,
+    EXECUTION_ENVIRONMENT_DEFAULTS,
     assert_isolated,
     child_main,
     prepare_isolation,
@@ -50,6 +52,82 @@ class FailClosedTests(unittest.TestCase):
     def test_invalid_schema_state_zero_collection_and_aggregate_gates_fail(self) -> None:
         # Includes local-development reports being rejected by strict aggregate.
         run()
+
+
+class DiagnosticSummaryTests(unittest.TestCase):
+    @staticmethod
+    def _payload() -> dict[str, object]:
+        def step(step_id: str, state: str, exit_code: int, diagnostic: str) -> dict[str, object]:
+            return {
+                "step_id": step_id,
+                "state": state,
+                "exit_code": exit_code,
+                "duration_seconds": 0.25,
+                "diagnostic": diagnostic,
+                "resource": {
+                    "wall_time_limit_seconds": 10,
+                    "max_rss_bytes": 1024,
+                    "max_rss_limit_bytes": 4096,
+                    "timed_out": state != "PASS",
+                    "output_bytes": 0,
+                    "output_limit_bytes": 4096,
+                },
+            }
+
+        return {
+            "matrix_row_id": "h1",
+            "state": "FAIL",
+            "duration_seconds": 0.5,
+            "resource": {
+                "commands_executed": 2,
+                "commands_expected": 2,
+                "wall_time_limit_seconds": 600,
+                "max_rss_bytes": 1024,
+                "max_rss_limit_bytes": 4 * 1024**3,
+                "wall_time_breach": False,
+            },
+            "steps": [
+                step("late-pass", "PASS", 0, ""),
+                step("early-fail", "FAIL", 1, "command failed"),
+            ],
+            "diagnostic": {"errors": ["command failed"]},
+        }
+
+    def test_summary_is_bounded_failure_first_and_does_not_dump_environment(self) -> None:
+        payload = self._payload()
+        with tempfile.TemporaryDirectory(prefix="sllm-diagnostic-summary-") as directory:
+            output = Path(directory)
+            with patch.dict(os.environ, {"SLLM_TEST_SECRET": "do-not-print"}):
+                host_runner.write_diagnostic_summary(
+                    output,
+                    payload,
+                    [["false"], ["true", "--safe"]],
+                )
+            summary = (output / "diagnostic.md").read_bytes()
+        text = summary.decode("utf-8")
+        self.assertLessEqual(len(summary), host_runner.DIAGNOSTIC_SUMMARY_LIMIT_BYTES)
+        self.assertIn("report validation pending", text)
+        self.assertLess(text.index("early-fail"), text.index("late-pass"))
+        self.assertNotIn("SLLM_TEST_SECRET", text)
+        self.assertNotIn("do-not-print", text)
+
+    def test_summary_distinguishes_validated_report_and_truncates_details(self) -> None:
+        payload = self._payload()
+        payload["diagnostic"]["errors"] = ["x" * (host_runner.DIAGNOSTIC_SUMMARY_LIMIT_BYTES * 2)]
+        with tempfile.TemporaryDirectory(prefix="sllm-diagnostic-summary-") as directory:
+            output = Path(directory)
+            host_runner.write_diagnostic_summary(
+                output,
+                payload,
+                [["false"], ["true", "--safe"]],
+                report_validated=True,
+            )
+            summary = (output / "diagnostic.md").read_bytes()
+        text = summary.decode("utf-8")
+        self.assertLessEqual(len(summary), host_runner.DIAGNOSTIC_SUMMARY_LIMIT_BYTES)
+        self.assertIn("report validated", text)
+        self.assertNotIn("report validation pending", text)
+        self.assertIn("diagnostic summary truncated", text)
 
 
 class LocalVerificationEntrypointTests(unittest.TestCase):
@@ -877,6 +955,18 @@ class NetworkRouteNormalizationTests(unittest.TestCase):
         self.assertIn("--clear-groups", fallback.prefix[setpriv_index + 1 :])
         self.assertIn("--bounding-set=-all", fallback.prefix[setpriv_index + 1 :])
         self.assertIn("--no-new-privs", fallback.prefix[setpriv_index + 1 :])
+
+    def test_network_guard_propagates_fixed_cargo_resource_controls(self) -> None:
+        with patch.dict(
+            os.environ,
+            {name: "9" for name in EXECUTION_ENVIRONMENT_DEFAULTS},
+            clear=False,
+        ):
+            plans = _candidate_plans("net:[4026531840]")
+        for plan in plans:
+            environment = dict(plan.execution_environment)
+            for name, value in EXECUTION_ENVIRONMENT_DEFAULTS.items():
+                self.assertEqual(environment.get(name), value)
 
     def test_counter_changes_are_ignored_but_semantic_changes_are_not(self) -> None:
         baseline = _normalize_ipv4_routes([self.IPV4_HEADER, " ".join(self.IPV4_FIELDS)])

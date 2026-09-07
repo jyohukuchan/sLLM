@@ -239,7 +239,7 @@ def expected_build_commands() -> list[list[str]]:
     """Reuse the canonical public-runtime closure with RMSNorm-owned outputs."""
 
     common_hip = [
-        COMPILER, "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", "-std=gnu++17",
+        COMPILER, "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", '-DSLLM_HIP_COMPILE_TARGET="{target}"', "-std=gnu++17",
         "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "--offload-arch={target}",
         "-mcode-object-version=6", "-mno-wavefrontsize64", "-pthread",
     ]
@@ -247,13 +247,13 @@ def expected_build_commands() -> list[list[str]]:
         [*common_hip, "-o", "{build_dir}/rmsnorm-kernel-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/rmsnorm_kernel.hip.cpp"],
         [*common_hip, "-o", "{build_dir}/public-runtime-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp"],
         [
-            COMPILER, "-O3", "-DNDEBUG", "-std=gnu++17", "-I", "{repo}/include", "-I",
+            COMPILER, "-O3", "-DNDEBUG", '-DSLLM_HIP_COMPILE_TARGET="{target}"', "-std=gnu++17", "-I", "{repo}/include", "-I",
             "{repo}/native/hip/src", "--offload-arch={target}", "-mcode-object-version=6",
             "-mno-wavefrontsize64", "-pthread", "-o", "{build_dir}/rmsnorm-api-{target}.o",
             "-c", "{repo}/native/hip/src/rmsnorm_api.cpp",
         ],
         [
-            COMPILER, "-O3", "-DNDEBUG", "-std=gnu++17", "--offload-arch={target}",
+            COMPILER, "-O3", "-DNDEBUG", '-DSLLM_HIP_COMPILE_TARGET="{target}"', "-std=gnu++17", "--offload-arch={target}",
             "-mcode-object-version=6", "-mno-wavefrontsize64", "--hip-link", "--rtlib=compiler-rt",
             "-unwindlib=libgcc", "-pthread", "-nostartfiles", "{build_dir}/rmsnorm-kernel-{target}.o",
             "{build_dir}/public-runtime-{target}.o", "{build_dir}/rmsnorm-api-{target}.o",
@@ -277,7 +277,7 @@ def validate_matrix(repo: Path = ROOT) -> tuple[dict[str, Any], dict[str, Any], 
     expected_top = {"$schema", "schema_version", "matrix_id", "revision", "suite_id", "tier", "toolchain_id", "container", "workflow", "source_sets", "source_symbol_map", "public_abi_symbols", "logical_kernel", "device_symbol", "case_manifest", "rows"}
     if set(matrix) != expected_top:
         raise ContractError("RMSNorm matrix has missing or unknown top-level fields")
-    if matrix["$schema"] != "https://sllm-project.local/ci/schema/rmsnorm-h3-compile-v1.schema.json" or matrix["schema_version"] != "rmsnorm-h3-compile-v1" or matrix["matrix_id"] != "rmsnorm-h3-compile-v1" or matrix["revision"] != 7:
+    if matrix["$schema"] != "https://sllm-project.local/ci/schema/rmsnorm-h3-compile-v1.schema.json" or matrix["schema_version"] != "rmsnorm-h3-compile-v1" or matrix["matrix_id"] != "rmsnorm-h3-compile-v1" or matrix["revision"] != 8:
         raise ContractError("RMSNorm matrix identity is invalid")
     if matrix["suite_id"] != "h3-rmsnorm-compile-only" or matrix["tier"] != "tier_h3_rmsnorm" or matrix["toolchain_id"] != "rocm-7.14.0":
         raise ContractError("RMSNorm matrix suite/tier/toolchain is not fixed")

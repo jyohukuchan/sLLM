@@ -126,7 +126,7 @@
     "$schema": {"const": "https://sllm-project.local/ci/schema/hip-runtime-compile-v1.schema.json"},
     "schema_version": {"const": "hip-runtime-compile-v1"},
     "matrix_id": {"const": "hip-runtime-compile-v1"},
-    "revision": {"const": 11},
+    "revision": {"const": 12},
     "toolchain_id": {"const": "rocm-7.14.0"},
     "container": {
       "type": "object",
@@ -156,8 +156,8 @@
       "additionalProperties": false,
       "required": ["canonical_order", "files", "source_set_sha256"],
       "properties": {
-        "canonical_order": {"type": "array", "minItems": 98, "maxItems": 98, "items": {"type": "string"}},
-        "files": {"type": "array", "minItems": 98, "maxItems": 98, "uniqueItems": true, "items": {"$ref": "#/$defs/source"}},
+        "canonical_order": {"type": "array", "minItems": 100, "maxItems": 100, "items": {"type": "string"}},
+        "files": {"type": "array", "minItems": 100, "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/source"}},
         "source_set_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
@@ -176,6 +176,7 @@
       "sllm_buffer_release",
       "sllm_buffer_size",
       "sllm_causal_attention_execute",
+      "sllm_causal_attention_execute_after_kv_append",
       "sllm_completion_finalize_after",
       "sllm_completion_query",
       "sllm_completion_read",
@@ -203,6 +204,10 @@
       "sllm_gdn_projection_bundle_plan_release",
       "sllm_gdn_projection_bundle_prepare",
       "sllm_get_abi_version",
+      "sllm_graph_span_create",
+      "sllm_graph_span_execute",
+      "sllm_graph_span_node_count",
+      "sllm_graph_span_release",
       "sllm_kv_state_append",
       "sllm_kv_state_append_cancel",
       "sllm_kv_state_create",
@@ -256,6 +261,9 @@
       "sllm_queue_fence",
       "sllm_queue_release",
       "sllm_queue_set_completion_mode",
+      "sllm_qwen38_projection_pack2_execute",
+      "sllm_qwen38_projection_pack2_plan_release",
+      "sllm_qwen38_projection_pack2_prepare",
       "sllm_residual_rmsnorm_execute",
       "sllm_residual_rmsnorm_plan_release",
       "sllm_residual_rmsnorm_prepare",

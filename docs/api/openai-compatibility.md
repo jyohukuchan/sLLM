@@ -618,6 +618,6 @@ profile connects it to OpenWebUI through `/v1/models` and `/v1/chat/completions`
 Tokenization and apply-template utilities use the artifact's verified frontend.
 Embeddings and tool protocol are unavailable for this text-only profile.
 
-This scoped safetensors entrypoint does not complete Phase80 static FP8 KV/MTP
+This scoped safetensors entrypoint does not complete Phase81 static FP8 KV/MTP
 or add batching, vision, MXFP6 KV, other artifacts, or other GPUs. See the
 [deployment and validation record](../history/2026/09/1-10/qwen38-nvfp4-r9700-server.md).

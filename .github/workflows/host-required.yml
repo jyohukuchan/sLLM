@@ -12,6 +12,12 @@ permissions:
 
 env:
   RUSTUP_AUTO_INSTALL: "0"
+  # Keep compiler parallelism bounded independently from test-thread
+  # parallelism.  CI does not need incremental artifacts or debug info.
+  CARGO_BUILD_JOBS: "2"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   h0:
@@ -55,6 +61,7 @@ jobs:
       - name: Verify clean checkout after setup
         run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - name: Run h0 host suite
+        id: run_h0
         env:
           SLLM_H0_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '' }}
         run: >-
@@ -75,6 +82,25 @@ jobs:
             .local-artifacts/ci/h0/report.json.sha256
           if-no-files-found: error
           retention-days: 7
+      - name: Upload h0 failure diagnostics
+        if: ${{ always() && steps.run_h0.outcome != 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: host-h0-failure-diagnostics
+          path: |
+            .local-artifacts/ci/h0/diagnostic.md
+            .local-artifacts/ci/h0/*.stdout
+            .local-artifacts/ci/h0/*.stderr
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Add h0 diagnostics to job summary
+        if: ${{ always() }}
+        run: |
+          if [ -f .local-artifacts/ci/h0/diagnostic.md ]; then
+            sed -n '1,240p' .local-artifacts/ci/h0/diagnostic.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' '## host h0: no report was produced (runner or setup failure)' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   h1:
     name: h1
@@ -114,6 +140,7 @@ jobs:
       - name: Verify clean checkout after setup
         run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - name: Run h1 host suite
+        id: run_h1
         run: >-
           python3 ci/tools/run_host_suite.py
           --row h1
@@ -132,6 +159,25 @@ jobs:
             .local-artifacts/ci/h1/report.json.sha256
           if-no-files-found: error
           retention-days: 7
+      - name: Upload h1 failure diagnostics
+        if: ${{ always() && steps.run_h1.outcome != 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: host-h1-failure-diagnostics
+          path: |
+            .local-artifacts/ci/h1/diagnostic.md
+            .local-artifacts/ci/h1/*.stdout
+            .local-artifacts/ci/h1/*.stderr
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Add h1 diagnostics to job summary
+        if: ${{ always() }}
+        run: |
+          if [ -f .local-artifacts/ci/h1/diagnostic.md ]; then
+            sed -n '1,240p' .local-artifacts/ci/h1/diagnostic.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' '## host h1: no report was produced (runner or setup failure)' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   h2:
     name: h2
@@ -157,6 +203,7 @@ jobs:
       - name: Verify clean checkout after setup
         run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - name: Run h2 host suite
+        id: run_h2
         run: >-
           python3 ci/tools/run_host_suite.py
           --row h2
@@ -175,6 +222,25 @@ jobs:
             .local-artifacts/ci/h2/report.json.sha256
           if-no-files-found: error
           retention-days: 7
+      - name: Upload h2 failure diagnostics
+        if: ${{ always() && steps.run_h2.outcome != 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: host-h2-failure-diagnostics
+          path: |
+            .local-artifacts/ci/h2/diagnostic.md
+            .local-artifacts/ci/h2/*.stdout
+            .local-artifacts/ci/h2/*.stderr
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Add h2 diagnostics to job summary
+        if: ${{ always() }}
+        run: |
+          if [ -f .local-artifacts/ci/h2/diagnostic.md ]; then
+            sed -n '1,240p' .local-artifacts/ci/h2/diagnostic.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' '## host h2: no report was produced (runner or setup failure)' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   host-required:
     name: host-required

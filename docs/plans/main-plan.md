@@ -264,18 +264,37 @@
 
 ## 開発・最適化の優先順位
 
-### Phase完了時のcommit・push
+### Phase完了時のcommit・pushとCI確認
 
-2026-09-07のユーザー明示指示により、以後は各Phaseの完了手順にcommit・GitHubへのpushを含める。
-実装、必要な検証、main-plan／計画／履歴の更新を終えたら、`push`スキルで変更全体を確認し、
-目的ごとの必要最小限のコミットへ整理して現在のブランチをpushする。この指示を継続的な公開許可として扱い、
-Phaseごとに再確認を求めない。ユーザーによる個別の停止・保留指示を優先する。
-push後はremoteとの同期とworking treeを確認し、完了報告に公開したcommitと検証結果を記載する。
-pushが失敗した場合は原因と未公開範囲を記録し、実装完了と公開待ちを区別して報告する。
+2026-09-07のユーザー明示指示により、各Phaseの完了手順にcommit・GitHubへのpush、
+公開commitのCI結果確認、失敗原因に応じた必要な修正を含める。
+実装、必要な検証、main-plan／計画／履歴の更新後、`push`スキルで変更全体を確認し、
+目的ごとの必要最小限のコミットへ整理して現在のブランチをpushする。
+この指示を継続的な公開・CI修復の許可として扱い、Phaseごとの再確認は求めない。
+ユーザーによる個別の停止・保留指示を優先し、AGENTS.md／sLLM.md等の別途承認が必要な変更はその規則に従う。
+
+- pushしたHEADに紐づくCI runと期待するworkflow/jobを確認し、終了まで監視する。
+  別commitの成功を流用せず、missing、cancel、timeout、想定外skipを成功と扱わない。
+- requiredかnon-requiredかにかかわらず、実行されたCIの失敗を確認する。対象変更と関係するコード、
+  workflow、検査manifest、テスト、資源設定の不具合は修正し、影響する検証後にcommit・pushする。
+  変更前からあるCI不具合も放置せず切り分け、通常の修復範囲は継続して直す。
+  確認・修正と再pushを繰り返し、最終公開HEADの対象CI成功まで確認する。
+- 成功させるためだけの検査削除、無条件skip、continue-on-error、数値基準緩和は行わない。
+  適用外の検査は理由と対象範囲を明示し、検査の正しさを保って構成を修正する。
+  docs-only変更だけでGPU実測を一律に再実行しない。
+- 外部障害、権限不足、広範な修復へのscope変更が必要な場合は、原因・run URL・残件と次の対応を記録し、
+  「実装完了・CI確認待ち／修復中」として報告する。未確認・失敗のまま全作業完了とは報告しない。
+  通常の修復は再確認を挟まず進め、反復失敗時は既存の停止・再計画条件に従う。
+- 最後にremoteとの同期とworking treeを確認し、完了報告へ最終commit、CI run／結果、検証範囲と残件を記載する。
+  push失敗時は原因と未公開範囲を記録し、実装完了と公開待ちを区別する。
+
+実施中の[Phase 80: CI修復](active/2026/09/1-10/phase80-ci-restoration.md)で、
+既存CIをこの運用で使える状態へ戻す。
 
 ### 最適化の共通化と既定採用の方針
 
-2026-09-07のユーザー指示により、次Phaseは既存最適化の共通化を先行し、従来のPhase 79〜81をPhase 80〜82へ繰り下げる。
+2026-09-07のユーザー指示によるPhase 79の共通化は完了した。同日の追加指示でPhase 80にCI修復を挿入し、
+後続はPhase 81〜83とする。以下の共通化方針は継続する。
 
 - 最適化は演算の意味、GPU能力、shape/layout、重み・KV encodingに基づいて適用する。model fingerprintによる成果物検証は維持し、最適化判定のモデル固定条件は必要な演算条件へ置き換える。
 - prepared cache、same-stream segment owner、completion集約とGraph実行制御は共通execution層で再利用する。モデル固有graph、attention preprocess、GDN、model stateはadapter側に維持する。
@@ -462,9 +481,10 @@ pushが失敗した場合は原因と未公開範囲を記録し、実装完了�
 | 完了・decode機能／dispatch PASS（速度残差はPhase 78へ統合） | 77 | 同artifactのsingle-request decode専用経路を成立。実用速度は未達のため、whole-model速度gateをPhase 78で閉じる |
 | 完了・ユーザー承認による目標変更／未達受容 | 78 | r25を到達点として終了。V620 decode基準を実artifact帯域へ変更し、prefill等の旧目標未達・正式比較未実施を明記。モデル固有の追加最適化は要求しない |
 | 完了・条件付き既定採用 | 79 | NVFP4/FP8 decode既定化、projection/実行制御共通化、prefill基準加算順復元 |
-| 計画済み | 80 | static FP8 KV、MTP、文章生成の実用closeout |
-| 計画済み | 81 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了 |
-| 計画済み | 82 | NVFP4のGPU batching最適化 |
+| 実装・検証中 | 80 | CI修復、公開API／依存manifest同期、Rust資源設定、失敗診断と公開後CI確認 |
+| 計画済み | 81 | static FP8 KV、MTP、文章生成の実用closeout |
+| 計画済み | 82 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了 |
+| 計画済み | 83 | NVFP4のGPU batching最適化 |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
 
@@ -479,10 +499,12 @@ superseded履歴となった。v2のfresh correctnessは両local targetでPASS�
 フェーズ53を完了した。その後2026-08-30のユーザー決定でblock16経路を廃止し、同じreviewed Qwen3.5-4B BF16 dense scopeの
 省略時KVをstandard OCP MXFP8 E4M3へ変更した。Phase 53/54のblock16 evidenceは採用根拠ではなく履歴としてのみ保持する。
 gfx942実機は今後の検証項目との一括実行へ延期し、local RDNA follow-upをblockしない。
-2026-09-07の順序変更: 新Phase 79で共通化・条件付き既定採用を行い、旧Phase 79のstatic FP8 KV／MTP／文章生成をPhase 80、
-旧Phase 80の他精度最適化をPhase 81、旧Phase 81のNVFP4 batchingをPhase 82へ移す。
+2026-09-07の追加順序変更: Phase 79の共通化完了後、Phase 80でCIを修復する。
+直前のPhase 80 static FP8 KV／MTP／文章生成はPhase 81、Phase 81他精度最適化はPhase 82、
+Phase 82 NVFP4 batchingはPhase 83へ繰り下げる。内容は保持する。
 以下の日付付き経過に残る旧番号と旧gateは当時の記録であり、現在の順序は上の一覧と
-[Phase 79計画](archive/2026/09/1-10/phase79-common-optimization.md)を正とする。
+[Phase 80計画](active/2026/09/1-10/phase80-ci-restoration.md)、
+[現行ロードマップ](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正とする。
 
 2026-09-05の最新ユーザー指示によりPhase 78は完了扱いとする。
 [完了記録](archive/2026/09/1-10/phase78-accepted-closeout.md)と

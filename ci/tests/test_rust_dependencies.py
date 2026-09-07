@@ -162,6 +162,25 @@ class RustDependencyPolicyTests(unittest.TestCase):
     def test_schema_required_field_mutation_is_rejected(self) -> None:
         self.assert_policy_rejected(lambda document: document.pop("counts"))
 
+    def test_counts_must_match_manifest_structure(self) -> None:
+        def mutate(document):
+            document["counts"]["edges"] += 1
+
+        self.assert_policy_rejected(mutate)
+
+    def test_observed_graph_drift_reports_bounded_diff(self) -> None:
+        observed = copy.deepcopy(self.observed)
+        extra_edge = copy.deepcopy(observed["edges"][0])
+        extra_edge["name"] = "synthetic_dependency_for_diagnostic"
+        observed["edges"].append(extra_edge)
+        with self.assertRaisesRegex(
+            ContractError,
+            r"Rust dependency edges graph/field drift detected: .*added=1.*synthetic_dependency_for_diagnostic",
+        ):
+            validate_manifest_against_observed(
+                copy.deepcopy(self.policy), observed, schema=self.schema
+            )
+
     def test_renamed_active_dependency_matches_alias_and_preserves_manifest_name(self) -> None:
         package_dependencies = [
             {

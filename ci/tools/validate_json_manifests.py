@@ -107,6 +107,8 @@ H3_PUBLIC_RUNTIME_STEP_NAMES = [
     "Prepare exact public-runtime needs input",
     "Aggregate exactly two public-runtime PASS rows locally",
     "Upload JSON aggregate only",
+    "Upload public-runtime reports and bounded diagnostics",
+    "Summarize public-runtime compile outcomes",
     "Cleanup generated public-H3 rows and needs",
 ]
 SHA40 = re.compile(r"@[0-9a-f]{40}$")
@@ -525,6 +527,7 @@ def _expected_public_runtime_prepare_step() -> dict[str, object]:
 def _expected_public_runtime_verify_step() -> dict[str, object]:
     return {
         "name": "Verify immutable identity and pinned image",
+        "id": "pinned_image",
         "env": {
             "REVIEWED_SHA": "${{ github.sha }}",
             "TESTED_SHA": "${{ github.sha }}",
@@ -549,8 +552,9 @@ docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$H3_
 
 def _expected_public_runtime_row_step(row_id: str) -> dict[str, object]:
     target = row_id.removeprefix("h3-public-")
-    return {
+    step: dict[str, object] = {
         "name": f"Compile, link, extract, and inspect {target}",
+        "id": target,
         "env": {
             "REVIEWED_SHA": "${{ github.sha }}",
             "TESTED_SHA": "${{ github.sha }}",
@@ -559,8 +563,23 @@ def _expected_public_runtime_row_step(row_id: str) -> dict[str, object]:
             "RUN_ATTEMPT": "${{ github.run_attempt }}",
             "SLLM_H3_NETWORK_DISABLED": "1",
         },
-        "run": _expected_public_runtime_row_run(row_id),
+        "run": _expected_public_runtime_row_run(row_id).replace(
+            "set -eu\n",
+            "set -eu\n"
+            "set -o pipefail\n"
+            'mkdir -p "$GITHUB_WORKSPACE/.local-artifacts/h3-public-runtime-diagnostics"\n',
+            1,
+        ).replace(
+            "  '\n",
+            "  ' 2>&1 | tee \"$GITHUB_WORKSPACE/.local-artifacts/h3-public-runtime-diagnostics/"
+            + target
+            + ".log\"\n",
+            1,
+        ),
     }
+    if target == "gfx1201":
+        step["if"] = "${{ always() && !cancelled() && steps.pinned_image.outcome == 'success' }}"
+    return step
 
 
 def _expected_public_runtime_needs_step() -> dict[str, object]:
@@ -646,6 +665,30 @@ def _expected_public_runtime_aggregate_steps() -> list[dict[str, object]]:
                 "retention-days": 7,
             },
         },
+        {
+            "name": "Upload public-runtime reports and bounded diagnostics",
+            "if": "${{ always() }}",
+            "uses": H3_PUBLIC_RUNTIME_ACTIONS["upload"],
+            "with": {
+                "name": "h3-public-runtime-diagnostics",
+                "path": ".local-artifacts/h3-public-runtime/h3-public-gfx1030/report.json\n"
+                ".local-artifacts/h3-public-runtime/h3-public-gfx1030/report.json.sha256\n"
+                ".local-artifacts/h3-public-runtime/h3-public-gfx1201/report.json\n"
+                ".local-artifacts/h3-public-runtime/h3-public-gfx1201/report.json.sha256\n"
+                ".local-artifacts/h3-public-runtime-diagnostics/*.log\n",
+                "if-no-files-found": "warn",
+                "retention-days": 7,
+            },
+        },
+        {
+            "name": "Summarize public-runtime compile outcomes",
+            "if": "${{ always() }}",
+            "env": {
+                "GFX1030_OUTCOME": "${{ steps.gfx1030.outcome }}",
+                "GFX1201_OUTCOME": "${{ steps.gfx1201.outcome }}",
+            },
+            "run": "printf '## public-runtime compile-only\\n\\ngfx1030: %s\\n\\ngfx1201: %s\\n' \"$GFX1030_OUTCOME\" \"$GFX1201_OUTCOME\" >> \"$GITHUB_STEP_SUMMARY\"\n",
+        },
         _expected_public_runtime_cleanup_step(),
     ]
 
@@ -692,7 +735,11 @@ def _validate_action_pins(path: Path, jobs: dict[str, object]) -> None:
 
 def _validate_exact_public_runtime_actions(path: Path, jobs: dict[str, object]) -> None:
     expected = {
-        "h3-public-runtime": [H3_PUBLIC_RUNTIME_ACTIONS["checkout"], H3_PUBLIC_RUNTIME_ACTIONS["upload"]],
+        "h3-public-runtime": [
+            H3_PUBLIC_RUNTIME_ACTIONS["checkout"],
+            H3_PUBLIC_RUNTIME_ACTIONS["upload"],
+            H3_PUBLIC_RUNTIME_ACTIONS["upload"],
+        ],
     }
     for job_id, expected_uses in expected.items():
         job = jobs[job_id]
@@ -1214,8 +1261,10 @@ def validate_h3_public_runtime_workflow(path: Path, document: dict[str, object])
 
     needs = steps[5]
     aggregate = steps[6]
-    upload = steps[7]
-    cleanup = steps[8]
+    aggregate_upload = steps[7]
+    diagnostics_upload = steps[8]
+    summary = steps[9]
+    cleanup = steps[10]
     if not isinstance(needs, dict) or needs.get("if") != "${{ always() }}":
         raise ContractError(f"{path.relative_to(ROOT)}: needs preparation must run with always()")
     if not isinstance(aggregate, dict) or aggregate.get("if") != "${{ always() }}" or aggregate.get("run", "").strip() != H3_PUBLIC_RUNTIME_AGGREGATE_COMMAND:
@@ -1223,9 +1272,9 @@ def validate_h3_public_runtime_workflow(path: Path, document: dict[str, object])
     aggregate_run = aggregate.get("run", "")
     if not isinstance(aggregate_run, str) or "docker" in aggregate_run.lower() or "download-artifact" in aggregate_run:
         raise ContractError(f"{path.relative_to(ROOT)}: aggregate must be local without row transport")
-    if not isinstance(upload, dict) or upload.get("if") != "${{ success() }}" or upload.get("uses") != H3_PUBLIC_RUNTIME_ACTIONS["upload"]:
+    if not isinstance(aggregate_upload, dict) or aggregate_upload.get("if") != "${{ success() }}" or aggregate_upload.get("uses") != H3_PUBLIC_RUNTIME_ACTIONS["upload"]:
         raise ContractError(f"{path.relative_to(ROOT)}: aggregate upload is not success-only and pinned")
-    upload_with = upload.get("with")
+    upload_with = aggregate_upload.get("with")
     if upload_with != {
         "name": "h3-public-runtime-aggregate",
         "path": ".local-artifacts/h3-public-runtime-aggregate/aggregate.json\n"
@@ -1234,6 +1283,26 @@ def validate_h3_public_runtime_workflow(path: Path, document: dict[str, object])
         "retention-days": 7,
     }:
         raise ContractError(f"{path.relative_to(ROOT)}: only aggregate JSON and SHA-256 sidecar may be uploaded")
+    if not isinstance(diagnostics_upload, dict) or diagnostics_upload.get("if") != "${{ always() }}" or diagnostics_upload.get("uses") != H3_PUBLIC_RUNTIME_ACTIONS["upload"]:
+        raise ContractError(f"{path.relative_to(ROOT)}: diagnostics upload must be always-run and pinned")
+    if diagnostics_upload.get("with") != {
+        "name": "h3-public-runtime-diagnostics",
+        "path": ".local-artifacts/h3-public-runtime/h3-public-gfx1030/report.json\n"
+        ".local-artifacts/h3-public-runtime/h3-public-gfx1030/report.json.sha256\n"
+        ".local-artifacts/h3-public-runtime/h3-public-gfx1201/report.json\n"
+        ".local-artifacts/h3-public-runtime/h3-public-gfx1201/report.json.sha256\n"
+        ".local-artifacts/h3-public-runtime-diagnostics/*.log\n",
+        "if-no-files-found": "warn",
+        "retention-days": 7,
+    }:
+        raise ContractError(f"{path.relative_to(ROOT)}: diagnostics upload paths or bounds are not exact")
+    if not isinstance(summary, dict) or summary.get("if") != "${{ always() }}" or summary.get("env") != {
+        "GFX1030_OUTCOME": "${{ steps.gfx1030.outcome }}",
+        "GFX1201_OUTCOME": "${{ steps.gfx1201.outcome }}",
+    }:
+        raise ContractError(f"{path.relative_to(ROOT)}: compile outcome summary must be always-run and exact")
+    if summary.get("run") != "printf '## public-runtime compile-only\\n\\ngfx1030: %s\\n\\ngfx1201: %s\\n' \"$GFX1030_OUTCOME\" \"$GFX1201_OUTCOME\" >> \"$GITHUB_STEP_SUMMARY\"\n":
+        raise ContractError(f"{path.relative_to(ROOT)}: compile outcome summary command is not exact")
     if not isinstance(cleanup, dict) or cleanup.get("if") != "${{ always() }}" or cleanup != _expected_public_runtime_cleanup_step():
         raise ContractError(f"{path.relative_to(ROOT)}: public-H3 cleanup is not exact or is too broad")
     cleanup_run = cleanup.get("run", "")

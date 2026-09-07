@@ -26,6 +26,7 @@ from run_h3_public_runtime_compile import (  # noqa: E402
     EXPECTED_SOURCE_PATHS,
     EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS,
     CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS,
+    ADDITIONAL_DEVICE_STUB_SYMBOLS,
     KERNEL_SYMBOLS,
     PUBLIC_SYMBOLS,
     RuntimeContractError,
@@ -688,7 +689,7 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_rmsnorm_residual_fused_wave64_v1",
             "sllm_token_selector_bf16_f32_mask_v1",
         }
-        self.assertEqual(len(KERNEL_SYMBOLS), 58)
+        self.assertEqual(len(KERNEL_SYMBOLS), 161)
         self.assertEqual(tuple(sorted(KERNEL_SYMBOLS)), KERNEL_SYMBOLS)
         self.assertTrue(expected_additions <= set(KERNEL_SYMBOLS))
         self.assertEqual(len(expected_additions), 32)
@@ -719,15 +720,35 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
         self.assertEqual(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS, expected)
         self.assertEqual(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS, tuple(sorted(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)))
 
-    def test_host_hip_undefined_closure_includes_the_three_gfx1030_additions(self) -> None:
-        additions = {"hipMemRetainAllocationHandle", "hipMemcpy", "hipMemsetAsync"}
-        self.assertEqual(len(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS), 52)
-        self.assertEqual(len(set(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS)), 52)
+    def test_additional_device_stub_inventory_is_finite_and_duplicate_free(self) -> None:
+        self.assertEqual(len(ADDITIONAL_DEVICE_STUB_SYMBOLS), 86)
+        self.assertEqual(len(set(ADDITIONAL_DEVICE_STUB_SYMBOLS)), 86)
+        self.assertEqual(ADDITIONAL_DEVICE_STUB_SYMBOLS, tuple(sorted(ADDITIONAL_DEVICE_STUB_SYMBOLS)))
+        self.assertEqual(sum("causal_attention_kernel" in name for name in ADDITIONAL_DEVICE_STUB_SYMBOLS), 85)
+        self.assertEqual(sum("ministral3_yarn_kernel" in name for name in ADDITIONAL_DEVICE_STUB_SYMBOLS), 1)
+
+    def test_host_hip_undefined_closure_includes_graph_and_gfx1030_additions(self) -> None:
+        additions = {
+            "__hipRegisterVar",
+            "hipGraphDestroy",
+            "hipGraphExecDestroy",
+            "hipGraphGetNodes",
+            "hipGraphInstantiate",
+            "hipGraphLaunch",
+            "hipGraphNodeGetType",
+            "hipMemRetainAllocationHandle",
+            "hipMemcpy",
+            "hipMemsetAsync",
+            "hipStreamBeginCapture",
+            "hipStreamEndCapture",
+        }
+        self.assertEqual(len(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS), 61)
+        self.assertEqual(len(set(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS)), 61)
         self.assertEqual(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS, tuple(sorted(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS)))
         self.assertEqual(additions, additions & set(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS))
 
     def test_public_symbols_are_exactly_the_umbrella_header_extern_c_set(self) -> None:
-        self.assertEqual(len(PUBLIC_SYMBOLS), 109)
+        self.assertEqual(len(PUBLIC_SYMBOLS), 117)
         self.assertEqual(declared_public_symbols(ROOT), PUBLIC_SYMBOLS)
         with tempfile.TemporaryDirectory(prefix="sllm-h3-public-symbol-header-") as directory:
             repo = Path(directory)
@@ -755,6 +776,8 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "Prepare exact public-runtime needs input",
             "Aggregate exactly two public-runtime PASS rows locally",
             "Upload JSON aggregate only",
+            "Upload public-runtime reports and bounded diagnostics",
+            "Summarize public-runtime compile outcomes",
             "Cleanup generated public-H3 rows and needs",
         ])
         self.assertIn("--row h3-public-gfx1030", steps[3]["run"])
@@ -803,9 +826,9 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             (lambda w: w["jobs"]["h3-public-runtime"]["steps"][6].__setitem__("if", "${{ success() }}"), "aggregate not always"),
             (lambda w: w["jobs"]["h3-public-runtime"]["steps"][7].__setitem__("if", "${{ always() }}"), "upload on failure"),
             (lambda w: w["jobs"]["h3-public-runtime"]["steps"][7]["with"].__setitem__("path", ".local-artifacts"), "broad upload"),
-            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][8].__setitem__("run", w["jobs"]["h3-public-runtime"]["steps"][8]["run"].replace('rm -rf -- "$ROW1030"', 'rm -rf -- "$ARTIFACT_ROOT"')), "broad cleanup"),
-            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][8].__setitem__("if", "${{ success() }}"), "cleanup not always"),
-            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][8].__setitem__("run", w["jobs"]["h3-public-runtime"]["steps"][8]["run"].replace('test -f "$AGGREGATE_ROOT/aggregate.json"', "")), "missing aggregate retention proof"),
+            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][10].__setitem__("run", w["jobs"]["h3-public-runtime"]["steps"][10]["run"].replace('rm -rf -- "$ROW1030"', 'rm -rf -- "$ARTIFACT_ROOT"')), "broad cleanup"),
+            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][10].__setitem__("if", "${{ success() }}"), "cleanup not always"),
+            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][10].__setitem__("run", w["jobs"]["h3-public-runtime"]["steps"][10]["run"].replace('test -f "$AGGREGATE_ROOT/aggregate.json"', "")), "missing aggregate retention proof"),
         )
         for mutation, label in mutations:
             reject(mutation, label)
@@ -838,6 +861,26 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
         mutated["push"] = {"branches": ["feature"]}
         with self.assertRaises(ManifestContractError):
             validate_h3_public_runtime_workflow(workflow_path, mutated)
+
+    def test_public_runtime_diagnostics_and_failure_propagation_are_closed(self) -> None:
+        workflow_path = ROOT / ".github/workflows/h3-public-runtime-compile.yml"
+        workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+
+        mutations = (
+            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][2].pop("id"), "missing pinned-image step id"),
+            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][3].__setitem__("run", w["jobs"]["h3-public-runtime"]["steps"][3]["run"].replace("set -o pipefail\n", "")), "missing bounded log pipe failure"),
+            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][4].__setitem__("if", "${{ success() }}"), "gfx1201 does not collect after row failure"),
+            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][8].__setitem__("if", "${{ success() }}"), "diagnostics upload is not always-run"),
+            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][8]["with"].__setitem__("path", ".local-artifacts"), "diagnostics upload is broad"),
+            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][9].__setitem__("if", "${{ success() }}"), "summary is not always-run"),
+            (lambda w: w["jobs"]["h3-public-runtime"]["steps"][9]["env"].__setitem__("GFX1030_OUTCOME", "${{ job.status }}"), "summary loses row outcome"),
+        )
+        for mutation, label in mutations:
+            with self.subTest(label=label):
+                mutated = copy.deepcopy(workflow)
+                mutation(mutated)
+                with self.assertRaises(ManifestContractError):
+                    validate_h3_public_runtime_workflow(workflow_path, mutated)
 
     def test_build_script_rerun_registration_covers_exact_h3_public_runtime_inputs(self) -> None:
         build_script = ROOT / "crates/sllm-hip-sys/build.rs"

@@ -2574,8 +2574,8 @@ __launch_bounds__(256, 1) void sllm_matmul_nvfp4_w4a4_block16_prefill_row8_tiled
         const float activation_scale = e4m3fn_to_float(
             activation_block_scales[row * blocks_per_activation_row +
                                     inner / UINT64_C(16)]);
-        partials[offset / wave_width] +=
-            e2m1_to_float(activation_code) * activation_scale * weight_tile[offset];
+        partials[offset / wave_width] += e2m1_to_float(activation_code) *
+                                         activation_scale * weight_tile[offset];
       }
     }
     __syncthreads();

@@ -53,8 +53,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let lock = parse_gemma4_model_lock(&fs::read(&args[0])?)?;
     let verified = verify_derived_gguf(
-        read_derived_gguf_lock(&PathBuf::from(&args[2]))?,
-        &PathBuf::from(&args[1]),
+        read_derived_gguf_lock(PathBuf::from(&args[2]))?,
+        PathBuf::from(&args[1]),
     )?;
     let (source, plan) = build_verified_gguf_gemma_weight_load_plan(&lock, verified)?;
     let backend = HipBackend::connect()?;

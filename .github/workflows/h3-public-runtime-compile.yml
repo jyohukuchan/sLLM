@@ -69,6 +69,7 @@ jobs:
           done
 
       - name: Verify immutable identity and pinned image
+        id: pinned_image
         env:
           REVIEWED_SHA: ${{ github.sha }}
           TESTED_SHA: ${{ github.sha }}
@@ -89,6 +90,7 @@ jobs:
           docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$H3_PUBLIC_RUNTIME_IMAGE_REFERENCE" | grep -F -- "$H3_PUBLIC_RUNTIME_IMAGE_MANIFEST_DIGEST" >/dev/null
 
       - name: Compile, link, extract, and inspect gfx1030
+        id: gfx1030
         env:
           REVIEWED_SHA: ${{ github.sha }}
           TESTED_SHA: ${{ github.sha }}
@@ -98,6 +100,8 @@ jobs:
           SLLM_H3_NETWORK_DISABLED: "1"
         run: |
           set -eu
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.local-artifacts/h3-public-runtime-diagnostics"
           TREE_OID="$(git rev-parse HEAD^{tree})"
           export TREE_OID
           test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
@@ -125,7 +129,7 @@ jobs:
                 --reviewed-sha "$REVIEWED_SHA" --tested-sha "$TESTED_SHA" \
                 --workflow-sha "$WORKFLOW_SHA" --tree-oid "$TREE_OID" \
                 --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
-            '
+            ' 2>&1 | tee "$GITHUB_WORKSPACE/.local-artifacts/h3-public-runtime-diagnostics/gfx1030.log"
           if find "$GITHUB_WORKSPACE/.local-artifacts/h3-public-runtime/h3-public-gfx1030" -xdev -type l -print -quit | grep -q .; then
             echo "H3 public-runtime output contains a symlink" >&2
             exit 1
@@ -136,6 +140,8 @@ jobs:
           fi
 
       - name: Compile, link, extract, and inspect gfx1201
+        id: gfx1201
+        if: ${{ always() && !cancelled() && steps.pinned_image.outcome == 'success' }}
         env:
           REVIEWED_SHA: ${{ github.sha }}
           TESTED_SHA: ${{ github.sha }}
@@ -145,6 +151,8 @@ jobs:
           SLLM_H3_NETWORK_DISABLED: "1"
         run: |
           set -eu
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.local-artifacts/h3-public-runtime-diagnostics"
           TREE_OID="$(git rev-parse HEAD^{tree})"
           export TREE_OID
           test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
@@ -172,7 +180,7 @@ jobs:
                 --reviewed-sha "$REVIEWED_SHA" --tested-sha "$TESTED_SHA" \
                 --workflow-sha "$WORKFLOW_SHA" --tree-oid "$TREE_OID" \
                 --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
-            '
+            ' 2>&1 | tee "$GITHUB_WORKSPACE/.local-artifacts/h3-public-runtime-diagnostics/gfx1201.log"
           if find "$GITHUB_WORKSPACE/.local-artifacts/h3-public-runtime/h3-public-gfx1201" -xdev -type l -print -quit | grep -q .; then
             echo "H3 public-runtime output contains a symlink" >&2
             exit 1
@@ -221,6 +229,28 @@ jobs:
             .local-artifacts/h3-public-runtime-aggregate/aggregate.json.sha256
           if-no-files-found: error
           retention-days: 7
+
+      - name: Upload public-runtime reports and bounded diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: h3-public-runtime-diagnostics
+          path: |
+            .local-artifacts/h3-public-runtime/h3-public-gfx1030/report.json
+            .local-artifacts/h3-public-runtime/h3-public-gfx1030/report.json.sha256
+            .local-artifacts/h3-public-runtime/h3-public-gfx1201/report.json
+            .local-artifacts/h3-public-runtime/h3-public-gfx1201/report.json.sha256
+            .local-artifacts/h3-public-runtime-diagnostics/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Summarize public-runtime compile outcomes
+        if: ${{ always() }}
+        env:
+          GFX1030_OUTCOME: ${{ steps.gfx1030.outcome }}
+          GFX1201_OUTCOME: ${{ steps.gfx1201.outcome }}
+        run: |
+          printf '## public-runtime compile-only\n\ngfx1030: %s\n\ngfx1201: %s\n' "$GFX1030_OUTCOME" "$GFX1201_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Cleanup generated public-H3 rows and needs
         if: ${{ always() }}

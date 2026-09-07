@@ -18,9 +18,11 @@ from common import (  # noqa: E402
     DEV_RUST_VERSION,
     MSRV_RUST_VERSION,
     load_manifests,
+    isolated_env,
     sha256_json,
 )
 from local_hygiene import WARN_WORKTREES, classify_worktrees  # noqa: E402
+from run_host_suite import actual_counts  # noqa: E402
 from validate_matrix import main as validate_matrix_main  # noqa: E402
 from validate_rust import MSRV_TARGET, RUSTUP_AUTO_INSTALL, command_for_mode  # noqa: E402
 
@@ -80,16 +82,18 @@ class HostContractTests(unittest.TestCase):
             cargo_commands,
             [
                 (
-                    "h0-phase46-tools-contract",
-                    "phase46-tools-rust",
+                    "h1-host-contract",
+                    "cargo-build-workspace",
                     [
                         "cargo",
                         f"+{DEV_RUST_VERSION}",
                         "test",
-                        "-p",
-                        "sllm-tools",
+                        "--workspace",
+                        "--jobs",
+                        "2",
                         "--locked",
                         "--offline",
+                        "--no-run",
                     ],
                 ),
                 (
@@ -101,7 +105,7 @@ class HostContractTests(unittest.TestCase):
                         "test",
                         "--workspace",
                         "--jobs",
-                        "4",
+                        "2",
                         "--locked",
                         "--offline",
                         "--",
@@ -136,6 +140,27 @@ class HostContractTests(unittest.TestCase):
         )
         self.assertEqual(list(zip(msrv_command, msrv_command[1:])).count(("--jobs", "1")), 1)
         self.assertEqual(RUSTUP_AUTO_INSTALL, "0")
+
+    def test_h1_build_and_test_budgets_are_distinct_and_local_defaults_match_ci(self) -> None:
+        suites, _, _ = load_manifests(ROOT)
+        h1 = next(suite for suite in suites["suites"] if suite["suite_id"] == "h1-host-contract")
+        cargo = [command for command in h1["commands"] if command["argv"][0] == "cargo"]
+        self.assertEqual([command["command_id"] for command in cargo], ["cargo-build-workspace", "cargo-test-workspace"])
+        self.assertIn("--no-run", cargo[0]["argv"])
+        self.assertNotIn("resource", cargo[0])
+        self.assertEqual(cargo[1]["resource"], {"max_rss_bytes": 3 * 1024**3})
+        self.assertEqual(actual_counts(cargo[0]["argv"], "", 0, repo=ROOT)[2], "validator-command")
+        environment = isolated_env()
+        self.assertEqual(
+            {name: environment[name] for name in (
+                "CARGO_BUILD_JOBS", "CARGO_INCREMENTAL",
+                "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG",
+            )},
+            {
+                "CARGO_BUILD_JOBS": "2", "CARGO_INCREMENTAL": "0",
+                "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0",
+            },
+        )
 
     def test_fixture_paths_are_explicitly_owned_by_h0_and_their_consumer_tier(self) -> None:
         _, _, paths = load_manifests(ROOT)
