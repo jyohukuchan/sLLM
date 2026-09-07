@@ -1,0 +1,1450 @@
+{
+  "schema_version": "phase78-nvfp4-cross-model-observation-v1",
+  "rows": [
+    {
+      "target": "gfx1030",
+      "model": "Gemma4-12B",
+      "weight": "mixed NVFP4 W4A4 / FP8 W8A8",
+      "kv": "FP16",
+      "input": 17,
+      "output": 17,
+      "arms": {
+        "control1": {
+          "metrics": {
+            "prefill_tokens_per_second": {
+              "median": 2.706294418779426,
+              "min": 2.6493120854134276,
+              "max": 2.723800276216132,
+              "mad": 0.017505857436705963,
+              "count": 3
+            },
+            "decode_tokens_per_second": {
+              "median": 1.6165202749845908,
+              "min": 1.5964852389240725,
+              "max": 1.6180065775800032,
+              "mad": 0.001486302595412381,
+              "count": 3
+            },
+            "ttft_ns": {
+              "median": 6290461644,
+              "min": 6248744479,
+              "max": 6424890788,
+              "mad": 41717165,
+              "count": 3
+            },
+            "request_prepare_ns": {
+              "median": 8129799,
+              "min": 7463798,
+              "max": 8808891,
+              "mad": 666001,
+              "count": 3
+            },
+            "mean_tpot_ns": {
+              "median": 618612717.375,
+              "min": 618044459.0625,
+              "max": 626375976.1875,
+              "mad": 568258.3125,
+              "count": 3
+            }
+          },
+          "peak_vram_bytes": 9408695728,
+          "raw_sha256": "b5999443fd70068e095d9af3f342b1c3ee886e9ff13d25f9342e23324818e181",
+          "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1030-12B-17x17-control1.json",
+          "binary_sha256": "d67a8f3742ed705cee60adb8f5f8dc4e3f8797f17e87e4aa91665b01ccfc69b8"
+        },
+        "current": {
+          "metrics": {
+            "prefill_tokens_per_second": {
+              "median": 13.097523022332885,
+              "min": 13.046463188209596,
+              "max": 13.127997622362095,
+              "mad": 0.030474600029210208,
+              "count": 3
+            },
+            "decode_tokens_per_second": {
+              "median": 1.6267049280082915,
+              "min": 1.5238199052317238,
+              "max": 1.6358038549715364,
+              "mad": 0.00909892696324488,
+              "count": 3
+            },
+            "ttft_ns": {
+              "median": 1306038190,
+              "min": 1302351330,
+              "max": 1310919296,
+              "mad": 3686860,
+              "count": 3
+            },
+            "request_prepare_ns": {
+              "median": 7883565,
+              "min": 7408477,
+              "max": 8081906,
+              "mad": 198341,
+              "count": 3
+            },
+            "mean_tpot_ns": {
+              "median": 614739638.875,
+              "min": 611320236.8125,
+              "max": 656245529.125,
+              "mad": 3419402.0625,
+              "count": 3
+            }
+          },
+          "peak_vram_bytes": 9408695728,
+          "raw_sha256": "7ac9c73628e56c9e27a2c27c61f6d1694c67f1717aace7138885406bcbed0209",
+          "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1030-12B-17x17-current.json",
+          "binary_sha256": "497526210a20b97f8399485180f2b0f12d24e15fde8930f5ca27842117d88be6"
+        },
+        "control2": {
+          "metrics": {
+            "prefill_tokens_per_second": {
+              "median": 2.699094903646578,
+              "min": 2.686059441968983,
+              "max": 2.7076990751659014,
+              "mad": 0.008604171519323245,
+              "count": 3
+            },
+            "decode_tokens_per_second": {
+              "median": 1.623840036447658,
+              "min": 1.6232969258550376,
+              "max": 1.6323954850411921,
+              "mad": 0.000543110592620355,
+              "count": 3
+            },
+            "ttft_ns": {
+              "median": 6306040505,
+              "min": 6285767086,
+              "max": 6337040300,
+              "mad": 20273419,
+              "count": 3
+            },
+            "request_prepare_ns": {
+              "median": 7631781,
+              "min": 7373067,
+              "max": 8065798,
+              "mad": 258714,
+              "count": 3
+            },
+            "mean_tpot_ns": {
+              "median": 615824205.3125,
+              "min": 612596646.5625,
+              "max": 616030243.1875,
+              "mad": 206037.875,
+              "count": 3
+            }
+          },
+          "peak_vram_bytes": 9408695728,
+          "raw_sha256": "bc790f75457382e56bbb42c23c3e8f101d491909c9cf84a8052789fed6ea15cd",
+          "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1030-12B-17x17-control2.json",
+          "binary_sha256": "d67a8f3742ed705cee60adb8f5f8dc4e3f8797f17e87e4aa91665b01ccfc69b8"
+        }
+      },
+      "tokens_equal": true,
+      "stop_equal": true,
+      "audit_equal": true,
+      "token_digest": "e8122e692f241e4782a21bb08ca1c5439a599494dd5999ee3a05cb414831b8be",
+      "model_identity": {
+        "model_size": "12B",
+        "repo_id": "google/gemma-4-12B-it",
+        "resolved_revision": "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7",
+        "lock_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d"
+      },
+      "model_identities_equal": true,
+      "metric_change_percent": {
+        "prefill_tokens_per_second": {
+          "pooled_control": {
+            "median": 2.702694661213002,
+            "min": 2.6493120854134276,
+            "max": 2.723800276216132,
+            "mad": 0.010819816598459209,
+            "count": 6
+          },
+          "current": {
+            "median": 13.097523022332885,
+            "min": 13.046463188209596,
+            "max": 13.127997622362095,
+            "mad": 0.030474600029210208,
+            "count": 3
+          },
+          "percent": 384.60979371064286,
+          "control2_vs_control1_percent": -0.266028525310813
+        },
+        "decode_tokens_per_second": {
+          "pooled_control": {
+            "median": 1.6206517517175203,
+            "min": 1.5964852389240725,
+            "max": 1.6323954850411921,
+            "mad": 0.00365988073153356,
+            "count": 6
+          },
+          "current": {
+            "median": 1.6267049280082915,
+            "min": 1.5238199052317238,
+            "max": 1.6358038549715364,
+            "mad": 0.00909892696324488,
+            "count": 3
+          },
+          "percent": 0.3735025914331169,
+          "control2_vs_control1_percent": 0.45280975292048
+        },
+        "ttft_ns": {
+          "pooled_control": {
+            "median": 6298251074.5,
+            "min": 6248744479,
+            "max": 6424890788,
+            "mad": 25636607.0,
+            "count": 6
+          },
+          "current": {
+            "median": 1306038190,
+            "min": 1302351330,
+            "max": 1310919296,
+            "mad": 3686860,
+            "count": 3
+          },
+          "percent": -79.26347847122493,
+          "control2_vs_control1_percent": 0.24765846899106325
+        },
+        "request_prepare_ns": {
+          "pooled_control": {
+            "median": 7848789.5,
+            "min": 7373067,
+            "max": 8808891,
+            "mad": 333000.5,
+            "count": 6
+          },
+          "current": {
+            "median": 7883565,
+            "min": 7408477,
+            "max": 8081906,
+            "mad": 198341,
+            "count": 3
+          },
+          "percent": 0.4430683228286325,
+          "control2_vs_control1_percent": -6.125834107337713
+        },
+        "mean_tpot_ns": {
+          "pooled_control": {
+            "median": 617037351.125,
+            "min": 612596646.5625,
+            "max": 626375976.1875,
+            "mad": 1394256.03125,
+            "count": 6
+          },
+          "current": {
+            "median": 614739638.875,
+            "min": 611320236.8125,
+            "max": 656245529.125,
+            "mad": 3419402.0625,
+            "count": 3
+          },
+          "percent": -0.3723781462841358,
+          "control2_vs_control1_percent": -0.4507686286070345
+        }
+      }
+    },
+    {
+      "target": "gfx1030",
+      "model": "Gemma4-12B",
+      "weight": "mixed NVFP4 W4A4 / FP8 W8A8",
+      "kv": "FP16",
+      "input": 512,
+      "output": 32,
+      "arms": {
+        "control1": {
+          "metrics": {
+            "prefill_tokens_per_second": {
+              "median": 3.8235053715120215,
+              "min": 3.8200085691942323,
+              "max": 3.8259087837755374,
+              "mad": 0.002403412263515925,
+              "count": 3
+            },
+            "decode_tokens_per_second": {
+              "median": 1.5427966205581896,
+              "min": 1.5404480113832422,
+              "max": 1.5449810782917897,
+              "mad": 0.002184457733600098,
+              "count": 3
+            },
+            "ttft_ns": {
+              "median": 133947388198,
+              "min": 133859809481,
+              "max": 134068634386,
+              "mad": 87578717,
+              "count": 3
+            },
+            "request_prepare_ns": {
+              "median": 37520758,
+              "min": 35395064,
+              "max": 38853317,
+              "mad": 1332559,
+              "count": 3
+            },
+            "mean_tpot_ns": {
+              "median": 648173574.3225807,
+              "min": 647257117.9354838,
+              "max": 649161797.483871,
+              "mad": 916456.3870968819,
+              "count": 3
+            }
+          },
+          "peak_vram_bytes": 15280868068,
+          "raw_sha256": "a33b77f4f70458eeb9e4be3e27d8adc95dfbc2ffd2788344ed2c4d8e62ee87ed",
+          "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1030-12B-512x32-control1.json",
+          "binary_sha256": "d67a8f3742ed705cee60adb8f5f8dc4e3f8797f17e87e4aa91665b01ccfc69b8"
+        },
+        "current": {
+          "metrics": {
+            "prefill_tokens_per_second": {
+              "median": 18.945385592088837,
+              "min": 18.927813759739248,
+              "max": 18.95741767395328,
+              "mad": 0.012032081864443711,
+              "count": 3
+            },
+            "decode_tokens_per_second": {
+              "median": 1.5396241691104784,
+              "min": 1.5313718351945032,
+              "max": 1.54651686435159,
+              "mad": 0.00689269524111169,
+              "count": 3
+            },
+            "ttft_ns": {
+              "median": 27063590747,
+              "min": 27042831111,
+              "max": 27086990586,
+              "mad": 20759636,
+              "count": 3
+            },
+            "request_prepare_ns": {
+              "median": 36850495,
+              "min": 34932533,
+              "max": 38539622,
+              "mad": 1689127,
+              "count": 3
+            },
+            "mean_tpot_ns": {
+              "median": 649509159.483871,
+              "min": 646614351.9354838,
+              "max": 653009267.2580645,
+              "mad": 2894807.54838717,
+              "count": 3
+            }
+          },
+          "peak_vram_bytes": 15280868068,
+          "raw_sha256": "0ddb2ffab2f6a449c8b880513381779796d52c17ee2aa72441176978e60fd59f",
+          "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1030-12B-512x32-current.json",
+          "binary_sha256": "497526210a20b97f8399485180f2b0f12d24e15fde8930f5ca27842117d88be6"
+        }
+      },
+      "tokens_equal": false,
+      "stop_equal": true,
+      "audit_equal": true,
+      "token_digest": "07894f1fec7329a941ce7914319166c321c810b6aaf462d25d59145042165464",
+      "model_identity": {
+        "model_size": "12B",
+        "repo_id": "google/gemma-4-12B-it",
+        "resolved_revision": "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7",
+        "lock_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d"
+      },
+      "model_identities_equal": true,
+      "metric_change_percent": {
+        "prefill_tokens_per_second": {
+          "pooled_control": {
+            "median": 3.8235053715120215,
+            "min": 3.8200085691942323,
+            "max": 3.8259087837755374,
+            "mad": 0.002403412263515925,
+            "count": 3
+          },
+          "current": {
+            "median": 18.945385592088837,
+            "min": 18.927813759739248,
+            "max": 18.95741767395328,
+            "mad": 0.012032081864443711,
+            "count": 3
+          },
+          "percent": 395.497815518873,
+          "control2_vs_control1_percent": null
+        },
+        "decode_tokens_per_second": {
+          "pooled_control": {
+            "median": 1.5427966205581896,
+            "min": 1.5404480113832422,
+            "max": 1.5449810782917897,
+            "mad": 0.002184457733600098,
+            "count": 3
+          },
+          "current": {
+            "median": 1.5396241691104784,
+            "min": 1.5313718351945032,
+            "max": 1.54651686435159,
+            "mad": 0.00689269524111169,
+            "count": 3
+          },
+          "percent": -0.20562991942277842,
+          "control2_vs_control1_percent": null
+        },
+        "ttft_ns": {
+          "pooled_control": {
+            "median": 133947388198,
+            "min": 133859809481,
+            "max": 134068634386,
+            "mad": 87578717,
+            "count": 3
+          },
+          "current": {
+            "median": 27063590747,
+            "min": 27042831111,
+            "max": 27086990586,
+            "mad": 20759636,
+            "count": 3
+          },
+          "percent": -79.795357631763,
+          "control2_vs_control1_percent": null
+        },
+        "request_prepare_ns": {
+          "pooled_control": {
+            "median": 37520758,
+            "min": 35395064,
+            "max": 38853317,
+            "mad": 1332559,
+            "count": 3
+          },
+          "current": {
+            "median": 36850495,
+            "min": 34932533,
+            "max": 38539622,
+            "mad": 1689127,
+            "count": 3
+          },
+          "percent": -1.7863791557729214,
+          "control2_vs_control1_percent": null
+        },
+        "mean_tpot_ns": {
+          "pooled_control": {
+            "median": 648173574.3225807,
+            "min": 647257117.9354838,
+            "max": 649161797.483871,
+            "mad": 916456.3870968819,
+            "count": 3
+          },
+          "current": {
+            "median": 649509159.483871,
+            "min": 646614351.9354838,
+            "max": 653009267.2580645,
+            "mad": 2894807.54838717,
+            "count": 3
+          },
+          "percent": 0.20605362733063792,
+          "control2_vs_control1_percent": null
+        }
+      }
+    },
+    {
+      "target": "gfx1201",
+      "model": "Gemma4-12B",
+      "weight": "mixed NVFP4 W4A4 / FP8 W8A8",
+      "kv": "FP16",
+      "input": 17,
+      "output": 17,
+      "arms": {
+        "control1": {
+          "metrics": {
+            "prefill_tokens_per_second": {
+              "median": 20.546071282919208,
+              "min": 20.539117869969374,
+              "max": 20.65992985810409,
+              "mad": 0.006953412949833648,
+              "count": 3
+            },
+            "decode_tokens_per_second": {
+              "median": 11.061838318597589,
+              "min": 10.914398161704835,
+              "max": 11.215251033322586,
+              "mad": 0.14744015689275436,
+              "count": 3
+            },
+            "ttft_ns": {
+              "median": 835310486,
+              "min": 830637747,
+              "max": 835505310,
+              "mad": 194824,
+              "count": 3
+            },
+            "request_prepare_ns": {
+              "median": 7815574,
+              "min": 7788214,
+              "max": 7900925,
+              "mad": 27360,
+              "count": 3
+            },
+            "mean_tpot_ns": {
+              "median": 90400887.375,
+              "min": 89164299.3125,
+              "max": 91622092.6875,
+              "mad": 1221205.3125,
+              "count": 3
+            }
+          },
+          "peak_vram_bytes": 9408695728,
+          "raw_sha256": "56d310d9998b362d7d283bb10edb06736050d398649aed3b39d4aa3faa1b6b5b",
+          "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1201-12B-17x17-control1.json",
+          "binary_sha256": "aef19ee6de27099e5425eae57e9f7bf17c717ada2088bedf0148d5e7daff4294"
+        },
+        "current": {
+          "metrics": {
+            "prefill_tokens_per_second": {
+              "median": 18.179422192302933,
+              "min": 18.15656193811148,
+              "max": 18.517994124427823,
+              "mad": 0.022860254191453322,
+              "count": 3
+            },
+            "decode_tokens_per_second": {
+              "median": 10.921401378689588,
+              "min": 10.792543424732699,
+              "max": 11.097487327033608,
+              "mad": 0.1288579539568886,
+              "count": 3
+            },
+            "ttft_ns": {
+              "median": 942935074,
+              "min": 925861930,
+              "max": 944347797,
+              "mad": 1412723,
+              "count": 3
+            },
+            "request_prepare_ns": {
+              "median": 7835074,
+              "min": 7811014,
+              "max": 8046548,
+              "mad": 24060,
+              "count": 3
+            },
+            "mean_tpot_ns": {
+              "median": 91563341.125,
+              "min": 90110488.125,
+              "max": 92656564.875,
+              "mad": 1093223.75,
+              "count": 3
+            }
+          },
+          "peak_vram_bytes": 9408695728,
+          "raw_sha256": "fb21f7badcb799551712504aeb432814ef6cdde943ab1c6d1fea06729e1e6768",
+          "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1201-12B-17x17-current.json",
+          "binary_sha256": "2d3def05a33533cdabd1189f73abc6b400bf5d1df77140b374ec3abbe6e3232b"
+        },
+        "control2": {
+          "metrics": {
+            "prefill_tokens_per_second": {
+              "median": 20.363292396048358,
+              "min": 16.322141700029885,
+              "max": 20.49304113643248,
+              "mad": 0.1297487403841231,
+              "count": 3
+            },
+            "decode_tokens_per_second": {
+              "median": 10.644065030596524,
+              "min": 9.860111680690528,
+              "max": 10.929319258312814,
+              "mad": 0.2852542277162904,
+              "count": 3
+            },
+            "ttft_ns": {
+              "median": 843019700,
+              "min": 837305232,
+              "max": 1050383657,
+              "mad": 5714468,
+              "count": 3
+            },
+            "request_prepare_ns": {
+              "median": 8183450,
+              "min": 7754653,
+              "max": 8852832,
+              "mad": 428797,
+              "count": 3
+            },
+            "mean_tpot_ns": {
+              "median": 93949069,
+              "min": 91497006.9375,
+              "max": 101418729.5625,
+              "mad": 2452062.0625,
+              "count": 3
+            }
+          },
+          "peak_vram_bytes": 9408695728,
+          "raw_sha256": "c99a065c5399f37a2bf5a31e3afc6baf533a9598dd6d0f163261e57a8a435adc",
+          "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1201-12B-17x17-control2.json",
+          "binary_sha256": "aef19ee6de27099e5425eae57e9f7bf17c717ada2088bedf0148d5e7daff4294"
+        }
+      },
+      "tokens_equal": false,
+      "stop_equal": true,
+      "audit_equal": true,
+      "token_digest": "5d80c1e7b1193eb9a1ad448b1b7219a1a626659e21fef938166bbaf4204ebd55",
+      "model_identity": {
+        "model_size": "12B",
+        "repo_id": "google/gemma-4-12B-it",
+        "resolved_revision": "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7",
+        "lock_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d"
+      },
+      "model_identities_equal": true,
+      "metric_change_percent": {
+        "prefill_tokens_per_second": {
+          "pooled_control": {
+            "median": 20.516079503200928,
+            "min": 16.322141700029885,
+            "max": 20.65992985810409,
+            "mad": 0.0869210673107208,
+            "count": 6
+          },
+          "current": {
+            "median": 18.179422192302933,
+            "min": 18.15656193811148,
+            "max": 18.517994124427823,
+            "mad": 0.022860254191453322,
+            "count": 3
+          },
+          "percent": -11.389394891618688,
+          "control2_vs_control1_percent": -0.8896050459184401
+        },
+        "decode_tokens_per_second": {
+          "pooled_control": {
+            "median": 10.921858710008824,
+            "min": 9.860111680690528,
+            "max": 11.215251033322586,
+            "mad": 0.20888664400053258,
+            "count": 6
+          },
+          "current": {
+            "median": 10.921401378689588,
+            "min": 10.792543424732699,
+            "max": 11.097487327033608,
+            "mad": 0.1288579539568886,
+            "count": 3
+          },
+          "percent": -0.004187303016622845,
+          "control2_vs_control1_percent": -3.776707595686768
+        },
+        "ttft_ns": {
+          "pooled_control": {
+            "median": 836405271.0,
+            "min": 830637747,
+            "max": 1050383657,
+            "mad": 3431154.5,
+            "count": 6
+          },
+          "current": {
+            "median": 942935074,
+            "min": 925861930,
+            "max": 944347797,
+            "mad": 1412723,
+            "count": 3
+          },
+          "percent": 12.736625018232338,
+          "control2_vs_control1_percent": 0.9229159850388857
+        },
+        "request_prepare_ns": {
+          "pooled_control": {
+            "median": 7858249.5,
+            "min": 7754653,
+            "max": 8852832,
+            "mad": 86816.0,
+            "count": 6
+          },
+          "current": {
+            "median": 7835074,
+            "min": 7811014,
+            "max": 8046548,
+            "mad": 24060,
+            "count": 3
+          },
+          "percent": -0.2949193710380382,
+          "control2_vs_control1_percent": 4.7069607427426385
+        },
+        "mean_tpot_ns": {
+          "pooled_control": {
+            "median": 91559549.8125,
+            "min": 89164299.3125,
+            "max": 101418729.5625,
+            "mad": 1774090.8125,
+            "count": 6
+          },
+          "current": {
+            "median": 91563341.125,
+            "min": 90110488.125,
+            "max": 92656564.875,
+            "mad": 1093223.75,
+            "count": 3
+          },
+          "percent": 0.004140816012920823,
+          "control2_vs_control1_percent": 3.924941146076888
+        }
+      }
+    },
+    {
+      "target": "gfx1201",
+      "model": "Gemma4-12B",
+      "weight": "mixed NVFP4 W4A4 / FP8 W8A8",
+      "kv": "FP16",
+      "input": 512,
+      "output": 32,
+      "arms": {
+        "control1": {
+          "metrics": {
+            "prefill_tokens_per_second": {
+              "median": 20.608606404090807,
+              "min": 20.49240526195697,
+              "max": 20.614263207085003,
+              "mad": 0.0056568029941956866,
+              "count": 3
+            },
+            "decode_tokens_per_second": {
+              "median": 8.712137040128248,
+              "min": 8.584393761717841,
+              "max": 8.723049913237295,
+              "mad": 0.010912873109047538,
+              "count": 3
+            },
+            "ttft_ns": {
+              "median": 24884117900,
+              "min": 24879265658,
+              "max": 25032364780,
+              "mad": 4852242,
+              "count": 3
+            },
+            "request_prepare_ns": {
+              "median": 42092983,
+              "min": 40127854,
+              "max": 47497985,
+              "mad": 1965129,
+              "count": 3
+            },
+            "mean_tpot_ns": {
+              "median": 114782400.16129032,
+              "min": 114638802.93548387,
+              "max": 116490462.5483871,
+              "mad": 143597.22580644488,
+              "count": 3
+            }
+          },
+          "peak_vram_bytes": 15280868068,
+          "raw_sha256": "e86ee1bab7696f63294f1f83ebc7cb9c5bf40b070a34baccbcaf2c26d60d315d",
+          "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1201-12B-512x32-control1.json",
+          "binary_sha256": "aef19ee6de27099e5425eae57e9f7bf17c717ada2088bedf0148d5e7daff4294"
+        },
+        "current": {
+          "metrics": {
+            "prefill_tokens_per_second": {
+              "median": 24.459526600982638,
+              "min": 24.28995114888759,
+              "max": 24.533665332808308,
+              "mad": 0.07413873182566988,
+              "count": 3
+            },
+            "decode_tokens_per_second": {
+              "median": 8.763572461290192,
+              "min": 8.70214108102343,
+              "max": 8.770215602289715,
+              "mad": 0.006643140999523567,
+              "count": 3
+            },
+            "ttft_ns": {
+              "median": 20973669075,
+              "min": 20911114951,
+              "max": 21129794271,
+              "mad": 62554124,
+              "count": 3
+            },
+            "request_prepare_ns": {
+              "median": 41831529,
+              "min": 41129200,
+              "max": 51118006,
+              "mad": 702329,
+              "count": 3
+            },
+            "mean_tpot_ns": {
+              "median": 114108715.87096775,
+              "min": 114022282.38709678,
+              "max": 114914248.19354838,
+              "mad": 86433.48387096822,
+              "count": 3
+            }
+          },
+          "peak_vram_bytes": 15280868068,
+          "raw_sha256": "06ac3758e5b95ed3915d7114c9a16f53fe09c7c477f3e603afad56e9d60514a3",
+          "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1201-12B-512x32-current.json",
+          "binary_sha256": "2d3def05a33533cdabd1189f73abc6b400bf5d1df77140b374ec3abbe6e3232b"
+        },
+        "control2": {
+          "metrics": {
+            "prefill_tokens_per_second": {
+              "median": 20.56884527514717,
+              "min": 20.56080748355141,
+              "max": 20.575568477857463,
+              "mad": 0.0067232027102939185,
+              "count": 3
+            },
+            "decode_tokens_per_second": {
+              "median": 8.780283111125748,
+              "min": 8.620591496457338,
+              "max": 8.792643625974412,
+              "mad": 0.012360514848664295,
+              "count": 3
+            },
+            "ttft_ns": {
+              "median": 24933892358,
+              "min": 24926186277,
+              "max": 24940323759,
+              "mad": 6431401,
+              "count": 3
+            },
+            "request_prepare_ns": {
+              "median": 41876987,
+              "min": 38577487,
+              "max": 42304586,
+              "mad": 427599,
+              "count": 3
+            },
+            "mean_tpot_ns": {
+              "median": 113891543.96774194,
+              "min": 113731437.61290322,
+              "max": 116001320.83870968,
+              "mad": 160106.354838714,
+              "count": 3
+            }
+          },
+          "peak_vram_bytes": 15280868068,
+          "raw_sha256": "b481617fc0a25131c28e4a30e7f4f13225a16cf511c7e67e0ab9cca29c40faa2",
+          "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1201-12B-512x32-control2.json",
+          "binary_sha256": "aef19ee6de27099e5425eae57e9f7bf17c717ada2088bedf0148d5e7daff4294"
+        }
+      },
+      "tokens_equal": false,
+      "stop_equal": true,
+      "audit_equal": true,
+      "token_digest": "b554713a5bac2ea908ca0d4741e4a9430577c6d90b7b7ca79c424b4b975983b0",
+      "model_identity": {
+        "model_size": "12B",
+        "repo_id": "google/gemma-4-12B-it",
+        "resolved_revision": "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7",
+        "lock_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d"
+      },
+      "model_identities_equal": true,
+      "metric_change_percent": {
+        "prefill_tokens_per_second": {
+          "pooled_control": {
+            "median": 20.572206876502314,
+            "min": 20.49240526195697,
+            "max": 20.614263207085003,
+            "mad": 0.023899460269698025,
+            "count": 6
+          },
+          "current": {
+            "median": 24.459526600982638,
+            "min": 24.28995114888759,
+            "max": 24.533665332808308,
+            "mad": 0.07413873182566988,
+            "count": 3
+          },
+          "percent": 18.89597818948847,
+          "control2_vs_control1_percent": -0.19293458356187676
+        },
+        "decode_tokens_per_second": {
+          "pooled_control": {
+            "median": 8.717593476682772,
+            "min": 8.584393761717841,
+            "max": 8.792643625974412,
+            "mad": 0.06886989186730741,
+            "count": 6
+          },
+          "current": {
+            "median": 8.763572461290192,
+            "min": 8.70214108102343,
+            "max": 8.770215602289715,
+            "mad": 0.006643140999523567,
+            "count": 3
+          },
+          "percent": 0.527427491662702,
+          "control2_vs_control1_percent": 0.7821969590654732
+        },
+        "ttft_ns": {
+          "pooled_control": {
+            "median": 24930039317.5,
+            "min": 24879265658,
+            "max": 25032364780,
+            "mad": 28102929.5,
+            "count": 6
+          },
+          "current": {
+            "median": 20973669075,
+            "min": 20911114951,
+            "max": 21129794271,
+            "mad": 62554124,
+            "count": 3
+          },
+          "percent": -15.869891708204287,
+          "control2_vs_control1_percent": 0.2000250047039076
+        },
+        "request_prepare_ns": {
+          "pooled_control": {
+            "median": 41984985.0,
+            "min": 38577487,
+            "max": 47497985,
+            "mad": 1088366.0,
+            "count": 6
+          },
+          "current": {
+            "median": 41831529,
+            "min": 41129200,
+            "max": 51118006,
+            "mad": 702329,
+            "count": 3
+          },
+          "percent": -0.3655020955705912,
+          "control2_vs_control1_percent": -0.5131401592517237
+        },
+        "mean_tpot_ns": {
+          "pooled_control": {
+            "median": 114710601.5483871,
+            "min": 113731437.61290322,
+            "max": 116490462.5483871,
+            "mad": 899110.7580645159,
+            "count": 6
+          },
+          "current": {
+            "median": 114108715.87096775,
+            "min": 114022282.38709678,
+            "max": 114914248.19354838,
+            "mad": 86433.48387096822,
+            "count": 3
+          },
+          "percent": -0.5246992599593936,
+          "control2_vs_control1_percent": -0.7761261241240547
+        }
+      }
+    }
+  ],
+  "complete": true,
+  "identity": {
+    "source_commit": "40ab582b049cff7effadbca75fe951d6cef5bd96",
+    "comparison": "retained pre-Phase76-78 binaries versus current, not isolated attribution",
+    "binaries": {
+      "current-gfx1030": "497526210a20b97f8399485180f2b0f12d24e15fde8930f5ca27842117d88be6",
+      "current-gfx1201": "2d3def05a33533cdabd1189f73abc6b400bf5d1df77140b374ec3abbe6e3232b",
+      "control-gfx1201": "aef19ee6de27099e5425eae57e9f7bf17c717ada2088bedf0148d5e7daff4294",
+      "control-gfx1030": "d67a8f3742ed705cee60adb8f5f8dc4e3f8797f17e87e4aa91665b01ccfc69b8"
+    },
+    "control_provenance": {
+      "gfx1030": {
+        "tracked_record": "ci/matrix/phase75-gfx1030-mxfp8-mxfp6-shared-half2-v1.json",
+        "identities": {
+          "starting_git_head": "097245a9d1841ddd039a20fbdc0caa0caa1db87b",
+          "source_identity": "dirty draft working tree; not release provenance",
+          "rocm": "7.14.0",
+          "hip": "7.14.60850",
+          "compiler": "AMD clang 23",
+          "code_object": "v6",
+          "wavefront": 32,
+          "gfx1030": {
+            "product": "Radeon Pro V620",
+            "uuid": "GPU-76a08c022586fed6",
+            "bdf": "0000:03:00.0"
+          },
+          "artifacts": {
+            "cli_sha256": "d67a8f3742ed705cee60adb8f5f8dc4e3f8797f17e87e4aa91665b01ccfc69b8",
+            "operator_runner_sha256": "688a54ebb2e4f5a6066af65082c2a9ee403ca50e8efccd479821283e9fe5c13d",
+            "extracted_gfx1030_matmul_code_object_sha256": "2b67fc2a1f535a2887dbf4fe243b072ac3c6c0e25b114709842604d67cdfea35"
+          },
+          "qwen35_4b": {
+            "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+            "mxfp8_lock_fingerprint": "sha256:f253d9f47603d84718b4fdb898b434e493d732b52838ba9abfdfafe73a5d076f",
+            "mxfp6_lock_fingerprint": "sha256:d0ff2e1de9d87dddddcde8f85ef305bbf21a06d5f7586d077ba1178580a0264e"
+          },
+          "qwen35_27b": {
+            "revision": "fc05daec18b0a78c049392ed2e771dde82bdf654",
+            "source_lock_fingerprint": "sha256:a4a0a6192babfdb7b1fc3ac75cc340e96df87fe2b0e629cc1510085bfeced97f",
+            "derived_mxfp6_lock_fingerprint": "sha256:d1142468252af487d52ebf72a29a4bb62487a635c174e709bebd73b0c337a82c"
+          }
+        }
+      },
+      "gfx1201": {
+        "tracked_record": "ci/matrix/phase74-mxfp6-prefill-llama-optimization-loop-v1.json",
+        "identities": {
+          "starting_git_head": "586c27b60d976781963b4a3e0901f9be3cb2c9e2",
+          "source_identity": "dirty draft working tree; not release provenance",
+          "rocm": "7.14.0",
+          "compiler": "AMD clang 23",
+          "code_object": "v6",
+          "wavefront": 32,
+          "gfx1030": {
+            "product": "Radeon Pro V620",
+            "uuid": "GPU-76a08c022586fed6",
+            "bdf": "0000:03:00.0",
+            "cli_sha256": "a3ed26a5aa01c7f3651fb735383fdc5311c65324fb5484b84e2222765a5e1df5",
+            "operator_runner_sha256": "d1b7d7dcdb87afea17f58a8aca69b0a35de440d07efbeb629eb86f34aeb37c73"
+          },
+          "gfx1201": {
+            "product": "Radeon AI PRO R9700",
+            "uuid": "GPU-a8e9ddefa2d60f55",
+            "bdf": "0000:07:00.0",
+            "cli_sha256": "aef19ee6de27099e5425eae57e9f7bf17c717ada2088bedf0148d5e7daff4294",
+            "operator_runner_sha256": "6d4b055e77cf82cf14266589701eaa8427da9b78684fd13fca42679968ae78dc"
+          },
+          "qwen35_4b": {
+            "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+            "lock_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae"
+          },
+          "qwen35_27b": {
+            "revision": "fc05daec18b0a78c049392ed2e771dde82bdf654",
+            "lock_fingerprint": "sha256:a4a0a6192babfdb7b1fc3ac75cc340e96df87fe2b0e629cc1510085bfeced97f"
+          },
+          "llama_cpp_commit": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+        }
+      }
+    },
+    "models": {
+      "12B": {
+        "derived_lock": "/home/homelab1/.cache/sllm/derived/phase20-final-gemma4-nvfp4.lock.json",
+        "fingerprint": "sha256:201d7a05f1210ea2df4831634ef883fc94843bfb98a8f64a75f41570b3a77f5f",
+        "output": {
+          "path": "/home/homelab1/.cache/sllm/derived/phase20-final-gemma4-nvfp4.gguf",
+          "size_bytes": 9337229760,
+          "sha256": "sha256:4e0410c6afa45daef0a723c5adc7ab89c410c1f106d199b1c3c023c15e902fb5",
+          "metadata_sha256": "sha256:b8d7c83b73811a8948b1bc8c80fad474f25648e9011f8847ff85e0d55c54212e",
+          "tensor_catalog_sha256": "sha256:b3c6f97d5687056c29268138e32b7054f44f87979dddb02700ae45ac497924d4"
+        }
+      }
+    }
+  },
+  "date": "2026-09-05",
+  "state": "OBSERVATION_COMPLETE_WITH_TOKEN_DIFFERENCES",
+  "protocol": {
+    "model": "Gemma 4 12B reviewed mixed NVFP4 W4A4 / FP8 W8A8 GGUF",
+    "kv": "FP16",
+    "input_token": 23066,
+    "greedy": true,
+    "ignore_eos": true,
+    "warmups_per_arm": 1,
+    "measured_per_arm": 3,
+    "main_gpu_uuids": {
+      "gfx1030": "GPU-76a08c022586fed6",
+      "gfx1201": "GPU-a8e9ddefa2d60f55"
+    },
+    "order": "control1/current/control2 except V620 512/32 control1/current only",
+    "v620_long_exception": "First control took 640 seconds; second control omitted by replanning. Active current GPU benchmark completed exit0 and cleanup0 before scheduler was stopped.",
+    "clocks": "unchanged dynamic clocks",
+    "concurrency": "Separate GPUs ran concurrently; V620-B ablation uses separate same-device comparisons."
+  },
+  "limitations": [
+    "Whole-binary comparison spans Phase76-78 changes, not Phase78-only attribution.",
+    "Historical controls are SHA256-bound draft binaries, not immutable source snapshots.",
+    "Model contains FP8 as well as NVFP4; V620 default prefill improvement includes ID71 on FP8 projections.",
+    "Old/current tokens differ in three of four main rows; DP4A tokens also differ. No numerical equivalence or quality-maintained speedup PASS is claimed.",
+    "No new independent logits oracle, quality corpus, per-kernel trace, or physical DRAM traffic measurement.",
+    "Only 1 warmup + 3 measured per arm. No performance threshold or default-adoption decision."
+  ],
+  "ablation_rows": [
+    {
+      "target": "gfx1201",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "input": 17,
+      "output": 17,
+      "arm": "gfx1201-12B-17x17-current-dp4a",
+      "environment": {
+        "ROCR_VISIBLE_DEVICES": "GPU-a8e9ddefa2d60f55",
+        "LD_LIBRARY_PATH": "/opt/rocm/lib:/opt/rocm/lib64",
+        "SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A": "1"
+      },
+      "binary_sha256": "2d3def05a33533cdabd1189f73abc6b400bf5d1df77140b374ec3abbe6e3232b",
+      "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1201-12B-17x17-current-dp4a.json",
+      "raw_sha256": "f933c4c9544792b71f9cfbba8e34e2c5e872e39e7361dbf89c079dd2db882530",
+      "tokens_equal_current": false,
+      "tokens_equal_old": false,
+      "token_sha256": "828a80aa4b95963d31a80948c0bbaeadc53b8d55aa1f6dd1b1aac4d4844d40a0",
+      "metrics": {
+        "prefill_tokens_per_second": {
+          "median": 119.10978217602404,
+          "min": 118.92544064639027,
+          "max": 119.50241024059737,
+          "mad": 0.1843415296337696,
+          "count": 3
+        },
+        "decode_tokens_per_second": {
+          "median": 11.236601736813299,
+          "min": 11.224731829914314,
+          "max": 11.25201308535421,
+          "mad": 0.01186990689898515,
+          "count": 3
+        },
+        "ttft_ns": {
+          "median": 150432760,
+          "min": 149981332,
+          "max": 150798676,
+          "mad": 365916,
+          "count": 3
+        }
+      }
+    },
+    {
+      "target": "gfx1201",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "input": 17,
+      "output": 17,
+      "arm": "gfx1201-12B-17x17-current-nvbaseline",
+      "environment": {
+        "ROCR_VISIBLE_DEVICES": "GPU-a8e9ddefa2d60f55",
+        "LD_LIBRARY_PATH": "/opt/rocm/lib:/opt/rocm/lib64",
+        "SLLM_NVFP4_W4A4_FORCE_BASELINE": "1"
+      },
+      "binary_sha256": "2d3def05a33533cdabd1189f73abc6b400bf5d1df77140b374ec3abbe6e3232b",
+      "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1201-12B-17x17-current-nvbaseline.json",
+      "raw_sha256": "211b7664da88270232333d96be608d7cc77d2c9a41652f71fa51f4d4ff6d88fb",
+      "tokens_equal_current": false,
+      "tokens_equal_old": true,
+      "token_sha256": "5d80c1e7b1193eb9a1ad448b1b7219a1a626659e21fef938166bbaf4204ebd55",
+      "metrics": {
+        "prefill_tokens_per_second": {
+          "median": 20.438778273279087,
+          "min": 20.428586284617047,
+          "max": 20.493115223420343,
+          "mad": 0.010191988662040075,
+          "count": 3
+        },
+        "decode_tokens_per_second": {
+          "median": 11.161025581478707,
+          "min": 10.956101516308632,
+          "max": 11.178020232933411,
+          "mad": 0.016994651454703913,
+          "count": 3
+        },
+        "ttft_ns": {
+          "median": 839670228,
+          "min": 837296316,
+          "max": 840072137,
+          "mad": 401909,
+          "count": 3
+        }
+      }
+    },
+    {
+      "target": "gfx1201",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "input": 512,
+      "output": 32,
+      "arm": "gfx1201-12B-512x32-current-dp4a",
+      "environment": {
+        "ROCR_VISIBLE_DEVICES": "GPU-a8e9ddefa2d60f55",
+        "LD_LIBRARY_PATH": "/opt/rocm/lib:/opt/rocm/lib64",
+        "SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A": "1"
+      },
+      "binary_sha256": "2d3def05a33533cdabd1189f73abc6b400bf5d1df77140b374ec3abbe6e3232b",
+      "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model/gfx1201-12B-512x32-current-dp4a.json",
+      "raw_sha256": "d9dec36ca0affcf20dcce62eb79d5428bcc797e727edb3874cfaf23df6979775",
+      "tokens_equal_current": false,
+      "tokens_equal_old": false,
+      "token_sha256": "f95aaf0b961f99a64f2522ceed1670819af7f89a56e898a2f8ff6cf934ff619a",
+      "metrics": {
+        "prefill_tokens_per_second": {
+          "median": 423.3709965329504,
+          "min": 421.5029159341215,
+          "max": 423.5053947659837,
+          "mad": 0.13439823303326648,
+          "count": 3
+        },
+        "decode_tokens_per_second": {
+          "median": 8.814734113554453,
+          "min": 7.647022305152627,
+          "max": 8.824633002450806,
+          "mad": 0.009898888896353597,
+          "count": 3
+        },
+        "ttft_ns": {
+          "median": 1254198152,
+          "min": 1250399206,
+          "max": 1266534549,
+          "mad": 3798946,
+          "count": 3
+        }
+      }
+    }
+  ],
+  "v620b_ablation": {
+    "schema_version": "phase78-nvfp4-v620b-gemma-ablation-v1",
+    "scope": {
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "bdf": "0000:43:00.0",
+      "target": "gfx1030",
+      "logical_device": 0,
+      "model": "phase20-final-gemma4-nvfp4.gguf",
+      "input_tokens": 17,
+      "output_tokens": 17,
+      "kv_cache_encoding": "fp16",
+      "warmups": 1,
+      "measured": 3,
+      "ignore_eos": true,
+      "greedy": true,
+      "comparison": "same V620-B only; no cross-GPU claim"
+    },
+    "rows": [
+      {
+        "arm": "current-default",
+        "selector": {},
+        "exit_code": 0,
+        "state": "PASS",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_identity": {
+          "model_size": "12B",
+          "repo_id": "google/gemma-4-12B-it",
+          "resolved_revision": "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7",
+          "lock_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d"
+        },
+        "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+        "plan_digest": "sha256:0ac901b2988a3461ace05cbbf29da4d8b87000cc853e9bd084588a7a0865dd2c",
+        "binary_sha256": "497526210a20b97f8399485180f2b0f12d24e15fde8930f5ca27842117d88be6",
+        "model_sha256": "4e0410c6afa45daef0a723c5adc7ab89c410c1f106d199b1c3c023c15e902fb5",
+        "lock_sha256": "ed99cdd9566b3611998a2571d37021aa3ce63afb3068f1be9efa7b590710d98c",
+        "token_digests": [
+          "e8122e692f241e4782a21bb08ca1c5439a599494dd5999ee3a05cb414831b8be",
+          "e8122e692f241e4782a21bb08ca1c5439a599494dd5999ee3a05cb414831b8be",
+          "e8122e692f241e4782a21bb08ca1c5439a599494dd5999ee3a05cb414831b8be",
+          "e8122e692f241e4782a21bb08ca1c5439a599494dd5999ee3a05cb414831b8be"
+        ],
+        "prefill_tokens_per_second_median": 12.719328014617135,
+        "decode_tokens_per_second_median": 1.569656424014254,
+        "ttft_ns_median": 1344221423,
+        "e2e_ns_median": 11537086245,
+        "kernel_dispatch_counts": [
+          23358
+        ],
+        "selected_backends": [
+          "hip"
+        ],
+        "all_dispatches_hip": true,
+        "fallback_used": false,
+        "cleanup_retryable": [
+          0
+        ],
+        "cleanup_quarantine": [
+          0
+        ],
+        "cleanup_request_dropped": true,
+        "cleanup_allocator_validated": true,
+        "after_cleanup_request_bytes": [
+          0
+        ],
+        "after_cleanup_workspace_bytes": [
+          0
+        ],
+        "peak_vram_bytes": 9408695728,
+        "tokens_match_default": true,
+        "generated_tokens_match_default": true,
+        "raw_sha256": "d5e6597fc3c823a732f8e4a068d60e2cc12dbc3d0d177cc2311475eac261147a",
+        "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model-v620b/gfx1030-12B-17x17-current-default.json",
+        "metrics": {
+          "prefill_tokens_per_second": {
+            "median": 12.719328014617135,
+            "min": 12.658083331056057,
+            "max": 12.72565253393998,
+            "mad": 0.00632451932284539,
+            "count": 3
+          },
+          "decode_tokens_per_second": {
+            "median": 1.569656424014254,
+            "min": 1.527635651993614,
+            "max": 1.577258528812959,
+            "mad": 0.007602104798704934,
+            "count": 3
+          },
+          "ttft_ns": {
+            "median": 1344221423,
+            "min": 1343769986,
+            "max": 1351603315,
+            "mad": 451437,
+            "count": 3
+          }
+        }
+      },
+      {
+        "arm": "current-w4a4-baseline",
+        "selector": {
+          "SLLM_NVFP4_W4A4_FORCE_BASELINE": "1"
+        },
+        "exit_code": 0,
+        "state": "PASS",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_identity": {
+          "model_size": "12B",
+          "repo_id": "google/gemma-4-12B-it",
+          "resolved_revision": "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7",
+          "lock_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d"
+        },
+        "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+        "plan_digest": "sha256:0ac901b2988a3461ace05cbbf29da4d8b87000cc853e9bd084588a7a0865dd2c",
+        "binary_sha256": "497526210a20b97f8399485180f2b0f12d24e15fde8930f5ca27842117d88be6",
+        "model_sha256": "4e0410c6afa45daef0a723c5adc7ab89c410c1f106d199b1c3c023c15e902fb5",
+        "lock_sha256": "ed99cdd9566b3611998a2571d37021aa3ce63afb3068f1be9efa7b590710d98c",
+        "token_digests": [
+          "e8122e692f241e4782a21bb08ca1c5439a599494dd5999ee3a05cb414831b8be",
+          "e8122e692f241e4782a21bb08ca1c5439a599494dd5999ee3a05cb414831b8be",
+          "e8122e692f241e4782a21bb08ca1c5439a599494dd5999ee3a05cb414831b8be",
+          "e8122e692f241e4782a21bb08ca1c5439a599494dd5999ee3a05cb414831b8be"
+        ],
+        "prefill_tokens_per_second_median": 11.81155043415622,
+        "decode_tokens_per_second_median": 1.585338116005274,
+        "ttft_ns_median": 1446882103,
+        "e2e_ns_median": 11539554908,
+        "kernel_dispatch_counts": [
+          23358
+        ],
+        "selected_backends": [
+          "hip"
+        ],
+        "all_dispatches_hip": true,
+        "fallback_used": false,
+        "cleanup_retryable": [
+          0
+        ],
+        "cleanup_quarantine": [
+          0
+        ],
+        "cleanup_request_dropped": true,
+        "cleanup_allocator_validated": true,
+        "after_cleanup_request_bytes": [
+          0
+        ],
+        "after_cleanup_workspace_bytes": [
+          0
+        ],
+        "peak_vram_bytes": 9408695728,
+        "tokens_match_default": true,
+        "generated_tokens_match_default": true,
+        "raw_sha256": "8aba9ff3dde43738aac64cbb74d25144af7b251e0314dc73931705d8ea60eb4a",
+        "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model-v620b/gfx1030-12B-17x17-current-w4a4-baseline.json",
+        "metrics": {
+          "prefill_tokens_per_second": {
+            "median": 11.81155043415622,
+            "min": 11.809904380615945,
+            "max": 11.815691359201104,
+            "mad": 0.0016460535402753607,
+            "count": 3
+          },
+          "decode_tokens_per_second": {
+            "median": 1.585338116005274,
+            "min": 1.5793818996068234,
+            "max": 1.5890609781179714,
+            "mad": 0.003722862112697456,
+            "count": 3
+          },
+          "ttft_ns": {
+            "median": 1446882103,
+            "min": 1446426598,
+            "max": 1447068677,
+            "mad": 186574,
+            "count": 3
+          }
+        }
+      },
+      {
+        "arm": "current-w4a4-dp4a",
+        "selector": {
+          "SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A": "1"
+        },
+        "exit_code": 0,
+        "state": "PASS",
+        "target": "gfx1030",
+        "device_index": 0,
+        "model_identity": {
+          "model_size": "12B",
+          "repo_id": "google/gemma-4-12B-it",
+          "resolved_revision": "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7",
+          "lock_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d"
+        },
+        "model_fingerprint": "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+        "plan_digest": "sha256:0ac901b2988a3461ace05cbbf29da4d8b87000cc853e9bd084588a7a0865dd2c",
+        "binary_sha256": "497526210a20b97f8399485180f2b0f12d24e15fde8930f5ca27842117d88be6",
+        "model_sha256": "4e0410c6afa45daef0a723c5adc7ab89c410c1f106d199b1c3c023c15e902fb5",
+        "lock_sha256": "ed99cdd9566b3611998a2571d37021aa3ce63afb3068f1be9efa7b590710d98c",
+        "token_digests": [
+          "72a636581d4f3d519b0d9eaaf3cbebd42d064ac513b2fb72667e3aca66f35765",
+          "72a636581d4f3d519b0d9eaaf3cbebd42d064ac513b2fb72667e3aca66f35765",
+          "72a636581d4f3d519b0d9eaaf3cbebd42d064ac513b2fb72667e3aca66f35765",
+          "72a636581d4f3d519b0d9eaaf3cbebd42d064ac513b2fb72667e3aca66f35765"
+        ],
+        "prefill_tokens_per_second_median": 79.90174191390494,
+        "decode_tokens_per_second_median": 1.5725190007520002,
+        "ttft_ns_median": 220864744,
+        "e2e_ns_median": 10392880241,
+        "kernel_dispatch_counts": [
+          23358
+        ],
+        "selected_backends": [
+          "hip"
+        ],
+        "all_dispatches_hip": true,
+        "fallback_used": false,
+        "cleanup_retryable": [
+          0
+        ],
+        "cleanup_quarantine": [
+          0
+        ],
+        "cleanup_request_dropped": true,
+        "cleanup_allocator_validated": true,
+        "after_cleanup_request_bytes": [
+          0
+        ],
+        "after_cleanup_workspace_bytes": [
+          0
+        ],
+        "peak_vram_bytes": 9408695728,
+        "tokens_match_default": false,
+        "generated_tokens_match_default": false,
+        "raw_sha256": "341c7f065b0e9afce8b5508d910216e18138c7046ad8444eb9d8fb66def164a1",
+        "raw_path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase78-nvfp4-cross-model-v620b/gfx1030-12B-17x17-current-w4a4-dp4a.json",
+        "metrics": {
+          "prefill_tokens_per_second": {
+            "median": 79.90174191390494,
+            "min": 79.26205756216702,
+            "max": 80.83897541829414,
+            "mad": 0.6396843517379267,
+            "count": 3
+          },
+          "decode_tokens_per_second": {
+            "median": 1.5725190007520002,
+            "min": 1.547776630304767,
+            "max": 1.5766062623591803,
+            "mad": 0.004087261607180093,
+            "count": 3
+          },
+          "ttft_ns": {
+            "median": 220864744,
+            "min": 218120241,
+            "max": 222174507,
+            "mad": 1309763,
+            "count": 3
+          }
+        }
+      }
+    ],
+    "all_states_pass": true,
+    "all_hip_no_fallback": true,
+    "all_cleanup_zero": true
+  },
+  "validation": {
+    "completed_gpu_runs": 17,
+    "warmup_requests": 17,
+    "measured_requests": 51,
+    "hip_only": true,
+    "fallback_used": false,
+    "per_run_repeat_tokens_equal": true,
+    "request_workspace_model_cleanup_zero": true,
+    "cross_version_tokens_equal_in_all_rows": false,
+    "quality_equivalence_claimed": false,
+    "new_default_adopted": false
+  }
+}
