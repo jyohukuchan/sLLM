@@ -2879,7 +2879,42 @@
       "h3-compile-only",
       "h3-public-runtime-compile-only"
     ],
-    "identity_rule": "Inspect runs for the final published HEAD; local GPU evidence is separate from CPU/compile-only CI. Documentation commit does not change implementation inputs."
+    "identity_rule": "Inspect runs for the final published HEAD; local GPU evidence is separate from CPU/compile-only CI. Documentation commit does not change implementation inputs.",
+    "first_attempt": {
+      "head": "c2d96352a9bb463550670c9c979f450fce039777",
+      "host_run_url": "https://github.com/jyohukuchan/sLLM/actions/runs/34194001351",
+      "host_state": "FAIL",
+      "diagnostic": "Only validate_json_manifests.py failed: source hash drift native/hip/src/public_runtime.hip.cpp in separate RMSNorm H3 inventory; other 39 H0 commands PASS, H1/H2 PASS. No OOM/timeout.",
+      "h0_duration_seconds": 553.77878,
+      "h0_report_sha256": "5564b6411f95748a61284a29d643dcde0b177ea00bc62441a3ad1ec482ec2267",
+      "h3_runs": [
+        {
+          "url": "https://github.com/jyohukuchan/sLLM/actions/runs/34194001390",
+          "state": "PASS"
+        },
+        {
+          "url": "https://github.com/jyohukuchan/sLLM/actions/runs/34194001409",
+          "state": "PASS"
+        }
+      ],
+      "fix": {
+        "manifest": "ci/matrix/rmsnorm-h3-compile-v1.json",
+        "source_sets": [
+          "host_abi",
+          "binding_build",
+          "ci_contract"
+        ],
+        "updated_source_hashes": [
+          "native/hip/src/public_runtime.hip.cpp",
+          "crates/sllm-hip-sys/build.rs",
+          "native/hip/CMakeLists.txt",
+          "ci/tools/run_h3_public_runtime_compile.py",
+          "ci/matrix/hip-runtime-compile-v1.json"
+        ],
+        "local_validation": "python3 ci/tools/validate_json_manifests.py: PASS",
+        "runtime_source_changed": false
+      }
+    }
   },
   "committed_source_verification": {
     "gfx1030": {

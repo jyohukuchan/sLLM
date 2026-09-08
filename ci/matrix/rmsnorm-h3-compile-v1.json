@@ -59,7 +59,7 @@
         },
         {
           "path": "native/hip/src/public_runtime.hip.cpp",
-          "sha256": "ce2824405cd4b0383b6fc59035ef063e315defa06e29ea3949033144c2ec927a"
+          "sha256": "574d1fc4a426bc3189ae18a8c407c7f359c20a62a1ea13ed34b78219013d2f29"
         },
         {
           "path": "native/hip/src/public_runtime_internal.hpp",
@@ -74,7 +74,7 @@
           "sha256": "62675cd693719f711541768a2f52182fdc22a98fc70d21fe66f6ea041df4be19"
         }
       ],
-      "source_set_sha256": "c950e0adc8f6ba3758b158886c5ec93d586f0fff5fe10ae4ad3a8ab3aa1868e5"
+      "source_set_sha256": "66742dabb61ec43e0af4ebdfcb63ffa3eccd12e6f7cb2328900068cd7352b1db"
     },
     "binding_build": {
       "canonical_order": [
@@ -87,7 +87,7 @@
       "files": [
         {
           "path": "crates/sllm-hip-sys/build.rs",
-          "sha256": "8f5cf4884bc19d4e96e721cd2188861a0c519a23ce7b435d7d6fbd42a1445706"
+          "sha256": "03d9baecaa57602b6b28265320127923738a59f14cac07e9a14dacd30823b3cb"
         },
         {
           "path": "crates/sllm-hip-sys/src/bindings.rs",
@@ -103,10 +103,10 @@
         },
         {
           "path": "native/hip/CMakeLists.txt",
-          "sha256": "105e67c8ab9f4a77acba2b778f3935476f0069398d42faf950c37ab84f2118e4"
+          "sha256": "a011936c29d89d4afd0976306a7d5eaf2f5fce644e1a480e29a768c046b2719e"
         }
       ],
-      "source_set_sha256": "ed88e450a97459f18dcbe0891c658fdc3ad751168e53eaca78d4fc0dc5ecc955"
+      "source_set_sha256": "e4d3e44ffed6cc580658383312efb6e1016ccc6c6037fc838c74d8af8b7263ea"
     },
     "ci_contract": {
       "canonical_order": [
@@ -152,11 +152,11 @@
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "6ccbb0803d6f458b9b2637fa8f27ebd0139100fc9248c8e06d15710574185f24"
+          "sha256": "b444bca7635017d7a8a9fa7f6764689d81927d35e9ed64be4048fc653e7bb68c"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "c0d82a743b5f96e1bc4acfc4f762d8eedabab6cff6a3cf4635a9ebec2dcd77ca"
+          "sha256": "71414a648a081247b61e7875f69bebc5eee427443fbca6cdb863b1e0b0ebd547"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -183,7 +183,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "388bb6b9afbd029259814e68270e235bcf92a097624d7b95f9432dac471723ba"
+      "source_set_sha256": "b6ec8bace944fb9ce3640d2d1029e704992c103455f4118b7e122ff9480db705"
     }
   },
   "source_symbol_map": [

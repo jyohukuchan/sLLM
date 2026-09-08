@@ -129,6 +129,16 @@ Phase82の削除範囲は、この棄却済み候補固有のkernel、selector�
 
 上記GPU証拠はV620の既存承認targetと記載したshapeに限る。GPU実行をしていないtarget／shape、全モデルの性能、rocBLAS selectorの既定経路については主張しない。source point、source hash、binary hash、実行条件、oracle、repeat、finite、cleanupは同reportに対応付けた。
 
+## 初回公開CIの修復
+
+初回公開HEAD `c2d96352`の2種類のHIP CIとhost h1／h2は成功したが、h0のJSON manifest検査が
+`source hash drift: native/hip/src/public_runtime.hip.cpp`で失敗した。別のRMSNorm用H3 manifestの同期漏れであり、
+h0の残り39コマンド（Clippy、MSRV、C++、依存関係等）は成功、メモリ不足・timeoutではなかった。
+`ci/matrix/rmsnorm-h3-compile-v1.json`のhost_abi／binding_build／ci_contractの3集合、5ファイルのhashと集合hashを同期した。
+失敗したJSON・schema・manifest検査はローカルで全て成功し、修正を再pushして最終HEADのCIを再確認する。
+過去のGPU evidenceを新sourceのPASSへ書き換える修正ではなく、compile-onlyの入力hash更新である。
+[初回host CI](https://github.com/jyohukuchan/sLLM/actions/runs/34194001351)の失敗と修正理由を測定記録へ保持する。
+
 ## commitと証拠の対応
 
 実装・削除・検査コードのcommitは`fff63c574f1ffa7541efbef5c02e91b856db4a7d`
