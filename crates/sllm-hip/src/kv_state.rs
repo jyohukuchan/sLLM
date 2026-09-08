@@ -2072,27 +2072,6 @@ fn scaled_prefill_gemm_enabled(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn long_prefill_v2_enabled(
-    expected_target: Option<&str>,
-    query_count: u64,
-    query_heads: u32,
-    kv_heads: u32,
-    head_dim: u32,
-    encoding: KvCacheEncoding,
-    opt_in: Option<&std::ffi::OsStr>,
-    force_baseline: bool,
-) -> bool {
-    !force_baseline
-        && expected_target == Some("gfx1030")
-        && opt_in.is_some_and(|value| value == "1")
-        && query_count >= 1024
-        && query_heads == 16
-        && kv_heads == 4
-        && head_dim == 256
-        && encoding == KvCacheEncoding::Fp16
-}
-
-#[allow(clippy::too_many_arguments)]
 fn gqa6_qtile4_fp16_key_tile_enabled(
     expected_target: Option<&str>,
     query_count: u64,
@@ -2608,17 +2587,6 @@ fn validate_causal_attention_info(
     let use_prefill_gqa6_qtile4_k32_fp16 = gqa6_qtile4_fp16_key_tile == Some(32);
     let scaled_prefill_opt_in =
         std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM");
-    let long_prefill_v2_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_LONG_PREFILL_V2");
-    let use_long_prefill_v2 = long_prefill_v2_enabled(
-        expected_target,
-        query_count,
-        query_heads,
-        descriptor.layout().heads() as u32,
-        descriptor.layout().head_dim() as u32,
-        descriptor.cache_encoding(),
-        long_prefill_v2_opt_in.as_deref(),
-        force_baseline,
-    );
     let use_scaled_prefill_gemm = scaled_prefill_gemm_enabled(
         expected_target,
         query_count,
@@ -2628,46 +2596,10 @@ fn validate_causal_attention_info(
         descriptor.cache_encoding(),
         scaled_prefill_opt_in.as_deref(),
         force_baseline,
-    ) && !use_long_prefill_v2;
-    let phase66_prefill_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_PHASE66_TILED_PREFILL");
-    let phase66_prefill_requested = phase66_prefill_opt_in
-        .as_deref()
-        .is_some_and(|value| value == "1");
-    let phase66_encoding = matches!(
-        descriptor.cache_encoding(),
-        KvCacheEncoding::Fp16 | KvCacheEncoding::Mxfp8E4
     );
-    let phase66_shape = expected_target == Some("gfx1201")
-        && query_heads == 16
-        && descriptor.layout().heads() == 4
-        && descriptor.layout().head_dim() == 256
-        && phase66_encoding;
-    let phase66_q4k1_control =
-        phase66_prefill_requested && phase66_shape && query_count >= 64 && !force_baseline;
-    let phase66_query_tile = if phase66_prefill_requested
-        && phase66_shape
-        && query_count >= 128
-        && committed_kv_length >= query_count
-        && !force_baseline
-    {
-        Some(if committed_kv_length >= 2_048 {
-            8_u64
-        } else {
-            4_u64
-        })
-    } else {
-        None
-    };
-    let phase66_key_tile = phase66_query_tile.map(|_| {
-        if committed_kv_length >= 512 {
-            8_u64
-        } else {
-            4_u64
-        }
-    });
     let use_prefill_gqa4_qtile4 = !use_any_gqa6_rocblas_f32
         && ((use_prefill_gqa4
-            && (query_count >= 128 || phase66_q4k1_control)
+            && query_count >= 128
             && !force_baseline
             && !use_scaled_prefill_gemm)
             || use_prefill_gqa6_qtile4
@@ -2761,11 +2693,6 @@ fn validate_causal_attention_info(
                 "sllm_causal_attention_decode_wave8_split_v5",
             )
         }
-    } else if use_long_prefill_v2 {
-        (
-            "causal_attention.prefill.gfx1030_qtile8_split.v2",
-            "sllm_causal_attention_prefill_gfx1030_qtile8_split_v2",
-        )
     } else if use_gfx1201_gqa6_rocblas_f16_tail {
         (
             "causal_attention.prefill.gfx1201_rocblas_gqa6_f16_tail.v1",
@@ -2785,21 +2712,6 @@ fn validate_causal_attention_info(
         (
             "causal_attention.prefill.gfx1030_hipblas_scaled_fp16.v1",
             "sllm_causal_attention_prefill_gfx1030_hipblas_scaled_fp16_v1",
-        )
-    } else if phase66_query_tile == Some(4) && phase66_key_tile == Some(4) {
-        (
-            "causal_attention.prefill.typed_q4k4.v1",
-            "sllm_causal_attention_prefill_typed_q4k4_v1",
-        )
-    } else if phase66_query_tile == Some(4) && phase66_key_tile == Some(8) {
-        (
-            "causal_attention.prefill.typed_q4k8.v1",
-            "sllm_causal_attention_prefill_typed_q4k8_v1",
-        )
-    } else if phase66_query_tile == Some(8) && phase66_key_tile == Some(8) {
-        (
-            "causal_attention.prefill.typed_q8k8.v1",
-            "sllm_causal_attention_prefill_typed_q8k8_v1",
         )
     } else if use_prefill_gqa4_qtile4 {
         if use_prefill_gqa6_qtile4_k4_fp16 {
@@ -2870,7 +2782,6 @@ fn validate_causal_attention_info(
                 || use_decode_gqa6_split_p128
                 || use_decode_gqa6_split_p64
                 || use_decode_gqa6_split_p32
-                || use_long_prefill_v2
             {
                 2
             } else {
@@ -2905,21 +2816,6 @@ fn validate_causal_attention_info(
                 query_count
                     .checked_add(255)
                     .and_then(|value| (value / 256).checked_mul(descriptor.layout().heads() as u64))
-                    .and_then(|value| u32::try_from(value).ok())
-            } else if use_long_prefill_v2 {
-                query_count
-                    .checked_add(7)
-                    .and_then(|value| {
-                        (value / 8)
-                            .checked_mul((descriptor.layout().heads() as u64).checked_mul(16)?)
-                    })
-                    .and_then(|value| u32::try_from(value).ok())
-            } else if let Some(query_tile) = phase66_query_tile {
-                query_count
-                    .checked_add(query_tile - 1)
-                    .and_then(|value| {
-                        (value / query_tile).checked_mul(descriptor.layout().heads() as u64)
-                    })
                     .and_then(|value| u32::try_from(value).ok())
             } else if use_prefill_gqa6_blocksoftmax_q8 {
                 query_count
@@ -3413,16 +3309,6 @@ mod tests {
                     opt_in,
                     false,
                 ));
-                assert!(!long_prefill_v2_enabled(
-                    Some("gfx942"),
-                    query_count,
-                    16,
-                    4,
-                    256,
-                    KvCacheEncoding::Fp16,
-                    opt_in,
-                    false,
-                ));
             }
         }
 
@@ -3462,16 +3348,6 @@ mod tests {
             true,
         ));
         assert!(!scaled_prefill_gemm_enabled(
-            Some("gfx942"),
-            1024,
-            16,
-            4,
-            256,
-            KvCacheEncoding::Fp16,
-            Some(std::ffi::OsStr::new("1")),
-            true,
-        ));
-        assert!(!long_prefill_v2_enabled(
             Some("gfx942"),
             1024,
             16,
@@ -3925,7 +3801,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_gqa6_split_p64_guard_is_explicit_opt_in_target_scoped_and_force_safe() {
+    fn decode_gqa6_split_p64_guard_requires_explicit_opt_in_and_rollback() {
         let enabled = Some(std::ffi::OsStr::new("1"));
         assert!(decode_gqa6_split_p64_enabled(
             Some("gfx1030"),
@@ -3949,6 +3825,32 @@ mod tests {
             enabled,
             false,
         ));
+        for (target, committed_kv_length) in [(Some("gfx1030"), 8192), (Some("gfx1201"), 4096)] {
+            assert!(!decode_gqa6_split_p64_enabled(
+                target,
+                1,
+                committed_kv_length,
+                24,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                None,
+                false,
+            ));
+            for opt_in in ["0", "unknown"] {
+                assert!(!decode_gqa6_split_p64_enabled(
+                    target,
+                    1,
+                    committed_kv_length,
+                    24,
+                    4,
+                    256,
+                    KvCacheEncoding::Fp16,
+                    Some(std::ffi::OsStr::new(opt_in)),
+                    false,
+                ));
+            }
+        }
         assert!(!decode_gqa6_split_p64_enabled(
             Some("gfx1030"),
             1,
@@ -3960,27 +3862,10 @@ mod tests {
             enabled,
             false,
         ));
-        for opt_in in [
-            None,
-            Some(std::ffi::OsStr::new("0")),
-            Some(std::ffi::OsStr::new("unknown")),
-        ] {
-            assert!(!decode_gqa6_split_p64_enabled(
-                Some("gfx1030"),
-                1,
-                4096,
-                24,
-                4,
-                256,
-                KvCacheEncoding::Fp16,
-                opt_in,
-                false,
-            ));
-        }
         assert!(!decode_gqa6_split_p64_enabled(
             Some("gfx1030"),
             1,
-            4096,
+            8192,
             24,
             4,
             256,
@@ -4478,69 +4363,6 @@ mod tests {
             enabled,
             true,
         ));
-    }
-
-    #[test]
-    fn long_prefill_v2_guard_is_explicit_and_matches_native_shape() {
-        let enabled = Some(std::ffi::OsStr::new("1"));
-        for query_count in [1024, 4096, 10_001, 100_000] {
-            assert!(long_prefill_v2_enabled(
-                Some("gfx1030"),
-                query_count,
-                16,
-                4,
-                256,
-                KvCacheEncoding::Fp16,
-                enabled,
-                false,
-            ));
-        }
-        assert!(!long_prefill_v2_enabled(
-            Some("gfx1030"),
-            1024,
-            16,
-            4,
-            256,
-            KvCacheEncoding::Fp16,
-            None,
-            false,
-        ));
-        assert!(!long_prefill_v2_enabled(
-            Some("gfx1030"),
-            1024,
-            16,
-            4,
-            256,
-            KvCacheEncoding::Fp16,
-            enabled,
-            true,
-        ));
-        for (target, query_count, query_heads, kv_heads, head_dim, encoding) in [
-            (Some("gfx1201"), 1024, 16, 4, 256, KvCacheEncoding::Fp16),
-            (Some("gfx1030"), 1023, 16, 4, 256, KvCacheEncoding::Fp16),
-            (Some("gfx1030"), 1024, 8, 4, 256, KvCacheEncoding::Fp16),
-            (Some("gfx1030"), 1024, 16, 8, 256, KvCacheEncoding::Fp16),
-            (Some("gfx1030"), 1024, 16, 4, 128, KvCacheEncoding::Fp16),
-            (
-                Some("gfx1030"),
-                1024,
-                16,
-                4,
-                256,
-                KvCacheEncoding::Fp8E4M3Fn,
-            ),
-        ] {
-            assert!(!long_prefill_v2_enabled(
-                target,
-                query_count,
-                query_heads,
-                kv_heads,
-                head_dim,
-                encoding,
-                enabled,
-                false,
-            ));
-        }
     }
 
     #[test]

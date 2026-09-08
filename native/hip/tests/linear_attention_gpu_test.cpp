@@ -705,7 +705,7 @@ bool row32_lds_production_gpu_oracle() {
   };
 
   unsetenv(opt_in_name);
-  unsetenv(force_name);
+  setenv(force_name, "1", 1);
   sllm_linear_attention_desc_t baseline_descriptor =
       make_descriptor(baseline_state);
   sllm_linear_attention_dispatch_info_t baseline_dispatch{};
@@ -728,7 +728,8 @@ bool row32_lds_production_gpu_oracle() {
   if (!ok)
     return finish(false);
 
-  setenv(opt_in_name, "1", 1);
+  unsetenv(opt_in_name);
+  unsetenv(force_name);
   sllm_linear_attention_desc_t row_descriptor = make_descriptor(row_state);
   sllm_linear_attention_dispatch_info_t row_dispatch{};
   row_dispatch.struct_size = sizeof(row_dispatch);

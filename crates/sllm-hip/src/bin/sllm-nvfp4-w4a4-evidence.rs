@@ -25,14 +25,8 @@ const PREFILL_DP4A_KERNEL: &str = "matmul.nvfp4.w4a4.block16.prefill.dp4a64x64.v
 const PREFILL_DP4A_DEVICE: &str = "sllm_matmul_nvfp4_w4a4_block16_prefill_dp4a_64x64_v1";
 const PREFILL_GFX1201_WMMA_KERNEL: &str = "matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x64.v1";
 const PREFILL_GFX1201_WMMA_DEVICE: &str = "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_v1";
-const PREFILL_GFX1201_WMMA_F16SCALE_KERNEL: &str =
-    "matmul.nvfp4.w4a4.prefill.gfx1201.wmma_f16scale128x64.v1";
-const PREFILL_GFX1201_WMMA_F16SCALE_DEVICE: &str =
-    "sllm_nvfp4_w4a4_prefill_gfx1201_wmma_f16scale128x64_v1";
 const DECODE_KERNEL: &str = "matmul.nvfp4.w4a4.block16.decode.v1";
 const DECODE_DEVICE: &str = "sllm_matmul_nvfp4_w4a4_block16_decode_v1";
-const DECODE_COLUMNS128_KERNEL: &str = "matmul.nvfp4.w4a4.decode.columns128.v1";
-const DECODE_COLUMNS128_DEVICE: &str = "sllm_matmul_nvfp4_w4a4_decode_columns128_v1";
 const DECODE_WAVE4_KERNEL: &str = "matmul.nvfp4.w4a4.decode.dp4a.wave4col32.v1";
 const DECODE_WAVE4_DEVICE: &str = "sllm_matmul_nvfp4_w4a4_decode_dp4a_wave4col32_v1";
 const BASELINE_KERNEL: &str = "matmul.nvfp4.w4a4.block16.packed.v1";
@@ -418,27 +412,20 @@ fn run_case(
     let force_dp4a = env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A").as_deref() == Ok("1");
     let force_gfx1201_wmma =
         env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA").as_deref() == Ok("1");
-    let force_gfx1201_wmma_f16scale =
-        env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA_F16SCALE").as_deref() == Ok("1");
-    let force_decode_columns =
-        env::var("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_COLUMNS").as_deref() == Ok("1");
     let force_decode_wave4 =
         env::var("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4").as_deref() == Ok("1");
     let (expected_kernel_id, expected_kernel, expected_device) = if force_baseline {
         (11, BASELINE_KERNEL, BASELINE_DEVICE)
     } else if shape.m == 1 {
-        if force_decode_wave4
+        let wave4_default = env::var_os("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4").is_none()
+            && shape.k >= 1024
+            && shape.n >= 1024;
+        if (force_decode_wave4 || wave4_default)
             && matches!(target, "gfx1030" | "gfx1201")
             && (shape.k % 16 == 0)
             && shape.k <= 17_408
         {
             (67, DECODE_WAVE4_KERNEL, DECODE_WAVE4_DEVICE)
-        } else if force_decode_columns
-            && matches!(target, "gfx1030" | "gfx1201")
-            && (shape.k % 16 == 0)
-            && shape.k <= 17_408
-        {
-            (65, DECODE_COLUMNS128_KERNEL, DECODE_COLUMNS128_DEVICE)
         } else {
             (58, DECODE_KERNEL, DECODE_DEVICE)
         }
@@ -446,13 +433,6 @@ fn run_case(
         (59, PREFILL_KERNEL, PREFILL_DEVICE)
     } else if force_col8 {
         (61, PREFILL_COL8_KERNEL, PREFILL_COL8_DEVICE)
-    } else if force_gfx1201_wmma_f16scale && target == "gfx1201" && shape.m > 1 && shape.k % 16 == 0
-    {
-        (
-            69,
-            PREFILL_GFX1201_WMMA_F16SCALE_KERNEL,
-            PREFILL_GFX1201_WMMA_F16SCALE_DEVICE,
-        )
     } else if force_gfx1201_wmma && target == "gfx1201" && shape.k % 16 == 0 {
         (64, PREFILL_GFX1201_WMMA_KERNEL, PREFILL_GFX1201_WMMA_DEVICE)
     } else if force_dp4a && shape.k % 16 == 0 {

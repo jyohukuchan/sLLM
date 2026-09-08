@@ -1135,10 +1135,10 @@ fn request_memory_report(audit: &QwenRequestMemoryAudit) -> Result<RequestMemory
 }
 
 fn audit_report(audit: &QwenExecutionAudit) -> AuditReport {
-    const SELECTED_KERNELS: [(u32, &str); 32] = [
+    const SELECTED_KERNELS: [(u32, &str); 24] = [
         (5, "matmul.fp8.outer.hipblaslt.v1"),
         (6, "matmul.fp8.outer.emulation.v1"),
-        (11, "matmul.nvfp4.w4a4.block16.baseline.v1"),
+        (11, "matmul.nvfp4.w4a4.block16.packed.v1"),
         (58, "matmul.nvfp4.w4a4.block16.decode.v1"),
         (59, "matmul.nvfp4.w4a4.block16.prefill.row8_tiled256.v1"),
         (60, "matmul.fp8.outer.prefill.tiled16.v1"),
@@ -1149,15 +1149,9 @@ fn audit_report(audit: &QwenExecutionAudit) -> AuditReport {
         (62, "matmul.nvfp4.w4a4.block16.prefill.dp4a64x64.v1"),
         (63, "matmul.fp8.outer.prefill.gfx1030.half2.128x64.v1"),
         (64, "matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x64.v1"),
-        (65, "matmul.nvfp4.w4a4.decode.columns128.v1"),
         (66, "matmul.fp8.outer.decode.gfx1030.half2.wave4col32.v1"),
         (67, "matmul.nvfp4.w4a4.decode.dp4a.wave4col32.v1"),
         (68, "matmul.fp8.outer.decode.gfx1030.dword8.wave4col32.v1"),
-        (
-            69,
-            "matmul.nvfp4.w4a4.prefill.gfx1201.wmma_f16scale128x64.v1",
-        ),
-        (70, "matmul.fp8.outer.prefill.gfx1030.f16_staging.v1"),
         (71, "matmul.fp8.outer.prefill.gfx1030.half2.64x64.v1"),
         (72, "matmul.nvfp4.w4a4.prefill.gfx1201.f16_staging.v1"),
         (
@@ -1179,13 +1173,8 @@ fn audit_report(audit: &QwenExecutionAudit) -> AuditReport {
         ),
         (78, "causal_attention.decode.gqa6_split_p128.fp16.v1"),
         (79, "linear_attention.gdn.row32_lds.v1"),
-        (80, "matmul.nvfp4.w4a4.block16.prefill.dp4a64x64_k128.v1"),
-        (81, "matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x32.v1"),
         (82, "matmul.fp8.outer.decode.gfx1030.lds_lut.wave4col32.v1"),
-        (83, "matmul.nvfp4.w4a4.prefill.gfx1201.fp8_staging.v1"),
         (84, "matmul.nvfp4.w4a4.decode.scale_lut.v1"),
-        (85, "matmul.fp8.outer.prefill.gfx1030.lds_lut.64x64.v1"),
-        (86, "matmul.fp8.outer.prefill.gfx1030.f16_tile.v1"),
     ];
     AuditReport {
         selected_backend: audit.selected_backend(),
@@ -1400,7 +1389,7 @@ where
 }
 
 fn selector_environment() -> BTreeMap<String, Option<String>> {
-    const NAMES: [&str; 62] = [
+    const NAMES: [&str; 54] = [
         CHUNK_CAPACITY_ENV,
         "SLLM_MATMUL_FORCE_BASELINE",
         "SLLM_MATMUL_GFX1030_ROCBLAS_SOLUTION_445",
@@ -1408,13 +1397,8 @@ fn selector_environment() -> BTreeMap<String, Option<String>> {
         "SLLM_NVFP4_W4A4_FORCE_BASELINE",
         "SLLM_NVFP4_W4A4_PREFILL_FORCE_COL8",
         "SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A",
-        "SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A_K128",
         "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA",
-        "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA_128X32",
-        "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA_F16SCALE",
         "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_F16_STAGING",
-        "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_FP8_STAGING",
-        "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_COLUMNS",
         "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4",
         "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_ACTIVATION_SHARED",
         "SLLM_NVFP4_W4A4_DECODE_FORCE_LDS_F32_LUT",
@@ -1422,9 +1406,6 @@ fn selector_environment() -> BTreeMap<String, Option<String>> {
         "SLLM_FP8_OUTER_PREFILL_FORCE_BASELINE",
         "SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_HALF2",
         "SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_HALF2_64X64",
-        "SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_LDS_LUT",
-        "SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_F16_STAGING",
-        "SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_F16_TILE_STAGING",
         "SLLM_FP8_OUTER_DECODE_FORCE_BASELINE",
         "SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_HALF2",
         "SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_DWORD8",

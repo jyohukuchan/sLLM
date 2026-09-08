@@ -998,7 +998,7 @@ fn row32_lds_enabled(
 ) -> bool {
     !force_baseline
         && observed_target == Some("gfx1030")
-        && opt_in.is_some_and(|value| value == "1")
+        && opt_in.is_none_or(|value| value == "1")
         && token_count == 1
         && qk_heads == 16
         && value_heads == 48
@@ -1258,9 +1258,27 @@ mod tests {
     }
 
     #[test]
-    fn row32_lds_provider_is_exact_opt_in_shape_and_metadata() {
+    fn row32_lds_provider_default_scope_rollback_and_metadata() {
         let enabled = Some(std::ffi::OsStr::new("1"));
         let disabled = Some(std::ffi::OsStr::new("0"));
+        assert!(row32_lds_enabled(
+            Some("gfx1030"),
+            1,
+            16,
+            48,
+            128,
+            false,
+            None
+        ));
+        assert!(!row32_lds_enabled(
+            Some("gfx1030"),
+            1,
+            16,
+            48,
+            128,
+            false,
+            Some(std::ffi::OsStr::new("invalid"))
+        ));
         let row_layout = LinearAttentionLayout::new(16, 48, 128, 4).unwrap();
         let descriptor = sllm_core::LinearAttentionDescriptor::new(9, 1, 10).unwrap();
         assert!(row32_lds_enabled(
@@ -1333,8 +1351,19 @@ mod tests {
             .is_ok()
         );
 
-        // The same metadata is rejected when the provider is not explicitly
-        // enabled, which keeps rollback on the generic route fail-closed.
+        assert!(
+            validate_dispatch_with_all_opt_ins(
+                &info,
+                descriptor,
+                row_layout,
+                Some("gfx1030"),
+                None,
+                None,
+                None,
+            )
+            .is_ok()
+        );
+        // Explicit rollback requires generic metadata.
         assert!(
             validate_dispatch_with_all_opt_ins(
                 &info,

@@ -9,11 +9,8 @@
 //
 // ID64 is the production FP8-WMMA control: it converts E2M1 to E4M3 exactly,
 // runs one K=16 MMA per scale domain, and applies the two block scales to the
-// FP32 contribution.  ID69 is the current FP16-WMMA baseline: scalar lanes
-// repeatedly load a packed source byte, decode one nibble, and absorb block
-// scales into FP16 LDS operands before MMA.
-//
-// The two candidates retain ID69's arithmetic order but replace its ingress.
+// FP32 contribution.  The two remaining candidates retain the FP16-WMMA
+// arithmetic order from the retired scalar baseline but replace its ingress.
 // One thread owns four adjacent E2M1 values, issues one aligned 16-bit load,
 // expands all four nibbles to two packed half2 values, broadcasts the E4M3
 // block scale to half2, and writes two adjacent dwords to LDS.  StageK=32 is
@@ -78,17 +75,15 @@ constexpr std::array<Shape, 6> kShapes = {{
     {1024U, 17408U, 5120U, 56U, "down-m1024"},
 }};
 
-enum class Variant : uint32_t { Id64, Id69, Vector32, Vector64 };
+enum class Variant : uint32_t { Id64, Vector32, Vector64 };
 
-constexpr std::array<Variant, 4> kVariants = {
-    Variant::Id64, Variant::Id69, Variant::Vector32, Variant::Vector64};
+constexpr std::array<Variant, 3> kVariants = {Variant::Id64, Variant::Vector32,
+                                              Variant::Vector64};
 
 const char *variant_name(const Variant variant) {
   switch (variant) {
   case Variant::Id64:
     return "id64-fp8-contribution-scale";
-  case Variant::Id69:
-    return "id69-scalar-fp16-ingress";
   case Variant::Vector32:
     return "vector-fp16-ingress-stagek32";
   case Variant::Vector64:
@@ -418,206 +413,6 @@ __global__ __launch_bounds__(kThreads, 1) void id64_control_kernel(
 #endif
 }
 
-// Current production ID69 candidate, retained byte-for-byte in its relevant
-// ingress and MMA ordering as the scalar baseline.
-__global__ __launch_bounds__(kThreads, 1) void id69_baseline_kernel(
-    const uint8_t *const packed_activation,
-    const uint8_t *const activation_block_scales,
-    const uint8_t *const packed_weight,
-    const uint8_t *const weight_block_scales,
-    const float *const weight_tensor_scale,
-    const float *const input_tensor_scale, uint16_t *const output,
-    const uint64_t m, const uint64_t k, const uint64_t n) {
-#if defined(__gfx1201__)
-  constexpr uint32_t wave_width = 32U;
-  constexpr uint32_t waves_per_workgroup = 8U;
-  constexpr uint32_t tile_m = 16U;
-  constexpr uint32_t tile_n = 16U;
-  constexpr uint32_t column_tiles = 4U;
-  constexpr uint32_t fragment_k = 16U;
-  constexpr uint32_t stage_k = 32U;
-  constexpr uint32_t scale_blocks_per_stage = stage_k / fragment_k;
-  constexpr uint32_t rows_per_workgroup = waves_per_workgroup * tile_m;
-  constexpr uint32_t columns_per_workgroup = column_tiles * tile_n;
-  constexpr uint32_t tile_values = tile_m * stage_k;
-  constexpr uint32_t output_values = tile_m * tile_n;
-  constexpr uint32_t activation_tile_values = waves_per_workgroup * tile_values;
-  constexpr uint32_t weight_tile_values = column_tiles * tile_values;
-  __shared__ __align__(4)
-      rocwmma::float16_t activation_tile[activation_tile_values];
-  __shared__ __align__(4) rocwmma::float16_t weight_tile[weight_tile_values];
-  __shared__ rocwmma::float16_t activation_scale_tile[waves_per_workgroup]
-                                                     [tile_m]
-                                                     [scale_blocks_per_stage];
-  __shared__ rocwmma::float16_t weight_scale_tile[column_tiles * tile_n]
-                                                 [scale_blocks_per_stage];
-  __shared__ float tensor_scale;
-  using AFragment =
-      rocwmma::fragment<rocwmma::matrix_a, tile_m, tile_n, fragment_k,
-                        rocwmma::float16_t, rocwmma::row_major>;
-  using BFragment =
-      rocwmma::fragment<rocwmma::matrix_b, tile_m, tile_n, fragment_k,
-                        rocwmma::float16_t, rocwmma::col_major>;
-  using AccumulatorFragment = rocwmma::fragment<rocwmma::accumulator, tile_m,
-                                                tile_n, fragment_k, float>;
-  const uint32_t thread = threadIdx.x;
-  const uint32_t lane = thread & (wave_width - 1U);
-  const uint32_t wave = thread / wave_width;
-  const uint64_t row_group_base =
-      static_cast<uint64_t>(blockIdx.y) * rows_per_workgroup;
-  const uint64_t row_tile_base =
-      row_group_base + static_cast<uint64_t>(wave) * tile_m;
-  const uint64_t column_base =
-      static_cast<uint64_t>(blockIdx.x) * columns_per_workgroup;
-  const uint64_t blocks_per_row = k / fragment_k;
-  const uint64_t stages =
-      (blocks_per_row + scale_blocks_per_stage - 1U) / scale_blocks_per_stage;
-  const uint64_t packed_row_bytes = k / 2U;
-  if (thread == 0U) {
-    tensor_scale = weight_tensor_scale[0] * input_tensor_scale[0];
-  }
-  AccumulatorFragment contributions[column_tiles];
-#pragma unroll
-  for (uint32_t column_tile = 0U; column_tile < column_tiles; ++column_tile) {
-    rocwmma::fill_fragment(contributions[column_tile], 0.0F);
-  }
-  for (uint64_t stage = 0U; stage < stages; ++stage) {
-    const uint64_t inner_base = stage * stage_k;
-    for (uint32_t index = thread;
-         index < waves_per_workgroup * tile_m * scale_blocks_per_stage;
-         index += blockDim.x) {
-      const uint32_t scale_block = index % scale_blocks_per_stage;
-      const uint32_t row_index = index / scale_blocks_per_stage;
-      const uint32_t source_wave = row_index / tile_m;
-      const uint32_t local_row = row_index - source_wave * tile_m;
-      const uint64_t row = row_group_base +
-                           static_cast<uint64_t>(source_wave) * tile_m +
-                           local_row;
-      const uint64_t block = stage * scale_blocks_per_stage + scale_block;
-      activation_scale_tile[source_wave][local_row][scale_block] =
-          row < m && block < blocks_per_row
-              ? static_cast<rocwmma::float16_t>(e4m3fn_to_float(
-                    activation_block_scales[row * blocks_per_row + block]))
-              : static_cast<rocwmma::float16_t>(0.0F);
-    }
-    for (uint32_t index = thread;
-         index < column_tiles * tile_n * scale_blocks_per_stage;
-         index += blockDim.x) {
-      const uint32_t scale_block = index % scale_blocks_per_stage;
-      const uint32_t local_column = index / scale_blocks_per_stage;
-      const uint64_t column = column_base + local_column;
-      const uint64_t block = stage * scale_blocks_per_stage + scale_block;
-      weight_scale_tile[local_column][scale_block] =
-          column < n && block < blocks_per_row
-              ? static_cast<rocwmma::float16_t>(e4m3fn_to_float(
-                    weight_block_scales[column * blocks_per_row + block]))
-              : static_cast<rocwmma::float16_t>(0.0F);
-    }
-    __syncthreads();
-    for (uint32_t index = thread; index < activation_tile_values;
-         index += blockDim.x) {
-      const uint32_t source_wave = index / tile_values;
-      const uint32_t tile_index = index - source_wave * tile_values;
-      const uint32_t local_row = tile_index / stage_k;
-      const uint32_t local_inner = tile_index - local_row * stage_k;
-      const uint64_t row = row_group_base +
-                           static_cast<uint64_t>(source_wave) * tile_m +
-                           local_row;
-      const uint64_t inner = inner_base + local_inner;
-      if (row < m && inner < k) {
-        const uint8_t packed = __builtin_nontemporal_load(
-            packed_activation + row * packed_row_bytes + inner / 2U);
-        const uint8_t code =
-            (inner & 1U) == 0U ? packed & UINT8_C(0x0f) : packed >> 4U;
-        const uint32_t scale_block = local_inner / fragment_k;
-        const float scale = static_cast<float>(
-            activation_scale_tile[source_wave][local_row][scale_block]);
-        activation_tile[index] =
-            static_cast<rocwmma::float16_t>(e2m1_to_float(code) * scale);
-      } else {
-        activation_tile[index] = static_cast<rocwmma::float16_t>(0.0F);
-      }
-    }
-    for (uint32_t index = thread; index < weight_tile_values;
-         index += blockDim.x) {
-      const uint32_t column_tile = index / tile_values;
-      const uint32_t tile_index = index - column_tile * tile_values;
-      const uint32_t local_column = tile_index / stage_k;
-      const uint32_t local_inner = tile_index - local_column * stage_k;
-      const uint64_t column = column_base +
-                              static_cast<uint64_t>(column_tile) * tile_n +
-                              local_column;
-      const uint64_t inner = inner_base + local_inner;
-      if (column < n && inner < k) {
-        const uint8_t packed = __builtin_nontemporal_load(
-            packed_weight + column * packed_row_bytes + inner / 2U);
-        const uint8_t code =
-            (inner & 1U) == 0U ? packed & UINT8_C(0x0f) : packed >> 4U;
-        const uint32_t scale_block = local_inner / fragment_k;
-        const float scale =
-            static_cast<float>(weight_scale_tile[column_tile * tile_n +
-                                                 local_column][scale_block]);
-        weight_tile[index] =
-            static_cast<rocwmma::float16_t>(e2m1_to_float(code) * scale);
-      } else {
-        weight_tile[index] = static_cast<rocwmma::float16_t>(0.0F);
-      }
-    }
-    __syncthreads();
-#pragma unroll
-    for (uint32_t scale_block = 0U; scale_block < scale_blocks_per_stage;
-         ++scale_block) {
-      AFragment activation_fragment;
-      rocwmma::load_matrix_sync(activation_fragment,
-                                activation_tile + wave * tile_values +
-                                    scale_block * fragment_k,
-                                stage_k);
-#pragma unroll
-      for (uint32_t column_tile = 0U; column_tile < column_tiles;
-           ++column_tile) {
-        BFragment weight_fragment;
-        rocwmma::load_matrix_sync(weight_fragment,
-                                  weight_tile + column_tile * tile_values +
-                                      scale_block * fragment_k,
-                                  stage_k);
-        rocwmma::mma_sync(contributions[column_tile], activation_fragment,
-                          weight_fragment, contributions[column_tile]);
-      }
-    }
-    __syncthreads();
-  }
-#pragma unroll
-  for (uint32_t column_tile = 0U; column_tile < column_tiles; ++column_tile) {
-    const auto contribution_row_major =
-        rocwmma::apply_data_layout<rocwmma::row_major>(
-            contributions[column_tile]);
-#pragma unroll
-    for (uint32_t slot = 0U; slot < output_values / wave_width; ++slot) {
-      const uint32_t local_row =
-          (lane / tile_n) * (output_values / wave_width) + slot;
-      const uint32_t local_column = lane % tile_n;
-      const uint64_t row = row_tile_base + local_row;
-      const uint64_t column = column_base + column_tile * tile_n + local_column;
-      if (row < m && column < n) {
-        output[row * n + column] =
-            bf16_rne(contribution_row_major[slot] * tensor_scale);
-      }
-    }
-  }
-#else
-  (void)packed_activation;
-  (void)activation_block_scales;
-  (void)packed_weight;
-  (void)weight_block_scales;
-  (void)weight_tensor_scale;
-  (void)input_tensor_scale;
-  (void)output;
-  (void)m;
-  (void)k;
-  (void)n;
-#endif
-}
-
 template <uint32_t StageK>
 __global__ __launch_bounds__(kThreads, 1) void vector_ingress_kernel(
     const uint8_t *const packed_activation,
@@ -844,7 +639,7 @@ struct Measurement final {
 
 struct ShapeResult final {
   Shape shape{};
-  std::array<Measurement, 4> measurements;
+  std::array<Measurement, kVariants.size()> measurements;
 };
 
 struct CleanupTotals final {
@@ -1073,8 +868,6 @@ const void *kernel_pointer(const Variant variant) {
   switch (variant) {
   case Variant::Id64:
     return reinterpret_cast<const void *>(id64_control_kernel);
-  case Variant::Id69:
-    return reinterpret_cast<const void *>(id69_baseline_kernel);
   case Variant::Vector32:
     return reinterpret_cast<const void *>(vector_ingress_kernel<32U>);
   case Variant::Vector64:
@@ -1127,13 +920,6 @@ bool launch(const Variant variant, const Shape &shape,
   switch (variant) {
   case Variant::Id64:
     hipLaunchKernelGGL(id64_control_kernel, grid, block, 0U, buffers.stream,
-                       buffers.activation, buffers.activation_scales,
-                       buffers.weight, buffers.weight_scales,
-                       buffers.weight_tensor_scale, buffers.input_tensor_scale,
-                       buffers.output, shape.m, shape.k, shape.n);
-    break;
-  case Variant::Id69:
-    hipLaunchKernelGGL(id69_baseline_kernel, grid, block, 0U, buffers.stream,
                        buffers.activation, buffers.activation_scales,
                        buffers.weight, buffers.weight_scales,
                        buffers.weight_tensor_scale, buffers.input_tensor_scale,
@@ -1437,24 +1223,15 @@ bool run_shape(const Shape &shape, const bool run_stage64,
       }
     }
     const auto &id64 = result->measurements[variant_index(Variant::Id64)];
-    const auto &id69 = result->measurements[variant_index(Variant::Id69)];
     const auto &vector32 =
         result->measurements[variant_index(Variant::Vector32)];
-    const Comparison id64_id69 = compare(id64.output, id69.output);
     const Comparison id64_vector32 = compare(id64.output, vector32.output);
-    const Comparison id69_vector32 = compare(id69.output, vector32.output);
-    print_comparison(shape, "id64-vs-id69", id64_id69);
     print_comparison(shape, "id64-vs-vector32", id64_vector32);
-    print_comparison(shape, "id69-vs-vector32", id69_vector32);
-    ok = id69_vector32.mismatches == 0U && ok;
     const auto &vector64 =
         result->measurements[variant_index(Variant::Vector64)];
     if (vector64.ran) {
       const Comparison id64_vector64 = compare(id64.output, vector64.output);
-      const Comparison id69_vector64 = compare(id69.output, vector64.output);
       print_comparison(shape, "id64-vs-vector64", id64_vector64);
-      print_comparison(shape, "id69-vs-vector64", id69_vector64);
-      ok = id69_vector64.mismatches == 0U && ok;
     }
   }
   cleanup(&buffers, cleanup_totals);
@@ -1487,20 +1264,11 @@ void print_weighted_results(
       }
       return value;
     }();
-    const double id69_total = [&]() {
-      double value = 0.0;
-      for (const ShapeResult &result : results) {
-        value += result.measurements[variant_index(Variant::Id69)].median_us *
-                 result.shape.occurrences;
-      }
-      return value;
-    }();
     std::cout << "weighted variant=" << variant_name(variant)
               << " shapes=6 qwen_projection_weight=" << total_weight
               << " weighted_total_us=" << std::fixed << std::setprecision(3)
               << weighted_total_us << " weighted_mean_us=" << weighted_mean_us
-              << " speedup_vs_id64=" << id64_total / weighted_total_us
-              << " speedup_vs_id69=" << id69_total / weighted_total_us << "\n";
+              << " speedup_vs_id64=" << id64_total / weighted_total_us << "\n";
   }
   for (const uint64_t m : {UINT64_C(128), UINT64_C(512), UINT64_C(1024)}) {
     for (const Variant variant : kVariants) {
@@ -1559,7 +1327,7 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  std::array<ResourceInfo, 4> resources{};
+  std::array<ResourceInfo, kVariants.size()> resources{};
   for (const Variant variant : kVariants) {
     resources[variant_index(variant)] = resource_info(variant, properties);
     if (!resources[variant_index(variant)].available) {

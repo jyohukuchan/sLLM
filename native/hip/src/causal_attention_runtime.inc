@@ -123,14 +123,6 @@ constexpr uint64_t kDecodeGqa6SplitP128WorkspaceBytes =
     static_cast<uint64_t>(kDecodeGqa6SplitP128QHeads) *
     kDecodeGqa6SplitP128Partitions * (kDecodeGqa6SplitP128HeadDim + 2U) *
     sizeof(float);
-constexpr uint32_t kLongPrefillV2Partitions = 16U;
-constexpr uint32_t kLongPrefillV2ChunkRows = 256U;
-constexpr uint32_t kLongPrefillV2QHeads = 16U;
-constexpr uint32_t kLongPrefillV2HeadDim = 256U;
-constexpr uint64_t kLongPrefillV2WorkspaceBytes =
-    static_cast<uint64_t>(kLongPrefillV2ChunkRows) * kLongPrefillV2QHeads *
-    kLongPrefillV2Partitions * (kLongPrefillV2HeadDim + 2U) * sizeof(float);
-
 bool causal_scaled_prefill_workspace_bytes(const uint64_t key_length,
                                            uint64_t *const result) noexcept {
   if (result == nullptr || key_length == 0U ||
@@ -363,21 +355,6 @@ struct CausalAttentionProviderSelection final {
   bool use_gfx1201_gqa6_rocblas_f32;
   bool use_gfx1201_gqa6_rocblas_f16_tail;
   bool use_scaled_prefill_gemm;
-  bool use_long_prefill_v2;
-  ::sllm_causal_attention_kernel::PrefillTilePolicy prefill_tile_policy =
-      ::sllm_causal_attention_kernel::PrefillTilePolicy::Q4K1Control;
-};
-
-struct PrefillTileKey final {
-  const char *target;
-  uint32_t kv_encoding;
-  uint32_t query_heads;
-  uint32_t kv_heads;
-  uint32_t head_dim;
-  uint64_t query_count;
-  uint64_t context_length;
-  uint64_t sliding_window;
-  bool explicit_score_scale;
 };
 
 enum class Gqa6QTile4Fp16KeyTile : uint32_t {
@@ -415,26 +392,6 @@ Gqa6QTile4Fp16KeyTile select_gqa6_qtile4_fp16_key_tile(
     return Gqa6QTile4Fp16KeyTile::K32;
   }
   return Gqa6QTile4Fp16KeyTile::None;
-}
-
-::sllm_causal_attention_kernel::PrefillTilePolicy
-select_phase66_prefill_tile(const PrefillTileKey &key,
-                            const bool candidate_enabled) noexcept {
-  if (!candidate_enabled || std::strcmp(key.target, "gfx1201") != 0 ||
-      (key.kv_encoding != SLLM_HIP_KV_ENCODING_FP16_V1 &&
-       key.kv_encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) ||
-      key.query_heads != 16U || key.kv_heads != 4U ||
-      key.head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM ||
-      key.query_count < 128U || key.context_length < key.query_count ||
-      key.sliding_window != 0U || key.explicit_score_scale) {
-    return ::sllm_causal_attention_kernel::PrefillTilePolicy::Q4K1Control;
-  }
-  if (key.context_length >= 2048U) {
-    return ::sllm_causal_attention_kernel::PrefillTilePolicy::Q8K8;
-  }
-  return key.context_length >= 512U
-             ? ::sllm_causal_attention_kernel::PrefillTilePolicy::Q4K8
-             : ::sllm_causal_attention_kernel::PrefillTilePolicy::Q4K4;
 }
 
 CausalAttentionProviderSelection select_causal_attention_provider(
@@ -475,8 +432,6 @@ CausalAttentionProviderSelection select_causal_attention_provider(
       std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1201");
   const char *const gqa6_blocksoftmax_q8_gfx1201_opt_in =
       std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_Q8_GFX1201");
-  const char *const phase66_tiled_prefill_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_PHASE66_TILED_PREFILL");
   const char *const gqa6_qtile4_opt_in =
       std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_QTILE4");
   const char *const gqa6_qtile4_k4_fp16_opt_in =
@@ -633,21 +588,10 @@ CausalAttentionProviderSelection select_causal_attention_provider(
   const bool use_decode_wave_split_q_preload =
       use_decode_wave_split_q_preload_long ||
       use_decode_wave_split_short_q_preload;
-  const bool phase66_tiled_prefill_requested =
-      phase66_tiled_prefill_opt_in != nullptr &&
-      std::strcmp(phase66_tiled_prefill_opt_in, "1") == 0;
-  const bool phase66_q4k1_control =
-      phase66_tiled_prefill_requested &&
-      std::strcmp(arch_name, "gfx1201") == 0 &&
-      (encoding == SLLM_HIP_KV_ENCODING_FP16_V1 ||
-       encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) &&
-      metadata.query_count >= 64U && metadata.query.q_heads == 16U &&
-      kv_heads == 4U &&
-      metadata.query.head_dim == SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
   const bool use_prefill_gqa4_qtile4_control =
       allow_prefill_provider && use_phase33_common_provider &&
       !use_prefill_gqa6_blocksoftmax_q8 && !use_any_gqa6_rocblas_f32 &&
-      (metadata.query_count >= 128U || phase66_q4k1_control) &&
+      metadata.query_count >= 128U &&
       (metadata.query.q_heads / kv_heads == 4U ||
        (metadata.query.q_heads / kv_heads == 6U &&
         gqa6_qtile4_opt_in != nullptr &&
@@ -677,31 +621,8 @@ CausalAttentionProviderSelection select_causal_attention_provider(
       use_prefill_gqa4_qtile4_control || use_prefill_gqa6_qtile4_k4_fp16 ||
       use_prefill_gqa6_qtile4_k8_fp16 || use_prefill_gqa6_qtile4_k16_fp16 ||
       use_prefill_gqa6_qtile4_k32_fp16;
-  // Candidate-only typed tile policy. The key contains only target, KV
-  // encoding, GQA shape, head dimension, query/context boundaries and the
-  // attention semantics implemented by the candidate. Model, layer, prompt
-  // and measured performance never participate. Unset, invalid, or
-  // out-of-domain requests retain the existing q4k1 control path.
-  const bool use_phase66_tiled_prefill =
-      allow_prefill_provider && phase66_tiled_prefill_requested;
-  const ::sllm_causal_attention_kernel::PrefillTilePolicy prefill_tile_policy =
-      select_phase66_prefill_tile(
-          {arch_name, encoding, metadata.query.q_heads, kv_heads,
-           metadata.query.head_dim, metadata.query_count,
-           metadata.expected_kv_length, metadata.sliding_window,
-           metadata.explicit_score_scale},
-          use_phase66_tiled_prefill);
   const char *const scaled_prefill_opt_in =
       std::getenv("SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM");
-  const char *const long_prefill_v2_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GFX1030_LONG_PREFILL_V2");
-  const bool use_long_prefill_v2 =
-      allow_prefill_provider && std::strcmp(arch_name, "gfx1030") == 0 &&
-      long_prefill_v2_opt_in != nullptr &&
-      std::strcmp(long_prefill_v2_opt_in, "1") == 0 &&
-      metadata.query_count >= 1024U && metadata.query.q_heads == 16U &&
-      kv_heads == 4U && metadata.query.head_dim == 256U &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1;
   const bool scaled_prefill_encoding_enabled =
       (encoding == SLLM_HIP_KV_ENCODING_FP16_V1 &&
        (scaled_prefill_opt_in == nullptr ||
@@ -713,7 +634,7 @@ CausalAttentionProviderSelection select_causal_attention_provider(
       allow_prefill_provider && std::strcmp(arch_name, "gfx1030") == 0 &&
       scaled_prefill_encoding_enabled && metadata.query_count >= 1024U &&
       metadata.query.q_heads == 16U && kv_heads == 4U &&
-      metadata.query.head_dim == 256U && !use_long_prefill_v2;
+      metadata.query.head_dim == 256U;
   return {
       std::strcmp(arch_name, "gfx1201") == 0 &&
           (metadata.query_count == 1U || metadata.query_count >= 32U),
@@ -743,8 +664,6 @@ CausalAttentionProviderSelection select_causal_attention_provider(
       use_gfx1201_gqa6_rocblas_f32,
       use_gfx1201_gqa6_rocblas_f16_tail,
       use_scaled_prefill_gemm,
-      use_long_prefill_v2,
-      prefill_tile_policy,
   };
 }
 
@@ -791,11 +710,6 @@ void fill_causal_attention_dispatch_info(
   const bool use_any_gqa6_rocblas_f32 =
       use_gqa6_rocblas_f32 || use_gfx1201_gqa6_rocblas_f32;
   const bool use_scaled_prefill_gemm = selection.use_scaled_prefill_gemm;
-  const bool use_long_prefill_v2 = selection.use_long_prefill_v2;
-  const auto prefill_tile_policy = selection.prefill_tile_policy;
-  const bool use_typed_prefill =
-      prefill_tile_policy !=
-      ::sllm_causal_attention_kernel::PrefillTilePolicy::Q4K1Control;
   const bool sliding = metadata.sliding_window != 0U;
   const bool explicitly_scaled = metadata.explicit_score_scale;
   const uint32_t struct_size = info->struct_size;
@@ -815,7 +729,7 @@ void fill_causal_attention_dispatch_info(
       : use_any_gqa6_rocblas_f32        ? 7U
       : (use_decode_gqa4_split || use_decode_gqa4_split_p32 ||
          use_decode_gqa6_split_p128 || use_decode_gqa6_split_p64 ||
-         use_decode_gqa6_split_p32 || use_long_prefill_v2)
+         use_decode_gqa6_split_p32)
           ? 2U
           : 1U;
   info->kernel_id =
@@ -849,20 +763,10 @@ void fill_causal_attention_dispatch_info(
       : use_decode_gqa4_split     ? 4U * kDecodeGqa4SplitPartitions
       : use_decode_wave_split_fp16_pair
           ? metadata.query_count * metadata.query.q_heads
-      : use_long_prefill_v2 ? ((metadata.query_count + 7U) / 8U) * kv_heads *
-                                  kLongPrefillV2Partitions
       : use_any_gqa6_rocblas_f32
           ? static_cast<uint64_t>(kv_heads) * metadata.query_count * 6U
       : use_scaled_prefill_gemm
           ? ((metadata.query_count + 255U) / 256U) * kv_heads
-      : use_typed_prefill
-          ? ((metadata.query_count +
-              ::sllm_causal_attention_kernel::prefill_query_tile(
-                  prefill_tile_policy) -
-              1U) /
-             ::sllm_causal_attention_kernel::prefill_query_tile(
-                 prefill_tile_policy)) *
-                kv_heads
       : use_prefill_gqa6_blocksoftmax_q8
           ? (metadata.query_count + 7U) / 8U * kv_heads
       : (use_prefill_gqa4_qtile4 || use_prefill_gqa6_blocksoftmax)
@@ -930,8 +834,6 @@ void fill_causal_attention_dispatch_info(
                        kDecodeWaveSplitQPreloadLogicalKernelId
                  : ::sllm_causal_attention_kernel::
                        kDecodeWaveSplitLogicalKernelId)
-      : use_long_prefill_v2
-          ? ::sllm_causal_attention_kernel::kLongPrefillV2LogicalKernelId
       : use_gfx1201_gqa6_rocblas_f16_tail
           ? ::sllm_causal_attention_kernel::
                 kGfx1201Gqa6RocblasF16TailLogicalKernelId
@@ -941,15 +843,6 @@ void fill_causal_attention_dispatch_info(
           ? ::sllm_causal_attention_kernel::kGqa6RocblasF32LogicalKernelId
       : use_scaled_prefill_gemm
           ? ::sllm_causal_attention_kernel::kScaledPrefillGemmLogicalKernelId
-      : prefill_tile_policy ==
-              ::sllm_causal_attention_kernel::PrefillTilePolicy::Q4K4
-          ? ::sllm_causal_attention_kernel::kPrefillTypedQ4K4LogicalKernelId
-      : prefill_tile_policy ==
-              ::sllm_causal_attention_kernel::PrefillTilePolicy::Q4K8
-          ? ::sllm_causal_attention_kernel::kPrefillTypedQ4K8LogicalKernelId
-      : prefill_tile_policy ==
-              ::sllm_causal_attention_kernel::PrefillTilePolicy::Q8K8
-          ? ::sllm_causal_attention_kernel::kPrefillTypedQ8K8LogicalKernelId
       : use_prefill_gqa6_qtile4_k4_fp16
           ? ::sllm_causal_attention_kernel::
                 kPrefillGqa6QTile4K4Fp16LogicalKernelId
@@ -1005,8 +898,6 @@ void fill_causal_attention_dispatch_info(
                  ? ::sllm_causal_attention_kernel::
                        kDecodeWaveSplitQPreloadDeviceSymbol
                  : ::sllm_causal_attention_kernel::kDecodeWaveSplitDeviceSymbol)
-      : use_long_prefill_v2
-          ? ::sllm_causal_attention_kernel::kLongPrefillV2DeviceSymbol
       : use_gfx1201_gqa6_rocblas_f16_tail
           ? ::sllm_causal_attention_kernel::
                 kGfx1201Gqa6RocblasF16TailDeviceSymbol
@@ -1016,15 +907,6 @@ void fill_causal_attention_dispatch_info(
           ? ::sllm_causal_attention_kernel::kGqa6RocblasF32DeviceSymbol
       : use_scaled_prefill_gemm
           ? ::sllm_causal_attention_kernel::kScaledPrefillGemmDeviceSymbol
-      : prefill_tile_policy ==
-              ::sllm_causal_attention_kernel::PrefillTilePolicy::Q4K4
-          ? ::sllm_causal_attention_kernel::kPrefillTypedQ4K4DeviceSymbol
-      : prefill_tile_policy ==
-              ::sllm_causal_attention_kernel::PrefillTilePolicy::Q4K8
-          ? ::sllm_causal_attention_kernel::kPrefillTypedQ4K8DeviceSymbol
-      : prefill_tile_policy ==
-              ::sllm_causal_attention_kernel::PrefillTilePolicy::Q8K8
-          ? ::sllm_causal_attention_kernel::kPrefillTypedQ8K8DeviceSymbol
       : use_prefill_gqa6_qtile4_k4_fp16
           ? ::sllm_causal_attention_kernel::kPrefillGqa6QTile4K4Fp16DeviceSymbol
       : use_prefill_gqa6_qtile4_k8_fp16
@@ -1063,12 +945,10 @@ void fill_causal_attention_dispatch_info(
 // gqa4-p32, gqa6-p64, gqa6-p32, gqa6-blocksoftmax (bit 18),
 // gqa6-blocksoftmax-q8 (bit 19), gfx1030 gqa6-rocblas-f32 (bit 20),
 // gfx1201 gqa6-rocblas-f32 (bit 21), decode-q-preload,
-// prefill-gqa4, prefill-gqa4-qtile4,
-// scaled-prefill-gemm, long-prefill-v2, and gqa6-qtile4-k32-fp16 (bit 12).
+// prefill-gqa4, prefill-gqa4-qtile4, scaled-prefill-gemm,
+// and gqa6-qtile4-k32-fp16 (bit 12).
 // Bit 22 is the gfx1030-only GQA6 P128 decode provider.
 // Bits 13..15 contain the mutually-exclusive GQA6 FP16 K4/K8/K16 candidates.
-// Bits 10..11 contain the typed prefill tile policy (0=q4k1 control,
-// 1=q4k4, 2=q4k8, 3=q8k8).
 extern "C" uint32_t sllm_test_select_causal_attention_providers_with_semantics(
     const uint64_t expected_kv_length, const uint32_t query_count,
     const uint32_t query_heads, const uint32_t kv_heads,
@@ -1112,11 +992,9 @@ extern "C" uint32_t sllm_test_select_causal_attention_providers_with_semantics(
   mask |= selection.use_prefill_gqa6_qtile4_k8_fp16 ? (1U << 14U) : 0U;
   mask |= selection.use_prefill_gqa6_qtile4_k16_fp16 ? (1U << 15U) : 0U;
   mask |= selection.use_scaled_prefill_gemm ? (1U << 8U) : 0U;
-  mask |= selection.use_long_prefill_v2 ? (1U << 9U) : 0U;
   mask |= selection.use_gqa6_rocblas_f32 ? (1U << 20U) : 0U;
   mask |= selection.use_gfx1201_gqa6_rocblas_f32 ? (1U << 21U) : 0U;
   mask |= selection.use_decode_gqa6_split_p128 ? (1U << 22U) : 0U;
-  mask |= static_cast<uint32_t>(selection.prefill_tile_policy) << 10U;
   return mask;
 }
 
@@ -1438,19 +1316,6 @@ static sllm_status_t causal_attention_execute_impl(
                            "causal attention GQA split workspace prepare");
       }
       candidate->causal_scaled_prefill_plan_acquired = true;
-    } else if (selection.use_long_prefill_v2) {
-      const hipError_t plan_status = prepare_causal_workspace_plan_for_bytes(
-          context, queue, kLongPrefillV2WorkspaceBytes,
-          &scaled_prefill_workspace, &scaled_prefill_workspace_bytes);
-      if (plan_status != hipSuccess) {
-        execute_guard.disarm();
-        (void)rollback_reserved_causal_attention(state, queue, {query, output},
-                                                 error_sink);
-        return hip_failure(
-            error_sink, plan_status,
-            "causal attention long-prefill v2 workspace prepare");
-      }
-      candidate->causal_scaled_prefill_plan_acquired = true;
     } else if (selection.use_gqa6_rocblas_f32 ||
                selection.use_gfx1201_gqa6_rocblas_f32) {
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
@@ -1649,18 +1514,6 @@ static sllm_status_t causal_attention_execute_impl(
           state->encoding, state->static_key_scale, state->static_value_scale,
           scaled_prefill_workspace, scaled_prefill_workspace_bytes,
           queue->stream);
-    } else if (selection.use_long_prefill_v2) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      launch_status = hipErrorNotSupported;
-#else
-      launch_status = ::sllm_causal_attention_kernel::launch_long_prefill_v2(
-          query_pointer, state->key_buffer->device_pointer,
-          state->value_buffer->device_pointer, output_pointer,
-          static_cast<uint32_t>(metadata.query_count), metadata.start_position,
-          metadata.expected_kv_length, metadata.query.q_heads,
-          state->head_count, state->head_dim, scaled_prefill_workspace,
-          scaled_prefill_workspace_bytes, queue->stream);
-#endif
     } else if (selection.use_gqa6_rocblas_f32 ||
                selection.use_gfx1201_gqa6_rocblas_f32) {
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
@@ -1744,23 +1597,6 @@ static sllm_status_t causal_attention_execute_impl(
               metadata.start_position, metadata.query.q_heads,
               state->head_count, state->head_dim, state->static_key_scale,
               state->static_value_scale, key_tile, queue->stream);
-#endif
-    } else if (selection.prefill_tile_policy !=
-               ::sllm_causal_attention_kernel::PrefillTilePolicy::Q4K1Control) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      launch_status = hipErrorNotSupported;
-#else
-      launch_status = ::sllm_causal_attention_kernel::launch_typed_prefill(
-          query_pointer, state->key_buffer->device_pointer,
-          state->value_buffer->device_pointer, state->key_scale_plane.address,
-          state->value_scale_plane.address,
-          static_cast<const float *>(state->key_outer_scale_plane.address),
-          static_cast<const float *>(state->value_outer_scale_plane.address),
-          output_pointer, static_cast<uint32_t>(metadata.query_count),
-          metadata.start_position, metadata.query.q_heads, state->head_count,
-          state->head_dim, state->encoding, state->static_key_scale,
-          state->static_value_scale, selection.prefill_tile_policy,
-          queue->stream);
 #endif
     } else if (selection.use_decode_wave_split_fp16_pair) {
       launch_status =

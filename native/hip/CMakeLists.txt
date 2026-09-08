@@ -569,8 +569,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 src/public_runtime.hip.cpp src/matmul_runtime.inc
                 src/graph_span_runtime.inc
                 src/low_precision_matmul_provider.hpp
-                src/nvfp4_decode_scale_lut.inc src/fp8_prefill_lds_lut.inc
-                src/fp8_prefill_f16_tile_staging.inc
+                src/nvfp4_decode_scale_lut.inc
                 src/fp8_prefill_short_m32.inc
                 src/mlp_gate_up_silu_bundle_runtime.inc
                 src/qwen38_projection_pack_runtime.inc
@@ -653,8 +652,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
             DEPENDS src/matmul_kernel.hip.cpp src/matmul_kernel_internal.hpp
                 src/low_precision_block_codec.hpp
-                src/nvfp4_decode_scale_lut.inc src/fp8_prefill_lds_lut.inc
-                src/fp8_prefill_f16_tile_staging.inc
+                src/nvfp4_decode_scale_lut.inc
                 src/fp8_prefill_short_m32.inc
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"

@@ -1,11 +1,8 @@
 //! Focused numerical evidence for the public FP8 matmul path.
 //!
 //! gfx1201 consumes OCP E4M3FN, gfx942 consumes numerically converted CDNA3
-//! E4M3FNUZ, and gfx1030 uses software providers. Phase 78 candidate ID70
-//! expands exact OCP E4M3FN values into transient FP16, runs rocBLAS with FP32
-//! accumulation, then applies the outer-vector scales in a BF16 epilogue.
-//! ID71 is the direct gfx1030 64x64x32 half2 prefill candidate. CPU work is an
-//! oracle only.
+//! E4M3FNUZ, and gfx1030 uses software providers. ID71 is the direct
+//! gfx1030 64x64x32 half2 prefill provider. CPU work is an oracle only.
 
 use std::env;
 use std::process::ExitCode;
@@ -317,27 +314,15 @@ fn run_case(
         .map_err(|error| format!("prepare: {error}"))?;
     let benchmark = env::var("SLLM_FP8_BENCHMARK").as_deref() == Ok("1");
     let force_baseline = env::var("SLLM_FP8_OUTER_PREFILL_FORCE_BASELINE").as_deref() == Ok("1");
-    let force_f16_staging =
-        env::var("SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_F16_STAGING").as_deref() == Ok("1");
-    let f16_staging_candidate = target == "gfx1030"
-        && !force_baseline
-        && force_f16_staging
-        && shape.m >= 128
-        && (shape.m % 128 == 0)
-        && (1..=17_408).contains(&shape.k)
-        && (shape.k % 16 == 0)
-        && (1..=17_408).contains(&shape.n)
-        && (shape.n % 16 == 0);
     let force_half2_64x64 =
         env::var("SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_HALF2_64X64").as_deref() == Ok("1");
     let force_half2_128x64 =
         env::var("SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_HALF2").as_deref() == Ok("1");
     let half2_64x64_candidate = target == "gfx1030"
         && !force_baseline
-        && !f16_staging_candidate
         && shape.m > 1
         && (force_half2_64x64 || !(force_half2_128x64 && (shape.k % 2 == 0)));
-    let focused_prefill_candidate = f16_staging_candidate || half2_64x64_candidate;
+    let focused_prefill_candidate = half2_64x64_candidate;
     let warmups = if benchmark {
         if focused_prefill_candidate { 5 } else { 3 }
     } else {
@@ -385,8 +370,26 @@ fn run_case(
     let expected_kernel = if matches!(target, "gfx1201" | "gfx942") {
         5
     } else if shape.m == 1 {
+        let lut_tuple = matches!(
+            (shape.k, shape.n),
+            (5120, 17408) | (6144, 5120) | (5120, 10240) | (5120, 6144)
+        );
+        let lut_control = env::var("SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_LDS_LUT");
+        let implicit_decode = env::var_os("SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_DWORD8").is_none()
+            && env::var_os("SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_HALF2").is_none()
+            && env::var_os("SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_ACTIVATION_SHARED").is_none();
         if !force_decode_baseline
-            && force_decode_dword8
+            && (64..=17_408).contains(&shape.k)
+            && shape.k % 64 == 0
+            && (lut_control.as_deref() == Ok("1")
+                || (lut_control.is_err()
+                    && env::var_os("SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_LDS_LUT").is_none()
+                    && implicit_decode
+                    && lut_tuple))
+        {
+            82
+        } else if !force_decode_baseline
+            && (force_decode_dword8 || (implicit_decode && shape.k >= 128 && shape.n >= 64))
             && (64..=17_408).contains(&shape.k)
             && (shape.k % 64 == 0)
         {
@@ -402,8 +405,6 @@ fn run_case(
         }
     } else if force_baseline {
         6
-    } else if f16_staging_candidate {
-        70
     } else if half2_64x64_candidate {
         71
     } else if force_half2_128x64 && shape.k % 2 == 0 {
@@ -411,7 +412,7 @@ fn run_case(
     } else {
         60
     };
-    let expected_dispatch_count = if expected_kernel == 70 { 4 } else { 2 };
+    let expected_dispatch_count = 2;
     if dispatch.dispatch_count != expected_dispatch_count
         || dispatch.kernel_id != expected_kernel
         || dispatch.fallback_allowed
@@ -566,8 +567,6 @@ fn run(device_index: u32, target: String) -> Result<Report, String> {
                     n: 2560,
                 },
                 // Representative exact prefill shapes from the locked model.
-                // ID70 deliberately excludes the 248320-column vocabulary
-                // projection and any non-128-aligned prompt tail.
                 Shape {
                     m: 128,
                     k: 5120,
@@ -653,8 +652,6 @@ fn expected_native(cases: &[CaseReport]) -> bool {
 fn provider_name(cases: &[CaseReport]) -> &'static str {
     if expected_native(cases) {
         "hipblaslt-native"
-    } else if cases.iter().any(|case| case.kernel_id == 70) {
-        "f16-staging-rocblas"
     } else if cases.iter().any(|case| case.kernel_id == 71) {
         "gfx1030-half2-64x64-k32"
     } else {

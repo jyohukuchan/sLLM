@@ -31,11 +31,9 @@ bool short_column_state_shape_opt_in(
          head_dim == ::sllm_linear_attention_kernel::kHeadDim;
 }
 
-// The row32-LDS provider is deliberately opt-in. Unlike the historical short
-// column route, an unset variable must not change the production default: the
-// provider is an exact gfx1030 Qwen3.8 M=1 contract and has an explicit
-// rollback switch (set the variable to anything other than "1", or force the
-// generic path with SLLM_GDN_FORCE_BASELINE=1).
+// The row32-LDS provider is the default for its exact gfx1030 Qwen3.8 M=1
+// contract. Set the selector to anything other than "1" (including "0") or
+// force the generic path with SLLM_GDN_FORCE_BASELINE=1 to roll it back.
 bool row32_lds_state_opt_in(const uint64_t token_count, const uint32_t qk_heads,
                             const uint32_t value_heads, const uint32_t head_dim,
                             const char *const arch_name,
@@ -43,7 +41,7 @@ bool row32_lds_state_opt_in(const uint64_t token_count, const uint32_t qk_heads,
   const char *const opt_in =
       std::getenv("SLLM_LINEAR_ATTENTION_GFX1030_ROW32_LDS");
   return (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0) &&
-         opt_in != nullptr && std::strcmp(opt_in, "1") == 0 &&
+         (opt_in == nullptr || std::strcmp(opt_in, "1") == 0) &&
          token_count == 1U &&
          qk_heads == ::sllm_linear_attention_kernel::kRow32LdsQkHeads &&
          value_heads == ::sllm_linear_attention_kernel::kRow32LdsValueHeads &&

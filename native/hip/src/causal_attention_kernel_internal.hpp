@@ -95,18 +95,6 @@ constexpr const char *kPrefillGqa6BlockSoftmaxQ8Fp16LogicalKernelId =
     "causal_attention.prefill.gqa6_blocksoftmax_q8.fp16.v1";
 constexpr const char *kPrefillGqa6BlockSoftmaxQ8Fp16DeviceSymbol =
     "sllm_causal_attention_prefill_gqa6_blocksoftmax_q8_fp16_v1";
-constexpr const char *kPrefillTypedQ4K4LogicalKernelId =
-    "causal_attention.prefill.typed_q4k4.v1";
-constexpr const char *kPrefillTypedQ4K4DeviceSymbol =
-    "sllm_causal_attention_prefill_typed_q4k4_v1";
-constexpr const char *kPrefillTypedQ4K8LogicalKernelId =
-    "causal_attention.prefill.typed_q4k8.v1";
-constexpr const char *kPrefillTypedQ4K8DeviceSymbol =
-    "sllm_causal_attention_prefill_typed_q4k8_v1";
-constexpr const char *kPrefillTypedQ8K8LogicalKernelId =
-    "causal_attention.prefill.typed_q8k8.v1";
-constexpr const char *kPrefillTypedQ8K8DeviceSymbol =
-    "sllm_causal_attention_prefill_typed_q8k8_v1";
 constexpr const char *kScaledPrefillGemmLogicalKernelId =
     "causal_attention.prefill.gfx1030_hipblas_scaled_fp16.v1";
 constexpr const char *kScaledPrefillGemmDeviceSymbol =
@@ -123,31 +111,6 @@ constexpr const char *kGfx1201Gqa6RocblasF16TailLogicalKernelId =
     "causal_attention.prefill.gfx1201_rocblas_gqa6_f16_tail.v1";
 constexpr const char *kGfx1201Gqa6RocblasF16TailDeviceSymbol =
     "sllm_causal_attention_prefill_gfx1201_rocblas_gqa6_f16_tail_v1";
-constexpr const char *kLongPrefillV2LogicalKernelId =
-    "causal_attention.prefill.gfx1030_qtile8_split.v2";
-constexpr const char *kLongPrefillV2DeviceSymbol =
-    "sllm_causal_attention_prefill_gfx1030_qtile8_split_v2";
-
-enum class PrefillTilePolicy : uint32_t {
-  Q4K1Control = 0U,
-  Q4K4 = 1U,
-  Q4K8 = 2U,
-  Q8K8 = 3U,
-};
-
-constexpr uint32_t prefill_query_tile(const PrefillTilePolicy policy) noexcept {
-  return policy == PrefillTilePolicy::Q8K8 ? 8U : 4U;
-}
-
-hipError_t launch_typed_prefill(
-    const uint16_t *query, const void *key, const void *value,
-    const void *key_scales, const void *value_scales,
-    const float *key_outer_scales, const float *value_outer_scales,
-    uint16_t *output, uint32_t query_count, uint64_t start_position,
-    uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
-    float static_key_scale, float static_value_scale, PrefillTilePolicy policy,
-    hipStream_t stream) noexcept;
-
 hipError_t
 launch(const uint16_t *query, const void *key, const void *value,
        const void *key_scales, const void *value_scales,
@@ -237,12 +200,6 @@ hipError_t launch_gqa6_rocblas_f16_tail(
     uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
     void *workspace, uint64_t workspace_bytes, void *blas_handle,
     void *blas_mutex, hipStream_t stream) noexcept;
-
-hipError_t launch_long_prefill_v2(
-    const uint16_t *query, const void *key, const void *value, uint16_t *output,
-    uint32_t query_count, uint64_t start_position, uint64_t committed_kv_length,
-    uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim, void *workspace,
-    uint64_t workspace_bytes, hipStream_t stream) noexcept;
 
 hipError_t launch_decode_wave_split_fp16_pair(
     const uint16_t *query, const void *key, const void *value,

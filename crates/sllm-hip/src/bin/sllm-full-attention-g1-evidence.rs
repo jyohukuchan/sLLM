@@ -420,58 +420,6 @@ const PHASE49_SHORT_DECODE_CASES: [Case; 6] = [
     },
 ];
 
-// Phase66 typed prefill policy boundaries. With
-// SLLM_CAUSAL_ATTENTION_PHASE66_TILED_PREFILL=1 these rows select q4k4 at
-// [128, 512), q4k8 at [512, 2048), and q8k8 at [2048, ...). The 127 row is
-// the fail-closed lower-bound control.
-const PHASE66_PREFILL_CASES: [Case; 9] = [
-    Case {
-        id: "phase66-prefill-m127",
-        m: 127,
-        start_position: 0,
-    },
-    Case {
-        id: "phase66-prefill-m128",
-        m: 128,
-        start_position: 0,
-    },
-    Case {
-        id: "phase66-prefill-m129",
-        m: 129,
-        start_position: 0,
-    },
-    Case {
-        id: "phase66-prefill-m511",
-        m: 511,
-        start_position: 0,
-    },
-    Case {
-        id: "phase66-prefill-m512",
-        m: 512,
-        start_position: 0,
-    },
-    Case {
-        id: "phase66-prefill-m513",
-        m: 513,
-        start_position: 0,
-    },
-    Case {
-        id: "phase66-prefill-m2047",
-        m: 2_047,
-        start_position: 0,
-    },
-    Case {
-        id: "phase66-prefill-m2048",
-        m: 2_048,
-        start_position: 0,
-    },
-    Case {
-        id: "phase66-prefill-m2049",
-        m: 2_049,
-        start_position: 0,
-    },
-];
-
 #[derive(Debug)]
 struct Config {
     device_index: u32,
@@ -481,7 +429,6 @@ struct Config {
     phase49_operator: bool,
     phase49_decode_operator: bool,
     phase49_decode_short: bool,
-    phase66_prefill: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -565,7 +512,6 @@ where
     let mut phase49_operator = false;
     let mut phase49_decode_operator = false;
     let mut phase49_decode_short = false;
-    let mut phase66_prefill = false;
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -637,12 +583,6 @@ where
                 }
                 phase49_decode_short = true;
             }
-            "--phase66-prefill" => {
-                if phase66_prefill {
-                    return Err("duplicate --phase66-prefill".to_owned());
-                }
-                phase66_prefill = true;
-            }
             other => return Err(format!("unexpected argument {other}")),
         }
     }
@@ -654,7 +594,6 @@ where
         phase49_operator,
         phase49_decode_operator,
         phase49_decode_short,
-        phase66_prefill,
     })
 }
 
@@ -663,11 +602,8 @@ fn selected_cases(
     phase49_operator: bool,
     phase49_decode_operator: bool,
     phase49_decode_short: bool,
-    phase66_prefill: bool,
 ) -> &'static [Case] {
-    if phase66_prefill {
-        &PHASE66_PREFILL_CASES
-    } else if phase49_decode_short {
+    if phase49_decode_short {
         &PHASE49_SHORT_DECODE_CASES
     } else if phase49_decode_operator {
         &PHASE49_OPERATOR_CASES[16..]
@@ -1190,58 +1126,6 @@ fn scaled_prefill_gemm_enabled(
         }
 }
 
-fn long_prefill_v2_enabled(
-    expected_target: &str,
-    case: Case,
-    encoding: KvCacheEncoding,
-    opt_in: Option<&std::ffi::OsStr>,
-    force_baseline: bool,
-) -> bool {
-    !force_baseline
-        && expected_target == "gfx1030"
-        && opt_in.is_some_and(|value| value == "1")
-        && case.m >= 1024
-        && Q_HEADS == 16
-        && KV_HEADS == 4
-        && HEAD_DIM == 256
-        && encoding == KvCacheEncoding::Fp16
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Phase66PrefillTile {
-    Q4K4,
-    Q4K8,
-    Q8K8,
-}
-
-fn phase66_prefill_tile(
-    expected_target: &str,
-    case: Case,
-    encoding: KvCacheEncoding,
-    opt_in: Option<&std::ffi::OsStr>,
-    force_baseline: bool,
-) -> Option<Phase66PrefillTile> {
-    if force_baseline
-        || expected_target != "gfx1201"
-        || !opt_in.is_some_and(|value| value == "1")
-        || case.m < 128
-        || !matches!(encoding, KvCacheEncoding::Fp16 | KvCacheEncoding::Mxfp8E4)
-        || Q_HEADS != 16
-        || KV_HEADS != 4
-        || HEAD_DIM != 256
-    {
-        return None;
-    }
-    let context = case.start_position + case.m as u64;
-    Some(if context >= 2_048 {
-        Phase66PrefillTile::Q8K8
-    } else if context >= 512 {
-        Phase66PrefillTile::Q4K8
-    } else {
-        Phase66PrefillTile::Q4K4
-    })
-}
-
 fn metadata_matches(
     dispatch: &sllm_core::DispatchEvidence,
     case: Case,
@@ -1309,40 +1193,15 @@ fn metadata_matches(
         use_decode_wave_split_q_preload_long || use_decode_wave_split_q_preload_short;
     let use_prefill_gqa4 = use_phase33_common_provider && case.m >= 64;
     let scaled_prefill_opt_in = env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM");
-    let long_prefill_v2_opt_in = env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_LONG_PREFILL_V2");
-    let use_long_prefill_v2 = long_prefill_v2_enabled(
-        expected_target,
-        case,
-        encoding,
-        long_prefill_v2_opt_in.as_deref(),
-        force_baseline,
-    );
     let use_scaled_prefill_gemm = scaled_prefill_gemm_enabled(
         expected_target,
         case,
         encoding,
         scaled_prefill_opt_in.as_deref(),
         force_baseline,
-    ) && !use_long_prefill_v2;
-    let phase66_prefill_opt_in = env::var_os("SLLM_CAUSAL_ATTENTION_PHASE66_TILED_PREFILL");
-    let use_phase66_q4k1_control = !force_baseline
-        && expected_target == "gfx1201"
-        && phase66_prefill_opt_in
-            .as_deref()
-            .is_some_and(|value| value == "1")
-        && case.m >= 64
-        && matches!(encoding, KvCacheEncoding::Fp16 | KvCacheEncoding::Mxfp8E4);
-    let use_prefill_gqa4_qtile4 = use_prefill_gqa4
-        && (case.m >= 128 || use_phase66_q4k1_control)
-        && !force_baseline
-        && !use_scaled_prefill_gemm;
-    let phase66_tile = phase66_prefill_tile(
-        expected_target,
-        case,
-        encoding,
-        phase66_prefill_opt_in.as_deref(),
-        force_baseline,
     );
+    let use_prefill_gqa4_qtile4 =
+        use_prefill_gqa4 && case.m >= 128 && !force_baseline && !use_scaled_prefill_gemm;
     let (kernel_id, baseline_kernel_symbol, baseline_device_symbol) =
         if encoding == KvCacheEncoding::Fp16 {
             (
@@ -1389,26 +1248,6 @@ fn metadata_matches(
             "causal_attention.prefill.gfx1030_hipblas_scaled_fp16.v1",
             "sllm_causal_attention_prefill_gfx1030_hipblas_scaled_fp16_v1",
         )
-    } else if use_long_prefill_v2 {
-        (
-            "causal_attention.prefill.gfx1030_qtile8_split.v2",
-            "sllm_causal_attention_prefill_gfx1030_qtile8_split_v2",
-        )
-    } else if phase66_tile == Some(Phase66PrefillTile::Q4K4) {
-        (
-            "causal_attention.prefill.typed_q4k4.v1",
-            "sllm_causal_attention_prefill_typed_q4k4_v1",
-        )
-    } else if phase66_tile == Some(Phase66PrefillTile::Q4K8) {
-        (
-            "causal_attention.prefill.typed_q4k8.v1",
-            "sllm_causal_attention_prefill_typed_q4k8_v1",
-        )
-    } else if phase66_tile == Some(Phase66PrefillTile::Q8K8) {
-        (
-            "causal_attention.prefill.typed_q8k8.v1",
-            "sllm_causal_attention_prefill_typed_q8k8_v1",
-        )
     } else if use_prefill_gqa4_qtile4 {
         (
             "causal_attention.prefill.gqa4_qtile4.v7",
@@ -1438,7 +1277,7 @@ fn metadata_matches(
         && dispatch.info_version == sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION
         && dispatch.dispatch_id != 0
         && dispatch.dispatch_count
-            == if use_decode_gqa4_split || use_decode_gqa4_split_p32 || use_long_prefill_v2 {
+            == if use_decode_gqa4_split || use_decode_gqa4_split_p32 {
                 2
             } else {
                 1
@@ -1457,12 +1296,6 @@ fn metadata_matches(
                 64
             } else if use_scaled_prefill_gemm {
                 case.m.div_ceil(256) as u32 * KV_HEADS as u32
-            } else if use_long_prefill_v2 {
-                case.m.div_ceil(8) as u32 * KV_HEADS as u32 * 16
-            } else if phase66_tile == Some(Phase66PrefillTile::Q8K8) {
-                case.m.div_ceil(8) as u32 * KV_HEADS as u32
-            } else if phase66_tile.is_some() {
-                case.m.div_ceil(4) as u32 * KV_HEADS as u32
             } else if use_prefill_gqa4_qtile4 {
                 (case.m.div_ceil(4) * KV_HEADS) as u32
             } else if use_prefill_gqa4 {
@@ -1806,7 +1639,7 @@ fn run_case(
 
     let all_key_words = [prefix_key.as_slice(), key_words.as_slice()].concat();
     let all_value_words = [prefix_value.as_slice(), value_words.as_slice()].concat();
-    let sampled_oracle = (config.phase49_operator && case.m >= 1024) || config.phase66_prefill;
+    let sampled_oracle = config.phase49_operator && case.m >= 1024;
     let oracle_rows = if sampled_oracle {
         phase49_oracle_rows(case.m)
     } else {
@@ -1987,7 +1820,6 @@ fn run(config: &Config) -> Report {
             config.phase49_operator,
             config.phase49_decode_operator,
             config.phase49_decode_short,
-            config.phase66_prefill,
         )
         .iter()
         .copied()
@@ -2163,7 +1995,7 @@ mod tests {
 
     #[test]
     fn phase12_subset_selects_the_original_sixteen_cases() {
-        let ids = selected_cases(true, false, false, false, false)
+        let ids = selected_cases(true, false, false, false)
             .iter()
             .map(|case| case.id)
             .collect::<Vec<_>>();
@@ -2188,26 +2020,26 @@ mod tests {
                 "special-value-pos-inf",
             ]
         );
-        assert_eq!(selected_cases(true, false, false, false, false).len(), 16);
+        assert_eq!(selected_cases(true, false, false, false).len(), 16);
         assert_eq!(
-            selected_cases(false, false, false, false, false).len(),
+            selected_cases(false, false, false, false).len(),
             CASES.len()
         );
         assert_eq!(
-            selected_cases(false, false, false, false, false)[0].id,
+            selected_cases(false, false, false, false)[0].id,
             CASES[0].id
         );
         assert_eq!(
-            selected_cases(false, false, false, false, false)[28].id,
+            selected_cases(false, false, false, false)[28].id,
             CASES[28].id
         );
         assert_eq!(
-            selected_cases(false, true, false, false, false).len(),
+            selected_cases(false, true, false, false).len(),
             PHASE49_OPERATOR_CASES.len()
         );
-        assert_eq!(selected_cases(false, true, false, false, false)[0].m, 127);
+        assert_eq!(selected_cases(false, true, false, false)[0].m, 127);
         assert_eq!(
-            selected_cases(false, true, false, false, false)
+            selected_cases(false, true, false, false)
                 .iter()
                 .map(|case| case.m)
                 .collect::<Vec<_>>(),
@@ -2216,17 +2048,17 @@ mod tests {
                 1024, 1024, 1, 1, 1, 1, 1, 1,
             ]
         );
-        assert_eq!(selected_cases(false, false, true, false, false).len(), 6);
+        assert_eq!(selected_cases(false, false, true, false).len(), 6);
         assert_eq!(
-            selected_cases(false, false, true, false, false)
+            selected_cases(false, false, true, false)
                 .iter()
                 .map(|case| case.start_position + 1)
                 .collect::<Vec<_>>(),
             vec![1023, 1024, 1025, 4096, 8192, 16384]
         );
-        assert_eq!(selected_cases(false, false, false, true, false).len(), 6);
+        assert_eq!(selected_cases(false, false, false, true).len(), 6);
         assert_eq!(
-            selected_cases(false, false, false, true, false)
+            selected_cases(false, false, false, true)
                 .iter()
                 .map(|case| case.start_position + 1)
                 .collect::<Vec<_>>(),
@@ -2246,7 +2078,6 @@ mod tests {
         assert!(!default.phase49_operator);
         assert!(!default.phase49_decode_operator);
         assert!(!default.phase49_decode_short);
-        assert!(!default.phase66_prefill);
 
         let subset = parse_config_from(
             vec![
@@ -2264,7 +2095,6 @@ mod tests {
         assert!(!subset.phase49_operator);
         assert!(!subset.phase49_decode_operator);
         assert!(!subset.phase49_decode_short);
-        assert!(!subset.phase66_prefill);
         assert_eq!(subset.device_index, default.device_index);
         assert_eq!(subset.target, default.target);
         assert_eq!(subset.kv_encoding, default.kv_encoding);
@@ -2285,7 +2115,6 @@ mod tests {
         assert!(!operator.phase12_subset);
         assert!(!operator.phase49_decode_operator);
         assert!(!operator.phase49_decode_short);
-        assert!(!operator.phase66_prefill);
 
         let decode_operator = parse_config_from(
             vec![
@@ -2303,7 +2132,6 @@ mod tests {
         assert!(!decode_operator.phase49_operator);
         assert!(!decode_operator.phase12_subset);
         assert!(!decode_operator.phase49_decode_short);
-        assert!(!decode_operator.phase66_prefill);
 
         let decode_short = parse_config_from(
             vec![
@@ -2321,25 +2149,6 @@ mod tests {
         assert!(!decode_short.phase49_decode_operator);
         assert!(!decode_short.phase49_operator);
         assert!(!decode_short.phase12_subset);
-        assert!(!decode_short.phase66_prefill);
-
-        let phase66 = parse_config_from(
-            vec![
-                "--device-index",
-                "0",
-                "--target",
-                "gfx1201",
-                "--kv-encoding",
-                "mxfp8-e4",
-                "--phase66-prefill",
-            ]
-            .into_iter()
-            .map(String::from),
-        )
-        .unwrap();
-        assert!(phase66.phase66_prefill);
-        assert_eq!(phase66.kv_encoding, KvCacheEncoding::Mxfp8E4);
-        assert_eq!(selected_cases(false, false, false, false, true).len(), 9);
 
         for (name, expected) in [
             ("e4-block16", KvCacheEncoding::Fp8E4M3Block16),
@@ -2419,85 +2228,6 @@ mod tests {
             vec![31, 32, 33, 128, 287, 1023]
         );
         assert!(PHASE49_SHORT_DECODE_CASES.iter().all(|case| case.m == 1));
-    }
-
-    #[test]
-    fn phase66_prefill_cases_and_typed_policy_cover_all_boundaries() {
-        assert_eq!(
-            PHASE66_PREFILL_CASES
-                .iter()
-                .map(|case| case.m)
-                .collect::<Vec<_>>(),
-            vec![127, 128, 129, 511, 512, 513, 2_047, 2_048, 2_049]
-        );
-        let enabled = Some(std::ffi::OsStr::new("1"));
-        let tile = |m, encoding| {
-            phase66_prefill_tile(
-                "gfx1201",
-                Case {
-                    id: "phase66-test",
-                    m,
-                    start_position: 0,
-                },
-                encoding,
-                enabled,
-                false,
-            )
-        };
-        assert_eq!(tile(127, KvCacheEncoding::Fp16), None);
-        assert_eq!(
-            tile(128, KvCacheEncoding::Fp16),
-            Some(Phase66PrefillTile::Q4K4)
-        );
-        assert_eq!(
-            tile(511, KvCacheEncoding::Mxfp8E4),
-            Some(Phase66PrefillTile::Q4K4)
-        );
-        assert_eq!(
-            tile(512, KvCacheEncoding::Fp16),
-            Some(Phase66PrefillTile::Q4K8)
-        );
-        assert_eq!(
-            tile(2_047, KvCacheEncoding::Mxfp8E4),
-            Some(Phase66PrefillTile::Q4K8)
-        );
-        assert_eq!(
-            tile(2_048, KvCacheEncoding::Fp16),
-            Some(Phase66PrefillTile::Q8K8)
-        );
-        assert_eq!(
-            tile(2_049, KvCacheEncoding::Mxfp8E4),
-            Some(Phase66PrefillTile::Q8K8)
-        );
-        assert_eq!(tile(512, KvCacheEncoding::Mxfp8E5), None);
-        assert_eq!(
-            phase66_prefill_tile(
-                "gfx1030",
-                Case {
-                    id: "phase66-wrong-target",
-                    m: 512,
-                    start_position: 0,
-                },
-                KvCacheEncoding::Fp16,
-                enabled,
-                false,
-            ),
-            None
-        );
-        assert_eq!(
-            phase66_prefill_tile(
-                "gfx1201",
-                Case {
-                    id: "phase66-force-baseline",
-                    m: 512,
-                    start_position: 0,
-                },
-                KvCacheEncoding::Fp16,
-                enabled,
-                true,
-            ),
-            None
-        );
     }
 
     #[test]
@@ -2783,64 +2513,6 @@ mod tests {
         );
         assert!(f32::NAN.is_nan());
         assert!(f32::INFINITY.is_infinite());
-    }
-
-    #[test]
-    fn long_prefill_v2_is_explicit_gfx1030_fp16_opt_in() {
-        let enabled = Some(std::ffi::OsStr::new("1"));
-        for m in [1024, 4096, 10_001, 100_000] {
-            assert!(long_prefill_v2_enabled(
-                "gfx1030",
-                Case {
-                    id: "long-v2",
-                    m,
-                    start_position: 257,
-                },
-                KvCacheEncoding::Fp16,
-                enabled,
-                false,
-            ));
-        }
-        let case = Case {
-            id: "long-v2",
-            m: 1024,
-            start_position: 257,
-        };
-        assert!(!long_prefill_v2_enabled(
-            "gfx1030",
-            case,
-            KvCacheEncoding::Fp16,
-            None,
-            false,
-        ));
-        assert!(!long_prefill_v2_enabled(
-            "gfx1030",
-            case,
-            KvCacheEncoding::Fp16,
-            enabled,
-            true,
-        ));
-        assert!(!long_prefill_v2_enabled(
-            "gfx1201",
-            case,
-            KvCacheEncoding::Fp16,
-            enabled,
-            false,
-        ));
-        assert!(!long_prefill_v2_enabled(
-            "gfx1030",
-            Case { m: 1023, ..case },
-            KvCacheEncoding::Fp16,
-            enabled,
-            false,
-        ));
-        assert!(!long_prefill_v2_enabled(
-            "gfx1030",
-            case,
-            KvCacheEncoding::Fp8E4M3Fn,
-            enabled,
-            false,
-        ));
     }
 
     #[test]

@@ -28,48 +28,23 @@ const PHASE66_CANDIDATE_KERNEL_SYMBOL: &str = "matmul.mxfp8.w8a8.gfx1201.wmma128
 const PHASE66_CANDIDATE_DEVICE_SYMBOL: &str = "sllm_mxfp8_w8a8_gfx1201_wmma128x128_bdirect_v1";
 const PHASE67_ROW8_KERNEL_ID: u32 = 22;
 const PHASE67_CONTROL_KERNEL_ID: u32 = 27;
-const PHASE67_COL16_KERNEL_ID: u32 = 38;
-const PHASE67_COL32_KERNEL_ID: u32 = 39;
 const PHASE67_CONTROL_FORCE_ENV: &str = "SLLM_MX_WA_PREFILL_FORCE_MMQ_COLUMNS";
-const PHASE67_CANDIDATE_FORCE_ENV: &str = "SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_COLUMNS";
-const PHASE67_COL16_KERNEL_SYMBOL: &str = "matmul.mxfp8.w8a8.gfx1030.mmq-col16.v1";
-const PHASE67_COL16_DEVICE_SYMBOL: &str = "sllm_mxfp8_w8a8_gfx1030_mmq_col16_v1";
-const PHASE67_COL32_KERNEL_SYMBOL: &str = "matmul.mxfp8.w8a8.gfx1030.mmq-col32.v1";
-const PHASE67_COL32_DEVICE_SYMBOL: &str = "sllm_mxfp8_w8a8_gfx1030_mmq_col32_v1";
 const PHASE69_CONTROL_KERNEL_ID: u32 = 27;
-const PHASE69_REGSCALE_KERNEL_ID: u32 = 40;
 const PHASE69_VECTOR32_KERNEL_ID: u32 = 41;
-const PHASE69_COMBINED_KERNEL_ID: u32 = 42;
 const PHASE69_CANDIDATE_FORCE_ENV: &str = "SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_PHASE69";
-const PHASE69_REGSCALE_KERNEL_SYMBOL: &str = "matmul.mxfp8.w8a8.gfx1030.mmq-col8.regscale.v1";
-const PHASE69_REGSCALE_DEVICE_SYMBOL: &str = "sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_v1";
 const PHASE69_VECTOR32_KERNEL_SYMBOL: &str = "matmul.mxfp8.w8a8.gfx1030.mmq-col8.vector32.v1";
 const PHASE69_VECTOR32_DEVICE_SYMBOL: &str = "sllm_mxfp8_w8a8_gfx1030_mmq_col8_vector32_v1";
-const PHASE69_COMBINED_KERNEL_SYMBOL: &str =
-    "matmul.mxfp8.w8a8.gfx1030.mmq-col8.regscale-vector32.v1";
-const PHASE69_COMBINED_DEVICE_SYMBOL: &str =
-    "sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_vector32_v1";
 const PHASE70_CONTROL_KERNEL_ID: u32 = 29;
-const PHASE70_GFX1030_CANDIDATE_KERNEL_ID: u32 = 43;
 const PHASE70_GFX1201_CANDIDATE_KERNEL_ID: u32 = 44;
 const PHASE70_CANDIDATE_FORCE_ENV: &str = "SLLM_MXFP6_PREFILL_FORCE_PHASE70";
-const PHASE70_GFX1030_CANDIDATE_KERNEL_SYMBOL: &str =
-    "matmul.mxfp6.w6a6.gfx1030.mmq-col8.via-e4m3.v1";
-const PHASE70_GFX1030_CANDIDATE_DEVICE_SYMBOL: &str =
-    "sllm_mxfp6_w6a6_gfx1030_mmq_col8_via_e4m3_v1";
 const PHASE70_GFX1201_CANDIDATE_KERNEL_SYMBOL: &str =
     "matmul.mxfp6.w6a6.gfx1201.wmma128x64.via-e4m3.v1";
 const PHASE70_GFX1201_CANDIDATE_DEVICE_SYMBOL: &str =
     "sllm_mxfp6_w6a6_gfx1201_wmma128x64_via_e4m3_v1";
 const PHASE70_GFX1201_PACK4_N64_KERNEL_ID: u32 = 45;
-const PHASE70_GFX1201_PACK4_N128_KERNEL_ID: u32 = 46;
 const PHASE70_GFX1201_PACK4_N64_KERNEL_SYMBOL: &str =
     "matmul.mxfp6.w6a6.gfx1201.wmma128x64.pack4.v2";
 const PHASE70_GFX1201_PACK4_N64_DEVICE_SYMBOL: &str = "sllm_mxfp6_w6a6_gfx1201_wmma128x64_pack4_v2";
-const PHASE70_GFX1201_PACK4_N128_KERNEL_SYMBOL: &str =
-    "matmul.mxfp6.w6a6.gfx1201.wmma128x128.pack4.v1";
-const PHASE70_GFX1201_PACK4_N128_DEVICE_SYMBOL: &str =
-    "sllm_mxfp6_w6a6_gfx1201_wmma128x128_pack4_v1";
 const PHASE74_CONTROL_KERNEL_ID: u32 = 25;
 const PHASE74_CANDIDATE_KERNEL_ID: u32 = 47;
 const PHASE74_CONTROL_FORCE_ENV: &str = "SLLM_MXFP6_PREFILL_FORCE_TILED16";
@@ -89,82 +64,22 @@ const PHASE74_GFX1201_CANDIDATE_DEVICE_SYMBOL: &str =
     "sllm_mxfp6_w6a6_gfx1201_wmma128x64_pack4_swar_v1";
 const PHASE75_MXFP8_FORCE_ENV: &str = "SLLM_MXFP8_PREFILL_FORCE_PHASE75";
 const PHASE75_MXFP6_FORCE_ENV: &str = "SLLM_MXFP6_PREFILL_FORCE_PHASE75";
-const PHASE75_MXFP8_HALF2_IDENTITIES: &[(u32, &str, &str, &str, usize, usize)] = &[
-    (
-        49,
-        "id49-mxfp8-half2-32x32-k32",
-        "matmul.mxfp8.w8a8.gfx1030.half2.32x32.k32.v1",
-        "sllm_mxfp8_w8a8_gfx1030_half2_32x32_k32_v1",
-        32,
-        32,
-    ),
-    (
-        50,
-        "id50-mxfp8-half2-64x64-k32",
-        "matmul.mxfp8.w8a8.gfx1030.half2.64x64.k32.v1",
-        "sllm_mxfp8_w8a8_gfx1030_half2_64x64_k32_v1",
-        64,
-        64,
-    ),
-    (
-        51,
-        "id51-mxfp8-half2-128x32-k32",
-        "matmul.mxfp8.w8a8.gfx1030.half2.128x32.k32.v1",
-        "sllm_mxfp8_w8a8_gfx1030_half2_128x32_k32_v1",
-        128,
-        32,
-    ),
-    (
-        52,
-        "id52-mxfp8-half2-128x64-k32",
-        "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k32.v1",
-        "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_v1",
-        128,
-        64,
-    ),
-    (
-        53,
-        "id53-mxfp8-half2-128x64-k64",
-        "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k64.v1",
-        "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k64_v1",
-        128,
-        64,
-    ),
-    (
-        54,
-        "id54-mxfp8-half2-128x64-k128",
-        "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k128.v1",
-        "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k128_v1",
-        128,
-        64,
-    ),
-    (
-        55,
-        "id55-mxfp8-half2-128x64-k32-double",
-        "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k32.double.v1",
-        "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_double_v1",
-        128,
-        64,
-    ),
-];
-const PHASE75_MXFP6_HALF2_IDENTITIES: &[(u32, &str, &str, &str, usize, usize)] = &[
-    (
-        56,
-        "id56-mxfp6-half2-128x64-k32-double-scalar",
-        "matmul.mxfp6.w6a6.gfx1030.half2.128x64.k32d.scalar.v1",
-        "sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_scalar_v1",
-        128,
-        64,
-    ),
-    (
-        57,
-        "id57-mxfp6-half2-128x64-k32-double-pack4",
-        "matmul.mxfp6.w6a6.gfx1030.half2.128x64.k32d.pack4.v1",
-        "sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_pack4_v1",
-        128,
-        64,
-    ),
-];
+const PHASE75_MXFP8_HALF2_IDENTITIES: &[(u32, &str, &str, &str, usize, usize)] = &[(
+    55,
+    "id55-mxfp8-half2-128x64-k32-double",
+    "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k32.double.v1",
+    "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_double_v1",
+    128,
+    64,
+)];
+const PHASE75_MXFP6_HALF2_IDENTITIES: &[(u32, &str, &str, &str, usize, usize)] = &[(
+    57,
+    "id57-mxfp6-half2-128x64-k32-double-pack4",
+    "matmul.mxfp6.w6a6.gfx1030.half2.128x64.k32d.pack4.v1",
+    "sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_pack4_v1",
+    128,
+    64,
+)];
 const MXFP8_FORCE_ENVIRONMENTS: &[&str] = &[
     "SLLM_MX_WA_PREFILL_FORCE_BASELINE",
     "SLLM_MXFP8_PREFILL_FORCE_ROW8",
@@ -172,13 +87,9 @@ const MXFP8_FORCE_ENVIRONMENTS: &[&str] = &[
     "SLLM_MXFP8_PREFILL_FORCE_TILED16",
     "SLLM_MXFP8_PREFILL_FORCE_WMMA_GFX1201",
     "SLLM_MXFP8_PREFILL_FORCE_WMMA_N16_GFX1201",
-    "SLLM_MXFP8_PREFILL_FORCE_WMMA_4W_GFX1201",
-    "SLLM_MXFP8_PREFILL_FORCE_WMMA_LDS_PAD_GFX1201",
     "SLLM_MXFP8_PREFILL_FORCE_WMMA_DIRECT_WEIGHT_GFX1201",
-    "SLLM_MXFP8_PREFILL_FORCE_WMMA_DIRECT_ACTIVATION_GFX1201",
     PHASE66_CONTROL_FORCE_ENV,
     PHASE66_CANDIDATE_FORCE_ENV,
-    PHASE67_CANDIDATE_FORCE_ENV,
     PHASE69_CANDIDATE_FORCE_ENV,
     PHASE75_MXFP8_FORCE_ENV,
 ];
@@ -193,27 +104,9 @@ const MXFP6_FORCE_ENVIRONMENTS: &[&str] = &[
 ];
 const GFX1201_WMMA_CANDIDATE_IDENTITIES: &[(u32, &str, &str, u32)] = &[
     (
-        32,
-        "matmul.mxfp8.w8a8.gfx1201.wmma64x64.4w.v1",
-        "sllm_mxfp8_w8a8_gfx1201_wmma64x64_4w_v1",
-        128,
-    ),
-    (
-        33,
-        "matmul.mxfp8.w8a8.gfx1201.wmma128x64.pad33.v1",
-        "sllm_mxfp8_w8a8_gfx1201_wmma128x64_pad33_v1",
-        256,
-    ),
-    (
         34,
         "matmul.mxfp8.w8a8.gfx1201.wmma128x64.direct.v1",
         "sllm_mxfp8_w8a8_gfx1201_wmma128x64_direct_v1",
-        256,
-    ),
-    (
-        35,
-        "matmul.mxfp8.w8a8.gfx1201.wmma128x64.adirect.v1",
-        "sllm_mxfp8_w8a8_gfx1201_wmma128x64_adirect_v1",
         256,
     ),
     (
@@ -229,38 +122,12 @@ const GFX1201_WMMA_CANDIDATE_IDENTITIES: &[(u32, &str, &str, u32)] = &[
         256,
     ),
 ];
-const GFX1030_MMQ_CANDIDATE_IDENTITIES: &[(u32, &str, &str, u32)] = &[
-    (
-        PHASE67_COL16_KERNEL_ID,
-        PHASE67_COL16_KERNEL_SYMBOL,
-        PHASE67_COL16_DEVICE_SYMBOL,
-        256,
-    ),
-    (
-        PHASE67_COL32_KERNEL_ID,
-        PHASE67_COL32_KERNEL_SYMBOL,
-        PHASE67_COL32_DEVICE_SYMBOL,
-        256,
-    ),
-    (
-        PHASE69_REGSCALE_KERNEL_ID,
-        PHASE69_REGSCALE_KERNEL_SYMBOL,
-        PHASE69_REGSCALE_DEVICE_SYMBOL,
-        256,
-    ),
-    (
-        PHASE69_VECTOR32_KERNEL_ID,
-        PHASE69_VECTOR32_KERNEL_SYMBOL,
-        PHASE69_VECTOR32_DEVICE_SYMBOL,
-        256,
-    ),
-    (
-        PHASE69_COMBINED_KERNEL_ID,
-        PHASE69_COMBINED_KERNEL_SYMBOL,
-        PHASE69_COMBINED_DEVICE_SYMBOL,
-        256,
-    ),
-];
+const GFX1030_MMQ_CANDIDATE_IDENTITIES: &[(u32, &str, &str, u32)] = &[(
+    41,
+    "matmul.mxfp8.w8a8.gfx1030.mmq-col8.vector32.v1",
+    "sllm_mxfp8_w8a8_gfx1030_mmq_col8_vector32_v1",
+    256,
+)];
 const MAX_ABSOLUTE_ERROR: f32 = 0.5;
 const MAX_RELATIVE_ERROR: f32 = 0.02;
 const PHASE63_SPECIAL_ORACLE_POINTS: &[(usize, usize)] = &[
@@ -683,8 +550,6 @@ impl Phase66Provider {
 enum Phase67Provider {
     Row8,
     Control,
-    Col16,
-    Col32,
 }
 
 impl Phase67Provider {
@@ -692,8 +557,6 @@ impl Phase67Provider {
         match self {
             Self::Row8 => "id22-row8-control",
             Self::Control => "id27-col8-control",
-            Self::Col16 => "id38-col16-candidate",
-            Self::Col32 => "id39-col32-candidate",
         }
     }
 
@@ -701,7 +564,6 @@ impl Phase67Provider {
         match self {
             Self::Row8 => "SLLM_MXFP8_PREFILL_FORCE_ROW8",
             Self::Control => PHASE67_CONTROL_FORCE_ENV,
-            Self::Col16 | Self::Col32 => PHASE67_CANDIDATE_FORCE_ENV,
         }
     }
 
@@ -709,8 +571,6 @@ impl Phase67Provider {
         match self {
             Self::Row8 => "1",
             Self::Control => "8",
-            Self::Col16 => "16",
-            Self::Col32 => "32",
         }
     }
 
@@ -718,8 +578,6 @@ impl Phase67Provider {
         match self {
             Self::Row8 => PHASE67_ROW8_KERNEL_ID,
             Self::Control => PHASE67_CONTROL_KERNEL_ID,
-            Self::Col16 => PHASE67_COL16_KERNEL_ID,
-            Self::Col32 => PHASE67_COL32_KERNEL_ID,
         }
     }
 }
@@ -727,43 +585,35 @@ impl Phase67Provider {
 #[derive(Clone, Copy)]
 enum Phase69Provider {
     Control,
-    Regscale,
     Vector32,
-    Combined,
 }
 
 impl Phase69Provider {
     fn name(self) -> &'static str {
         match self {
             Self::Control => "id27-col8-control",
-            Self::Regscale => "id40-regscale-candidate",
             Self::Vector32 => "id41-vector32-candidate",
-            Self::Combined => "id42-regscale-vector32-candidate",
         }
     }
 
     fn force_environment(self) -> &'static str {
         match self {
             Self::Control => PHASE67_CONTROL_FORCE_ENV,
-            Self::Regscale | Self::Vector32 | Self::Combined => PHASE69_CANDIDATE_FORCE_ENV,
+            Self::Vector32 => PHASE69_CANDIDATE_FORCE_ENV,
         }
     }
 
     fn force_value(self) -> &'static str {
         match self {
             Self::Control => "8",
-            Self::Regscale => "regscale",
             Self::Vector32 => "vector32",
-            Self::Combined => "combined",
         }
     }
 
     fn kernel_id(self) -> u32 {
         match self {
             Self::Control => PHASE69_CONTROL_KERNEL_ID,
-            Self::Regscale => PHASE69_REGSCALE_KERNEL_ID,
             Self::Vector32 => PHASE69_VECTOR32_KERNEL_ID,
-            Self::Combined => PHASE69_COMBINED_KERNEL_ID,
         }
     }
 }
@@ -773,10 +623,8 @@ enum Phase70Provider {
     Gfx1201Default,
     Tiled16,
     Control,
-    Gfx1030Candidate,
     Gfx1201Candidate,
     Gfx1201Pack4N64,
-    Gfx1201Pack4N128,
 }
 
 impl Phase70Provider {
@@ -785,10 +633,8 @@ impl Phase70Provider {
             Self::Gfx1201Default => "id45-gfx1201-pack4-n64-default",
             Self::Tiled16 => "id25-tiled16-control",
             Self::Control => "id29-col8-control",
-            Self::Gfx1030Candidate => "id43-gfx1030-via-e4m3-candidate",
             Self::Gfx1201Candidate => "id44-gfx1201-via-e4m3-n64-candidate",
             Self::Gfx1201Pack4N64 => "id45-gfx1201-pack4-n64-candidate",
-            Self::Gfx1201Pack4N128 => "id46-gfx1201-pack4-n128-candidate",
         }
     }
 
@@ -797,10 +643,7 @@ impl Phase70Provider {
             Self::Gfx1201Default => None,
             Self::Tiled16 => Some("SLLM_MXFP6_PREFILL_FORCE_TILED16"),
             Self::Control => Some(PHASE67_CONTROL_FORCE_ENV),
-            Self::Gfx1030Candidate
-            | Self::Gfx1201Candidate
-            | Self::Gfx1201Pack4N64
-            | Self::Gfx1201Pack4N128 => Some(PHASE70_CANDIDATE_FORCE_ENV),
+            Self::Gfx1201Candidate | Self::Gfx1201Pack4N64 => Some(PHASE70_CANDIDATE_FORCE_ENV),
         }
     }
 
@@ -809,10 +652,8 @@ impl Phase70Provider {
             Self::Gfx1201Default => "",
             Self::Tiled16 => "1",
             Self::Control => "8",
-            Self::Gfx1030Candidate => "gfx1030",
             Self::Gfx1201Candidate => "gfx1201-n64",
             Self::Gfx1201Pack4N64 => "gfx1201-n64-pack4",
-            Self::Gfx1201Pack4N128 => "gfx1201-n128-pack4",
         }
     }
 
@@ -821,10 +662,8 @@ impl Phase70Provider {
             Self::Gfx1201Default => PHASE70_GFX1201_PACK4_N64_KERNEL_ID,
             Self::Tiled16 => 25,
             Self::Control => PHASE70_CONTROL_KERNEL_ID,
-            Self::Gfx1030Candidate => PHASE70_GFX1030_CANDIDATE_KERNEL_ID,
             Self::Gfx1201Candidate => PHASE70_GFX1201_CANDIDATE_KERNEL_ID,
             Self::Gfx1201Pack4N64 => PHASE70_GFX1201_PACK4_N64_KERNEL_ID,
-            Self::Gfx1201Pack4N128 => PHASE70_GFX1201_PACK4_N128_KERNEL_ID,
         }
     }
 }
@@ -903,15 +742,8 @@ impl Phase74Provider {
 #[derive(Clone, Copy)]
 enum Phase75Provider {
     Mxfp8Id41Control,
-    Mxfp8Half2_32x32K32,
-    Mxfp8Half2_64x64K32,
-    Mxfp8Half2_128x32K32,
-    Mxfp8Half2_128x64K32,
-    Mxfp8Half2_128x64K64,
-    Mxfp8Half2_128x64K128,
     Mxfp8Half2_128x64K32Double,
     Mxfp6Id47Control,
-    Mxfp6Half2_128x64K32DoubleScalar,
     Mxfp6Half2_128x64K32DoublePack4,
 }
 
@@ -926,13 +758,7 @@ impl Phase75Provider {
                 8,
                 8,
             ),
-            Self::Mxfp8Half2_32x32K32 => PHASE75_MXFP8_HALF2_IDENTITIES[0],
-            Self::Mxfp8Half2_64x64K32 => PHASE75_MXFP8_HALF2_IDENTITIES[1],
-            Self::Mxfp8Half2_128x32K32 => PHASE75_MXFP8_HALF2_IDENTITIES[2],
-            Self::Mxfp8Half2_128x64K32 => PHASE75_MXFP8_HALF2_IDENTITIES[3],
-            Self::Mxfp8Half2_128x64K64 => PHASE75_MXFP8_HALF2_IDENTITIES[4],
-            Self::Mxfp8Half2_128x64K128 => PHASE75_MXFP8_HALF2_IDENTITIES[5],
-            Self::Mxfp8Half2_128x64K32Double => PHASE75_MXFP8_HALF2_IDENTITIES[6],
+            Self::Mxfp8Half2_128x64K32Double => PHASE75_MXFP8_HALF2_IDENTITIES[0],
             Self::Mxfp6Id47Control => (
                 PHASE74_CANDIDATE_KERNEL_ID,
                 "id47-mxfp6-half2-32x32-control",
@@ -941,24 +767,14 @@ impl Phase75Provider {
                 32,
                 32,
             ),
-            Self::Mxfp6Half2_128x64K32DoubleScalar => PHASE75_MXFP6_HALF2_IDENTITIES[0],
-            Self::Mxfp6Half2_128x64K32DoublePack4 => PHASE75_MXFP6_HALF2_IDENTITIES[1],
+            Self::Mxfp6Half2_128x64K32DoublePack4 => PHASE75_MXFP6_HALF2_IDENTITIES[0],
         }
     }
 
     fn format(self) -> Format {
         match self {
-            Self::Mxfp8Id41Control
-            | Self::Mxfp8Half2_32x32K32
-            | Self::Mxfp8Half2_64x64K32
-            | Self::Mxfp8Half2_128x32K32
-            | Self::Mxfp8Half2_128x64K32
-            | Self::Mxfp8Half2_128x64K64
-            | Self::Mxfp8Half2_128x64K128
-            | Self::Mxfp8Half2_128x64K32Double => Format::Mxfp8,
-            Self::Mxfp6Id47Control
-            | Self::Mxfp6Half2_128x64K32DoubleScalar
-            | Self::Mxfp6Half2_128x64K32DoublePack4 => Format::Mxfp6,
+            Self::Mxfp8Id41Control | Self::Mxfp8Half2_128x64K32Double => Format::Mxfp8,
+            Self::Mxfp6Id47Control | Self::Mxfp6Half2_128x64K32DoublePack4 => Format::Mxfp6,
         }
     }
 
@@ -989,32 +805,17 @@ impl Phase75Provider {
     fn force_environment(self) -> &'static str {
         match self {
             Self::Mxfp8Id41Control => PHASE69_CANDIDATE_FORCE_ENV,
-            Self::Mxfp8Half2_32x32K32
-            | Self::Mxfp8Half2_64x64K32
-            | Self::Mxfp8Half2_128x32K32
-            | Self::Mxfp8Half2_128x64K32
-            | Self::Mxfp8Half2_128x64K64
-            | Self::Mxfp8Half2_128x64K128
-            | Self::Mxfp8Half2_128x64K32Double => PHASE75_MXFP8_FORCE_ENV,
+            Self::Mxfp8Half2_128x64K32Double => PHASE75_MXFP8_FORCE_ENV,
             Self::Mxfp6Id47Control => PHASE74_CANDIDATE_FORCE_ENV,
-            Self::Mxfp6Half2_128x64K32DoubleScalar | Self::Mxfp6Half2_128x64K32DoublePack4 => {
-                PHASE75_MXFP6_FORCE_ENV
-            }
+            Self::Mxfp6Half2_128x64K32DoublePack4 => PHASE75_MXFP6_FORCE_ENV,
         }
     }
 
     fn force_value(self) -> &'static str {
         match self {
             Self::Mxfp8Id41Control => "vector32",
-            Self::Mxfp8Half2_32x32K32 => "half2-32x32-k32",
-            Self::Mxfp8Half2_64x64K32 => "half2-64x64-k32",
-            Self::Mxfp8Half2_128x32K32 => "half2-128x32-k32",
-            Self::Mxfp8Half2_128x64K32 => "half2-128x64-k32",
-            Self::Mxfp8Half2_128x64K64 => "half2-128x64-k64",
-            Self::Mxfp8Half2_128x64K128 => "half2-128x64-k128",
             Self::Mxfp8Half2_128x64K32Double => "half2-128x64-k32-double",
             Self::Mxfp6Id47Control => PHASE74_CANDIDATE_FORCE_VALUE,
-            Self::Mxfp6Half2_128x64K32DoubleScalar => "half2-128x64-k32-double-scalar",
             Self::Mxfp6Half2_128x64K32DoublePack4 => "half2-128x64-k32-double-pack4",
         }
     }
@@ -1454,34 +1255,11 @@ fn validate_actual_dispatch(
         (Format::Mxfp6, 1) => dispatch.kernel_id == 20,
         (Format::Mxfp8, _) => matches!(
             dispatch.kernel_id,
-            19 | 22
-                | 24
-                | 26
-                | 27
-                | 30
-                | 31
-                | 32
-                | 33
-                | 34
-                | 35
-                | 36
-                | 37
-                | 38
-                | 39
-                | 40
-                | 41
-                | 42
-                | 49
-                | 50
-                | 51
-                | 52
-                | 53
-                | 54
-                | 55
+            19 | 22 | 24 | 26 | 27 | 30 | 31 | 34 | 36 | 37 | 41 | 55
         ),
         (Format::Mxfp6, _) => matches!(
             dispatch.kernel_id,
-            21 | 23 | 25 | 28 | 29 | 43 | 44 | 45 | 46 | 47 | 48 | 56 | 57
+            21 | 23 | 25 | 28 | 29 | 44 | 45 | 47 | 48 | 57
         ),
     };
     let format_fragment = match format {
@@ -1554,38 +1332,6 @@ fn validate_actual_dispatch(
             ));
         }
     }
-    if dispatch.kernel_id == PHASE70_GFX1030_CANDIDATE_KERNEL_ID
-        && (format != Format::Mxfp6
-            || target != "gfx1030"
-            || m <= 1
-            || k == 0
-            || k % 32 != 0
-            || n == 0
-            || dispatch.kernel_symbol != PHASE70_GFX1030_CANDIDATE_KERNEL_SYMBOL
-            || dispatch.device_symbol != PHASE70_GFX1030_CANDIDATE_DEVICE_SYMBOL
-            || dispatch.workgroup_size_x != 256)
-    {
-        return Err(format!(
-            "Phase 70 gfx1030 candidate kernel {} escaped its exact MXFP6 prefill scope",
-            dispatch.kernel_id
-        ));
-    }
-    if dispatch.kernel_id == PHASE70_GFX1201_CANDIDATE_KERNEL_ID
-        && (format != Format::Mxfp6
-            || target != "gfx1201"
-            || m <= 1
-            || k == 0
-            || k % 32 != 0
-            || n == 0
-            || dispatch.kernel_symbol != PHASE70_GFX1201_CANDIDATE_KERNEL_SYMBOL
-            || dispatch.device_symbol != PHASE70_GFX1201_CANDIDATE_DEVICE_SYMBOL
-            || dispatch.workgroup_size_x != 256)
-    {
-        return Err(format!(
-            "Phase 70 gfx1201 candidate kernel {} escaped its exact MXFP6 prefill scope",
-            dispatch.kernel_id
-        ));
-    }
     if dispatch.kernel_id == PHASE70_GFX1201_PACK4_N64_KERNEL_ID
         && (format != Format::Mxfp6
             || target != "gfx1201"
@@ -1602,20 +1348,19 @@ fn validate_actual_dispatch(
             dispatch.kernel_id
         ));
     }
-    if dispatch.kernel_id == PHASE70_GFX1201_PACK4_N128_KERNEL_ID
+    if dispatch.kernel_id == PHASE70_GFX1201_CANDIDATE_KERNEL_ID
         && (format != Format::Mxfp6
             || target != "gfx1201"
             || m <= 1
             || k == 0
             || k % 32 != 0
             || n == 0
-            || n % 128 != 0
-            || dispatch.kernel_symbol != PHASE70_GFX1201_PACK4_N128_KERNEL_SYMBOL
-            || dispatch.device_symbol != PHASE70_GFX1201_PACK4_N128_DEVICE_SYMBOL
+            || dispatch.kernel_symbol != PHASE70_GFX1201_CANDIDATE_KERNEL_SYMBOL
+            || dispatch.device_symbol != PHASE70_GFX1201_CANDIDATE_DEVICE_SYMBOL
             || dispatch.workgroup_size_x != 256)
     {
         return Err(format!(
-            "Phase 70 gfx1201 packed N128 kernel {} escaped its exact MXFP6 prefill scope",
+            "Phase 70 gfx1201 candidate kernel {} escaped its exact MXFP6 prefill scope",
             dispatch.kernel_id
         ));
     }
@@ -2951,22 +2696,15 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
                 provider.name()
             ));
         }
-        EvidenceMode::Phase70 {
-            provider: Phase70Provider::Gfx1030Candidate,
-            ..
-        } if target != "gfx1030" => {
-            return Err("Phase 70 ID43 candidate requires exact gfx1030".to_owned());
-        }
         EvidenceMode::Phase70 { provider, .. }
             if matches!(
                 provider,
                 Phase70Provider::Gfx1201Default
-                    | Phase70Provider::Gfx1201Candidate
                     | Phase70Provider::Gfx1201Pack4N64
-                    | Phase70Provider::Gfx1201Pack4N128
+                    | Phase70Provider::Gfx1201Candidate
             ) && target != "gfx1201" =>
         {
-            return Err("Phase 70 ID44 candidate requires exact gfx1201".to_owned());
+            return Err("Phase 70 gfx1201 provider requires exact gfx1201".to_owned());
         }
         EvidenceMode::Phase70 { .. } if !matches!(target.as_str(), "gfx1030" | "gfx1201") => {
             return Err("Phase 70 control requires exact gfx1030 or gfx1201".to_owned());
@@ -3626,8 +3364,6 @@ fn main() -> ExitCode {
             let provider = match arguments.next().as_deref() {
                 Some("id22-row8-control") => Phase67Provider::Row8,
                 Some("id27-col8-control") => Phase67Provider::Control,
-                Some("id38-col16-candidate") => Phase67Provider::Col16,
-                Some("id39-col32-candidate") => Phase67Provider::Col32,
                 Some(value) => {
                     eprintln!("invalid Phase 67 provider {value}");
                     return ExitCode::FAILURE;
@@ -3670,9 +3406,7 @@ fn main() -> ExitCode {
         Some("phase69-provider") => {
             let provider = match arguments.next().as_deref() {
                 Some("id27-col8-control") => Phase69Provider::Control,
-                Some("id40-regscale-candidate") => Phase69Provider::Regscale,
                 Some("id41-vector32-candidate") => Phase69Provider::Vector32,
-                Some("id42-regscale-vector32-candidate") => Phase69Provider::Combined,
                 Some(value) => {
                     eprintln!("invalid Phase 69 provider {value}");
                     return ExitCode::FAILURE;
@@ -3768,19 +3502,10 @@ fn main() -> ExitCode {
         Some("phase75-provider") => {
             let provider = match arguments.next().as_deref() {
                 Some("id41-mxfp8-vector32-control") => Phase75Provider::Mxfp8Id41Control,
-                Some("id49-mxfp8-half2-32x32-k32") => Phase75Provider::Mxfp8Half2_32x32K32,
-                Some("id50-mxfp8-half2-64x64-k32") => Phase75Provider::Mxfp8Half2_64x64K32,
-                Some("id51-mxfp8-half2-128x32-k32") => Phase75Provider::Mxfp8Half2_128x32K32,
-                Some("id52-mxfp8-half2-128x64-k32") => Phase75Provider::Mxfp8Half2_128x64K32,
-                Some("id53-mxfp8-half2-128x64-k64") => Phase75Provider::Mxfp8Half2_128x64K64,
-                Some("id54-mxfp8-half2-128x64-k128") => Phase75Provider::Mxfp8Half2_128x64K128,
                 Some("id55-mxfp8-half2-128x64-k32-double") => {
                     Phase75Provider::Mxfp8Half2_128x64K32Double
                 }
                 Some("id47-mxfp6-half2-32x32-control") => Phase75Provider::Mxfp6Id47Control,
-                Some("id56-mxfp6-half2-128x64-k32-double-scalar") => {
-                    Phase75Provider::Mxfp6Half2_128x64K32DoubleScalar
-                }
                 Some("id57-mxfp6-half2-128x64-k32-double-pack4") => {
                     Phase75Provider::Mxfp6Half2_128x64K32DoublePack4
                 }
@@ -3836,10 +3561,8 @@ fn main() -> ExitCode {
                 Some("id45-gfx1201-pack4-n64-default") => Phase70Provider::Gfx1201Default,
                 Some("id25-tiled16-control") => Phase70Provider::Tiled16,
                 Some("id29-col8-control") => Phase70Provider::Control,
-                Some("id43-gfx1030-via-e4m3-candidate") => Phase70Provider::Gfx1030Candidate,
                 Some("id44-gfx1201-via-e4m3-n64-candidate") => Phase70Provider::Gfx1201Candidate,
                 Some("id45-gfx1201-pack4-n64-candidate") => Phase70Provider::Gfx1201Pack4N64,
-                Some("id46-gfx1201-pack4-n128-candidate") => Phase70Provider::Gfx1201Pack4N128,
                 Some(value) => {
                     eprintln!("invalid Phase 70 provider {value}");
                     return ExitCode::FAILURE;
@@ -4150,7 +3873,7 @@ mod tests {
     }
 
     #[test]
-    fn phase67_candidate_dispatch_identity_is_exact_gfx1030_mxfp8_prefill() {
+    fn phase69_vector32_dispatch_identity_is_exact_gfx1030_mxfp8_prefill() {
         let candidate = |kernel_id: u32,
                          kernel_symbol: &str,
                          device_symbol: &str,
@@ -4214,22 +3937,14 @@ mod tests {
         assert_eq!(Phase67Provider::Row8.force_value(), "1");
         assert_eq!(Phase67Provider::Control.kernel_id(), 27);
         assert_eq!(Phase67Provider::Control.force_value(), "8");
-        assert_eq!(Phase67Provider::Col16.kernel_id(), 38);
-        assert_eq!(Phase67Provider::Col16.force_value(), "16");
-        assert_eq!(Phase67Provider::Col32.kernel_id(), 39);
-        assert_eq!(Phase67Provider::Col32.force_value(), "32");
     }
 
     #[test]
     fn phase69_provider_identities_are_stable() {
         assert_eq!(Phase69Provider::Control.kernel_id(), 27);
         assert_eq!(Phase69Provider::Control.force_value(), "8");
-        assert_eq!(Phase69Provider::Regscale.kernel_id(), 40);
-        assert_eq!(Phase69Provider::Regscale.force_value(), "regscale");
         assert_eq!(Phase69Provider::Vector32.kernel_id(), 41);
         assert_eq!(Phase69Provider::Vector32.force_value(), "vector32");
-        assert_eq!(Phase69Provider::Combined.kernel_id(), 42);
-        assert_eq!(Phase69Provider::Combined.force_value(), "combined");
     }
 
     #[test]
@@ -4472,21 +4187,11 @@ mod tests {
     fn phase75_provider_identities_and_case_formats_are_stable() {
         let providers = [
             Phase75Provider::Mxfp8Id41Control,
-            Phase75Provider::Mxfp8Half2_32x32K32,
-            Phase75Provider::Mxfp8Half2_64x64K32,
-            Phase75Provider::Mxfp8Half2_128x32K32,
-            Phase75Provider::Mxfp8Half2_128x64K32,
-            Phase75Provider::Mxfp8Half2_128x64K64,
-            Phase75Provider::Mxfp8Half2_128x64K128,
             Phase75Provider::Mxfp8Half2_128x64K32Double,
             Phase75Provider::Mxfp6Id47Control,
-            Phase75Provider::Mxfp6Half2_128x64K32DoubleScalar,
             Phase75Provider::Mxfp6Half2_128x64K32DoublePack4,
         ];
-        assert_eq!(
-            providers.map(Phase75Provider::kernel_id),
-            [41, 49, 50, 51, 52, 53, 54, 55, 47, 56, 57]
-        );
+        assert_eq!(providers.map(Phase75Provider::kernel_id), [41, 55, 47, 57]);
         for provider in providers {
             assert_eq!(
                 provider.force_environment(),
@@ -4505,10 +4210,7 @@ mod tests {
 
     #[test]
     fn phase75_mxfp6_candidate_dispatch_identity_is_exact() {
-        for provider in [
-            Phase75Provider::Mxfp6Half2_128x64K32DoubleScalar,
-            Phase75Provider::Mxfp6Half2_128x64K32DoublePack4,
-        ] {
+        for provider in [Phase75Provider::Mxfp6Half2_128x64K32DoublePack4] {
             let dispatch = DispatchEvidence {
                 abi_version: 1,
                 info_version: 1,

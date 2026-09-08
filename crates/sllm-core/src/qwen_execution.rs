@@ -952,9 +952,10 @@ fn qwen38_nvfp4_projection_pack2_scope_enabled(
     has_verified_artifact: bool,
     env_value: Option<&OsStr>,
 ) -> bool {
-    // Rollback is fail-closed: only the literal value "1" opts a request in.
-    // Unset, "0", and malformed values preserve the baseline Matmul graph.
-    env_value == Some(OsStr::new("1"))
+    // The reviewed Qwen3.8 artifact/target shape is the default scope.  Keep
+    // an exact zero or malformed value as a fail-closed rollback to the
+    // baseline Matmul graph.
+    default_on_env(env_value)
         && backend_name == "hip"
         && matches!(expected_target, Some("gfx1030" | "gfx1201"))
         && has_fp8_sidecar
@@ -995,8 +996,9 @@ fn qwen38_fp8_gdn_projection_pack2_enabled(
     let artifact_matches = artifact
         .is_some_and(|artifact| graph.fp8_sidecar_fingerprint() == Some(artifact.recipe_digest()));
     // Keep this selector structurally identical to the NVFP4 candidate while
-    // reading a separate literal opt-in. The independent environment switch
-    // allows both pair roles to be lowered in one verified composite pass.
+    // reading a separate target-scoped rollback switch. The independent
+    // environment switch allows both pair roles to be lowered in one verified
+    // composite pass.
     prepared_projection_sharing_enabled(
         std::env::var_os(PREPARED_PROJECTION_SHARING_ENV).as_deref(),
     ) && qwen38_nvfp4_projection_pack2_scope_enabled(
@@ -1021,9 +1023,15 @@ fn qwen38_deferred_completion_scope_enabled(
     adapters_empty: bool,
     env_value: Option<&OsStr>,
 ) -> bool {
-    // This candidate is deliberately opt-in: a missing value is OFF and only
-    // the exact value "1" enables it.  In particular, the legacy generic
-    // Qwen deferred-completion variable must not enable this mixed graph.
+    // The verified Qwen3.8 target/encoding scope is default-on.  In
+    // particular, the legacy generic Qwen deferred-completion variable must
+    // not enable this mixed graph; an exact zero or malformed value remains
+    // an explicit fail-closed rollback.
+    let scoped_env_value = if default_on_env(env_value) {
+        Some(OsStr::new("1"))
+    } else {
+        Some(OsStr::new("0"))
+    };
     prepared_deferred_completion_scope_enabled(
         backend_name,
         expected_target,
@@ -1031,8 +1039,15 @@ fn qwen38_deferred_completion_scope_enabled(
         is_multimodal,
         is_mtp,
         adapters_empty,
-        env_value,
+        scoped_env_value,
     )
+}
+
+fn qwen38_graph_spans_enabled_with_env(
+    deferred_completion_enabled: bool,
+    env_value: Option<&OsStr>,
+) -> bool {
+    deferred_completion_enabled && default_on_env(env_value)
 }
 
 fn qwen38_deferred_completion_enabled(
@@ -5375,8 +5390,10 @@ impl QwenExecutionCore {
             Some("gfx1201") => Some("SLLM_QWEN38_GFX1201_GRAPH_SPANS"),
             _ => None,
         };
-        let qwen38_graph_spans_enabled = qwen38_deferred_completion
-            && graph_span_env.and_then(std::env::var_os).as_deref() == Some(OsStr::new("1"));
+        let qwen38_graph_spans_enabled = qwen38_graph_spans_enabled_with_env(
+            qwen38_deferred_completion,
+            graph_span_env.and_then(std::env::var_os).as_deref(),
+        );
         let core = Self {
             graph_replay: Mutex::new(PreparedGraphReplayState::default()),
             device_sampling: Mutex::new(None),
@@ -12994,7 +13011,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen38_deferred_completion_selector_is_opt_in_and_fail_closed() {
+    fn qwen38_deferred_completion_selector_defaults_on_and_is_fail_closed() {
         let enabled = |target, env_value| {
             qwen38_deferred_completion_scope_enabled(
                 "hip",
@@ -13018,9 +13035,9 @@ mod tests {
         assert_eq!(qwen38_deferred_completion_env_name(Some("gfx942")), None);
         assert_eq!(qwen38_deferred_completion_env_name(None), None);
 
-        // Missing and non-canonical values are OFF by default; each exact
-        // target has its own explicit opt-in switch.
-        assert!(!enabled("gfx1030", None));
+        // The reviewed target scope is default-on; explicit zero and
+        // non-canonical values remain fail-closed rollback switches.
+        assert!(enabled("gfx1030", None));
         assert!(!enabled("gfx1201", Some(OsStr::new("0"))));
         assert!(!enabled("gfx1030", Some(OsStr::new("true"))));
         assert!(enabled("gfx1030", Some(OsStr::new("1"))));
@@ -13062,7 +13079,25 @@ mod tests {
     }
 
     #[test]
-    fn qwen38_nvfp4_projection_pack2_selector_is_literal_opt_in_only() {
+    fn qwen38_graph_spans_default_on_only_with_deferred_completion() {
+        assert!(qwen38_graph_spans_enabled_with_env(true, None));
+        assert!(qwen38_graph_spans_enabled_with_env(
+            true,
+            Some(OsStr::new("1"))
+        ));
+        assert!(!qwen38_graph_spans_enabled_with_env(
+            true,
+            Some(OsStr::new("0"))
+        ));
+        assert!(!qwen38_graph_spans_enabled_with_env(
+            true,
+            Some(OsStr::new("true"))
+        ));
+        assert!(!qwen38_graph_spans_enabled_with_env(false, None));
+    }
+
+    #[test]
+    fn qwen38_nvfp4_projection_pack2_selector_defaults_on_and_is_fail_closed() {
         let enabled = |env_value, has_verified_artifact| {
             qwen38_nvfp4_projection_pack2_scope_enabled(
                 "hip",
@@ -13076,7 +13111,7 @@ mod tests {
             )
         };
 
-        assert!(!enabled(None, true));
+        assert!(enabled(None, true));
         assert!(!enabled(Some(OsStr::new("0")), true));
         assert!(!enabled(Some(OsStr::new("true")), true));
         assert!(!enabled(Some(OsStr::new("1 ")), true));
@@ -13123,12 +13158,12 @@ mod tests {
             )
         };
 
-        assert!(!enabled(None));
+        assert!(enabled(None));
         assert!(!enabled(Some(OsStr::new("0"))));
         assert!(!enabled(Some(OsStr::new("true"))));
         assert!(!enabled(Some(OsStr::new("1 "))));
         assert!(enabled(Some(OsStr::new("1"))));
-        assert!(!qwen38_nvfp4_projection_pack2_scope_enabled(
+        assert!(qwen38_nvfp4_projection_pack2_scope_enabled(
             "hip",
             Some("gfx1201"),
             true,

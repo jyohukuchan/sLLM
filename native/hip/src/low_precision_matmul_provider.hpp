@@ -67,17 +67,16 @@ enum class TilePolicy : uint8_t {
   BlockRow8Column8,
   PackedRow8,
   Wmma128x16x32,
-  Wmma64x64x32,
-  Wmma128x64x32,
+  // Value 9 belonged to the retired four-wave candidate.
+  Wmma128x64x32 = 10,
   Wmma128x128x32,
-  BlockRow8Column16,
-  BlockRow8Column32,
-  BlockRow32Column32,
+  // Values 12/13 belonged to retired MMQ tile candidates.
+  BlockRow32Column32 = 14,
   BlockRow64Column64,
   BlockRow128Column32,
   BlockRow128Column64,
-  DecodeColumns128,
-  DecodeWave4Column32,
+  // Value 18 belonged to retired Phase 82 ID65; preserve the audit identity.
+  DecodeWave4Column32 = 19,
   DecodeDword8Wave4Column32,
   // Phase 78 ID71 short-M FP8 specialization with a 32x64 output tile.
   // Appended to preserve the numeric values of the existing audit ABI.
@@ -97,8 +96,8 @@ enum class InnerProduct : uint8_t {
   None,
   DecodedBlockScaledFp32,
   E4M3WmmaFp32,
-  E3M2ViaE4M3DecodedFp32,
-  E3M2ViaE4M3WmmaFp32,
+  // Value 3 belonged to the retired gfx1030 E3M2-to-E4M3 candidate.
+  E3M2ViaE4M3WmmaFp32 = 4,
   E3M2Fp16Dot2Fp32,
   E4M3Fp16Dot2Fp32,
   E2M1Bf16Fp32,
@@ -109,9 +108,6 @@ enum class InnerProduct : uint8_t {
   // NVFP4 W4A4 gfx1201 candidate: decode E2M1 and absorb each E4M3
   // block-16 scale into FP16 WMMA operands at tile ingress.
   E2M1Fp16ScaleWmmaFp32,
-  // NVFP4 W4A4 gfx1201 candidate: consume block scales while staging to
-  // native E4M3 FP8, then accumulate with the hipBLASLt FP8 provider.
-  E2M1ViaE4M3NativeFp8Fp32,
 };
 
 enum class AccumulationType : uint8_t {
@@ -130,8 +126,8 @@ enum class ProviderKind : uint8_t {
   Mxfp8Block32,
   Mxfp8Gfx1201Wmma,
   Mxfp6Block32,
-  Mxfp6Gfx1030MmqViaE4M3,
-  Mxfp6Gfx1030Half2Dot2,
+  // Preserve the existing numeric audit identity after retiring value 4.
+  Mxfp6Gfx1030Half2Dot2 = 5,
   Mxfp6Gfx1201WmmaViaE4M3,
   Nvfp4W4A16Block16,
   Nvfp4W4A4Block16,

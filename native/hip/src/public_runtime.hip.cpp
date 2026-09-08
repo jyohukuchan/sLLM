@@ -226,12 +226,6 @@ hipError_t launch_nvfp4_quantize(const uint16_t *, uint8_t *, uint8_t *,
   return hipErrorInvalidValue;
 }
 
-hipError_t launch_nvfp4_block16_to_fp8_staging(const uint8_t *, const uint8_t *,
-                                               uint8_t *, uint64_t, uint64_t,
-                                               hipStream_t) noexcept {
-  return hipErrorInvalidValue;
-}
-
 hipError_t launch_nvfp4_tensor_scale_product(const float *, const float *,
                                              float *, hipStream_t) noexcept {
   return hipErrorInvalidValue;
@@ -4072,13 +4066,8 @@ void initialize_matmul_dispatch_info(
   info->dispatch_count =
       nvfp4_split4 ? 3U
       : variant == ::sllm_matmul_kernel::KernelVariant::
-                       Fp8OuterPrefillGfx1030F16Staging ||
-              variant == ::sllm_matmul_kernel::KernelVariant::
-                             Nvfp4W4A4PrefillGfx1201F16Staging
+                       Nvfp4W4A4PrefillGfx1201F16Staging
           ? 5U
-      : variant == ::sllm_matmul_kernel::KernelVariant::
-                       Fp8OuterPrefillGfx1030F16TileStaging
-          ? 4U
       // The three ID82 tuple symbols each enqueue one kernel; the tuple
       // branch is explicit here so metadata remains one logical dispatch even
       // though device_symbol_for_target reports a shape-specific code object.
@@ -6979,8 +6968,6 @@ sllm_context_create(const sllm_context_create_info_t *const info,
     const char *const short_mixed_rocblas_solution_environment =
         std::getenv(::sllm_matmul_kernel::
                         kPhase49Gfx1030ShortMixedRocblasSolutionEnvironment);
-    const char *const fp8_f16_staging_environment = std::getenv(
-        ::sllm_matmul_kernel::kFp8OuterPrefillGfx1030F16StagingEnvironment);
     const char *const nvfp4_f16_staging_environment = std::getenv(
         ::sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201F16StagingEnvironment);
     const bool create_nvfp4_f16_staging_rocblas =
@@ -6992,9 +6979,7 @@ sllm_context_create(const sllm_context_create_info_t *const info,
          ((rocblas_solution_environment == nullptr ||
            std::strcmp(rocblas_solution_environment, "1") == 0) ||
           (short_mixed_rocblas_solution_environment == nullptr ||
-           std::strcmp(short_mixed_rocblas_solution_environment, "1") == 0) ||
-          (fp8_f16_staging_environment != nullptr &&
-           std::strcmp(fp8_f16_staging_environment, "1") == 0))) ||
+           std::strcmp(short_mixed_rocblas_solution_environment, "1") == 0))) ||
         create_nvfp4_f16_staging_rocblas;
     if (create_matmul_blas) {
       const hipblasStatus_t blas_status =

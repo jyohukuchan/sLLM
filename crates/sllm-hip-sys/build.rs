@@ -279,8 +279,6 @@ fn main() {
     let graph_span_runtime = source_dir.join("src/graph_span_runtime.inc");
     let qwen38_projection_pack_runtime = source_dir.join("src/qwen38_projection_pack_runtime.inc");
     let nvfp4_decode_scale_lut = source_dir.join("src/nvfp4_decode_scale_lut.inc");
-    let fp8_prefill_lds_lut = source_dir.join("src/fp8_prefill_lds_lut.inc");
-    let fp8_prefill_f16_tile_staging = source_dir.join("src/fp8_prefill_f16_tile_staging.inc");
     let fp8_prefill_short_m32 = source_dir.join("src/fp8_prefill_short_m32.inc");
     let mlp_gate_up_silu_bundle_kernel_internal =
         source_dir.join("src/mlp_gate_up_silu_bundle_kernel_internal.hpp");
@@ -464,11 +462,6 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         nvfp4_decode_scale_lut.display()
-    );
-    println!("cargo:rerun-if-changed={}", fp8_prefill_lds_lut.display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        fp8_prefill_f16_tile_staging.display()
     );
     println!("cargo:rerun-if-changed={}", fp8_prefill_short_m32.display());
     println!(

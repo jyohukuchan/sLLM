@@ -453,7 +453,7 @@ def chat_text(value: dict[str, Any]) -> tuple[str, Any, Any]:
     return message["content"], message.get("reasoning_content"), choice.get("finish_reason")
 
 
-def run(probe: ApiProbe, image_case: bool = False) -> None:
+def run(probe: ApiProbe, image_case: bool = False, tools: str = "supported") -> None:
     def models() -> None:
         response = probe.get("/v1/models")
         value = require_response_object(probe, response, "list")
@@ -566,7 +566,12 @@ def run(probe: ApiProbe, image_case: bool = False) -> None:
             "tool_choice": {"type": "function", "name": "lookup"},
             "parallel_tool_calls": False,
         }
-        value = require_responses(probe, probe.post("/v1/responses", payload))
+        response = probe.post("/v1/responses", payload)
+        if tools == "unsupported":
+            require_error(probe, response, "tools")
+            probe.assertion(response.value["error"]["code"] == "unsupported_parameter", "profile explicitly rejects unsupported tools")
+            return
+        value = require_responses(probe, response)
         calls = [item for item in value["output"] if isinstance(item, dict) and item.get("type") == "function_call"]
         probe.assertion(len(calls) == 1, "Responses tool request returns exactly one function call")
         call = calls[0]
@@ -575,7 +580,7 @@ def run(probe: ApiProbe, image_case: bool = False) -> None:
         probe.assertion(isinstance(arguments, dict), "function call arguments are a JSON object")
         probe.assertion(arguments == {"query": "Tokyo"}, "function call preserves the constrained argument")
 
-    probe.case("responses_tool_call", tool_call)
+    probe.case("reject_unsupported_tools" if tools == "unsupported" else "responses_tool_call", tool_call)
 
     def reasoning_controls() -> None:
         payload = chat_payload(probe.model, probe.seed, max_tokens=2)
@@ -689,6 +694,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--api-key", default=os.environ.get("SLLM_API_KEY"))
     parser.add_argument("--output", type=Path, default=Path(DEFAULT_OUTPUT))
+    parser.add_argument("--tools", choices=("supported", "unsupported"), default="supported", help="expected tool capability of the selected server profile")
     parser.add_argument("--image-case", action="store_true", help="verify the existing Qwen image route with a bounded JSON mask")
     return parser.parse_args()
 
@@ -703,7 +709,7 @@ def main() -> int:
         return 2
     started_at = datetime.now(timezone.utc).isoformat()
     try:
-        run(probe, image_case=args.image_case)
+        run(probe, image_case=args.image_case, tools=args.tools)
     except Exception as error:
         probe.cases.append(
             {

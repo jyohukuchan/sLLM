@@ -158,12 +158,6 @@ bool graph_span_qwen38_nvfp4_variant_safe(
   const bool exact_gfx1030 = matches_runtime_gcn_arch(arch_name, "gfx1030");
   const bool exact_gfx1201 = matches_runtime_gcn_arch(arch_name, "gfx1201");
   switch (variant) {
-  case KernelVariant::Nvfp4W4A4DecodeColumns128:
-    return (exact_gfx1030 || exact_gfx1201) &&
-           sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_columns128_shape(
-               first.m, first.k, first.n) &&
-           sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_columns128_shape(
-               second.m, second.k, second.n);
   case KernelVariant::Nvfp4W4A4DecodeWave4Column32:
     return (exact_gfx1030 || exact_gfx1201) &&
            sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_wave4col32_shape(
@@ -172,16 +166,20 @@ bool graph_span_qwen38_nvfp4_variant_safe(
                second.m, second.k, second.n);
   case KernelVariant::Nvfp4W4A4DecodeActivationShared:
     return exact_gfx1030 &&
-           sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_activation_shared_shape(
-               first.m, first.k, first.n) &&
-           sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_activation_shared_shape(
-               second.m, second.k, second.n);
+           sllm_matmul_kernel::
+               phase78_nvfp4_w4a4_decode_activation_shared_shape(
+                   first.m, first.k, first.n) &&
+           sllm_matmul_kernel::
+               phase78_nvfp4_w4a4_decode_activation_shared_shape(
+                   second.m, second.k, second.n);
   case KernelVariant::Nvfp4W4A4DecodeScaleLut:
     return (exact_gfx1030 &&
-            sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_activation_shared_shape(
-                first.m, first.k, first.n) &&
-            sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_activation_shared_shape(
-                second.m, second.k, second.n)) ||
+            sllm_matmul_kernel::
+                phase78_nvfp4_w4a4_decode_activation_shared_shape(
+                    first.m, first.k, first.n) &&
+            sllm_matmul_kernel::
+                phase78_nvfp4_w4a4_decode_activation_shared_shape(
+                    second.m, second.k, second.n)) ||
            (exact_gfx1201 &&
             sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_wave4col32_shape(
                 first.m, first.k, first.n) &&
@@ -210,14 +208,14 @@ bool graph_span_qwen38_pack(const ElementwisePlan *const plan,
            first.activation.shape[0] == second.activation.shape[0] &&
            first.activation.shape[1] == second.activation.shape[1] &&
            plan->matmul_workspace != nullptr &&
-           graph_span_qwen38_nvfp4_workspace_bytes(
-               first.k, &expected_workspace_bytes) &&
+           graph_span_qwen38_nvfp4_workspace_bytes(first.k,
+                                                   &expected_workspace_bytes) &&
            plan->matmul_workspace_bytes == expected_workspace_bytes &&
            plan->qwen38_projection_pack2_kernel_variants[0] ==
                plan->qwen38_projection_pack2_kernel_variants[1] &&
            graph_span_qwen38_nvfp4_variant_safe(
-               plan->qwen38_projection_pack2_kernel_variants[0], first,
-               second, arch_name);
+               plan->qwen38_projection_pack2_kernel_variants[0], first, second,
+               arch_name);
   }
   if (role != SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_FP8_GDN_QKV_Z ||
       plan->qwen38_projection_pack2_metadata[0].m != 1U ||

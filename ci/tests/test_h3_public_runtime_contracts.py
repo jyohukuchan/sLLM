@@ -701,7 +701,7 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_token_selector_fixed_topp_token_block_prefix_v1",
             "sllm_token_selector_fixed_topp_weight_prefix_v1",
         }
-        self.assertEqual(len(KERNEL_SYMBOLS), 173)
+        self.assertEqual(len(KERNEL_SYMBOLS), 147)
         self.assertEqual(tuple(sorted(KERNEL_SYMBOLS)), KERNEL_SYMBOLS)
         self.assertTrue(expected_additions <= set(KERNEL_SYMBOLS))
         self.assertEqual(len(expected_additions), 44)
@@ -719,24 +719,22 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_156__device_stub__causal_attention_decode_wave_split_kernelILb1EEEvPKtPKvS5_S5_S5_PKfS7_Ptmjjjjff",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_158__device_stub__causal_attention_prefill_gqa4_qtile4_kernelEPKtPKvS4_S4_S4_PKfS6_Ptjmjjjjff",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_158__device_stub__causal_attention_prefill_gqa4_shared_kernelEPKtPKvS4_S4_S4_PKfS6_Ptjmjjjjff",
-            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_161__device_stub__causal_attention_long_prefill_v2_stage1_kernelEPKtS2_S2_jmmmjjPf",
-            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_162__device_stub__causal_attention_long_prefill_v2_combine_kernelEPKfPtjjm",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage1_kernelILj16EEEvPKtS3_S3_PtmPf",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage1_kernelILj32EEEvPKtS3_S3_PtmPf",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage2_kernelILj16EEEvPKtPtjPKf",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage2_kernelILj32EEEvPKtPtjPKf",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_166__device_stub__causal_attention_decode_wave_split_fp16_pair_kernelEPKtPKvS4_S4_S4_PKfS6_Ptmjjjjff",
         )
-        self.assertEqual(len(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS), 18)
-        self.assertEqual(len(set(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)), 18)
+        self.assertEqual(len(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS), 16)
+        self.assertEqual(len(set(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)), 16)
         self.assertEqual(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS, expected)
         self.assertEqual(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS, tuple(sorted(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)))
 
     def test_additional_device_stub_inventory_is_finite_and_duplicate_free(self) -> None:
-        self.assertEqual(len(ADDITIONAL_DEVICE_STUB_SYMBOLS), 86)
-        self.assertEqual(len(set(ADDITIONAL_DEVICE_STUB_SYMBOLS)), 86)
+        self.assertEqual(len(ADDITIONAL_DEVICE_STUB_SYMBOLS), 80)
+        self.assertEqual(len(set(ADDITIONAL_DEVICE_STUB_SYMBOLS)), 80)
         self.assertEqual(ADDITIONAL_DEVICE_STUB_SYMBOLS, tuple(sorted(ADDITIONAL_DEVICE_STUB_SYMBOLS)))
-        self.assertEqual(sum("causal_attention_kernel" in name for name in ADDITIONAL_DEVICE_STUB_SYMBOLS), 85)
+        self.assertEqual(sum("causal_attention_kernel" in name for name in ADDITIONAL_DEVICE_STUB_SYMBOLS), 79)
         self.assertEqual(sum("ministral3_yarn_kernel" in name for name in ADDITIONAL_DEVICE_STUB_SYMBOLS), 1)
 
     def test_host_hip_undefined_closure_includes_graph_and_gfx1030_additions(self) -> None:
@@ -1525,7 +1523,7 @@ const _H3_ATTRIBUTE_DECOY: usize = 0;''',
 
         temp = Path(tempfile.mkdtemp(prefix="sllm-h3-report-schema-missing-"))
         try:
-            shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target"))
+            shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target", "build", "reference", "node_modules", ".rocprofv3", ".mypy_cache", ".pytest_cache"))
             (temp / "ci/schema/hip-runtime-public-report-v1.schema.json").unlink()
             with self.assertRaises((ContractError, RuntimeContractError)):
                 validate_static(temp)
@@ -1593,7 +1591,7 @@ const _H3_ATTRIBUTE_DECOY: usize = 0;''',
             with self.subTest(mode=mode):
                 temp = Path(tempfile.mkdtemp(prefix="sllm-h3-source-") )
                 try:
-                    shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target"))
+                    shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target", "build", "reference", "node_modules", ".rocprofv3", ".mypy_cache", ".pytest_cache"))
                     source = temp / "native/hip/src/public_runtime.hip.cpp"
                     if mode == "missing":
                         source.unlink()
@@ -1609,7 +1607,7 @@ const _H3_ATTRIBUTE_DECOY: usize = 0;''',
 
         temp = Path(tempfile.mkdtemp(prefix="sllm-h3-source-extra-"))
         try:
-            shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target"))
+            shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target", "build", "reference", "node_modules", ".rocprofv3", ".mypy_cache", ".pytest_cache"))
             matrix_path = temp / "ci/matrix/hip-runtime-compile-v1.json"
             matrix = json.loads(matrix_path.read_text())
             matrix["sources"]["canonical_order"].append("native/hip/src/extra.hpp")
@@ -1622,7 +1620,7 @@ const _H3_ATTRIBUTE_DECOY: usize = 0;''',
 
         temp = Path(tempfile.mkdtemp(prefix="sllm-h3-source-set-") )
         try:
-            shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target"))
+            shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target", "build", "reference", "node_modules", ".rocprofv3", ".mypy_cache", ".pytest_cache"))
             matrix_path = temp / "ci/matrix/hip-runtime-compile-v1.json"
             matrix = json.loads(matrix_path.read_text())
             matrix["sources"]["source_set_sha256"] = "0" * 64
@@ -1636,7 +1634,7 @@ const _H3_ATTRIBUTE_DECOY: usize = 0;''',
         def assert_invalid(mutator: object, label: str) -> None:
             temp = Path(tempfile.mkdtemp(prefix="sllm-h3-direct-inventory-"))
             try:
-                shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target"))
+                shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target", "build", "reference", "node_modules", ".rocprofv3", ".mypy_cache", ".pytest_cache"))
                 matrix_path = temp / "ci/matrix/hip-runtime-compile-v1.json"
                 matrix = json.loads(matrix_path.read_text())
                 mutator(matrix)
@@ -1730,7 +1728,7 @@ const _H3_ATTRIBUTE_DECOY: usize = 0;''',
         def assert_invalid_schema(mutator: object, label: str) -> None:
             temp = Path(tempfile.mkdtemp(prefix="sllm-h3-compile-schema-"))
             try:
-                shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target"))
+                shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target", "build", "reference", "node_modules", ".rocprofv3", ".mypy_cache", ".pytest_cache"))
                 schema_path = temp / "ci/schema/hip-runtime-compile-v1.schema.json"
                 schema = json.loads(schema_path.read_text())
                 mutator(schema)
@@ -1813,7 +1811,7 @@ const _H3_ATTRIBUTE_DECOY: usize = 0;''',
             with self.subTest(label=label):
                 temp = Path(tempfile.mkdtemp(prefix="sllm-h3-build-shape-"))
                 try:
-                    shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target"))
+                    shutil.copytree(ROOT, temp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local-artifacts", "__pycache__", "target", "build", "reference", "node_modules", ".rocprofv3", ".mypy_cache", ".pytest_cache"))
                     matrix_path = temp / "ci/matrix/hip-runtime-compile-v1.json"
                     matrix = json.loads(matrix_path.read_text())
                     mutation(next(row for row in matrix["rows"] if row["target"] == "gfx1030"))

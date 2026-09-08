@@ -4,7 +4,7 @@
 // activation-scale/weight-scale/FP32-add order, and BF16-RNE epilogue fixed.
 // It changes only the number of 16-row waves and 16-column accumulator tiles
 // owned by a workgroup.  The production 128x64 ID64 kernel is the control;
-// 128x32, 128x16, and 64x32 are independent candidates.
+// 128x16 and 64x32 are independent candidates.
 
 #define main phase78_scaled_ingress_embedded_main
 #include "phase78_nvfp4_gfx1201_wmma_scaled_ingress_probe.hip.cpp"
@@ -31,21 +31,17 @@ constexpr std::array<Shape, 4> kSweepBoundaryShapes = {{
 
 enum class TileVariant : uint32_t {
   Id64_128x64 = 0U,
-  Tile128x32 = 1U,
-  Tile128x16 = 2U,
-  Tile64x32 = 3U,
+  Tile128x16 = 1U,
+  Tile64x32 = 2U,
 };
 
-constexpr std::array<TileVariant, 4> kTileVariants = {
-    TileVariant::Id64_128x64, TileVariant::Tile128x32, TileVariant::Tile128x16,
-    TileVariant::Tile64x32};
+constexpr std::array<TileVariant, 3> kTileVariants = {
+    TileVariant::Id64_128x64, TileVariant::Tile128x16, TileVariant::Tile64x32};
 
 const char *tile_variant_name(const TileVariant variant) {
   switch (variant) {
   case TileVariant::Id64_128x64:
     return "id64-128x64-control";
-  case TileVariant::Tile128x32:
-    return "id64-order-128x32";
   case TileVariant::Tile128x16:
     return "id64-order-128x16";
   case TileVariant::Tile64x32:
@@ -57,7 +53,6 @@ const char *tile_variant_name(const TileVariant variant) {
 constexpr uint32_t tile_rows(const TileVariant variant) {
   switch (variant) {
   case TileVariant::Id64_128x64:
-  case TileVariant::Tile128x32:
   case TileVariant::Tile128x16:
     return 128U;
   case TileVariant::Tile64x32:
@@ -70,7 +65,6 @@ constexpr uint32_t tile_columns(const TileVariant variant) {
   switch (variant) {
   case TileVariant::Id64_128x64:
     return 64U;
-  case TileVariant::Tile128x32:
   case TileVariant::Tile64x32:
     return 32U;
   case TileVariant::Tile128x16:
@@ -301,8 +295,6 @@ const void *tile_kernel_pointer(const TileVariant variant) {
   switch (variant) {
   case TileVariant::Id64_128x64:
     return reinterpret_cast<const void *>(id64_control_kernel);
-  case TileVariant::Tile128x32:
-    return reinterpret_cast<const void *>(id64_geometry_kernel<8U, 2U>);
   case TileVariant::Tile128x16:
     return reinterpret_cast<const void *>(id64_geometry_kernel<8U, 1U>);
   case TileVariant::Tile64x32:
@@ -370,13 +362,6 @@ bool launch_tile(const TileVariant variant, const Shape &shape,
                        buffers.weight, buffers.weight_scales,
                        buffers.weight_tensor_scale, buffers.input_tensor_scale,
                        buffers.output, shape.m, shape.k, shape.n);
-    break;
-  case TileVariant::Tile128x32:
-    hipLaunchKernelGGL(
-        (id64_geometry_kernel<8U, 2U>), grid, block, 0U, buffers.stream,
-        buffers.activation, buffers.activation_scales, buffers.weight,
-        buffers.weight_scales, buffers.weight_tensor_scale,
-        buffers.input_tensor_scale, buffers.output, shape.m, shape.k, shape.n);
     break;
   case TileVariant::Tile128x16:
     hipLaunchKernelGGL(
@@ -669,8 +654,7 @@ int main(int argc, char **argv) {
     float best = std::numeric_limits<float>::infinity();
     TileVariant best_variant = TileVariant::Id64_128x64;
     for (const TileVariant variant :
-         {TileVariant::Tile128x32, TileVariant::Tile128x16,
-          TileVariant::Tile64x32}) {
+         {TileVariant::Tile128x16, TileVariant::Tile64x32}) {
       const float candidate =
           result.measurements[static_cast<std::size_t>(variant)].median_us;
       if (candidate < best) {

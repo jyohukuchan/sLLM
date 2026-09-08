@@ -205,7 +205,9 @@ bool linear_attention_gfx1030_row32_lds_selector_contract() {
   };
   unsetenv(force_name);
   unsetenv(opt_in_name);
-  bool valid = select(1U, 16U, 48U, 128U, "gfx1030") == 0U;
+  // The exact gfx1030 row32-LDS scope is enabled by default; "0" and
+  // invalid values remain explicit rollback controls.
+  bool valid = select(1U, 16U, 48U, 128U, "gfx1030") == 1U;
   setenv(opt_in_name, "1", 1);
   valid = valid && select(1U, 16U, 48U, 128U, "gfx1030") == 1U;
   valid = valid && select(2U, 16U, 48U, 128U, "gfx1030") == 0U &&
@@ -491,6 +493,15 @@ bool causal_attention_gqa6_p64_and_blocksoftmax_selector_contract() {
                select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
                       "gfx1201") == gfx1201_decode_base;
 
+  for (const char *const disabled : {"0", "unexpected"}) {
+    setenv(variables[1], disabled, 1);
+    valid = valid &&
+            select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                   "gfx1030") == gfx1030_decode_base &&
+            select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                   "gfx1201") == gfx1201_decode_base;
+  }
+
   setenv(variables[1], "1", 1);
   valid = valid &&
           select(8191U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
@@ -706,14 +717,17 @@ bool causal_attention_gqa6_p128_selector_contract() {
 bool causal_attention_gqa6_rocblas_f32_selector_contract() {
   constexpr const char *const candidate_name =
       "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1030_ROCBLAS_F32";
+  constexpr const char *const gfx1201_candidate_name =
+      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1201_ROCBLAS_F32";
   constexpr const char *const qtile_name =
       "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K32_FP16";
   constexpr const char *const blocksoftmax_name =
       "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1030";
   constexpr const char *const force_name =
       "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
-  constexpr std::array<const char *const, 4> variables = {
-      candidate_name, qtile_name, blocksoftmax_name, force_name};
+  constexpr std::array<const char *const, 5> variables = {
+      candidate_name, gfx1201_candidate_name, qtile_name, blocksoftmax_name,
+      force_name};
   std::array<bool, variables.size()> was_present{};
   std::array<std::string, variables.size()> old_values{};
   for (std::size_t index = 0U; index < variables.size(); ++index) {
@@ -742,9 +756,14 @@ bool causal_attention_gqa6_rocblas_f32_selector_contract() {
   constexpr uint32_t kProvider = 1U << 20U;
   constexpr uint32_t kQTile4K32 = 1U << 12U;
   constexpr uint32_t kBlockSoftmax = 1U << 18U;
-  bool valid = select(128U, 128U, 24U, 4U, 256U, "gfx1030") == 0U;
-  setenv(candidate_name, "0", 1);
-  valid = valid && select(128U, 128U, 24U, 4U, 256U, "gfx1030") == 0U;
+  // rocBLAS F32 is an explicit opt-in; an unset variable must select the
+  // baseline provider.
+  bool valid = (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kProvider) == 0U;
+  for (const char *const disabled : {"0", "unexpected"}) {
+    setenv(candidate_name, disabled, 1);
+    valid = valid &&
+            (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kProvider) == 0U;
+  }
   setenv(candidate_name, "1", 1);
   valid = valid && select(128U, 128U, 24U, 4U, 256U, "gfx1030") == kProvider &&
           select(128U, 128U, 24U, 4U, 256U, "gfx1201") != kProvider &&
@@ -752,9 +771,10 @@ bool causal_attention_gqa6_rocblas_f32_selector_contract() {
           select(1U, 1U, 24U, 4U, 256U, "gfx1030") != kProvider;
   setenv(qtile_name, "1", 1);
   valid = valid && select(128U, 128U, 24U, 4U, 256U, "gfx1030") == kProvider;
-  unsetenv(candidate_name);
+  setenv(candidate_name, "0", 1);
   valid = valid &&
-          (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kQTile4K32) != 0U;
+          (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kQTile4K32) != 0U &&
+          (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kProvider) == 0U;
   setenv(candidate_name, "1", 1);
   setenv(blocksoftmax_name, "1", 1);
   valid = valid && select(128U, 128U, 24U, 4U, 256U, "gfx1030") == kProvider &&
@@ -806,22 +826,28 @@ bool causal_attention_gqa6_rocblas_f32_gfx1201_selector_contract() {
         target);
   };
   constexpr uint32_t kProvider = 1U << 21U;
+  // Both rocBLAS providers are explicit opt-ins.  Clearing the environment
+  // must leave both targets on their baseline route.
   bool valid = (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
                        "gfx1201") &
                 kProvider) == 0U &&
-               select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                      "gfx1030") == 0U;
-  setenv(candidate_name, "0", 1);
-  valid = valid && (select(128U, 128U, 24U, 4U, 256U,
-                           SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1201") &
-                    kProvider) == 0U;
+               (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                       "gfx1030") &
+                kProvider) == 0U;
+  for (const char *const disabled : {"0", "unexpected"}) {
+    setenv(candidate_name, disabled, 1);
+    valid = valid && (select(128U, 128U, 24U, 4U, 256U,
+                             SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1201") &
+                      kProvider) == 0U;
+  }
   setenv(candidate_name, "1", 1);
   valid = valid &&
           (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
                   "gfx1201") &
            kProvider) == kProvider &&
-          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == 0U &&
+          (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                  "gfx1030") &
+           kProvider) == 0U &&
           (select(128U, 128U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
                   "gfx1201") &
            kProvider) == 0U &&
@@ -868,15 +894,10 @@ bool causal_attention_target_scoped_selector_contract() {
   constexpr uint32_t kPrefillGqa6QTile4K4Fp16 = 1U << 13U;
   constexpr uint32_t kPrefillGqa6QTile4K8Fp16 = 1U << 14U;
   constexpr uint32_t kPrefillGqa6QTile4K16Fp16 = 1U << 15U;
-  constexpr uint32_t kTypedQ4K4 = 1U << 10U;
-  constexpr uint32_t kTypedQ4K8 = 2U << 10U;
-  constexpr uint32_t kTypedQ8K8 = 3U << 10U;
   constexpr const char *const kForceBaseline =
       "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
   constexpr const char *const kGfx1201Gqa4SplitP32 =
       "SLLM_CAUSAL_ATTENTION_GFX1201_DECODE_GQA4_SPLIT_P32";
-  constexpr const char *const kPhase66TiledPrefill =
-      "SLLM_CAUSAL_ATTENTION_PHASE66_TILED_PREFILL";
   constexpr const char *const kGqa6QTile4 = "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4";
   constexpr const char *const kGqa6QTile4K4Fp16 =
       "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K4_FP16";
@@ -886,7 +907,7 @@ bool causal_attention_target_scoped_selector_contract() {
       "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K16_FP16";
   constexpr const char *const kGqa6QTile4K32Fp16 =
       "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K32_FP16";
-  constexpr std::array<const char *const, 22> kCandidateVariables = {
+  constexpr std::array<const char *const, 20> kCandidateVariables = {
       "SLLM_CAUSAL_ATTENTION_GFX1030_Q_PRELOAD",
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT",
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT_Q_PRELOAD",
@@ -899,13 +920,11 @@ bool causal_attention_target_scoped_selector_contract() {
       "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1201",
       "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_Q8_GFX1201",
       "SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM",
-      "SLLM_CAUSAL_ATTENTION_GFX1030_LONG_PREFILL_V2",
       kGqa6QTile4,
       kGqa6QTile4K4Fp16,
       kGqa6QTile4K8Fp16,
       kGqa6QTile4K16Fp16,
       kGqa6QTile4K32Fp16,
-      kPhase66TiledPrefill,
       kForceBaseline,
       "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1030_ROCBLAS_F32",
       "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1201_ROCBLAS_F32"};
@@ -951,13 +970,6 @@ bool causal_attention_target_scoped_selector_contract() {
     return sllm_test_select_causal_attention_providers(
         expected_kv_length, query_count, query_heads, kv_heads, head_dim,
         encoding, arch_name);
-  };
-  const auto select_with_semantics = [](const uint64_t sliding_window,
-                                        const bool explicit_score_scale,
-                                        const uint32_t encoding) {
-    return sllm_test_select_causal_attention_providers_with_semantics(
-        2048U, 128U, 16U, 4U, 256U, encoding, sliding_window,
-        explicit_score_scale ? 1U : 0U, "gfx1201");
   };
   const auto expect_gfx942_zero =
       [&](const uint64_t expected_kv_length, const uint32_t query_count = 1U,
@@ -1052,8 +1064,8 @@ bool causal_attention_target_scoped_selector_contract() {
     }
   }
   // The same environment matrix must not expose gfx1030-only candidates on
-  // gfx1201. Phase66 is the one model-independent gfx1201 opt-in in this set;
-  // FORCE_BASELINE removes both it and the qtile4 control.
+  // gfx1201. FORCE_BASELINE removes the common prefill route and qtile4
+  // control.
   for (const char *const variable : kCandidateVariables) {
     for (const char *const value : kEnvironmentValues) {
       clear_environment();
@@ -1063,20 +1075,13 @@ bool causal_attention_target_scoped_selector_contract() {
       const bool force_baseline = std::strcmp(variable, kForceBaseline) == 0 &&
                                   value != nullptr &&
                                   std::strcmp(value, "1") == 0;
-      const bool phase66 = std::strcmp(variable, kPhase66TiledPrefill) == 0 &&
-                           value != nullptr && std::strcmp(value, "1") == 0;
       valid = valid &&
               expect_gfx1201(4095U, 1U, kGfx1201Wave | kDecodeWaveSplit) &&
               expect_gfx1201(4096U, 2U, 0U) &&
-              expect_gfx1201(4096U, 64U,
+              expect_gfx1201(4096U, 64U, kGfx1201Wave | kPrefillGqa4) &&
+              expect_gfx1201(4096U, 128U,
                              kGfx1201Wave | kPrefillGqa4 |
-                                 (phase66 ? kPrefillGqa4QTile4 : 0U)) &&
-              expect_gfx1201(
-                  4096U, 128U,
-                  kGfx1201Wave | kPrefillGqa4 |
-                      (force_baseline
-                           ? 0U
-                           : kPrefillGqa4QTile4 | (phase66 ? kTypedQ8K8 : 0U)));
+                                 (force_baseline ? 0U : kPrefillGqa4QTile4));
     }
   }
   clear_environment();
@@ -1096,67 +1101,6 @@ bool causal_attention_target_scoped_selector_contract() {
           expect_gfx1201(4096U, 64U, kGfx1201Wave | kPrefillGqa4) &&
           expect_gfx1201(4096U, 128U, kGfx1201Wave | kPrefillGqa4);
 
-  // Phase66 chooses tiles from typed query/context boundaries only. Each
-  // rejected target, encoding or shape falls back to the existing q4k1 path.
-  clear_environment();
-  setenv(kPhase66TiledPrefill, "1", 1);
-  valid = valid &&
-          expect_gfx1201(127U, 127U,
-                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4) &&
-          expect_gfx1201(127U, 128U,
-                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4) &&
-          expect_gfx1201(128U, 128U,
-                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
-                             kTypedQ4K4) &&
-          expect_gfx1201(511U, 128U,
-                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
-                             kTypedQ4K4) &&
-          expect_gfx1201(512U, 128U,
-                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
-                             kTypedQ4K8) &&
-          expect_gfx1201(513U, 128U,
-                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
-                             kTypedQ4K8) &&
-          expect_gfx1201(2047U, 128U,
-                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
-                             kTypedQ4K8) &&
-          expect_gfx1201(2048U, 128U,
-                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
-                             kTypedQ8K8) &&
-          expect_gfx1201(2049U, 128U,
-                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
-                             kTypedQ8K8) &&
-          expect_gfx1201(2048U, 128U,
-                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4, 16U,
-                         4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) &&
-          expect_gfx1201(2048U, 128U,
-                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
-                             kTypedQ8K8,
-                         16U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) &&
-          select(2048U, 128U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                 "gfx1030") == (kPrefillGqa4 | kPrefillGqa4QTile4) &&
-          expect_gfx1201(2048U, 128U, kGfx1201Wave, 8U, 4U, 256U) &&
-          expect_gfx1201(2048U, 128U, kGfx1201Wave, 16U, 8U, 256U) &&
-          expect_gfx1201(2048U, 128U, kGfx1201Wave, 16U, 4U, 128U);
-
-  // The typed candidate implements full, implicitly-scaled causal attention
-  // only. Sliding-window and explicit-score-scale semantics must keep the
-  // typed policy bits clear for every accepted candidate KV encoding.
-  constexpr uint32_t kTypedPolicyMask = 3U << 10U;
-  for (const uint32_t encoding :
-       {SLLM_HIP_KV_ENCODING_FP16_V1, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1}) {
-    const uint32_t sliding = select_with_semantics(1024U, false, encoding);
-    const uint32_t explicitly_scaled =
-        select_with_semantics(0U, true, encoding);
-    if ((sliding & kTypedPolicyMask) != 0U ||
-        (explicitly_scaled & kTypedPolicyMask) != 0U) {
-      std::cerr << "Phase66 typed prefill selected unsupported attention "
-                   "semantics for encoding "
-                << encoding << ": sliding mask " << sliding
-                << ", explicit-scale mask " << explicitly_scaled << '\n';
-      valid = false;
-    }
-  }
   setenv(kForceBaseline, "1", 1);
   valid = valid && expect_gfx1201(2048U, 128U, kGfx1201Wave | kPrefillGqa4);
 
@@ -4117,9 +4061,8 @@ bool qwen38_projection_pack2_public_contract() {
   static_assert(SLLM_HIP_QWEN38_PROJECTION_PACK2_WORKSPACE_BYTES ==
                 UINT64_C(2880));
 
-  constexpr std::array<const char *, 5> kSelectorVariables = {
+  constexpr std::array<const char *, 4> kSelectorVariables = {
       "SLLM_NVFP4_W4A4_FORCE_BASELINE",
-      "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_COLUMNS",
       "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4",
       "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_ACTIVATION_SHARED",
       "SLLM_NVFP4_W4A4_DECODE_FORCE_LDS_F32_LUT"};
@@ -4315,10 +4258,10 @@ bool qwen38_projection_pack2_public_contract() {
       run_supported_target("gfx1030") && run_supported_target("gfx1201");
   // The shared-quantization bundle must admit the same ID84 compute variant
   // as standalone matmul on both exact targets.
-  setenv(kSelectorVariables[4], "1", 1);
+  setenv(kSelectorVariables[3], "1", 1);
   valid = run_supported_target("gfx1030") && valid;
   valid = run_supported_target("gfx1201") && valid;
-  unsetenv(kSelectorVariables[4]);
+  unsetenv(kSelectorVariables[3]);
 
   fake_hip::reset();
   fake_hip::set_gcn_arch_name("gfx942");
@@ -5186,8 +5129,6 @@ bool matmul_mxfp_prefill_selector_contract() {
       "SLLM_MXFP6_PREFILL_FORCE_PHASE75";
   constexpr const char *const mmq_columns =
       "SLLM_MX_WA_PREFILL_FORCE_MMQ_COLUMNS";
-  constexpr const char *const gfx1030_mmq_columns =
-      "SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_COLUMNS";
   constexpr const char *const gfx1030_phase69 =
       "SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_PHASE69";
   constexpr const char *const mxfp8_phase75 =
@@ -5197,14 +5138,8 @@ bool matmul_mxfp_prefill_selector_contract() {
       "SLLM_MXFP8_PREFILL_FORCE_WMMA_GFX1201";
   constexpr const char *const mxfp8_wmma_n16 =
       "SLLM_MXFP8_PREFILL_FORCE_WMMA_N16_GFX1201";
-  constexpr const char *const mxfp8_wmma_4wave =
-      "SLLM_MXFP8_PREFILL_FORCE_WMMA_4W_GFX1201";
-  constexpr const char *const mxfp8_wmma_lds_pad =
-      "SLLM_MXFP8_PREFILL_FORCE_WMMA_LDS_PAD_GFX1201";
   constexpr const char *const mxfp8_wmma_direct_weight =
       "SLLM_MXFP8_PREFILL_FORCE_WMMA_DIRECT_WEIGHT_GFX1201";
-  constexpr const char *const mxfp8_wmma_direct_activation =
-      "SLLM_MXFP8_PREFILL_FORCE_WMMA_DIRECT_ACTIVATION_GFX1201";
   constexpr const char *const mxfp8_wmma_direct_both =
       "SLLM_MXFP8_PREFILL_FORCE_WMMA_DIRECT_BOTH_GFX1201";
   constexpr const char *const mxfp8_wmma_n128_direct_both =
@@ -5239,10 +5174,6 @@ bool matmul_mxfp_prefill_selector_contract() {
   const bool had_mmq_columns = old_mmq_columns != nullptr;
   const std::string old_mmq_columns_value =
       had_mmq_columns ? old_mmq_columns : "";
-  const char *const old_gfx1030_mmq_columns = std::getenv(gfx1030_mmq_columns);
-  const bool had_gfx1030_mmq_columns = old_gfx1030_mmq_columns != nullptr;
-  const std::string old_gfx1030_mmq_columns_value =
-      had_gfx1030_mmq_columns ? old_gfx1030_mmq_columns : "";
   const char *const old_gfx1030_phase69 = std::getenv(gfx1030_phase69);
   const bool had_gfx1030_phase69 = old_gfx1030_phase69 != nullptr;
   const std::string old_gfx1030_phase69_value =
@@ -5261,26 +5192,12 @@ bool matmul_mxfp_prefill_selector_contract() {
   const bool had_mxfp8_wmma_n16 = old_mxfp8_wmma_n16 != nullptr;
   const std::string old_mxfp8_wmma_n16_value =
       had_mxfp8_wmma_n16 ? old_mxfp8_wmma_n16 : "";
-  const char *const old_mxfp8_wmma_4wave = std::getenv(mxfp8_wmma_4wave);
-  const bool had_mxfp8_wmma_4wave = old_mxfp8_wmma_4wave != nullptr;
-  const std::string old_mxfp8_wmma_4wave_value =
-      had_mxfp8_wmma_4wave ? old_mxfp8_wmma_4wave : "";
-  const char *const old_mxfp8_wmma_lds_pad = std::getenv(mxfp8_wmma_lds_pad);
-  const bool had_mxfp8_wmma_lds_pad = old_mxfp8_wmma_lds_pad != nullptr;
-  const std::string old_mxfp8_wmma_lds_pad_value =
-      had_mxfp8_wmma_lds_pad ? old_mxfp8_wmma_lds_pad : "";
   const char *const old_mxfp8_wmma_direct_weight =
       std::getenv(mxfp8_wmma_direct_weight);
   const bool had_mxfp8_wmma_direct_weight =
       old_mxfp8_wmma_direct_weight != nullptr;
   const std::string old_mxfp8_wmma_direct_weight_value =
       had_mxfp8_wmma_direct_weight ? old_mxfp8_wmma_direct_weight : "";
-  const char *const old_mxfp8_wmma_direct_activation =
-      std::getenv(mxfp8_wmma_direct_activation);
-  const bool had_mxfp8_wmma_direct_activation =
-      old_mxfp8_wmma_direct_activation != nullptr;
-  const std::string old_mxfp8_wmma_direct_activation_value =
-      had_mxfp8_wmma_direct_activation ? old_mxfp8_wmma_direct_activation : "";
   const char *const old_mxfp8_wmma_direct_both =
       std::getenv(mxfp8_wmma_direct_both);
   const bool had_mxfp8_wmma_direct_both = old_mxfp8_wmma_direct_both != nullptr;
@@ -5333,11 +5250,6 @@ bool matmul_mxfp_prefill_selector_contract() {
     } else {
       unsetenv(mmq_columns);
     }
-    if (had_gfx1030_mmq_columns) {
-      setenv(gfx1030_mmq_columns, old_gfx1030_mmq_columns_value.c_str(), 1);
-    } else {
-      unsetenv(gfx1030_mmq_columns);
-    }
     if (had_gfx1030_phase69) {
       setenv(gfx1030_phase69, old_gfx1030_phase69_value.c_str(), 1);
     } else {
@@ -5363,27 +5275,11 @@ bool matmul_mxfp_prefill_selector_contract() {
     } else {
       unsetenv(mxfp8_wmma_n16);
     }
-    if (had_mxfp8_wmma_4wave) {
-      setenv(mxfp8_wmma_4wave, old_mxfp8_wmma_4wave_value.c_str(), 1);
-    } else {
-      unsetenv(mxfp8_wmma_4wave);
-    }
-    if (had_mxfp8_wmma_lds_pad) {
-      setenv(mxfp8_wmma_lds_pad, old_mxfp8_wmma_lds_pad_value.c_str(), 1);
-    } else {
-      unsetenv(mxfp8_wmma_lds_pad);
-    }
     if (had_mxfp8_wmma_direct_weight) {
       setenv(mxfp8_wmma_direct_weight,
              old_mxfp8_wmma_direct_weight_value.c_str(), 1);
     } else {
       unsetenv(mxfp8_wmma_direct_weight);
-    }
-    if (had_mxfp8_wmma_direct_activation) {
-      setenv(mxfp8_wmma_direct_activation,
-             old_mxfp8_wmma_direct_activation_value.c_str(), 1);
-    } else {
-      unsetenv(mxfp8_wmma_direct_activation);
     }
     if (had_mxfp8_wmma_direct_both) {
       setenv(mxfp8_wmma_direct_both, old_mxfp8_wmma_direct_both_value.c_str(),
@@ -5407,16 +5303,12 @@ bool matmul_mxfp_prefill_selector_contract() {
   unsetenv(mxfp6_phase74);
   unsetenv(mxfp6_phase75);
   unsetenv(mmq_columns);
-  unsetenv(gfx1030_mmq_columns);
   unsetenv(gfx1030_phase69);
   unsetenv(mxfp8_phase75);
   unsetenv(mxfp8_row8);
   unsetenv(mxfp8_wmma);
   unsetenv(mxfp8_wmma_n16);
-  unsetenv(mxfp8_wmma_4wave);
-  unsetenv(mxfp8_wmma_lds_pad);
   unsetenv(mxfp8_wmma_direct_weight);
-  unsetenv(mxfp8_wmma_direct_activation);
   unsetenv(mxfp8_wmma_direct_both);
   unsetenv(mxfp8_wmma_n128_direct_both);
   bool valid =
@@ -5494,19 +5386,6 @@ bool matmul_mxfp_prefill_selector_contract() {
                                                "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
 
-  setenv(mxfp6_phase70, "gfx1030", 1);
-  valid =
-      valid &&
-      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp6W6A6PrefillMmqGfx1030ViaE4M3 &&
-      sllm_matmul_kernel::select_mxfp6_variant(1U, 2560U, 9216U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
-      sllm_matmul_kernel::select_mxfp6_variant(128U, 2559U, 9216U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
-      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1201") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp6W6A6PrefillWmmaGfx1201Pack4Swar;
   setenv(mxfp6_phase70, "gfx1201-n64", 1);
   valid =
       valid &&
@@ -5521,15 +5400,10 @@ bool matmul_mxfp_prefill_selector_contract() {
                                                             "gfx1201") ==
                        sllm_matmul_kernel::KernelVariant::
                            Mxfp6W6A6PrefillWmmaGfx1201Pack4N64;
-  setenv(mxfp6_phase70, "gfx1201-n128-pack4", 1);
-  valid =
-      valid &&
-      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1201") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp6W6A6PrefillWmmaGfx1201Pack4N128 &&
-      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 1025U, "gfx1201") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp6W6A6PrefillWmmaGfx1201Pack4Swar;
+  valid = valid && sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 1025U,
+                                                            "gfx1201") ==
+                       sllm_matmul_kernel::KernelVariant::
+                           Mxfp6W6A6PrefillWmmaGfx1201Pack4N64;
   unsetenv(mxfp6_phase70);
 
   setenv(mxfp6_phase74, "gfx1030-half2-32x32", 1);
@@ -5581,23 +5455,6 @@ bool matmul_mxfp_prefill_selector_contract() {
               Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double;
   unsetenv(mxfp8_phase75);
 
-  setenv(mxfp6_phase75, "half2-128x64-k32-double-scalar", 1);
-  valid =
-      valid &&
-      sllm_matmul_kernel::select_mxfp6_variant(2U, 32U, 1U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalar &&
-      sllm_matmul_kernel::select_mxfp6_variant(129U, 2080U, 1025U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalar &&
-      sllm_matmul_kernel::select_mxfp6_variant(1U, 2048U, 1024U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
-      sllm_matmul_kernel::select_mxfp6_variant(2U, 33U, 1U, "gfx1030") !=
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalar &&
-      sllm_matmul_kernel::select_mxfp6_variant(2U, 32U, 1U, "gfx1201") !=
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalar;
   setenv(mxfp6_phase75, "half2-128x64-k32-double-pack4", 1);
   valid = valid &&
           sllm_matmul_kernel::select_mxfp6_variant(33U, 64U, 35U, "gfx1030") ==
@@ -5797,46 +5654,12 @@ bool matmul_mxfp_prefill_selector_contract() {
               sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaN16;
   unsetenv(mxfp8_wmma_n16);
 
-  setenv(mxfp8_wmma_4wave, "1", 1);
-  valid =
-      valid &&
-      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, "gfx1201") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmma4Wave &&
-      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9217U, "gfx1201") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
-      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double;
-  unsetenv(mxfp8_wmma_4wave);
-
-  setenv(mxfp8_wmma_lds_pad, "1", 1);
-  valid =
-      valid &&
-      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, "gfx1201") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaLdsPad;
-  unsetenv(mxfp8_wmma_lds_pad);
-
   setenv(mxfp8_wmma_direct_weight, "1", 1);
   valid =
       valid &&
       sllm_matmul_kernel::select_mxfp8_variant(128U, 9216U, 2560U, "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaDirectWeight;
   unsetenv(mxfp8_wmma_direct_weight);
-
-  setenv(mxfp8_wmma_direct_activation, "1", 1);
-  valid =
-      valid &&
-      sllm_matmul_kernel::select_mxfp8_variant(128U, 9216U, 2560U, "gfx1201") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp8W8A8PrefillWmmaDirectActivation &&
-      sllm_matmul_kernel::select_mxfp8_variant(127U, 9216U, 2560U, "gfx1201") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaN64 &&
-      sllm_matmul_kernel::select_mxfp8_variant(129U, 9216U, 2560U, "gfx1201") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaN64 &&
-      sllm_matmul_kernel::select_mxfp8_variant(128U, 9216U, 2560U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double;
-  unsetenv(mxfp8_wmma_direct_activation);
 
   setenv(mxfp8_wmma_direct_both, "1", 1);
   valid =
@@ -5875,29 +5698,6 @@ bool matmul_mxfp_prefill_selector_contract() {
               sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillMmqCol8;
 
   unsetenv(mmq_columns);
-  setenv(gfx1030_mmq_columns, "16", 1);
-  valid =
-      valid &&
-      sllm_matmul_kernel::select_mxfp8_variant(2U, 31U, 17U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
-      sllm_matmul_kernel::select_mxfp8_variant(2U, 32U, 17U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Col16 &&
-      sllm_matmul_kernel::select_mxfp8_variant(2U, 33U, 17U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
-      sllm_matmul_kernel::select_mxfp8_variant(1U, 32U, 17U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Decode &&
-      sllm_matmul_kernel::select_mxfp8_variant(2U, 32U, 17U, "gfx1201") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
-      sllm_matmul_kernel::select_mxfp8_variant(2U, 32U, 17U, "gfx942") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
-      sllm_matmul_kernel::select_mxfp8_variant(2U, 32U, 17U, "gfx9999") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
-  setenv(gfx1030_mmq_columns, "32", 1);
-  valid =
-      valid &&
-      sllm_matmul_kernel::select_mxfp8_variant(9U, 32U, 33U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Col32;
-
   setenv(mmq_columns, "4", 1);
   valid = valid &&
           sllm_matmul_kernel::select_mxfp8_variant(9U, 32U, 33U, "gfx1030") ==
@@ -5918,50 +5718,12 @@ bool matmul_mxfp_prefill_selector_contract() {
           sllm_matmul_kernel::select_mxfp8_variant(9U, 32U, 33U, "gfx1030") ==
               sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Prefill;
   unsetenv(baseline);
-  unsetenv(gfx1030_mmq_columns);
 
-  setenv(gfx1030_phase69, "regscale", 1);
-  valid = valid &&
-          sllm_matmul_kernel::select_mxfp8_variant(2U, 31U, 17U, "gfx1030") ==
-              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
-          sllm_matmul_kernel::select_mxfp8_variant(2U, 32U, 17U, "gfx1030") ==
-              sllm_matmul_kernel::KernelVariant::
-                  Mxfp8W8A8PrefillMmqGfx1030Regscale &&
-          sllm_matmul_kernel::select_mxfp8_variant(2U, 32U, 17U, "gfx1201") ==
-              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
   setenv(gfx1030_phase69, "vector32", 1);
   valid =
       valid &&
       sllm_matmul_kernel::select_mxfp8_variant(9U, 32U, 33U, "gfx1030") ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Vector32;
-  setenv(gfx1030_phase69, "combined", 1);
-  valid =
-      valid &&
-      sllm_matmul_kernel::select_mxfp8_variant(9U, 32U, 33U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32 &&
-      sllm_matmul_kernel::select_mxfp8_variant(7U, 256U, 7U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32 &&
-      sllm_matmul_kernel::select_mxfp8_variant(8U, 256U, 8U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32 &&
-      sllm_matmul_kernel::select_mxfp8_variant(9U, 256U, 9U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32 &&
-      sllm_matmul_kernel::select_mxfp8_variant(127U, 256U, 31U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32 &&
-      sllm_matmul_kernel::select_mxfp8_variant(128U, 256U, 32U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32 &&
-      sllm_matmul_kernel::select_mxfp8_variant(129U, 256U, 33U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32 &&
-      sllm_matmul_kernel::select_mxfp8_variant(8U, 255U, 8U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
-      sllm_matmul_kernel::select_mxfp8_variant(8U, 257U, 8U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
   setenv(mxfp8_row8, "1", 1);
   valid = valid &&
           sllm_matmul_kernel::select_mxfp8_variant(9U, 32U, 33U, "gfx1030") ==
@@ -6006,182 +5768,7 @@ bool matmul_mxfp_prefill_selector_contract() {
   unsetenv(baseline);
   unsetenv(mmq_columns);
   unsetenv(mxfp8_tiled16);
-
-  setenv(gfx1030_mmq_columns, "16", 1);
-  fake_hip::reset();
-  fake_hip::set_gcn_arch_name("gfx1030");
-  {
-    sllm_context_t *gfx1030_context = nullptr;
-    sllm_buffer_t *gfx1030_activation = nullptr;
-    sllm_buffer_t *gfx1030_weight = nullptr;
-    sllm_buffer_t *gfx1030_output = nullptr;
-    sllm_matmul_plan_t *gfx1030_plan = nullptr;
-    constexpr uint64_t gfx1030_m = 9U;
-    constexpr uint64_t gfx1030_k = 32U;
-    constexpr uint64_t gfx1030_n = 33U;
-    constexpr uint64_t gfx1030_weight_blocks =
-        gfx1030_n * gfx1030_k / UINT64_C(32);
-    Error gfx1030_error;
-    if (!create_context_for_arch("gfx1030", &gfx1030_context) ||
-        !create_buffer_sized(gfx1030_context,
-                             gfx1030_m * gfx1030_k * sizeof(uint16_t),
-                             &gfx1030_activation) ||
-        !create_buffer_sized(gfx1030_context,
-                             gfx1030_n * gfx1030_k + gfx1030_weight_blocks,
-                             &gfx1030_weight) ||
-        !create_buffer_sized(gfx1030_context,
-                             gfx1030_m * gfx1030_n * sizeof(uint16_t),
-                             &gfx1030_output)) {
-      valid = false;
-    } else {
-      auto descriptor = matmul_descriptor(gfx1030_activation, 0U,
-                                          gfx1030_weight, 0U, gfx1030_output,
-                                          0U, gfx1030_m, gfx1030_k, gfx1030_n);
-      descriptor.op_version = SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION;
-      descriptor.weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
-      descriptor.weight.encoding = SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0;
-      valid =
-          valid &&
-          expect_status(sllm_matmul_prepare(gfx1030_context, &descriptor,
-                                            &gfx1030_plan, &gfx1030_error.sink),
-                        SLLM_STATUS_OK, "gfx1030 staged MMQ provider",
-                        gfx1030_error) &&
-          gfx1030_plan != nullptr;
-      uint32_t prepared_provider = 0U;
-      uint32_t prepared_tile = 0U;
-      uint32_t prepared_inner_product = 0U;
-      valid =
-          valid &&
-          sllm_test_matmul_prepared_kernel_id(gfx1030_plan) ==
-              static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
-                                        Mxfp8W8A8PrefillMmqGfx1030Col16) &&
-          sllm_test_matmul_prepared_provider_semantics(
-              gfx1030_plan, &prepared_provider, &prepared_tile,
-              &prepared_inner_product) == 1U &&
-          prepared_provider ==
-              static_cast<uint32_t>(sllm_lowp::ProviderKind::Mxfp8Block32) &&
-          prepared_tile ==
-              static_cast<uint32_t>(sllm_lowp::TilePolicy::BlockRow8Column16) &&
-          prepared_inner_product ==
-              static_cast<uint32_t>(
-                  sllm_lowp::InnerProduct::DecodedBlockScaledFp32);
-      setenv(gfx1030_mmq_columns, "32", 1);
-      setenv(baseline, "1", 1);
-      valid = valid &&
-              sllm_test_matmul_prepared_kernel_id(gfx1030_plan) ==
-                  static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
-                                            Mxfp8W8A8PrefillMmqGfx1030Col16) &&
-              sllm_test_matmul_prepared_provider_semantics(
-                  gfx1030_plan, &prepared_provider, &prepared_tile,
-                  &prepared_inner_product) == 1U &&
-              prepared_tile == static_cast<uint32_t>(
-                                   sllm_lowp::TilePolicy::BlockRow8Column16);
-    }
-    if (gfx1030_plan != nullptr) {
-      valid = expect_status(
-                  sllm_matmul_plan_release(&gfx1030_plan, &gfx1030_error.sink),
-                  SLLM_STATUS_OK, "gfx1030 staged MMQ provider release",
-                  gfx1030_error) &&
-              valid;
-    }
-    valid = release_buffer(&gfx1030_activation) &&
-            release_buffer(&gfx1030_weight) &&
-            release_buffer(&gfx1030_output) &&
-            release_context(&gfx1030_context) && valid;
-  }
-  unsetenv(baseline);
-  unsetenv(gfx1030_mmq_columns);
-
   unsetenv(mxfp6_row8);
-  setenv(mxfp6_phase70, "gfx1030", 1);
-  fake_hip::reset();
-  fake_hip::set_gcn_arch_name("gfx1030");
-  {
-    sllm_context_t *phase70_context = nullptr;
-    sllm_buffer_t *phase70_activation = nullptr;
-    sllm_buffer_t *phase70_weight = nullptr;
-    sllm_buffer_t *phase70_output = nullptr;
-    sllm_matmul_plan_t *phase70_plan = nullptr;
-    constexpr uint64_t phase70_m = 3U;
-    constexpr uint64_t phase70_k = 64U;
-    constexpr uint64_t phase70_n = 7U;
-    constexpr uint64_t phase70_weight_values =
-        phase70_n * phase70_k * UINT64_C(3) / UINT64_C(4);
-    constexpr uint64_t phase70_weight_blocks =
-        phase70_n * phase70_k / UINT64_C(32);
-    Error phase70_error;
-    if (!create_context_for_arch("gfx1030", &phase70_context) ||
-        !create_buffer_sized(phase70_context,
-                             phase70_m * phase70_k * sizeof(uint16_t),
-                             &phase70_activation) ||
-        !create_buffer_sized(phase70_context,
-                             phase70_weight_values + phase70_weight_blocks,
-                             &phase70_weight) ||
-        !create_buffer_sized(phase70_context,
-                             phase70_m * phase70_n * sizeof(uint16_t),
-                             &phase70_output)) {
-      valid = false;
-    } else {
-      auto descriptor = matmul_descriptor(phase70_activation, 0U,
-                                          phase70_weight, 0U, phase70_output,
-                                          0U, phase70_m, phase70_k, phase70_n);
-      descriptor.op_version = SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION;
-      descriptor.weight.dtype = SLLM_TENSOR_DTYPE_U8;
-      descriptor.weight.encoding = SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0;
-      valid =
-          valid &&
-          expect_status(sllm_matmul_prepare(phase70_context, &descriptor,
-                                            &phase70_plan, &phase70_error.sink),
-                        SLLM_STATUS_OK, "gfx1030 Phase 70 prepared provider",
-                        phase70_error) &&
-          phase70_plan != nullptr;
-      uint32_t prepared_provider = 0U;
-      uint32_t prepared_tile = 0U;
-      uint32_t prepared_inner_product = 0U;
-      valid =
-          valid &&
-          sllm_test_matmul_prepared_kernel_id(phase70_plan) ==
-              static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
-                                        Mxfp6W6A6PrefillMmqGfx1030ViaE4M3) &&
-          sllm_test_matmul_prepared_provider_semantics(
-              phase70_plan, &prepared_provider, &prepared_tile,
-              &prepared_inner_product) == 1U &&
-          prepared_provider ==
-              static_cast<uint32_t>(
-                  sllm_lowp::ProviderKind::Mxfp6Gfx1030MmqViaE4M3) &&
-          prepared_tile ==
-              static_cast<uint32_t>(sllm_lowp::TilePolicy::BlockRow8Column8) &&
-          prepared_inner_product ==
-              static_cast<uint32_t>(
-                  sllm_lowp::InnerProduct::E3M2ViaE4M3DecodedFp32);
-      unsetenv(mxfp6_phase70);
-      setenv(baseline, "1", 1);
-      valid =
-          valid &&
-          sllm_test_matmul_prepared_kernel_id(phase70_plan) ==
-              static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
-                                        Mxfp6W6A6PrefillMmqGfx1030ViaE4M3) &&
-          sllm_test_matmul_prepared_provider_semantics(
-              phase70_plan, &prepared_provider, &prepared_tile,
-              &prepared_inner_product) == 1U &&
-          prepared_provider ==
-              static_cast<uint32_t>(
-                  sllm_lowp::ProviderKind::Mxfp6Gfx1030MmqViaE4M3);
-    }
-    if (phase70_plan != nullptr) {
-      valid = expect_status(
-                  sllm_matmul_plan_release(&phase70_plan, &phase70_error.sink),
-                  SLLM_STATUS_OK, "gfx1030 Phase 70 prepared provider release",
-                  phase70_error) &&
-              valid;
-    }
-    valid = release_buffer(&phase70_activation) &&
-            release_buffer(&phase70_weight) &&
-            release_buffer(&phase70_output) &&
-            release_context(&phase70_context) && valid;
-  }
-  unsetenv(baseline);
-  unsetenv(mxfp6_phase70);
 
   fake_hip::reset();
   fake_hip::set_gcn_arch_name("gfx1201");
@@ -7087,416 +6674,16 @@ bool matmul_fp8_gfx1201_decode_rank_table_contract() {
   return valid;
 }
 
-bool matmul_fp8_outer_f16_staging_selector_and_lease_contract() {
-  constexpr std::array<const char *const, 8> variables = {
-      sllm_matmul_kernel::kFp8OuterPrefillGfx1030F16StagingEnvironment,
-      "SLLM_FP8_OUTER_PREFILL_FORCE_BASELINE",
-      "SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_HALF2",
-      sllm_matmul_kernel::kFp8OuterDecodeBaselineEnvironment,
-      sllm_matmul_kernel::kFp8OuterDecodeGfx1030Half2Environment,
-      sllm_matmul_kernel::kFp8OuterDecodeGfx1030Dword8Environment,
-      sllm_matmul_kernel::kFp8OuterPrefillGfx1030LdsLutEnvironment,
-      sllm_matmul_kernel::kFp8OuterPrefillGfx1030F16TileStagingEnvironment,
-  };
-  std::array<bool, variables.size()> was_present{};
-  std::array<std::string, variables.size()> old_values{};
-  for (std::size_t index = 0U; index < variables.size(); ++index) {
-    const char *const value = std::getenv(variables[index]);
-    was_present[index] = value != nullptr;
-    old_values[index] = value != nullptr ? value : "";
-    unsetenv(variables[index]);
-  }
-  const auto restore = [&]() {
-    for (std::size_t index = 0U; index < variables.size(); ++index) {
-      if (was_present[index]) {
-        setenv(variables[index], old_values[index].c_str(), 1);
-      } else {
-        unsetenv(variables[index]);
-      }
-    }
-  };
-
-  using sllm_matmul_kernel::KernelVariant;
-  const auto select = [](const uint64_t m, const uint64_t k, const uint64_t n,
-                         const char *const target = "gfx1030",
-                         const bool fnuz = false) {
-    return sllm_matmul_kernel::select_fp8_outer_variant(m, k, n, target, fnuz);
-  };
-  bool valid =
-      static_cast<uint32_t>(KernelVariant::Fp8OuterPrefillGfx1030F16Staging) ==
-          70U &&
-      static_cast<uint32_t>(
-          KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging) == 86U &&
-      select(128U, 16U, 16U) ==
-          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64;
-  valid =
-      valid &&
-      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n64_shape(
-          2U, 5120U, 10240U) &&
-      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n64_shape(
-          32U, 5120U, 17408U) &&
-      !sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n64_shape(
-          1U, 5120U, 17408U) &&
-      !sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n64_shape(
-          33U, 5120U, 17408U) &&
-      !sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n64_shape(
-          32U, 5120U, 17409U) &&
-      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n32_shape(
-          2U, 17408U, 5120U) &&
-      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n32_shape(
-          32U, 6144U, 5120U) &&
-      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_shape(
-          17U, 6144U, 5120U) &&
-      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_shape(
-          32U, 6144U, 5120U) &&
-      !sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_shape(
-          33U, 6144U, 5120U) &&
-      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_shape(
-          32U, 5120U, 6144U) &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64, 17U, 5120U) ==
-          80U &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64, 17U, 5120U,
-          6144U) == 160U &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64, 17U, 10240U,
-          5120U) == 160U &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64, 17U, 12288U,
-          5120U) == 192U &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64, 17U, 17408U,
-          5120U) == 272U &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64, 33U, 5120U,
-          6144U) == 80U;
-
-  // ID86 reuses ID70's FP16 workspace but consumes it with the measured
-  // 64x64/K32 tile. Row and column tails are guarded by the tile body; K/N
-  // retain the existing 16-element boundary and FNUZ stays on its rollback.
-  setenv(variables[7], "1", 1);
-  valid =
-      valid &&
-      select(128U, 16U, 16U) ==
-          KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging &&
-      select(219U, 6144U, 5120U) ==
-          KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging &&
-      select(127U, 16U, 16U) ==
-          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
-      select(128U, 15U, 16U) ==
-          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
-      select(128U, 16U, 17U) ==
-          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
-      select(128U, 16U, 16U, "gfx1030", true) ==
-          KernelVariant::Fp8OuterPrefillTiled16 &&
-      select(128U, 16U, 16U, "gfx1201") == KernelVariant::Fp8Native &&
-      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
-                      KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging),
-                  sllm_matmul_kernel::
-                      kFp8OuterPrefillGfx1030F16TileStagingLogicalKernelId) ==
-          0 &&
-      std::strcmp(sllm_matmul_kernel::device_symbol(
-                      KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging),
-                  sllm_matmul_kernel::
-                      kFp8OuterPrefillGfx1030F16TileStagingDeviceSymbol) == 0 &&
-      sllm_matmul_kernel::workgroup_size_x(
-          KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging) == 256U &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Fp8OuterPrefillGfx1030F16TileStaging, 219U, 5120U) ==
-          320U;
-  unsetenv(variables[7]);
-
-  setenv(variables[0], "1", 1);
-  valid = valid &&
-          select(128U, 16U, 16U) ==
-              KernelVariant::Fp8OuterPrefillGfx1030F16Staging &&
-          select(256U, 5120U, 17408U) ==
-              KernelVariant::Fp8OuterPrefillGfx1030F16Staging &&
-          select(128U, 17408U, 5120U) ==
-              KernelVariant::Fp8OuterPrefillGfx1030F16Staging &&
-          select(127U, 16U, 16U) ==
-              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
-          select(129U, 16U, 16U) ==
-              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
-          select(128U, 15U, 16U) ==
-              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
-          select(128U, 16U, 17U) ==
-              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
-          select(128U, 17424U, 16U) ==
-              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
-          select(128U, 16U, 17424U) ==
-              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
-          select(128U, 5120U, 248320U) ==
-              KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
-          select(1U, 5120U, 17408U) ==
-              KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
-          select(128U, 16U, 16U, "gfx1201") == KernelVariant::Fp8Native &&
-          select(128U, 16U, 16U, "gfx942:sramecc+:xnack-") ==
-              KernelVariant::Fp8Native &&
-          select(128U, 16U, 16U, "gfx9999") == KernelVariant::Fp8Emulation &&
-          select(128U, 16U, 16U, "gfx1030", true) ==
-              KernelVariant::Fp8OuterPrefillTiled16;
-
-  // ID85 is an explicit gfx1030 prefill opt-in. Its 64x64 tile geometry
-  // accepts non-aligned dimensions, remains disabled for FNUZ, and reports
-  // the stable registry identity used by the production dispatch path.
-  unsetenv(variables[0]);
-  setenv(variables[6], "1", 1);
-  valid =
-      valid &&
-      select(2U, 32U, 64U) == KernelVariant::Fp8OuterPrefillGfx1030LdsLut &&
-      select(65U, 5120U, 17408U) ==
-          KernelVariant::Fp8OuterPrefillGfx1030LdsLut &&
-      select(128U, 5120U, 17408U, "gfx1201") == KernelVariant::Fp8Native &&
-      select(128U, 5120U, 17408U, "gfx1030", true) ==
-          KernelVariant::Fp8OuterPrefillTiled16 &&
-      select(1U, 32U, 64U) == KernelVariant::Fp8Emulation &&
-      std::strcmp(
-          sllm_matmul_kernel::logical_kernel_id(
-              KernelVariant::Fp8OuterPrefillGfx1030LdsLut),
-          sllm_matmul_kernel::kFp8OuterPrefillGfx1030LdsLutLogicalKernelId) ==
-          0 &&
-      std::strcmp(
-          sllm_matmul_kernel::device_symbol(
-              KernelVariant::Fp8OuterPrefillGfx1030LdsLut),
-          sllm_matmul_kernel::kFp8OuterPrefillGfx1030LdsLutDeviceSymbol) == 0 &&
-      sllm_matmul_kernel::workgroup_size_x(
-          KernelVariant::Fp8OuterPrefillGfx1030LdsLut) == 256U &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Fp8OuterPrefillGfx1030LdsLut, 65U, 65U) == 4U;
-  unsetenv(variables[6]);
-  setenv(variables[0], "1", 1);
-
-  setenv(variables[2], "1", 1);
-  valid = valid && select(128U, 16U, 16U) ==
-                       KernelVariant::Fp8OuterPrefillGfx1030F16Staging;
-  setenv(variables[1], "1", 1);
-  valid = valid && select(128U, 16U, 16U) == KernelVariant::Fp8Emulation;
-  unsetenv(variables[1]);
-  unsetenv(variables[2]);
-  setenv(variables[0], "yes", 1);
-  valid = valid && select(128U, 16U, 16U) ==
-                       KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64;
-  setenv(variables[0], "1", 1);
-
-  sllm_matmul_kernel::F16StagingWorkspaceLayout layout{};
-  valid =
-      valid &&
-      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_f16_staging_workspace(
-          128U, 16U, 16U, &layout) &&
-      layout.activation_offset == 0U && layout.activation_bytes == 4096U &&
-      layout.weight_offset == 4096U && layout.weight_bytes == 512U &&
-      layout.output_offset == 4608U && layout.output_bytes == 8192U &&
-      layout.total_bytes == 12800U &&
-      (layout.weight_offset % sllm_matmul_kernel::kMatmulF16StagingAlignment) ==
-          0U &&
-      (layout.output_offset % sllm_matmul_kernel::kMatmulF16StagingAlignment) ==
-          0U &&
-      (layout.total_bytes % sllm_matmul_kernel::kMatmulF16StagingAlignment) ==
-          0U &&
-      !sllm_matmul_kernel::f16_staging_workspace_layout(UINT64_MAX, 2U, 2U,
-                                                        &layout) &&
-      sllm_matmul_kernel::fp8_outer_prefill_gfx1030_f16_tile_staging_workspace(
-          219U, 6144U, 5120U, &layout) &&
-      layout.activation_bytes == 219U * 6144U * sizeof(uint16_t) &&
-      layout.weight_bytes == 5120U * 6144U * sizeof(uint16_t) &&
-      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
-                      KernelVariant::Fp8OuterPrefillGfx1030F16Staging),
-                  "matmul.fp8.outer.prefill.gfx1030.f16_staging.v1") == 0 &&
-      std::strcmp(sllm_matmul_kernel::device_symbol(
-                      KernelVariant::Fp8OuterPrefillGfx1030F16Staging),
-                  "rocblas_gemm_ex") == 0 &&
-      sllm_matmul_kernel::workgroup_size_x(
-          KernelVariant::Fp8OuterPrefillGfx1030F16Staging) == 256U &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Fp8OuterPrefillGfx1030F16Staging, 128U, 16U) == 8U;
-
-  fake_hip::reset();
-  sllm_public_runtime::FaultInjector::reset();
-  fake_hip::set_gcn_arch_name("gfx1030");
-  sllm_context_t *context = nullptr;
-  sllm_queue_t *first_queue = nullptr;
-  sllm_queue_t *second_queue = nullptr;
-  sllm_buffer_t *activation = nullptr;
-  sllm_buffer_t *weight = nullptr;
-  sllm_buffer_t *output = nullptr;
-  sllm_matmul_plan_t *first_plan = nullptr;
-  sllm_matmul_plan_t *second_plan = nullptr;
-  sllm_completion_t *first_completion = nullptr;
-  sllm_completion_t *second_completion = nullptr;
-  constexpr uint64_t m = 128U;
-  constexpr uint64_t k = 16U;
-  constexpr uint64_t n = 16U;
-  Error error;
-  const bool resources =
-      create_context_for_arch("gfx1030", &context) &&
-      create_queue(context, &first_queue) &&
-      create_queue(context, &second_queue) &&
-      create_buffer_sized(context, m * k * sizeof(uint16_t), &activation) &&
-      create_buffer_sized(context, n * k + n * sizeof(float), &weight) &&
-      create_buffer_sized(context, m * n * sizeof(uint16_t), &output);
-  valid = valid && resources;
-  if (resources) {
-    auto descriptor =
-        matmul_descriptor(activation, 0U, weight, 0U, output, 0U, m, k, n);
-    descriptor.op_version = SLLM_HIP_MATMUL_FP8_VERSION;
-    descriptor.weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
-    descriptor.weight.encoding = SLLM_TENSOR_ENCODING_FP8_OUTER_F32;
-    valid =
-        expect_status(
-            sllm_matmul_prepare(context, &descriptor, &first_plan, &error.sink),
-            SLLM_STATUS_OK, "FP8 F16 staging first prepare", error) &&
-        first_plan != nullptr &&
-        expect_status(sllm_matmul_prepare(context, &descriptor, &second_plan,
-                                          &error.sink),
-                      SLLM_STATUS_OK, "FP8 F16 staging second prepare",
-                      error) &&
-        second_plan != nullptr && valid;
-  }
-  if (first_plan != nullptr && second_plan != nullptr) {
-    uint32_t prepared_provider = 0U;
-    uint32_t prepared_tile = 0U;
-    uint32_t prepared_inner_product = 0U;
-    valid = valid && sllm_test_matmul_prepared_kernel_id(first_plan) == 70U &&
-            sllm_test_matmul_prepared_provider_semantics(
-                first_plan, &prepared_provider, &prepared_tile,
-                &prepared_inner_product) == 1U &&
-            prepared_provider ==
-                static_cast<uint32_t>(
-                    sllm_lowp::ProviderKind::Fp8OuterGfx1030Software) &&
-            prepared_tile ==
-                static_cast<uint32_t>(sllm_lowp::TilePolicy::BlockTiled16x16) &&
-            prepared_inner_product ==
-                static_cast<uint32_t>(sllm_lowp::InnerProduct::E4M3OuterFp32);
-
-    unsetenv(variables[0]);
-    setenv(variables[1], "1", 1);
-    valid = valid && sllm_test_matmul_prepared_kernel_id(first_plan) == 70U;
-
-    auto first_info = matmul_dispatch_info();
-    valid =
-        valid &&
-        expect_status(sllm_matmul_execute(first_plan, first_queue,
-                                          &first_completion, &first_info,
-                                          &error.sink),
-                      SLLM_STATUS_OK, "FP8 F16 staging first execute", error) &&
-        first_completion != nullptr && first_info.dispatch_count == 5U &&
-        first_info.kernel_id == 70U && first_info.grid_size_x == 8U &&
-        std::strcmp(first_info.kernel_symbol,
-                    "matmul.fp8.outer.prefill.gfx1030.f16_staging.v1") == 0 &&
-        std::strcmp(first_info.device_symbol, "rocblas_gemm_ex") == 0;
-
-    auto blocked_info = matmul_dispatch_info();
-    valid = valid &&
-            expect_status(sllm_matmul_execute(second_plan, second_queue,
-                                              &second_completion, &blocked_info,
-                                              &error.sink),
-                          SLLM_STATUS_PUBLIC_NOT_READY,
-                          "FP8 F16 staging cross-queue lease", error) &&
-            second_completion == nullptr;
-
-    valid = valid && query_completion(first_completion, SLLM_STATUS_OK) &&
-            release_completion(&first_completion);
-
-    auto second_info = matmul_dispatch_info();
-    valid =
-        valid &&
-        expect_status(sllm_matmul_execute(second_plan, second_queue,
-                                          &second_completion, &second_info,
-                                          &error.sink),
-                      SLLM_STATUS_OK, "FP8 F16 staging lease reuse", error) &&
-        second_completion != nullptr && second_info.dispatch_count == 5U &&
-        second_info.kernel_id == 70U &&
-        query_completion(second_completion, SLLM_STATUS_OK) &&
-        release_completion(&second_completion);
-
-    // A failure after the workspace lease is acquired but before enqueue must
-    // roll the lease back.  A different queue can then acquire it immediately.
-    sllm_public_runtime::FaultInjector::set(
-        sllm_public_runtime::FaultPoint::RegistryInsertionFailure, 1U);
-    auto rollback_info = matmul_dispatch_info();
-    valid = valid &&
-            expect_status(sllm_matmul_execute(first_plan, first_queue,
-                                              &first_completion, &rollback_info,
-                                              &error.sink),
-                          SLLM_STATUS_INTERNAL_ERROR,
-                          "FP8 F16 staging registry rollback", error) &&
-            first_completion == nullptr;
-    sllm_public_runtime::FaultInjector::reset();
-
-    auto recovery_info = matmul_dispatch_info();
-    valid =
-        valid &&
-        expect_status(
-            sllm_matmul_execute(second_plan, second_queue, &second_completion,
-                                &recovery_info, &error.sink),
-            SLLM_STATUS_OK, "FP8 F16 staging rollback lease recovery", error) &&
-        second_completion != nullptr && recovery_info.dispatch_count == 5U &&
-        recovery_info.kernel_id == 70U &&
-        query_completion(second_completion, SLLM_STATUS_OK) &&
-        release_completion(&second_completion);
-  }
-
-  if (first_completion != nullptr) {
-    valid = query_completion(first_completion, SLLM_STATUS_OK) &&
-            release_completion(&first_completion) && valid;
-  }
-  if (second_completion != nullptr) {
-    valid = query_completion(second_completion, SLLM_STATUS_OK) &&
-            release_completion(&second_completion) && valid;
-  }
-  if (first_plan != nullptr) {
-    valid =
-        expect_status(sllm_matmul_plan_release(&first_plan, &error.sink),
-                      SLLM_STATUS_OK, "FP8 F16 staging first release", error) &&
-        valid;
-  }
-  if (second_plan != nullptr) {
-    valid = expect_status(sllm_matmul_plan_release(&second_plan, &error.sink),
-                          SLLM_STATUS_OK, "FP8 F16 staging second release",
-                          error) &&
-            valid;
-  }
-  if (first_queue != nullptr) {
-    valid = release_queue(&first_queue) && valid;
-  }
-  if (second_queue != nullptr) {
-    valid = release_queue(&second_queue) && valid;
-  }
-  if (activation != nullptr) {
-    valid = release_buffer(&activation) && valid;
-  }
-  if (weight != nullptr) {
-    valid = release_buffer(&weight) && valid;
-  }
-  if (output != nullptr) {
-    valid = release_buffer(&output) && valid;
-  }
-  if (context != nullptr) {
-    valid = release_context(&context) && valid;
-  }
-
-  fake_hip::set_gcn_arch_name("gfx1201");
-  restore();
-  return valid && fake_hip::live_events() == 0U &&
-         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
-}
-
 bool matmul_nvfp4_w4a4_selector_contract() {
-  constexpr std::array<const char *const, 13> variables = {
+  constexpr std::array<const char *const, 9> variables = {
       "SLLM_NVFP4_W4A4_FORCE_BASELINE",
       "SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8",
       "SLLM_NVFP4_W4A4_PREFILL_FORCE_COL8",
       "SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A",
       "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA",
-      "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_COLUMNS",
       "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4",
-      "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA_F16SCALE",
       sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201F16StagingEnvironment,
       sllm_matmul_kernel::kNvfp4W4A4DecodeActivationSharedEnvironment,
-      sllm_matmul_kernel::kNvfp4W4A4PrefillDp4a64x64K128Environment,
-      sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201Wmma128x32Environment,
       sllm_matmul_kernel::kNvfp4W4A4DecodeScaleLutEnvironment,
   };
   std::array<bool, variables.size()> was_present{};
@@ -7524,99 +6711,66 @@ bool matmul_nvfp4_w4a4_selector_contract() {
     return sllm_matmul_kernel::select_nvfp4_w4a4_variant(m, k, n, target);
   };
   bool valid =
-      select(1U, 5120U) == KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      select(1U, 5120U) == KernelVariant::Nvfp4W4A4DecodeScaleLut &&
       select(1U, 15U) == KernelVariant::Nvfp4W4A4Decode &&
       select(1U, 1024U, "gfx1030", 1024U) ==
           KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
       select(1U, 1008U, "gfx1030", 1024U) == KernelVariant::Nvfp4W4A4Decode &&
       select(1U, 1024U, "gfx1030", 1023U) == KernelVariant::Nvfp4W4A4Decode &&
-      select(1U, 1024U, "gfx1201", 17408U) == KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 1024U, "gfx1201", 17408U) ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      select(1U, 17408U, "gfx1201", 1024U) ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      select(1U, 17424U, "gfx1201", 1024U) == KernelVariant::Nvfp4W4A4Decode &&
+      select(1U, 1024U, "gfx942", 1024U) == KernelVariant::Nvfp4W4A4Decode &&
       select(2U, 5120U) == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
       select(2U, 5120U, "gfx1201") ==
           KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
       static_cast<uint32_t>(KernelVariant::Nvfp4W4A4DecodeWave4Column32) ==
           67U &&
-      static_cast<uint32_t>(
-          KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64) == 69U &&
       static_cast<uint32_t>(KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging) ==
           72U &&
       static_cast<uint32_t>(KernelVariant::Nvfp4W4A4DecodeActivationShared) ==
-          73U &&
-      static_cast<uint32_t>(KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128) ==
-          80U &&
-      static_cast<uint32_t>(KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32) ==
-          81U;
+          73U;
 
-  setenv(variables[6], "0", 1);
+  setenv(variables[5], "0", 1);
   valid = valid && select(1U, 5120U, "gfx1030", 17408U) ==
                        KernelVariant::Nvfp4W4A4Decode;
-  unsetenv(variables[6]);
+  unsetenv(variables[5]);
 
-  // ID69 is exact gfx1201 and M>1/K16-aligned only.  Invalid target/shape
-  // requests must fall through to the existing provider.
-  setenv(variables[7], "1", 1);
-  valid = valid &&
-          select(2U, 5120U, "gfx1201") ==
-              KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64 &&
-          select(129U, 48U, "gfx1201", 65U) ==
-              KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64 &&
-          select(2U, 5119U, "gfx1201") ==
-              KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
-          select(2U, 5120U, "gfx1030") ==
-              KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
-  valid =
-      valid &&
-      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
-                      KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64),
-                  "matmul.nvfp4.w4a4.prefill.gfx1201.wmma_f16scale128x64.v1") ==
-          0 &&
-      std::strcmp(sllm_matmul_kernel::device_symbol(
-                      KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64),
-                  "sllm_nvfp4_w4a4_prefill_gfx1201_wmma_f16scale128x64_v1") ==
-          0 &&
-      sllm_matmul_kernel::workgroup_size_x(
-          KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64) == 256U &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64, 127U,
-          63U) == 1U &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaF16Scale128x64, 129U,
-          65U) == 4U;
-
-  // ID72 is a force-only exact-gfx1201 pipeline.  Its transient arena is
-  // shared with ID70 but conservatively reserves the largest Qwen3.8
-  // wide/down projection for the current M before any submission is in
+  // ID72 is a force-only exact-gfx1201 pipeline.  Its transient arena uses
+  // the shared F16 staging layout and conservatively reserves the largest
+  // Qwen3.8 wide/down projection for the current M before any submission is in
   // flight.  Baseline and the accepted ID64 force remain higher-priority
   // rollback controls.
-  unsetenv(variables[7]);
-  setenv(variables[8], "1", 1);
-  valid =
-      valid &&
-      select(128U, 5120U, "gfx1201", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging &&
-      select(512U, 17408U, "gfx1201", 5120U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging &&
-      select(127U, 5120U, "gfx1201", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
-      select(129U, 5120U, "gfx1201", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
-      select(219U, 5120U, "gfx1201", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
-      select(1024U, 5120U, "gfx1201", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging &&
-      select(1025U, 5120U, "gfx1201", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
-      select(128U, 5119U, "gfx1201", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
-      select(128U, 17424U, "gfx1201", 5120U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
-      select(128U, 5120U, "gfx1201", 17424U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
-      select(128U, 5120U, "gfx1201", 248320U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
-      select(128U, 5120U, "gfx1030", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
-      select(1U, 5120U, "gfx1201", 17408U) == KernelVariant::Nvfp4W4A4Decode;
+  setenv(variables[6], "1", 1);
+  valid = valid &&
+          select(128U, 5120U, "gfx1201", 17408U) ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging &&
+          select(512U, 17408U, "gfx1201", 5120U) ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging &&
+          select(127U, 5120U, "gfx1201", 17408U) ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+          select(129U, 5120U, "gfx1201", 17408U) ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+          select(219U, 5120U, "gfx1201", 17408U) ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+          select(1024U, 5120U, "gfx1201", 17408U) ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging &&
+          select(1025U, 5120U, "gfx1201", 17408U) ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+          select(128U, 5119U, "gfx1201", 17408U) ==
+              KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+          select(128U, 17424U, "gfx1201", 5120U) ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+          select(128U, 5120U, "gfx1201", 17424U) ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+          select(128U, 5120U, "gfx1201", 248320U) ==
+              KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+          select(128U, 5120U, "gfx1030", 17408U) ==
+              KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+          select(1U, 5120U, "gfx1201", 17408U) ==
+              KernelVariant::Nvfp4W4A4DecodeScaleLut;
   valid =
       valid &&
       std::strcmp(sllm_matmul_kernel::logical_kernel_id(
@@ -7647,12 +6801,12 @@ bool matmul_nvfp4_w4a4_selector_contract() {
   valid = valid && select(128U, 5120U, "gfx1201", 17408U) ==
                        KernelVariant::Nvfp4W4A4Packed;
   unsetenv(variables[0]);
-  setenv(variables[8], "yes", 1);
+  setenv(variables[6], "yes", 1);
   valid = valid && select(128U, 5120U, "gfx1201", 17408U) ==
                        KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
-  unsetenv(variables[8]);
+  unsetenv(variables[6]);
 
-  setenv(variables[6], "1", 1);
+  setenv(variables[5], "1", 1);
   valid =
       valid &&
       select(1U, 16U, "gfx1030", 31U) ==
@@ -7690,7 +6844,7 @@ bool matmul_nvfp4_w4a4_selector_contract() {
   // ID73 is a literal opt-in for the two Qwen3.8 MLP decode projections on
   // exact gfx1030.  It supersedes ID67 only inside that narrow scope; an
   // unset/invalid request and every other target or shape retain ID67.
-  setenv(variables[9], "1", 1);
+  setenv(variables[7], "1", 1);
   valid =
       valid &&
       select(1U, 5120U, "gfx1030", 17408U) ==
@@ -7727,10 +6881,10 @@ bool matmul_nvfp4_w4a4_selector_contract() {
   valid = valid && select(1U, 5120U, "gfx1030", 17408U) ==
                        KernelVariant::Nvfp4W4A4Packed;
   unsetenv(variables[0]);
-  setenv(variables[9], "yes", 1);
+  setenv(variables[7], "yes", 1);
   valid = valid && select(1U, 5120U, "gfx1030", 17408U) ==
                        KernelVariant::Nvfp4W4A4DecodeWave4Column32;
-  unsetenv(variables[9]);
+  unsetenv(variables[7]);
   valid = valid && select(1U, 5120U, "gfx1030", 17408U) ==
                        KernelVariant::Nvfp4W4A4DecodeWave4Column32;
 
@@ -7738,7 +6892,7 @@ bool matmul_nvfp4_w4a4_selector_contract() {
   // the activation-shared exact shapes on gfx1030 and the wave4 exact shapes
   // on gfx1201; adjacent dimensions and unsupported targets keep the prior
   // selector result.
-  setenv(variables[12], "1", 1);
+  setenv(variables[8], "1", 1);
   valid =
       valid &&
       select(1U, 5120U, "gfx1030", 17408U) ==
@@ -7773,203 +6927,44 @@ bool matmul_nvfp4_w4a4_selector_contract() {
   valid = valid && select(1U, 5120U, "gfx1201", 17408U) ==
                        KernelVariant::Nvfp4W4A4Packed;
   unsetenv(variables[0]);
-  unsetenv(variables[6]);
-  setenv(variables[12], "yes", 1);
+  unsetenv(variables[8]);
+  setenv(variables[8], "yes", 1);
   valid = valid && select(1U, 5120U, "gfx1201", 17408U) ==
-                       KernelVariant::Nvfp4W4A4Decode;
-  unsetenv(variables[12]);
-  setenv(variables[6], "1", 1);
+                       KernelVariant::Nvfp4W4A4DecodeWave4Column32;
+  unsetenv(variables[8]);
+  setenv(variables[8], "1", 1);
 
-  // ID67 takes precedence over the older ID65 candidate when both are
-  // explicitly requested; an invalid ID67 value then permits ID65.
+  // An explicit ID84 disable or invalid value suppresses ID84. gfx1030 then
+  // uses the retained ID73 activation-shared default; gfx1201 falls back to
+  // the adopted ID67 wave4 provider.
+  unsetenv(variables[5]);
+  setenv(variables[8], "0", 1);
+  valid = valid &&
+          select(1U, 5120U, "gfx1030", 17408U) ==
+              KernelVariant::Nvfp4W4A4DecodeActivationShared &&
+          select(1U, 5120U, "gfx1201", 17408U) ==
+              KernelVariant::Nvfp4W4A4DecodeWave4Column32;
+  setenv(variables[8], "invalid", 1);
+  valid = valid &&
+          select(1U, 17408U, "gfx1030", 5120U) ==
+              KernelVariant::Nvfp4W4A4DecodeActivationShared &&
+          select(1U, 17408U, "gfx1201", 5120U) ==
+              KernelVariant::Nvfp4W4A4DecodeWave4Column32;
+  unsetenv(variables[8]);
+
+  // ID67 is the force-only wave4 decode candidate. Invalid requests fall
+  // through to the retained baseline provider.
   setenv(variables[5], "1", 1);
   valid = valid && select(1U, 16U, "gfx1030", 33U) ==
                        KernelVariant::Nvfp4W4A4DecodeWave4Column32;
-  setenv(variables[6], "yes", 1);
-  valid = valid && select(1U, 16U, "gfx1030", 33U) ==
-                       KernelVariant::Nvfp4W4A4DecodeColumns128;
-  unsetenv(variables[6]);
-
-  setenv(variables[5], "1", 1);
-  valid =
-      valid &&
-      select(1U, 16U, "gfx1030") == KernelVariant::Nvfp4W4A4DecodeColumns128 &&
-      select(1U, 16U, "gfx1201") == KernelVariant::Nvfp4W4A4DecodeColumns128 &&
-      select(1U, 17408U, "gfx1030") ==
-          KernelVariant::Nvfp4W4A4DecodeColumns128 &&
-      select(1U, 15U, "gfx1030") == KernelVariant::Nvfp4W4A4Decode &&
-      select(1U, 17424U, "gfx1201") == KernelVariant::Nvfp4W4A4Decode &&
-      select(1U, 16U, "gfx942:sramecc+:xnack-") ==
-          KernelVariant::Nvfp4W4A4Decode;
   setenv(variables[5], "yes", 1);
   valid = valid && select(1U, 16U, "gfx1030") == KernelVariant::Nvfp4W4A4Decode;
   setenv(variables[5], "1", 1);
 
-  // ID81 is the ID64-order 128x32 geometry.  Its dedicated opt-in applies
-  // only to exact gfx1201 and 1 < M <= 512; larger supported M stays on ID64.
+  // Clear decode controls before checking the prefill force matrix; otherwise
+  // ID84 intentionally wins for the Qwen decode shape.
   unsetenv(variables[5]);
-  setenv(variables[11], "1", 1);
-  valid =
-      valid &&
-      select(2U, 16U, "gfx1201", 1U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32 &&
-      select(127U, 48U, "gfx1201", 31U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32 &&
-      select(129U, 48U, "gfx1201", 33U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32 &&
-      select(512U, 5120U, "gfx1201", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32 &&
-      select(513U, 5120U, "gfx1201", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
-      select(1024U, 17408U, "gfx1201", 5120U) ==
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
-      select(128U, 5119U, "gfx1201", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
-      select(128U, 5120U, "gfx1030", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
-      select(1U, 5120U, "gfx1201", 17408U) == KernelVariant::Nvfp4W4A4Decode &&
-      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
-                      KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32),
-                  "matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x32.v1") == 0 &&
-      std::strcmp(sllm_matmul_kernel::device_symbol(
-                      KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32),
-                  "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x32_v1") == 0 &&
-      sllm_matmul_kernel::workgroup_size_x(
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32) == 256U &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32, 127U, 31U) == 1U &&
-      sllm_matmul_kernel::grid_size_x(
-          KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x32, 129U, 33U) == 2U;
-  if (!valid) {
-    std::cerr << "ID81 direct selector/identity contract failed\n";
-  }
-
-  // Preparation freezes both the ID81 dispatch and its concrete audit
-  // semantics.  A later rollback-env change must not rewrite that plan.
-  fake_hip::reset();
-  fake_hip::set_gcn_arch_name("gfx1201");
-  constexpr uint64_t id81_m = 127U;
-  constexpr uint64_t id81_k = 16U;
-  constexpr uint64_t id81_n = 33U;
-  constexpr uint64_t id81_weight_values = id81_n * id81_k / UINT64_C(2);
-  constexpr uint64_t id81_weight_scales = id81_n * (id81_k / UINT64_C(16));
-  constexpr uint64_t id81_weight_bytes =
-      ((id81_weight_values + id81_weight_scales + UINT64_C(3)) & ~UINT64_C(3)) +
-      UINT64_C(8);
-  static_assert(id81_weight_bytes == 308U);
-  sllm_context_t *id81_context = nullptr;
-  sllm_buffer_t *id81_activation = nullptr;
-  sllm_buffer_t *id81_weight = nullptr;
-  sllm_buffer_t *id81_output = nullptr;
-  sllm_matmul_plan_t *id81_plan = nullptr;
-  Error id81_error;
-  if (!create_context_for_arch("gfx1201", &id81_context) ||
-      !create_buffer_sized(id81_context, id81_m * id81_k * sizeof(uint16_t),
-                           &id81_activation) ||
-      !create_buffer_sized(id81_context, id81_weight_bytes, &id81_weight) ||
-      !create_buffer_sized(id81_context, id81_m * id81_n * sizeof(uint16_t),
-                           &id81_output)) {
-    valid = false;
-  } else {
-    auto descriptor =
-        matmul_descriptor(id81_activation, 0U, id81_weight, 0U, id81_output, 0U,
-                          id81_m, id81_k, id81_n);
-    descriptor.op_version = SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION;
-    descriptor.weight.dtype = SLLM_TENSOR_DTYPE_U8;
-    descriptor.weight.encoding =
-        SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
-    valid =
-        expect_status(sllm_matmul_prepare(id81_context, &descriptor, &id81_plan,
-                                          &id81_error.sink),
-                      SLLM_STATUS_OK, "ID81 prepared provider", id81_error) &&
-        id81_plan != nullptr && valid;
-    uint32_t prepared_provider = 0U;
-    uint32_t prepared_tile = 0U;
-    uint32_t prepared_inner_product = 0U;
-    valid =
-        id81_plan != nullptr &&
-        sllm_test_matmul_prepared_kernel_id(id81_plan) == 81U &&
-        sllm_test_matmul_prepared_provider_semantics(
-            id81_plan, &prepared_provider, &prepared_tile,
-            &prepared_inner_product) == 1U &&
-        prepared_provider ==
-            static_cast<uint32_t>(sllm_lowp::ProviderKind::Nvfp4W4A4Block16) &&
-        prepared_tile ==
-            static_cast<uint32_t>(sllm_lowp::TilePolicy::BlockRow128Column32) &&
-        prepared_inner_product ==
-            static_cast<uint32_t>(
-                sllm_lowp::InnerProduct::E2M1ViaE4M3WmmaFp32) &&
-        valid;
-    setenv(variables[11], "yes", 1);
-    valid = id81_plan != nullptr &&
-            sllm_test_matmul_prepared_kernel_id(id81_plan) == 81U && valid;
-    if (!valid) {
-      std::cerr << "ID81 prepared selector/audit contract failed: kernel="
-                << (id81_plan != nullptr
-                        ? sllm_test_matmul_prepared_kernel_id(id81_plan)
-                        : 0U)
-                << " provider=" << prepared_provider
-                << " tile=" << prepared_tile
-                << " inner_product=" << prepared_inner_product << '\n';
-    }
-  }
-  if (id81_plan != nullptr) {
-    valid = expect_status(
-                sllm_matmul_plan_release(&id81_plan, &id81_error.sink),
-                SLLM_STATUS_OK, "ID81 prepared provider release", id81_error) &&
-            valid;
-  }
-  if (id81_output != nullptr) {
-    valid = release_buffer(&id81_output) && valid;
-  }
-  if (id81_weight != nullptr) {
-    valid = release_buffer(&id81_weight) && valid;
-  }
-  if (id81_activation != nullptr) {
-    valid = release_buffer(&id81_activation) && valid;
-  }
-  if (id81_context != nullptr) {
-    valid = release_context(&id81_context) && valid;
-  }
-  valid = fake_hip::live_events() == 0U && fake_hip::live_streams() == 0U &&
-          fake_hip::live_allocations() == 0U && valid;
-  setenv(variables[11], "yes", 1);
-  valid = valid && select(128U, 5120U, "gfx1201", 17408U) ==
-                       KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
-  unsetenv(variables[11]);
-  setenv(variables[5], "1", 1);
-
-  unsetenv(variables[7]);
-  setenv(variables[10], "1", 1);
-  valid = valid &&
-          select(2U, 5120U, "gfx1030") ==
-              KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128 &&
-          select(129U, 17408U, "gfx1030", 5120U) ==
-              KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128 &&
-          select(2U, 5119U, "gfx1030") ==
-              KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
-          select(2U, 5120U, "gfx1201") ==
-              KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
-          std::strcmp(sllm_matmul_kernel::logical_kernel_id(
-                          KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128),
-                      "matmul.nvfp4.w4a4.block16.prefill."
-                      "dp4a64x64_k128.v1") == 0 &&
-          std::strcmp(sllm_matmul_kernel::device_symbol(
-                          KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128),
-                      "sllm_matmul_nvfp4_w4a4_block16_prefill_"
-                      "dp4a_64x64_k128_v1") == 0 &&
-          sllm_matmul_kernel::workgroup_size_x(
-              KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128) == 256U &&
-          sllm_matmul_kernel::grid_size_x(
-              KernelVariant::Nvfp4W4A4PrefillDp4a64x64K128, 65U, 65U) == 4U;
-  setenv(variables[10], "yes", 1);
-  valid = valid && select(2U, 5120U, "gfx1030") ==
-                       KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
-  unsetenv(variables[10]);
-  setenv(variables[3], "1", 1);
-  valid = valid &&
-          select(2U, 5120U) == KernelVariant::Nvfp4W4A4PrefillDp4a64x64 &&
-          select(2U, 5119U) == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
+  unsetenv(variables[8]);
 
   // ID62's optional gfx1030 index32 body is restricted to M>=33 and to
   // overflow-free uint32 logical/packed-plane extents. Keep the boundary
@@ -7994,13 +6989,13 @@ bool matmul_nvfp4_w4a4_selector_contract() {
   setenv(variables[4], "1", 1);
   valid =
       valid &&
-      select(1U, 5120U, "gfx1201") ==
-          KernelVariant::Nvfp4W4A4DecodeColumns128 &&
+      select(1U, 5120U, "gfx1201") == KernelVariant::Nvfp4W4A4DecodeScaleLut &&
       select(2U, 5120U, "gfx1201") ==
           KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
       select(2U, 5119U, "gfx1201") ==
           KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
-      select(2U, 5120U, "gfx1030") == KernelVariant::Nvfp4W4A4PrefillDp4a64x64;
+      select(2U, 5120U, "gfx1030") ==
+          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
   setenv(variables[2], "1", 1);
   valid = valid &&
           select(2U, 5120U) == KernelVariant::Nvfp4W4A4PrefillRow8Col8Tiled256;
@@ -8008,7 +7003,6 @@ bool matmul_nvfp4_w4a4_selector_contract() {
   valid =
       valid && select(2U, 5120U) == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
   setenv(variables[0], "1", 1);
-  setenv(variables[7], "1", 1);
   valid = valid && select(1U, 5120U) == KernelVariant::Nvfp4W4A4Packed &&
           select(2U, 5120U) == KernelVariant::Nvfp4W4A4Packed;
 
@@ -8018,7 +7012,7 @@ bool matmul_nvfp4_w4a4_selector_contract() {
   for (std::size_t index = 0U; index < variables.size(); ++index) {
     unsetenv(variables[index]);
   }
-  setenv(variables[12], "1", 1);
+  setenv(variables[8], "1", 1);
   fake_hip::reset();
   fake_hip::set_gcn_arch_name("gfx1201");
   constexpr uint64_t id84_m = 1U;
@@ -8071,7 +7065,7 @@ bool matmul_nvfp4_w4a4_selector_contract() {
             static_cast<uint32_t>(
                 sllm_lowp::InnerProduct::E2M1BlockScaledDp4aFp32) &&
         valid;
-    unsetenv(variables[12]);
+    unsetenv(variables[8]);
     setenv(variables[0], "1", 1);
     valid = id84_plan != nullptr &&
             sllm_test_matmul_prepared_kernel_id(id84_plan) == 84U && valid;
@@ -8097,26 +7091,24 @@ bool matmul_nvfp4_w4a4_selector_contract() {
   valid = fake_hip::live_events() == 0U && fake_hip::live_streams() == 0U &&
           fake_hip::live_allocations() == 0U && valid;
   unsetenv(variables[0]);
-  unsetenv(variables[12]);
+  unsetenv(variables[8]);
   restore();
   return valid;
 }
 
 bool matmul_selector_decision_contract() {
-  constexpr std::array<const char *const, 16> variables = {
+  constexpr std::array<const char *const, 14> variables = {
       sllm_matmul_kernel::kFp8OuterDecodeGfx1030Half2Environment,
       sllm_matmul_kernel::kFp8OuterDecodeGfx1030Dword8Environment,
       sllm_matmul_kernel::kFp8OuterDecodeGfx1030ActivationSharedEnvironment,
       sllm_matmul_kernel::kFp8OuterDecodeGfx1030LdsLutEnvironment,
       sllm_matmul_kernel::kNvfp4W4A4DecodeWave4Column32Environment,
-      sllm_matmul_kernel::kNvfp4W4A4DecodeColumns128Environment,
       sllm_matmul_kernel::kNvfp4W4A4DecodeActivationSharedEnvironment,
       sllm_matmul_kernel::kNvfp4W4A4DecodeScaleLutEnvironment,
       "SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A",
       "SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8",
       "SLLM_FP8_OUTER_PREFILL_FORCE_BASELINE",
       sllm_matmul_kernel::kFp8OuterDecodeBaselineEnvironment,
-      sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201Wmma128x32Environment,
       sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201F16StagingEnvironment,
       "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA",
       "SLLM_NVFP4_W4A4_FORCE_BASELINE"};
@@ -8201,7 +7193,7 @@ bool matmul_selector_decision_contract() {
                       "for target or shape") == 0;
   unsetenv(variables[0]);
 
-  setenv(variables[11], "1", 1);
+  setenv(variables[10], "1", 1);
   const auto fp8_explicit_baseline =
       sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx1030");
   valid = valid &&
@@ -8209,7 +7201,7 @@ bool matmul_selector_decision_contract() {
           !fp8_explicit_baseline.adopted &&
           std::strcmp(fp8_explicit_baseline.reason,
                       "explicit baseline override selected") == 0;
-  unsetenv(variables[11]);
+  unsetenv(variables[10]);
 
   setenv(variables[1], "1", 1);
   const auto fp8_dword8 =
@@ -8233,14 +7225,58 @@ bool matmul_selector_decision_contract() {
       sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 16U, 33U, "gfx1030");
   const auto nvfp4_unaligned =
       sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 15U, 33U, "gfx1030");
-  valid = valid && nvfp4_baseline.variant == KernelVariant::Nvfp4W4A4Decode &&
-          nvfp4_baseline.supported && nvfp4_baseline.enabled &&
-          nvfp4_baseline.adopted &&
-          nvfp4_unaligned.variant == KernelVariant::Nvfp4W4A4Decode &&
-          !nvfp4_unaligned.supported;
+  const auto nvfp4_id84_gfx1030 =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 5120U, 17408U,
+                                                     "gfx1030");
+  const auto nvfp4_id84_gfx1201 =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 17408U, 5120U,
+                                                     "gfx1201");
+  valid =
+      valid && nvfp4_baseline.variant == KernelVariant::Nvfp4W4A4Decode &&
+      nvfp4_baseline.supported && nvfp4_baseline.enabled &&
+      nvfp4_baseline.adopted &&
+      nvfp4_unaligned.variant == KernelVariant::Nvfp4W4A4Decode &&
+      !nvfp4_unaligned.supported &&
+      nvfp4_id84_gfx1030.variant == KernelVariant::Nvfp4W4A4DecodeScaleLut &&
+      nvfp4_id84_gfx1030.supported && nvfp4_id84_gfx1030.enabled &&
+      nvfp4_id84_gfx1030.adopted &&
+      std::strcmp(nvfp4_id84_gfx1030.reason,
+                  "adopted default for target and shape") == 0 &&
+      nvfp4_id84_gfx1201.variant == KernelVariant::Nvfp4W4A4DecodeScaleLut &&
+      nvfp4_id84_gfx1201.supported && nvfp4_id84_gfx1201.enabled &&
+      nvfp4_id84_gfx1201.adopted;
+
+  setenv(variables[6], "0", 1);
+  const auto nvfp4_id73_disabled =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 5120U, 17408U,
+                                                     "gfx1030");
+  const auto nvfp4_id67_disabled =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 5120U, 17408U,
+                                                     "gfx1201");
+  valid = valid &&
+          nvfp4_id73_disabled.variant ==
+              KernelVariant::Nvfp4W4A4DecodeActivationShared &&
+          nvfp4_id73_disabled.supported && nvfp4_id73_disabled.enabled &&
+          nvfp4_id73_disabled.adopted &&
+          nvfp4_id67_disabled.variant ==
+              KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+          nvfp4_id67_disabled.supported && nvfp4_id67_disabled.enabled &&
+          nvfp4_id67_disabled.adopted;
+  setenv(variables[6], "invalid", 1);
+  const auto nvfp4_id73_invalid =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 17408U, 5120U,
+                                                     "gfx1030");
+  valid = valid &&
+          nvfp4_id73_invalid.variant ==
+              KernelVariant::Nvfp4W4A4DecodeActivationShared &&
+          nvfp4_id73_invalid.adopted;
+  unsetenv(variables[6]);
 
   const auto nvfp4_adopted = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
       1U, 1024U, 1024U, "gfx1030");
+  const auto nvfp4_adopted_gfx1201 =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1024U, 1024U,
+                                                     "gfx1201");
   const auto nvfp4_k_adoption_boundary =
       sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1008U, 1024U,
                                                      "gfx1030");
@@ -8254,6 +7290,10 @@ bool matmul_selector_decision_contract() {
       nvfp4_adopted.adopted &&
       std::strcmp(nvfp4_adopted.reason,
                   "adopted default for target and shape") == 0 &&
+      nvfp4_adopted_gfx1201.variant ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      nvfp4_adopted_gfx1201.supported && nvfp4_adopted_gfx1201.enabled &&
+      nvfp4_adopted_gfx1201.adopted &&
       nvfp4_k_adoption_boundary.variant == KernelVariant::Nvfp4W4A4Decode &&
       nvfp4_k_adoption_boundary.supported &&
       nvfp4_k_adoption_boundary.adopted &&
@@ -8297,7 +7337,7 @@ bool matmul_selector_decision_contract() {
                       "for target or shape") == 0;
   unsetenv(variables[4]);
 
-  setenv(variables[7], "1", 1);
+  setenv(variables[6], "1", 1);
   const auto nvfp4_lut = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
       1U, 5120U, 17408U, "gfx1201");
   const auto nvfp4_lut_adjacent =
@@ -8316,17 +7356,7 @@ bool matmul_selector_decision_contract() {
           nvfp4_lut_gemma.variant == KernelVariant::Nvfp4W4A4DecodeScaleLut &&
           nvfp4_lut_gemma.supported && nvfp4_lut_gemma.enabled;
 
-  setenv(variables[12], "1", 1);
-  const auto nvfp4_wmma128x32_fallback =
-      sllm_matmul_kernel::select_nvfp4_w4a4_decision(513U, 48U, 33U, "gfx1201");
-  valid = valid &&
-          nvfp4_wmma128x32_fallback.variant ==
-              KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
-          nvfp4_wmma128x32_fallback.supported &&
-          nvfp4_wmma128x32_fallback.enabled;
-  unsetenv(variables[12]);
-
-  setenv(variables[13], "1", 1);
+  setenv(variables[11], "1", 1);
   const auto nvfp4_f16_staging_fallback =
       sllm_matmul_kernel::select_nvfp4_w4a4_decision(127U, 5120U, 17408U,
                                                      "gfx1201");
@@ -8335,10 +7365,10 @@ bool matmul_selector_decision_contract() {
               KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
           nvfp4_f16_staging_fallback.supported &&
           nvfp4_f16_staging_fallback.enabled;
-  unsetenv(variables[13]);
-  unsetenv(variables[7]);
+  unsetenv(variables[11]);
+  unsetenv(variables[6]);
 
-  setenv(variables[8], "1", 1);
+  setenv(variables[7], "1", 1);
   const auto nvfp4_dp4a =
       sllm_matmul_kernel::select_nvfp4_w4a4_decision(2U, 16U, 33U, "gfx1030");
   valid = valid &&
@@ -8350,9 +7380,8 @@ bool matmul_selector_decision_contract() {
 }
 
 bool matmul_nvfp4_w4a4_activation_shared_lifetime_contract() {
-  constexpr std::array<const char *, 4> kVariables = {
+  constexpr std::array<const char *, 3> kVariables = {
       "SLLM_NVFP4_W4A4_FORCE_BASELINE",
-      "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_COLUMNS",
       "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4",
       "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_ACTIVATION_SHARED"};
   std::array<bool, kVariables.size()> was_present{};
@@ -8376,8 +7405,8 @@ bool matmul_nvfp4_w4a4_activation_shared_lifetime_contract() {
   fake_hip::reset();
   sllm_public_runtime::FaultInjector::reset();
   fake_hip::set_gcn_arch_name("gfx1030");
+  setenv(kVariables[1], "1", 1);
   setenv(kVariables[2], "1", 1);
-  setenv(kVariables[3], "1", 1);
   constexpr uint64_t k = 5120U;
   constexpr uint64_t n = 17408U;
   constexpr uint64_t weight_values = n * k / UINT64_C(2);
@@ -13755,10 +12784,6 @@ int main() {
   }
   if (!matmul_fp8_gfx1201_decode_rank_table_contract()) {
     std::cerr << "matmul FP8 gfx1201 decode rank table test failed\n";
-    return 1;
-  }
-  if (!matmul_fp8_outer_f16_staging_selector_and_lease_contract()) {
-    std::cerr << "matmul FP8 outer F16 staging contract test failed\n";
     return 1;
   }
   if (!matmul_nvfp4_w4a4_selector_contract()) {

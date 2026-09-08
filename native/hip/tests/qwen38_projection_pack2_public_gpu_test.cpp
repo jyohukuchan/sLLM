@@ -823,16 +823,19 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
   return true;
 }
 
-bool run_activation_shared_matmul_oracle() {
-  if (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") != 0)
+bool run_activation_shared_matmul_oracle(const bool default_lut = false) {
+  if (!default_lut && std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") != 0)
     return true;
   constexpr const char *kBaselineEnvironment = "SLLM_NVFP4_W4A4_FORCE_BASELINE";
   constexpr const char *kControlEnvironment =
       "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4";
   constexpr const char *kCandidateEnvironment =
       "SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_ACTIVATION_SHARED";
-  constexpr std::array<const char *, 3> kEnvironments = {
-      kBaselineEnvironment, kControlEnvironment, kCandidateEnvironment};
+  constexpr const char *kLutEnvironment =
+      "SLLM_NVFP4_W4A4_DECODE_FORCE_LDS_F32_LUT";
+  constexpr std::array<const char *, 4> kEnvironments = {
+      kBaselineEnvironment, kControlEnvironment, kCandidateEnvironment,
+      kLutEnvironment};
   std::array<bool, kEnvironments.size()> was_present{};
   std::array<std::string, kEnvironments.size()> old_values{};
   for (std::size_t index = 0U; index != kEnvironments.size(); ++index) {
@@ -914,7 +917,12 @@ bool run_activation_shared_matmul_oracle() {
           SLLM_STATUS_OK, "ID67 control prepare", error);
     }
     if (valid) {
-      setenv(kCandidateEnvironment, "1", 1);
+      if (default_lut) {
+        unsetenv(kControlEnvironment);
+        unsetenv(kCandidateEnvironment);
+      } else {
+        setenv(kCandidateEnvironment, "1", 1);
+      }
       valid = expect(sllm_matmul_prepare(context, &descriptor, &candidate_plan,
                                          &error.sink),
                      SLLM_STATUS_OK, "ID73 candidate prepare", error);
@@ -929,9 +937,15 @@ bool run_activation_shared_matmul_oracle() {
           "sllm_matmul_nvfp4_w4a4_decode_dp4a_wave4col32_v1",
           static_cast<uint32_t>((n + UINT64_C(31)) / UINT64_C(32)));
       candidate = run_matmul_plan(
-          candidate_plan, queue, output_buffer, k, n, 73U,
-          "matmul.nvfp4.w4a4.decode.dp4a.activation_shared.wave4col32.v1",
-          "sllm_matmul_nvfp4_w4a4_decode_dp4a_activation_shared_v1",
+          candidate_plan, queue, output_buffer, k, n, default_lut ? 84U : 73U,
+          default_lut
+              ? "matmul.nvfp4.w4a4.decode.scale_lut.v1"
+              : "matmul.nvfp4.w4a4.decode.dp4a.activation_shared.wave4col32.v1",
+          default_lut
+              ? (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0
+                     ? "sllm_nvfp4_w4a4_decode_scale_lut_gfx1201_actshared_v1"
+                     : "sllm_matmul_nvfp4_w4a4_decode_scale_lut_v1")
+              : "sllm_matmul_nvfp4_w4a4_decode_dp4a_activation_shared_v1",
           static_cast<uint32_t>((n + UINT64_C(31)) / UINT64_C(32)));
       valid = control.valid && candidate.valid && control.deterministic &&
               candidate.deterministic && control.max_bf16_ulp == 0U &&
@@ -942,11 +956,11 @@ bool run_activation_shared_matmul_oracle() {
                   << " N=" << n << '\n';
       }
       std::cout << std::fixed << std::setprecision(6)
-                << "ID73 public Matmul oracle shape K=" << k << " N=" << n
+                << (default_lut ? "ID84 default" : "ID73 forced")
+                << " public Matmul oracle shape K=" << k << " N=" << n
                 << " warmups=3 measured=10 control_id67_median_ms="
                 << control.median_ms
-                << " candidate_id73_median_ms=" << candidate.median_ms
-                << " speedup="
+                << " candidate_median_ms=" << candidate.median_ms << " speedup="
                 << (candidate.median_ms > 0.0
                         ? control.median_ms / candidate.median_ms
                         : 0.0)
@@ -1156,6 +1170,7 @@ int main() {
             valid;
   }
   valid = run_activation_shared_matmul_oracle() && valid;
+  valid = run_activation_shared_matmul_oracle(true) && valid;
   if (!valid)
     return 1;
   std::cout << "Qwen3.8 projection-pack public GPU oracle: PASS target="

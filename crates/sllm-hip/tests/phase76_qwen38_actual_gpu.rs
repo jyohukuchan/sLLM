@@ -143,10 +143,14 @@ fn run_actual(contract: TargetContract) -> Result<(), String> {
         let audit = request.audit_snapshot().map_err(|e| e.to_string())?;
         let nvfp4_decode_dispatches =
             audit.kernel_dispatch_count_for(58, "matmul.nvfp4.w4a4.block16.decode.v1");
-        let nvfp4_decode_columns_dispatches =
-            audit.kernel_dispatch_count_for(65, "matmul.nvfp4.w4a4.decode.columns128.v1");
         let nvfp4_decode_wave4_dispatches =
             audit.kernel_dispatch_count_for(67, "matmul.nvfp4.w4a4.decode.dp4a.wave4col32.v1");
+        let nvfp4_decode_activation_shared_dispatches = audit.kernel_dispatch_count_for(
+            73,
+            "matmul.nvfp4.w4a4.decode.dp4a.activation_shared.wave4col32.v1",
+        );
+        let nvfp4_decode_scale_lut_dispatches =
+            audit.kernel_dispatch_count_for(84, "matmul.nvfp4.w4a4.decode.scale_lut.v1");
         let nvfp4_prefill_dispatches = audit
             .kernel_dispatch_count_for(59, "matmul.nvfp4.w4a4.block16.prefill.row8_tiled256.v1");
         let nvfp4_prefill_col8_dispatches = audit.kernel_dispatch_count_for(
@@ -157,33 +161,49 @@ fn run_actual(contract: TargetContract) -> Result<(), String> {
             audit.kernel_dispatch_count_for(62, "matmul.nvfp4.w4a4.block16.prefill.dp4a64x64.v1");
         let nvfp4_prefill_wmma_dispatches =
             audit.kernel_dispatch_count_for(64, "matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x64.v1");
-        let nvfp4_prefill_f16scale_dispatches = audit.kernel_dispatch_count_for(
-            69,
-            "matmul.nvfp4.w4a4.prefill.gfx1201.wmma_f16scale128x64.v1",
-        );
+        let nvfp4_prefill_f16_staging_dispatches =
+            audit.kernel_dispatch_count_for(72, "matmul.nvfp4.w4a4.prefill.gfx1201.f16_staging.v1");
         let fp8_outer_prefill_dispatches =
             audit.kernel_dispatch_count_for(60, "matmul.fp8.outer.prefill.tiled16.v1");
         let fp8_outer_half2_dispatches =
             audit.kernel_dispatch_count_for(63, "matmul.fp8.outer.prefill.gfx1030.half2.128x64.v1");
+        let fp8_outer_half2_short_dispatches =
+            audit.kernel_dispatch_count_for(71, "matmul.fp8.outer.prefill.gfx1030.half2.64x64.v1");
         let fp8_emulation_dispatches =
             audit.kernel_dispatch_count_for(6, "matmul.fp8.outer.emulation.v1");
         let fp8_decode_half2_dispatches = audit
             .kernel_dispatch_count_for(66, "matmul.fp8.outer.decode.gfx1030.half2.wave4col32.v1");
         let fp8_decode_dword8_dispatches = audit
             .kernel_dispatch_count_for(68, "matmul.fp8.outer.decode.gfx1030.dword8.wave4col32.v1");
+        let fp8_decode_lds_lut_dispatches = audit
+            .kernel_dispatch_count_for(82, "matmul.fp8.outer.decode.gfx1030.lds_lut.wave4col32.v1");
         let fp8_native_dispatches =
             audit.kernel_dispatch_count_for(5, "matmul.fp8.outer.hipblaslt.v1");
         let nvfp4_decode_ok =
-            if env::var("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4").as_deref() == Ok("1") {
-                nvfp4_decode_wave4_dispatches != 0
+            if env::var("SLLM_NVFP4_W4A4_DECODE_FORCE_LDS_F32_LUT").as_deref() == Ok("1") {
+                nvfp4_decode_scale_lut_dispatches != 0
                     && nvfp4_decode_dispatches == 0
-                    && nvfp4_decode_columns_dispatches == 0
-            } else if env::var("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_COLUMNS").as_deref() == Ok("1") {
-                nvfp4_decode_columns_dispatches != 0 && nvfp4_decode_dispatches == 0
+                    && nvfp4_decode_wave4_dispatches == 0
+                    && nvfp4_decode_activation_shared_dispatches == 0
+            } else if env::var("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_ACTIVATION_SHARED").as_deref()
+                == Ok("1")
+            {
+                nvfp4_decode_activation_shared_dispatches != 0
+                    && nvfp4_decode_dispatches == 0
+                    && nvfp4_decode_wave4_dispatches == 0
+                    && nvfp4_decode_scale_lut_dispatches == 0
+            } else if env::var("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4").as_deref() == Ok("1") {
+                nvfp4_decode_wave4_dispatches != 0 && nvfp4_decode_dispatches == 0
+            } else if contract.target == "gfx1030" {
+                (nvfp4_decode_wave4_dispatches != 0
+                    || nvfp4_decode_activation_shared_dispatches != 0
+                    || nvfp4_decode_scale_lut_dispatches != 0)
+                    && nvfp4_decode_dispatches == 0
             } else {
                 nvfp4_decode_dispatches != 0
-                    && nvfp4_decode_columns_dispatches == 0
-                    && nvfp4_decode_wave4_dispatches == 0
+                    || nvfp4_decode_wave4_dispatches != 0
+                    || nvfp4_decode_activation_shared_dispatches != 0
+                    || nvfp4_decode_scale_lut_dispatches != 0
             };
         let nvfp4_prefill_ok =
             if env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_COL8").as_deref() == Ok("1") {
@@ -191,16 +211,7 @@ fn run_actual(contract: TargetContract) -> Result<(), String> {
                     && nvfp4_prefill_dispatches == 0
                     && nvfp4_prefill_dp4a_dispatches == 0
                     && nvfp4_prefill_wmma_dispatches == 0
-                    && nvfp4_prefill_f16scale_dispatches == 0
-            } else if env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA_F16SCALE").as_deref()
-                == Ok("1")
-                && contract.target == "gfx1201"
-            {
-                nvfp4_prefill_f16scale_dispatches != 0
-                    && nvfp4_prefill_dispatches == 0
-                    && nvfp4_prefill_col8_dispatches == 0
-                    && nvfp4_prefill_dp4a_dispatches == 0
-                    && nvfp4_prefill_wmma_dispatches == 0
+                    && nvfp4_prefill_f16_staging_dispatches == 0
             } else if env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA").as_deref() == Ok("1")
                 && contract.target == "gfx1201"
             {
@@ -208,34 +219,55 @@ fn run_actual(contract: TargetContract) -> Result<(), String> {
                     && nvfp4_prefill_dispatches == 0
                     && nvfp4_prefill_col8_dispatches == 0
                     && nvfp4_prefill_dp4a_dispatches == 0
-                    && nvfp4_prefill_f16scale_dispatches == 0
+                    && nvfp4_prefill_f16_staging_dispatches == 0
+            } else if env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_F16_STAGING").as_deref()
+                == Ok("1")
+                && contract.target == "gfx1201"
+            {
+                nvfp4_prefill_f16_staging_dispatches != 0
+                    && nvfp4_prefill_dispatches == 0
+                    && nvfp4_prefill_col8_dispatches == 0
+                    && nvfp4_prefill_dp4a_dispatches == 0
+                    && nvfp4_prefill_wmma_dispatches == 0
             } else if env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A").as_deref() == Ok("1") {
                 nvfp4_prefill_dp4a_dispatches != 0
                     && nvfp4_prefill_dispatches == 0
                     && nvfp4_prefill_col8_dispatches == 0
                     && nvfp4_prefill_wmma_dispatches == 0
-                    && nvfp4_prefill_f16scale_dispatches == 0
+                    && nvfp4_prefill_f16_staging_dispatches == 0
             } else {
                 nvfp4_prefill_dispatches != 0
                     && nvfp4_prefill_col8_dispatches == 0
                     && nvfp4_prefill_dp4a_dispatches == 0
                     && nvfp4_prefill_wmma_dispatches == 0
-                    && nvfp4_prefill_f16scale_dispatches == 0
+                    && nvfp4_prefill_f16_staging_dispatches == 0
             };
         let target_prefill_ok = nvfp4_prefill_ok
             && if contract.target == "gfx1030" {
-                if env::var("SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_HALF2").as_deref() == Ok("1") {
+                if env::var("SLLM_FP8_OUTER_PREFILL_FORCE_BASELINE").as_deref() == Ok("1") {
+                    fp8_emulation_dispatches != 0
+                        && fp8_outer_prefill_dispatches == 0
+                        && fp8_outer_half2_dispatches == 0
+                        && fp8_outer_half2_short_dispatches == 0
+                } else if env::var("SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_HALF2").as_deref()
+                    == Ok("1")
+                {
                     fp8_outer_half2_dispatches != 0
                         && fp8_outer_prefill_dispatches == 0
+                        && fp8_outer_half2_short_dispatches == 0
                         && fp8_native_dispatches == 0
                 } else {
-                    fp8_outer_prefill_dispatches != 0
+                    fp8_outer_half2_short_dispatches != 0
+                        && fp8_outer_prefill_dispatches == 0
                         && fp8_outer_half2_dispatches == 0
+                        && fp8_emulation_dispatches == 0
                         && fp8_native_dispatches == 0
                 }
             } else {
                 fp8_outer_prefill_dispatches == 0
                     && fp8_outer_half2_dispatches == 0
+                    && fp8_outer_half2_short_dispatches == 0
+                    && fp8_emulation_dispatches == 0
                     && fp8_native_dispatches != 0
             };
         let fp8_decode_ok = if contract.target == "gfx1030" {
@@ -247,18 +279,27 @@ fn run_actual(contract: TargetContract) -> Result<(), String> {
                 fp8_decode_dword8_dispatches != 0
                     && fp8_emulation_dispatches == 0
                     && fp8_decode_half2_dispatches == 0
+                    && fp8_decode_lds_lut_dispatches == 0
             } else if env::var("SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_HALF2").as_deref() == Ok("1") {
                 fp8_decode_half2_dispatches != 0
                     && fp8_emulation_dispatches == 0
                     && fp8_decode_dword8_dispatches == 0
-            } else {
-                fp8_emulation_dispatches != 0
+                    && fp8_decode_lds_lut_dispatches == 0
+            } else if env::var("SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_LDS_LUT").as_deref() == Ok("1")
+            {
+                fp8_decode_lds_lut_dispatches != 0
+                    && fp8_emulation_dispatches == 0
                     && fp8_decode_half2_dispatches == 0
                     && fp8_decode_dword8_dispatches == 0
+            } else {
+                (fp8_decode_dword8_dispatches != 0 || fp8_decode_lds_lut_dispatches != 0)
+                    && fp8_emulation_dispatches == 0
+                    && fp8_decode_half2_dispatches == 0
             }
         } else {
             fp8_decode_half2_dispatches == 0
                 && fp8_decode_dword8_dispatches == 0
+                && fp8_decode_lds_lut_dispatches == 0
                 && fp8_emulation_dispatches == 0
         };
         if audit.fallback_used()
@@ -294,7 +335,7 @@ fn run_actual(contract: TargetContract) -> Result<(), String> {
         }
         let memory = session.memory_snapshot();
         eprintln!(
-            "phase76/78 Qwen3.8 actual GPU PASS target={} device={} artifact={} verify_ms={} plan_graph_ms={} load_ms={} prefill_ms={} decode_ms={} decode_tokens={:?} resident_bytes={} available_bytes={} dispatches={} submissions={} nvfp4_decode_dispatches={} nvfp4_decode_columns_dispatches={} nvfp4_decode_wave4_dispatches={} nvfp4_prefill_dispatches={} nvfp4_prefill_col8_dispatches={} nvfp4_prefill_dp4a_dispatches={} nvfp4_prefill_wmma_dispatches={} nvfp4_prefill_f16scale_dispatches={} fp8_outer_prefill_dispatches={} fp8_outer_half2_dispatches={} fp8_emulation_dispatches={} fp8_decode_half2_dispatches={} fp8_decode_dword8_dispatches={} fp8_native_dispatches={} high_water_bytes={}",
+            "phase76/78 Qwen3.8 actual GPU PASS target={} device={} artifact={} verify_ms={} plan_graph_ms={} load_ms={} prefill_ms={} decode_ms={} decode_tokens={:?} resident_bytes={} available_bytes={} dispatches={} submissions={} nvfp4_decode_dispatches={} nvfp4_decode_wave4_dispatches={} nvfp4_decode_activation_shared_dispatches={} nvfp4_decode_scale_lut_dispatches={} nvfp4_prefill_dispatches={} nvfp4_prefill_col8_dispatches={} nvfp4_prefill_dp4a_dispatches={} nvfp4_prefill_wmma_dispatches={} nvfp4_prefill_f16_staging_dispatches={} fp8_outer_prefill_dispatches={} fp8_outer_half2_dispatches={} fp8_outer_half2_short_dispatches={} fp8_emulation_dispatches={} fp8_decode_half2_dispatches={} fp8_decode_dword8_dispatches={} fp8_decode_lds_lut_dispatches={} fp8_native_dispatches={} high_water_bytes={}",
             contract.target,
             device_index,
             root.display(),
@@ -309,18 +350,21 @@ fn run_actual(contract: TargetContract) -> Result<(), String> {
             audit.kernel_dispatch_count(),
             audit.submission_count(),
             nvfp4_decode_dispatches,
-            nvfp4_decode_columns_dispatches,
             nvfp4_decode_wave4_dispatches,
+            nvfp4_decode_activation_shared_dispatches,
+            nvfp4_decode_scale_lut_dispatches,
             nvfp4_prefill_dispatches,
             nvfp4_prefill_col8_dispatches,
             nvfp4_prefill_dp4a_dispatches,
             nvfp4_prefill_wmma_dispatches,
-            nvfp4_prefill_f16scale_dispatches,
+            nvfp4_prefill_f16_staging_dispatches,
             fp8_outer_prefill_dispatches,
             fp8_outer_half2_dispatches,
+            fp8_outer_half2_short_dispatches,
             fp8_emulation_dispatches,
             fp8_decode_half2_dispatches,
             fp8_decode_dword8_dispatches,
+            fp8_decode_lds_lut_dispatches,
             fp8_native_dispatches,
             memory.high_water_bytes(),
         );
@@ -430,39 +474,34 @@ fn run_prefill_profile(contract: TargetContract) -> Result<(), String> {
                 .kernel_dispatch_count_for(62, "matmul.nvfp4.w4a4.block16.prefill.dp4a64x64.v1");
             let nvfp4_prefill_wmma = audit
                 .kernel_dispatch_count_for(64, "matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x64.v1");
-            let nvfp4_prefill_f16scale = audit.kernel_dispatch_count_for(
-                69,
-                "matmul.nvfp4.w4a4.prefill.gfx1201.wmma_f16scale128x64.v1",
-            );
+            let nvfp4_prefill_f16_staging = audit
+                .kernel_dispatch_count_for(72, "matmul.nvfp4.w4a4.prefill.gfx1201.f16_staging.v1");
             let fp8_prefill =
                 audit.kernel_dispatch_count_for(60, "matmul.fp8.outer.prefill.tiled16.v1");
             let fp8_half2 = audit
                 .kernel_dispatch_count_for(63, "matmul.fp8.outer.prefill.gfx1030.half2.128x64.v1");
+            let fp8_half2_short = audit
+                .kernel_dispatch_count_for(71, "matmul.fp8.outer.prefill.gfx1030.half2.64x64.v1");
             let fp8_native = audit.kernel_dispatch_count_for(5, "matmul.fp8.outer.hipblaslt.v1");
             let fp8_ok = if contract.target == "gfx1030" {
-                if env::var("SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_HALF2").as_deref() == Ok("1") {
-                    fp8_half2 != 0 && fp8_prefill == 0 && fp8_native == 0
+                if env::var("SLLM_FP8_OUTER_PREFILL_FORCE_BASELINE").as_deref() == Ok("1") {
+                    fp8_prefill == 0 && fp8_half2 == 0 && fp8_half2_short == 0 && fp8_native == 0
+                } else if env::var("SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_HALF2").as_deref()
+                    == Ok("1")
+                {
+                    fp8_half2 != 0 && fp8_prefill == 0 && fp8_half2_short == 0 && fp8_native == 0
                 } else {
-                    fp8_prefill != 0 && fp8_half2 == 0 && fp8_native == 0
+                    fp8_half2_short != 0 && fp8_prefill == 0 && fp8_half2 == 0 && fp8_native == 0
                 }
             } else {
-                fp8_prefill == 0 && fp8_half2 == 0 && fp8_native != 0
+                fp8_prefill == 0 && fp8_half2 == 0 && fp8_half2_short == 0 && fp8_native != 0
             };
             let nvfp4_ok = if env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_COL8").as_deref() == Ok("1") {
                 nvfp4_prefill_col8 != 0
                     && nvfp4_prefill == 0
                     && nvfp4_prefill_dp4a == 0
                     && nvfp4_prefill_wmma == 0
-                    && nvfp4_prefill_f16scale == 0
-            } else if env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA_F16SCALE").as_deref()
-                == Ok("1")
-                && contract.target == "gfx1201"
-            {
-                nvfp4_prefill_f16scale != 0
-                    && nvfp4_prefill == 0
-                    && nvfp4_prefill_col8 == 0
-                    && nvfp4_prefill_dp4a == 0
-                    && nvfp4_prefill_wmma == 0
+                    && nvfp4_prefill_f16_staging == 0
             } else if env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA").as_deref() == Ok("1")
                 && contract.target == "gfx1201"
             {
@@ -470,19 +509,28 @@ fn run_prefill_profile(contract: TargetContract) -> Result<(), String> {
                     && nvfp4_prefill == 0
                     && nvfp4_prefill_col8 == 0
                     && nvfp4_prefill_dp4a == 0
-                    && nvfp4_prefill_f16scale == 0
+                    && nvfp4_prefill_f16_staging == 0
+            } else if env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_F16_STAGING").as_deref()
+                == Ok("1")
+                && contract.target == "gfx1201"
+            {
+                nvfp4_prefill_f16_staging != 0
+                    && nvfp4_prefill == 0
+                    && nvfp4_prefill_col8 == 0
+                    && nvfp4_prefill_dp4a == 0
+                    && nvfp4_prefill_wmma == 0
             } else if env::var("SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A").as_deref() == Ok("1") {
                 nvfp4_prefill_dp4a != 0
                     && nvfp4_prefill == 0
                     && nvfp4_prefill_col8 == 0
                     && nvfp4_prefill_wmma == 0
-                    && nvfp4_prefill_f16scale == 0
+                    && nvfp4_prefill_f16_staging == 0
             } else {
                 nvfp4_prefill != 0
                     && nvfp4_prefill_col8 == 0
                     && nvfp4_prefill_dp4a == 0
                     && nvfp4_prefill_wmma == 0
-                    && nvfp4_prefill_f16scale == 0
+                    && nvfp4_prefill_f16_staging == 0
             };
             if audit.fallback_used() || !audit.all_dispatches_hip() || !nvfp4_ok || !fp8_ok {
                 return Err(format!(
@@ -490,7 +538,7 @@ fn run_prefill_profile(contract: TargetContract) -> Result<(), String> {
                 ));
             }
             eprintln!(
-                "phase78 profile target={} device={} tokens={} prefill_ms={} dispatches={} nvfp4_prefill={} nvfp4_prefill_col8={} nvfp4_prefill_dp4a={} nvfp4_prefill_wmma={} nvfp4_prefill_f16scale={} fp8_prefill={} fp8_half2={} fp8_native={}",
+                "phase78 profile target={} device={} tokens={} prefill_ms={} dispatches={} nvfp4_prefill={} nvfp4_prefill_col8={} nvfp4_prefill_dp4a={} nvfp4_prefill_wmma={} nvfp4_prefill_f16_staging={} fp8_prefill={} fp8_half2={} fp8_half2_short={} fp8_native={}",
                 contract.target,
                 device_index,
                 length,
@@ -500,9 +548,10 @@ fn run_prefill_profile(contract: TargetContract) -> Result<(), String> {
                 nvfp4_prefill_col8,
                 nvfp4_prefill_dp4a,
                 nvfp4_prefill_wmma,
-                nvfp4_prefill_f16scale,
+                nvfp4_prefill_f16_staging,
                 fp8_prefill,
                 fp8_half2,
+                fp8_half2_short,
                 fp8_native,
             );
             elapsed.push(elapsed_ms);
