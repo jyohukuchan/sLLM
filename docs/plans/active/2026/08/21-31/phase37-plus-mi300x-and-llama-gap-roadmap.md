@@ -39,8 +39,10 @@ decode、KV、他formatは変更していない。Phase 75ではexact gfx1030の
 性能値は採用判断と再計画に用いる目標であり、数値未達を隠すために比較条件やモデルを変更しない。
 2026-09-03のユーザー指示により、Phase 76〜78はexact Unsloth Qwen3.8-27B混合NVFP4のsingle-request実用化へ割り当てた。
 2026-09-07のユーザー指示により、Phase 79の既存最適化の共通化とPhase 80のCI確認・修復・再実行確認を完了し、
-次のPhase 81へ固定設定GPU samplingを挿入した。従来Phase 81（static FP8 KV・MTP・文章生成）を82、従来Phase 82（他精度）を
-83、従来Phase 83（NVFP4 batching）を84へ繰り下げる。詳細は[Phase 76〜84計画](../../09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)へ分離する。
+次のPhase 81へ固定設定GPU samplingを挿入した。2026-09-08の最新指示により、未採用最適化の削除・条件付き既定採用を
+新Phase 82へ挿入する。従来Phase 82（static FP8 KV・MTP・文章生成）を83、従来Phase 83（他精度）を84、従来Phase 84
+（NVFP4 batching）を85へ繰り下げる。詳細は[Phase 76〜85計画](../../09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)と
+[Phase 82専用計画](../../../../archive/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md)へ分離する。
 
 ## 正本と基準値
 
@@ -119,9 +121,10 @@ decode、KV、他formatは変更していない。Phase 75ではexact gfx1030の
 | 79 | complete | 既存最適化の共通化・条件付き既定採用 | Phase 76〜78完了、target共通化の採否記録 |
 | 80 | complete | CIの現状確認、必要な修正、再実行確認 | Phase 79完了。専用[Phase 80計画](../../../../archive/2026/09/1-10/phase80-ci-restoration.md) |
 | 81 | completed | 固定設定GPU sampling最適化（temperature 1.0、top_p 0.95、固定penalty/filter） | Phase 76〜80完了、main-plan固定profile |
-| 82 | planned | static FP8 KV、MTP、文章生成実用closeout | Phase 76〜81完了、target-only基準 |
-| 83 | planned | 他精度の未最適化経路を一巡 | Phase 82完了 |
-| 84 | planned | NVFP4 GPU batching最適化 | Phase 82〜83完了、single-request基準 |
+| 82 | complete-scoped-adoption | 不採用最適化の削除・現行target／shape／KV範囲の条件付き既定採用 | Phase 76〜81完了。専用[Phase 82計画](../../../../archive/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md) |
+| 83 | planned | static FP8 KV、MTP、文章生成実用closeout（旧Phase 82） | Phase 82完了、target-only基準 |
+| 84 | planned | 他精度の未最適化経路を一巡（旧Phase 83） | Phase 83完了 |
+| 85 | planned | NVFP4 GPU batching最適化（旧Phase 84） | Phase 84完了、single-request基準 |
 
 直近の性能laneの番号上の既定順はPhase 49→50→51→52である。Phase 49の3候補判定と採用経路の退行確認、Phase 50のR9700採否と
 MI300X wave64引継ぎ準備は完了した。Phase 51は一時保留中にR9700限定のPhase 52を先に完了し、2026-08-25のユーザー指示で再開して完了した。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
@@ -130,8 +133,8 @@ Phase 53のdescriptor v1／v2評価とPhase 54の改善研究は当時の証拠�
 block16製品経路は廃止し、両local targetを含むreviewed Qwen3.5-4B BF16 dense textの省略時KVをstandard OCP
 `kv-mxfp8-e4`へ変更した。gfx942のfresh実機証拠は追加のMI300X検証項目がまとまった時点の一括実行候補へ延期する。
 Phase 55〜75は完了済みである。Phase 76〜79でQwen3.8-27B混合NVFP4をsingle-requestで実用化し、
-Phase 80でCIを修復・再確認した後、Phase 81で固定設定GPU sampling、Phase 82でstatic FP8 KV／MTPを含む実用closeout、
-Phase 83で他精度、Phase 84でNVFP4 batchingへ進む。
+Phase 80でCIを修復・再確認した後、Phase 81で固定設定GPU sampling、Phase 82で未採用最適化の整理・条件付き既定採用、
+Phase 83でstatic FP8 KV／MTPを含む実用closeout、Phase 84で他精度、Phase 85でNVFP4 batchingへ進む。
 Phase 47〜48は内容と番号を保持する。
 
 複数surfaceへ現れる機能の所有権は一つに固定する。Phase 39はresumable transport/replay、Phase 40はsamplerと`n` choice

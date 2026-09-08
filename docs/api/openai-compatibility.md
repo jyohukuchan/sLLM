@@ -623,6 +623,16 @@ profile connects it to OpenWebUI through `/v1/models` and `/v1/chat/completions`
 Tokenization and apply-template utilities use the artifact's verified frontend.
 Embeddings and tool protocol are unavailable for this text-only profile.
 
-This scoped safetensors entrypoint does not complete Phase82 static FP8 KV/MTP
+This scoped safetensors entrypoint does not complete Phase83 static FP8 KV/MTP
 or add batching, vision, MXFP6 KV, other artifacts, or other GPUs. See the
 [deployment and validation record](../history/2026/09/1-10/qwen38-nvfp4-r9700-server.md).
+
+Phase82 enables the verified Qwen3.8 projection packs, deferred completion and
+stateless decode Graph spans without optimization opt-ins; the append-attention
+chain additionally requires FP16 KV. The fresh gfx1201 API probe used FP16 KV
+with the fixed sampling profile and checked SSE, cancellation and cleanup.
+The text profile's unsupported-tools response remains HTTP 400; it is not a
+positive tool-calling claim. This source change does not replace the locally
+deployed binary or change its explicitly configured Phase78 preset.
+See the [Phase82 adoption scope](../history/2026/09/1-10/phase82-default-adoption-scope.md)
+and [validation record](../history/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md).

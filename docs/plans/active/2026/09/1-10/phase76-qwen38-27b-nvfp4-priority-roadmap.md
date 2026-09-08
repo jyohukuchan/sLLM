@@ -1,6 +1,6 @@
 # Phase 76以降: Qwen3.8-27B NVFP4優先ロードマップ
 
-> 状態: Phase 76〜81完了。Phase 78は2026-09-05のユーザー承認により旧目標の未達・未実施を記録して終了。Phase 82〜84は未完了。2026-09-07のユーザー指示により、CI修復をPhase 80で完了後、固定GPU samplingを新Phase 81へ挿入した。直前のPhase 81〜83は82〜84へ繰り下げた。
+> 状態: Phase 76〜82完了。Phase 78は2026-09-05のユーザー承認により旧目標の未達・未実施を記録して終了。Phase 83〜85は未完了。2026-09-07のユーザー指示によりCI修復をPhase 80で完了後、固定GPU samplingを新Phase 81へ挿入し、2026-09-08の最新指示で未採用最適化の整理・条件付き既定採用を新Phase 82へ挿入した。旧Phase 82〜84は83〜85へ繰り下げた。
 > 作成日: 2026-09-03
 
 ## 現在の完了判断
@@ -9,11 +9,12 @@
 [履歴](../../../../../history/2026/09/1-10/phase76-78-qwen38-nvfp4.md)を現在の終了判断とする。
 以下の旧gate・未完了というcheckpoint記述は当時の履歴であり、最新のユーザー判断を上書きしない。
 
-## 2026-09-07の順序変更
+## 2026-09-07〜09-08の順序変更
 
 新[Phase 79](../../../../archive/2026/09/1-10/phase79-common-optimization.md)の既存最適化共通化・条件付き既定採用と、
-Phase 80のCI修復とPhase 81の固定GPU samplingを完了した。次はPhase 82のstatic FP8 KV／MTP／文章生成とする。
-これにより従来Phase 81（static FP8 KV・MTP・文章生成）を82、従来Phase 82（他精度）を83、従来Phase 83（batching）を84へ繰り下げる。
+Phase 80のCI修復とPhase 81の固定GPU samplingを完了した。2026-09-08の最新指示により新設した
+[Phase 82](../../../../archive/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md)の不採用最適化の削除・条件付き既定採用も完了し、次はPhase 83とする。
+これにより従来Phase 82（static FP8 KV・MTP・文章生成）を83、従来Phase 83（他精度）を84、従来Phase 84（batching）を85へ繰り下げる。
 以下のPhase 76〜78 checkpointに残る旧番号・開始gateは当時の履歴であり、この順序変更とPhase 78完了判断を上書きしない。
 共通化Phaseは既存経路を対象とし、新しい精度形式・汎用FP8 artifact互換の追加は含めない。
 
@@ -21,13 +22,14 @@ Phase 80のCI修復とPhase 81の固定GPU samplingを完了した。次はPhase
 
 2026-09-03のユーザー指示により、次の最優先目標を、手持ちGPU上で
 `unsloth/Qwen3.8-27B-NVFP4`を実用的な単一要求速度で文章生成できる状態とする。
-現在はPhase 78のユーザー承認済み完了判断とPhase 81の固定GPU sampling完了を踏まえ、Phase 82で実用closeout、
-Phase 83で他精度の単一要求最適化、Phase 84でNVFP4 batchingの順とする。Phase 81の共通samplerは既存モデル経路を
-対象とし、旧exact-model目標の再達成やPhase 82の完了を開始条件にしない。
+現在はPhase 78のユーザー承認済み完了判断とPhase 81の固定GPU sampling完了を踏まえ、Phase 82で未採用最適化を整理し、
+現行target・shape・KV範囲だけを条件付きで既定採用する。続いてPhase 83でstatic FP8 KV／MTP／文章生成の実用closeout、
+Phase 84で他精度の単一要求最適化、Phase 85でNVFP4 batchingの順とする。Phase 81の共通samplerは既存モデル経路を
+対象として完了した。旧exact-model目標の再達成や実用closeout（現在のPhase 83）の完了は開始条件にしなかった。
 2026-09-07の変更により、既存NVFP4/FP8経路のモデル横断共通化は新Phase 79として先行する。
-この既存経路の共通化に旧exact-model優先条件を適用せず、新しい他精度最適化はPhase 83に残す。
+この既存経路の共通化に旧exact-model優先条件を適用せず、新しい他精度最適化はPhase 84に残す。
 
-2026-09-07変更後の番号上の既定順は次とする。
+2026-09-08変更後の番号上の既定順は次とする。
 
 1. Phase 76: exact artifact統合、正しさ、baseline/profile。
 2. Phase 77: mixed NVFP4 modelの単一要求decode最適化。
@@ -35,11 +37,12 @@ Phase 83で他精度の単一要求最適化、Phase 84でNVFP4 batchingの順�
 4. Phase 79: [既存最適化の共通化・条件付き既定採用](../../../../archive/2026/09/1-10/phase79-common-optimization.md)。
 5. Phase 80: CIの確認・修復、必要なコード／検査変更、対象CIの再実行確認。
 6. Phase 81: 固定設定のGPU sampling最適化。
-7. Phase 82: static FP8 KV、MTP、長めの実入力、CLI/APIを含む実用closeout。
-8. Phase 83: 他精度の残る単一要求最適化。
-9. Phase 84: NVFP4のGPU batching最適化。
+7. Phase 82: 不採用最適化の削除・現行target／shape／KV範囲の条件付き既定採用。
+8. Phase 83: static FP8 KV、MTP、長めの実入力、CLI/APIを含む実用closeout（旧Phase 82）。
+9. Phase 84: 他精度の残る単一要求最適化（旧Phase 83）。
+10. Phase 85: NVFP4のGPU batching最適化（旧Phase 84）。
 
-Phase 76〜83の途中で一般的なFP8 artifact互換、vision、tensor parallel、continuous batchingへscopeを
+Phase 76〜84の途中で一般的なFP8 artifact互換、vision、tensor parallel、continuous batchingへscopeを
 広げない。Qwen3.8 artifact内に実在する限定FP8 recipeは対象modelを動かすために扱うが、これを汎用FP8対応とは呼ばない。
 
 ## 固定する対象artifact
@@ -79,7 +82,7 @@ vision tower、MTP 15 tensorなどはBF16または非量子化parameterとして
 実装済みの基盤範囲は、固定revisionのconfig/index/header identity検証、main/MTP safetensorsの範囲検証、
 NVFP4 168本・FP8 233本・BF16を含む1199論理tensorのinventory、直接source load plan、mixed graph、
 FP8 BF16-channel-scaleのF32 resident化、NVFP4のvalue/block/global-scale uploadである。
-CLIのsafetensors直接指定、static FP8 KVのscale materialization、MTP接続はPhase 82の実用closeoutへ残す。
+CLIのsafetensors直接指定、static FP8 KVのscale materialization、MTP接続はPhase 83の実用closeoutへ残す。
 実モデルの初期GPU smokeはPhase 76〜78でFP16 KVを使って完了している。
 
 基盤検証は `cargo check`、`cargo test -p sllm-core --lib`（532 passed、20 ignored）、
@@ -125,7 +128,7 @@ R9700の全GPU可視physical index 2はHIP最小kernelでも`invalid image`（gf
 
 - exact artifactからGGUFを生成し、全使用tensorのrole、shape、dtype、scale、range、hashをfail-closedに検証する。
 - NVFP4 168本、FP8 233本、BF16が意図したproviderへ入り、weight側のBF16展開や別precision fallbackが0である。
-  static FP8 KVのmaterializationはPhase 82のcloseout条件とし、Phase 76〜78ではFP16 KVを明示的rollbackとして使う。
+  static FP8 KVのmaterializationはPhase 83のcloseout条件とし、Phase 76〜78ではFP16 KVを明示的rollbackとして使う。
 - 非整列境界を含むoperator oracleと、固定promptのlogit/token replayを通す。
 - R9700とV620でsingle GPU residentとなり、GTT spillなしでbounded single-request generationとcleanupを完了する。
 - target別baseline profileからPhase 77の上位bottleneckを確定する。
@@ -1241,7 +1244,22 @@ CPU samplingへのフォールバックを許さず、候補選択・抽選、bu
 数値oracle、token replay、非整列・境界case、GPU-only、fallback 0、cleanup 0を受入条件とし、prefill／decode等への追加負担を
 ほぼなくすというユーザー目標に対する性能影響を測定する。未達と残作業を隠さず、対応範囲と採否を記録する。
 
-## Phase 82: 実用closeout
+## Phase 82: 不採用最適化の整理・条件付き既定採用（完了）
+
+[専用計画](../../../../archive/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md)を正本とする。Phase 79〜81で確認した既存の共通実行層、
+fixed sampling、target別selector、Graph／chain／ProjectionPackの証拠を再利用し、現行対応target・shape・KV範囲で
+採用できる最適化を条件付き既定へ移す。どの経路でも未採用で不採用理由が確定した候補は、採用済み共有処理と
+必要なbaseline／rollbackを維持して削除する。データ不足で今回判断できない候補は、不足事項と再検討条件を記録して保留する。
+削除するものの試行内容・比較条件・測定結果・不採用理由・元source・削除commitを
+[Phase 82履歴](../../../../../history/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md)へ残す。
+新モデル、全モデル・全KV形式、MI300X実機、長時間の新規性能探索は
+このPhaseの完了条件に追加しない。公開APIのfixed sampling profileにopt-inを追加せず、既存の省略時契約と実行前拒否を維持する。
+
+共通deferred completionはGemmaで追加効果が確認できなかったことだけを理由に削除せず、既存の共通rollbackとQwenの
+target／KV条件を維持する。Gemma ProjectionPackの既定採用済み範囲も変更しない。Phase 82の完了後、static FP8 KV／MTP／
+文章生成の実用closeoutを新Phase 83として開始する。
+
+## Phase 83: 実用closeout（旧Phase 82）
 
 - artifactのstatic FP8 KVをappend、full attention、context growthへ直接接続し、FP16 mirrorを作らない。
 - target-only逐次decodeが安定した後で、BF16 MTP companionを追加する。width 1〜3のdraft、逐次accept/reject、
@@ -1250,28 +1268,28 @@ CPU samplingへのフォールバックを許さず、候補選択・抽選、bu
 - 32 GB級deviceでmodel、MTP、KV、workspaceを収め、GTT spillとCPU/backend fallbackを許さない。
 - visionはこのcloseoutをblockしない。text target達成後の独立機能項目とする。
 
-## Phase 83: 他精度の単一要求最適化
+## Phase 84: 他精度の単一要求最適化（旧Phase 83）
 
-Phase 82完了後にだけ、次の順で残件を閉じる。
+Phase 83完了後にだけ、次の順で残件を閉じる。
 
 1. MXFP8 W8A8 decode。ここで得たMXFP8 activation decodeを後続MXFP4 W4A8へ再利用する。
 2. MXFP6 W6A6 decode。MXFP8のtile/reduction骨格を使い、E3M2 ingressだけを独立評価する。
 3. MXFP4 W4A8 prefill/decode。weightはMXFP4 block32/E8M0、activationはMXFP8 E4M3 block32/E8M0とする。
 4. NVFP4 W4A16 decode残差と、必要なら既存prefill providerの追加改善。
 
-一般的なFP8 artifact互換は保留を維持する。Phase 76〜82のexact Qwen3.8 recipe対応を汎用化する作業はPhase 83へ
+一般的なFP8 artifact互換は保留を維持する。Phase 76〜83のexact Qwen3.8 recipe対応を汎用化する作業はPhase 84へ
 自動的に含めない。
 
-## Phase 84: NVFP4 batching
+## Phase 85: NVFP4 batching（旧Phase 84）
 
-Phase 83完了後に開始する。最初はQwen3.8-27B NVFP4 W4A4へ限定する。
+Phase 84完了後に開始する。最初はQwen3.8-27B NVFP4 W4A4へ限定する。
 
 1. 同一decode stepのB=`2/4/8`でactivation pack、weight tile、scale loadをrequest間共有し、単一要求TPOTとaggregate throughputを測る。
 2. Phase 26のhost planningを再利用し、GPU B>1 executionへ接続する。単一要求providerを暗黙にB>1へ流用しない。
 3. decode-only batchingを成立させた後、prefill/decode混在、continuous admission、cancellation、KV ownershipへ進む。
 4. fairness、p50/p99 latency、aggregate tok/s、resident/request workspace、OOM admissionを別指標として記録する。
 
-tensor parallel、multi-GPU、RDMAはPhase 84へ含めず、batchingと通信最適化を同時に導入しない。
+tensor parallel、multi-GPU、RDMAはPhase 85へ含めず、batchingと通信最適化を同時に導入しない。
 
 ## 共通停止・再計画条件
 

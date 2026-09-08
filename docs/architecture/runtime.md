@@ -236,7 +236,7 @@ validation、KV encoding、quant scale、adapter／MTP／multimodal scopeを引�
 prepared entryを再利用する。`SLLM_PREPARED_DEFERRED_COMPLETION=1`はHIPの`gfx1030`／`gfx1201`で、compatible encoding、text-only、
 MTPなし、adapterなしのrequestだけに共通deferred completionを選ぶ。値が未設定、`0`、または不正ならprofiled completionを使う。
 Qwenの既存gfx1030 text defaultと、明示された`SLLM_QWEN_DEFERRED_COMPLETION`の`0`／`1`／不正値は互換性のため優先し、
-共通値はそれ以外のFP16／MXFP8 graphへ追加選択肢を与える。Qwen固有のgraph／artifact opt-inはこの共通制御の外側に残り、
+共通値はそれ以外のFP16／MXFP8 graphへ追加選択肢を与える。Qwen固有のgraph／artifact検証はこの共通制御の外側に残り、
 共通selectorが対象外modelを誤ってlowerしない。
 Gemmaは実際のopaque KV descriptorがFP16またはOCP MXFP8で、MTP hidden出力を要求しない場合だけこの判定を通し、static tensor FP8 KV、
 MTP、その他の範囲外形式はprofiledへ戻す。deferred modeがqueueのcompletion modeを変更するため、Gemma requestはresident queueを
@@ -245,7 +245,17 @@ MTP、その他の範囲外形式はprofiledへ戻す。deferred modeがqueueの
 projection共有には`SLLM_PREPARED_PROJECTION_SHARING`を共通rollbackとして使う。未設定または`1`が既定の有効状態で、`0`は
 Gemma／QwenのProjectionPack loweringだけを無効にし、普通の二つのMatmul、prepared completion、graph replay、state validationを
 変更しない。不正値はfail-closedで無効扱いにする。Qwenの既存`SLLM_QWEN38_NVFP4_PROJECTION_PACK2`と
-`SLLM_QWEN38_FP8_GDN_PROJECTION_PACK2`は引き続きliteral `1`のtarget／artifact opt-inを要求し、共通値`0`がその選択を上書きする。
+`SLLM_QWEN38_FP8_GDN_PROJECTION_PACK2`はPhase82で未設定または`1`を有効にした。
+HIP gfx1030／gfx1201、検証済みQwen3.8 sidecarとの一致、非MTP／文章のみ／adapterなしの既存条件を維持する。
+個別値`0`／不正値と共通値`0`は共有を無効にする。
+
+同じQwen3.8の適合範囲ではtarget別deferred completion、Graph spans、KV append-attention chainも
+未設定を有効にする。Graphはdeferred選択時のM1 terminal decode継続だけに適用し、最初のdecodeで準備・captureし、
+以後replayする。stateful attention／KVとterminal token selectionはcaptureの外に保つ。
+chainは全KV stateがFP16の場合だけであり、他KV形式へ拡張しない。各既存フラグの`0`／不正値で切り戻せる。
+Gemmaや他adapterの共通deferredの省略時動作は、このQwen3.8の既定変更から独立している。
+NVFP4量子化wave8、NVFP4／FP8 decode LUT、GDN row32のtarget／shape条件、明示overrideの優先順位、
+保留したprefill／attention候補は[Phase82 selector一覧](../history/2026/09/1-10/phase82-default-adoption-scope.md)を参照する。
 GemmaのW4A4 gate/up packはdecodeの`M=1`で、verified GGUFまたは同等のfirst-class quantized source、U8 W4A4 weight、同じ
 BF16 activation view、同じ`[N,K]` shape、`K % 16 == 0`、非zero `N`、両weightのverified input-global scale bits一致を全て満たした
 場合だけlowerする。direct NVFP4 sidecar、prefill `M>1`、scale欠落／不一致、shape／layout／artifact不一致は普通のMatmulへ戻る。
@@ -257,7 +267,7 @@ layoutはcandidate数、selected prepared pack submission数、scale不一致数
 | prepared completion／graph replay | 共通制御をencoding-compatibleなadapterで利用 | 同じ共通制御を利用。ただしdescriptorとscale／state identityを一致検証 |
 | Qwen KV append-attention chain | 全stateがFP16の候補だけchainを許可 | chainは選択せず、通常append／fence／attentionを維持 |
 | semantic projection pair | 共通predicateでactivation viewとweight／output shapeを検証 | 同じpredicateでmetadata共有を検証。新しいMXFP8 ProjectionPack kernelは作らない |
-| native projection pack | 既存target／artifact opt-inとABI／shape検証の範囲 | MXFP8のpack loweringは対象外。普通の低bit linearを使う |
+| native projection pack | target／artifact条件とABI／shape検証の範囲で既定選択 | MXFP8のpack loweringは対象外。普通の低bit linearを使う |
 | state／lifetime | checked view、generation、completion boundaryを保持 | 同じ。quant scale planeとencodingもprepared identityに含める |
 
 この表はRust側の選択契約を示すもので、実GPUの数値一致や性能を保証しない。GPUでのGemma default／共通override比較と

@@ -55,6 +55,15 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-09-08-P82-DEFAULT-SCOPE: Phase82の条件付き既定採用と保留
+
+- scope: NVFP4 activation quantizer wave8（exact compile target `gfx1030`／`gfx1201`）、NVFP4 decode ID67（`M=1`、`1024<=K<=17408`、`K%16=0`、`N>=1024`、両target）、NVFP4 decode ID84（両targetの exact `(K,N)=(5120,17408)/(17408,5120)`）、FP8 outer decode ID82（exact `gfx1030`の4 tuple）、gfx1030 Qwen GDN row32（`M=1,qk/value=16/48,head_dim=128`）、Qwen3.8の既存projection/deferred/Graph/FP16 chain scope。各経路のtarget、shape、encoding、adapter、artifact gateは[Phase82 scope history](../history/2026/09/1-10/phase82-default-adoption-scope.md)に記録する。
+- classification: wave8 quantizer、ID84、ID82、GDN row32、Qwen execution controlは**N0**。ID67は並列reduction treeへ変わるため**N1**。N0/N1はいずれも記載scopeだけに適用し、全model・全shapeへの一般化やtoken一致だけの品質主張はしない。
+- precedence/rollback: unsetは上記の範囲だけ既定ON。明示force `=1` は対応shapeで優先し、`=0`／未知値はbaselineまたはfallbackへ戻す。`SLLM_*_FORCE_BASELINE=1`は最優先rollback。ID84を抑制したgfx1030 exact tupleは、他のwave4／activation-shared controlが未設定ならID73、gfx1201はID67へ戻る。別controlが設定された場合はsource上の明示優先順位に従い、ID82の`SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_LDS_LUT=0`／未知値はdirect controlが未設定なら採用済みID68へ戻り、scalar baselineは`SLLM_FP8_OUTER_DECODE_FORCE_BASELINE=1`で選ぶ。ID82の範囲外は既存経路を維持する。Qwen Graphはdeferredのstateless M1 decodeだけをcaptureし、terminal sampler・stateful KV/attentionはcapture外に残す。
+- HOLD: GQA6 P64/P128、GQA6 rocBLAS F32、NVFP4 ID62/ID64/ID72は既定化しない。P64 partitionとP128はN2 scope、rocBLAS F32はprovider/reduction順変更、ID62はcorrected ID59より長いKの逐次block加算で誤差上限が増える既知のN2（K5120で319対約28段、K17408で1087対約76段。host stress sample最大絶対差0.75）、ID64は既定範囲不足、ID72はN2の丸め差と性能・ユーザー判断不足が理由である。ID62のGPU runnerやfull-model captureは人のN2判断を補助する任意証拠であり、追加の全model gateではない。P64のFP16 LDS表現だけはN0だが、partition採用を意味しない。
+- verification: NVFP4 quantizerは両targetの26 fixture／5 mode NumPy oracle、ID84 projection packは両targetのbitwise／repeat／`max_bf16_ulp=0`／cleanup、ID82は既存のexact tuple oracleと境界検査、GDN row32はstate/output oracleとcleanup、Qwen coreはhost focused testsと既存target-scoped GPU evidenceを確認した。R9700 Gemmaの新NV67既定はbaselineと3 sampling modeのtoken hashが異なる一方、HIP実行／finite／fallbackなし／cleanup 0はPASSしたため、N1 target拡張を全model出力同値とは扱わない。最終r7 source identityがcurrent source anchorであることは[Phase82 evidence ledger](../history/2026/09/1-10/phase82-optimization-evidence.json)の`final_build_reuse_mapping`に記録する。未実施の全model・全shape性能は採用根拠に含めない。
+- rollback identity: `SLLM_NVFP4_ACTIVATION_QUANTIZE_WAVE8`、NVFP4 decode controls、`SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_LDS_LUT`／`SLLM_FP8_OUTER_DECODE_FORCE_BASELINE`、`SLLM_LINEAR_ATTENTION_GFX1030_ROW32_LDS`、Qwen target-scoped `0`／malformed controls、および既存attention baseline flagsを維持する。候補固有削除は[Phase82 cleanup history](../history/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md)へ分離する。
+
 ### OUT-2026-09-07-P79-DECODE-DEFAULTS: NVFP4/FP8共通decodeの条件付き既定化（N1）
 
 - scope: exact gfx1030、M1。NVFP4 ID67はK1024..17408・K%16=0・N>=1024、
