@@ -823,5 +823,45 @@
   },
   "performance_comparison": "phase83-first-request-comparison.json",
   "publication_evidence": "GitHub host-required, h3-compile-only, h3-public-runtime-compile-only check runs attached to the commit containing this record; not inferred from local checks.",
-  "final_source_mapping_verified": true
+  "final_source_mapping_verified": true,
+  "post_publication_lint_fix": {
+    "source": "crates/sllm-hip/src/bin/sllm-phase78-qwen38-benchmark.rs",
+    "before_sha256": "dfbf34ef89ec274f562c5cc7582666d49eb8509ad5346cc1500320fdf2a06b16",
+    "after_sha256": "6f8c449e2df3a593d011a81cb425e23fa97d441849b24b40175bf42955605bda",
+    "change": "Add Clippy too_many_arguments allow to benchmark report constructor only; inference and measurement behavior unchanged.",
+    "failed_run": "https://github.com/jyohukuchan/sLLM/actions/runs/34318825514",
+    "failed_steps": [
+      {
+        "step_id": "h0-rust-clippy.rust-clippy",
+        "state": "FAIL",
+        "exit_code": 101,
+        "diagnostic": "command exited 101"
+      },
+      {
+        "step_id": "h0-markdown-links.markdown-local-links",
+        "state": "FAIL",
+        "exit_code": 1,
+        "diagnostic": "command exited 1"
+      },
+      {
+        "step_id": "h0-json-schema-manifest-workflow.json-schema-manifest-workflow",
+        "state": "FAIL",
+        "exit_code": 1,
+        "diagnostic": "command exited 1"
+      }
+    ],
+    "local_validation": "cargo clippy -p sllm-hip --all-targets -- -D warnings PASS",
+    "validation_log_sha256": "0954fb0ed70e6aa86283ae5c11159eebe9ecea9cad033e05b9d169f70d55e382",
+    "additional_ci_repairs": [
+      "Replaced four local-only Markdown evidence links with literal paths; tracked plan/evidence links remain.",
+      "Refreshed RMSNorm H3 existing source-set hashes to current files; source list and checks unchanged."
+    ],
+    "validation": [
+      "sllm-hip all-targets Clippy PASS",
+      "Rustfmt PASS",
+      "Markdown link validation PASS",
+      "JSON/schema/manifests/workflow validation PASS",
+      "RMSNorm H3 contracts 8 PASS /19 subtests PASS"
+    ]
+  }
 }

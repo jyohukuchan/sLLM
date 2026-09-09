@@ -109,7 +109,7 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 - 数値検証: V620-A `gfx1030`の公開runtime probe（GPU UUID `GPU-76a08c022586fed6`）で、3 exact shapeの`M=1..4`、repeat、finite、独立sampled E4M3FN/BF16 oracle、cleanupを確認した。M2--4は全shapeでID92、`dispatch_count=2`、oracle最大BF16 ULP差0、resources releasedを得た。比較用の既存ID71 probeも同じfixtureでfinite、oracle最大ULP差0、ID82/68 rowwise出力との差0 ULPだったが、これはfixture結果であり、ID71との一般的なbitwise互換性を意味しない。公開probe identityは`.local-artifacts/phase83/fp8-id92-public-gfx1030-r1/summary.json`に記録する。
 - 性能・採否: 同じV620-A公開probeのM2/M3/M4中央値は、GDN qkvが`0.306523/0.355844/0.570367 ms`、GDN zが`0.229922/0.263883/0.399765 ms`、lm_headが`2.603708/2.614028/2.633307 ms`だった。これはoperator-levelのtarget／shape限定証拠であり、full-model出力、MTP性能、別targetへの採用を示さない。exact shapeでは既定selectorがID92を選択する。
 - rollback: ID92のkernel/provider選択を無効化またはshape条件を外すと、gfx1030の既存ID71（M>1）へ戻す。`M=1`は既存のID82／ID68を維持し、FNUZ、非有限payload、未対応shape／targetは既存fail-closed規則に従う。
-- 詳細: [Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)、[ID92 public probe summary](../../.local-artifacts/phase83/fp8-id92-public-gfx1030-r1/summary.json)。
+- 詳細: [Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)、ID92 public probe summary: `.local-artifacts/phase83/fp8-id92-public-gfx1030-r1/summary.json`。
 
 ### OUT-2026-09-09-P83-GQA6-QTILE4-MXFP8: GQA6 QTILE4 MXFP8 prefill（N1・数値分類、採用保留）
 
@@ -129,7 +129,7 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 - 数値検証: ID87のgfx1030 standalone probeは、非整列を含むsmall shapeの全点とlarge shapeのsampleを独立encoded long-double oracleへ照合し、`max_bf16_ulp=0`、repeat、finite、cleanupを確認した。ID89のR9700 gfx1201 probeは`M=63/64/65/1024`、wide/down、2 seedの10 caseで`max_candidate_oracle_ulp=0`、candidate repeat PASS、controlとの差は最大1 ULPだった。後者のcontrolはID64の診断比較であり、Phase 82正式baseline ID59との採否比較へ読み替えない。
 - 性能・採否: ID89を明示選択したQwen3.8 8192/128、MXFP8、MTP無効、QTILE4併用のR9700探索行はprefill `364.0048`／decode `9.7603` tok/sだった。この値は当時のID89 includeでpragma scopeを修正する前の探索binaryであり、最終sourceの採用証拠へ再利用しない。単回探索であり、MTP目標、正式反復、ID59との差分帰属を示さない。ID87／ID89ともproduction既定化は保留し、full-modelのID59比較、性能、fallback、cleanup、API/MTP統合を別途確認する。
 - rollback: ID87は`SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED`、ID89は`SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED`を未設定または`0`に戻す。両flagは明示opt-inのままとする。
-- 詳細: [Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)、[ID89 probe summary](../../.local-artifacts/phase83/wmma-kahan-gfx1201-r1/summary.txt)。
+- 詳細: [Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)、ID89 probe summary: `.local-artifacts/phase83/wmma-kahan-gfx1201-r1/summary.txt`。
 
 ### OUT-2026-09-09-P83-NVFP4-SMALL-M-ROWGRID: ID88／ID90 small-M rowgrid（N1・ID84とのrowwise N0、opt-in保留）
 
@@ -139,7 +139,7 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 - 数値検証: ID88のgfx1030 public/runtime probeは両NVFP4 tuple、`M=1..4`、repeat・finite・cleanup・独立sample oracleをPASSし、最大BF16 ULP差は0だった。ID90のR9700 public API probeも両tupleの`M=1..4`とFP8 controlを同一runtimeで実行し、ID90 dispatch、fallback未使用、`max_bf16_ulp=0`、cleanupを確認した。これはoperator-levelの証拠であり、full-model出力の証拠ではない。
 - 性能・採否: ID88のV620 probeはwideのM2/3/4が`0.330887/0.464328/0.604291 ms`、downが`0.347286/0.489568/0.613569 ms`だった。ID90のR9700 probeはwideが`0.264843/0.272364/0.352605 ms`、downが`0.193083/0.275764/0.357604 ms`だった。測定は2 warmup＋5 measuredのbounded probeであり、新しい性能gateやfull-model採用条件を作らない。両IDはopt-in保留である。
 - rollback: ID88は`SLLM_NVFP4_W4A4_SMALL_M_ROWGRID`、ID90は`SLLM_NVFP4_W4A4_SMALL_M_ROWGRID_GFX1201`を未設定または`0`に戻す。範囲外shapeは既存selectorへ戻す。
-- 詳細: [Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)、[ID90 probe summary](../../.local-artifacts/phase83/small-m-gfx1201-r1/summary.txt)。
+- 詳細: [Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)、ID90 probe summary: `.local-artifacts/phase83/small-m-gfx1201-r1/summary.txt`。
 
 ### OUT-2026-09-09-P83-MXFP8-ATTENTION-STAGED32: ID93 staged32 attention（N1・共通opt-in）
 
@@ -164,7 +164,7 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 - 採否: ID93は両target共通の明示opt-in `SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32=1`として接続し、
   最終公開GPU・full-model検証までは既定化しない。未設定、`=0`、force baseline、範囲外shapeでは既存経路へrollbackする。
 - 詳細: [Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)、
-  [V620 staged32 report](../../.local-artifacts/phase83/attention-stage32-scratch-gfx1030-r1/report.md)。
+  V620 staged32 report: `.local-artifacts/phase83/attention-stage32-scratch-gfx1030-r1/report.md`。
 
 ### OUT-2026-09-08-P82-DEFAULT-SCOPE: Phase82の条件付き既定採用と保留
 

@@ -292,6 +292,7 @@ fn parse_mtp_config(mode: Option<&str>, width: Option<&str>) -> Result<MtpConfig
 /// accounted separately. Rejected draft tokens are never output rows: each
 /// proposal block contributes at most one replacement/continuation row plus
 /// the draft rows actually accepted.
+#[allow(clippy::too_many_arguments)]
 fn build_mtp_run_report(
     draft_width: usize,
     proposal_blocks: u64,

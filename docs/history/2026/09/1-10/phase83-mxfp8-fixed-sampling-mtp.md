@@ -98,6 +98,10 @@ V620のMTPありも96候補／80採用／16棄却、128出力、HIP-only、非�
 R9700の既存ユーザーserviceは復帰し、`/healthz`と`/readyz`のHTTP200、ready／scheduler acceptingを確認した。
 既存構成の復帰であり、新binaryの常駐serviceへの配備は行っていない。
 Phase83の実装・検証・比較記録は完了した。公開commitに対するhostと2種類のH3の結果をGitHub Checksで確認する。
+初回公開`24af711e`は両H3とhost H1/H2が成功し、H0はbenchmark集計関数のClippy引数数、ローカル専用証拠への4リンク、RMSNorm H3の古いsource hashで失敗した。
+当該関数へ既存の同種helperと同じlint属性を追加し、sllm-hipのall-targets Clippyを確認した。
+ローカル証拠の所在はリンクから通常のpath表記へ変更し、RMSNorm H3の既存source inventoryを同期した。
+推論・計測処理に変更はなく、修正前後のsource hashを検証記録へ保存した。修正commitの公開CIを再確認する。
 Phase83.5の追加最適化と速度目標達成、BF16 full-model品質同等性の未証明は区別して保持する。
 
 実行記録: [Phase83計画](../../../../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)。
