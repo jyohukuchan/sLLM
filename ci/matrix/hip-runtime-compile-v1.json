@@ -2,7 +2,7 @@
   "$schema": "https://sllm-project.local/ci/schema/hip-runtime-compile-v1.schema.json",
   "schema_version": "hip-runtime-compile-v1",
   "matrix_id": "hip-runtime-compile-v1",
-  "revision": 13,
+  "revision": 14,
   "toolchain_id": "rocm-7.14.0",
   "container": {
     "image_reference": "docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7",
@@ -25,7 +25,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "88a44fa3a258bd5c792616f1f3f53494078bead08f75a555c4112fb5e5ce4f9b"
+        "sha256": "bb53f2dd1cc0223ff88a2b051ce11229b74d7ef3ddc7d4b81d207254b4563749"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -40,7 +40,7 @@
         "sha256": "52d207e29446d7f3bf3f9873774dd2d00074dbf8195f07c937515a873766fb60"
       }
     ],
-    "source_set_sha256": "fa039b77dea47c6f02ce33c6f7736a0f9d4a19ae8c50d130ac438606fef6320c"
+    "source_set_sha256": "f96e48469c70dfe9ff57ef739bd1e661d0a2352cf18201aff3c74b3eebbcfd42"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -122,6 +122,7 @@
       "native/hip/src/moe_route_kernel.hip.cpp",
       "native/hip/src/moe_route_kernel_internal.hpp",
       "native/hip/src/moe_route_runtime.inc",
+      "native/hip/src/nvfp4_prefill_wmma_compensated.inc",
       "native/hip/src/public_runtime.hip.cpp",
       "native/hip/src/public_runtime_internal.hpp",
       "native/hip/src/qwen38_projection_pack_runtime.inc",
@@ -148,7 +149,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "88a44fa3a258bd5c792616f1f3f53494078bead08f75a555c4112fb5e5ce4f9b"
+        "sha256": "bb53f2dd1cc0223ff88a2b051ce11229b74d7ef3ddc7d4b81d207254b4563749"
       },
       {
         "path": "native/hip/src/argmax_api.cpp",
@@ -200,15 +201,15 @@
       },
       {
         "path": "native/hip/src/causal_attention_kernel.hip.cpp",
-        "sha256": "a5dc9a116fb8a862b8051c19b60495d5c302bf2192acf42465db2e97be696f45"
+        "sha256": "554523e0fe4e31ea0ea7225db8a7bf9ea879518d302e66fcf1d478fe4f563859"
       },
       {
         "path": "native/hip/src/causal_attention_kernel_internal.hpp",
-        "sha256": "98334d8bae28970e5de53b2ff5c0e59a90d2a9713b76a2ca094b732e45e0cdf4"
+        "sha256": "75a9e4707194945dfe1693dde4ebc2b82b1871a85b378c68927b0a7fa9a8f01e"
       },
       {
         "path": "native/hip/src/causal_attention_runtime.inc",
-        "sha256": "a97f32d26c3b1738e3d2975d5a235c6a0920fec437cbc9c9f9039351181eed07"
+        "sha256": "550cfc7414dd827b831854f52d4a6f17cafc5de27d3f7495eb5204b110e0dd75"
       },
       {
         "path": "native/hip/src/deepseek_v4_moe_route_api.cpp",
@@ -352,15 +353,15 @@
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
-        "sha256": "52bf33ab4cb2291caa62743ec8ba2333dd5c91e41dbe21dade527f56a2d64e16"
+        "sha256": "35ad0547c17c3bfa4a1efa12bc43579649b8cde281bd3632cb722eb5d33aea30"
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "c3c238f6c1823280ec602288bae2c2780f4de4421cc798974ad2693398afe0f4"
+        "sha256": "6183d893caba61b86ba9a5048302e168fdc91e964fd1fb79f97d8d41be54da23"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
-        "sha256": "634f2ac6da45ad011ce0a0f354fea04f923d53711ecb48b8c73b65d450fd3733"
+        "sha256": "521ec5b633236dd99bc1b4494cc06681cfcfa757177d5be82aa8b54fc5e2daa2"
       },
       {
         "path": "native/hip/src/minimax_m3_moe_route_api.cpp",
@@ -459,6 +460,10 @@
         "sha256": "ea92dc6a7f387f93c9f224e906ac571029584cd16ab15c02f7188ae777bccdda"
       },
       {
+        "path": "native/hip/src/nvfp4_prefill_wmma_compensated.inc",
+        "sha256": "7ef99f3e84ea67ffc36c1897dcb591c665c52dca80125e4a7583b1ecea8b7e2e"
+      },
+      {
         "path": "native/hip/src/public_runtime.hip.cpp",
         "sha256": "574d1fc4a426bc3189ae18a8c407c7f359c20a62a1ea13ed34b78219013d2f29"
       },
@@ -468,7 +473,7 @@
       },
       {
         "path": "native/hip/src/qwen38_projection_pack_runtime.inc",
-        "sha256": "9694d8558f180239ab91ae3183c53c4c45cf653a174ae240adcee6b1e303999a"
+        "sha256": "0b42b829b13b9987afbba1f272b0fd74672bb5c2a88f5dd6611770f9073a8eb1"
       },
       {
         "path": "native/hip/src/residual_rmsnorm_api.cpp",
@@ -547,7 +552,7 @@
         "sha256": "e6d480204c7f49f0385ca511cdb2080372e114d2befa5f345a97b7d5bd0eb8f1"
       }
     ],
-    "source_set_sha256": "9e38a94aae6651a533a63ddd2ac336a720bb015c15a1fd81bf4bdb98056c913c"
+    "source_set_sha256": "c830ff568c7d838460e4aff15575b0d6fc54cfbdef6271be9ed2de95f54b02ac"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",

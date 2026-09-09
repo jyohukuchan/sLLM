@@ -1,0 +1,827 @@
+{
+  "schema_version": "phase83-integration-evidence-v1",
+  "status": "Runtime integration and first-request comparison verified; publication results are GitHub checks",
+  "scope": "Qwen3.8-27B NVFP4 / standard OCP MXFP8 E4 KV / T1 P.95 K20 / MTP width2 / single GPU batch1 / V620 gfx1030 and R9700 gfx1201",
+  "evidence": [
+    {
+      "id": "id91-public-launch-r26",
+      "status": "PASS",
+      "target": "gfx1030",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/id91-public-launch-r26/identity.json",
+          "sha256": "803ebc70e367dd4d7c80f34ef937b375435092e0f06d4fcc0c270148691eea04"
+        },
+        {
+          "path": ".local-artifacts/phase83/id91-public-launch-r26/ctest.log",
+          "sha256": "774e2df65fffba579df194cd5b93255bd741b529ebfa88452544aab987f55f00"
+        }
+      ],
+      "binary_sha256": "2f103f8819ece9f8d98fc5e06dc576c5050976d722395d3b882c2e02e1954083",
+      "source_sha256": {
+        "native/hip/src/matmul_kernel.hip.cpp": "73b2baf6a57ab9c659cf2c2619caa13c960ac22fb896d8f803a233411e6c3942",
+        "native/hip/tests/phase83_bf16_prefill_public_gpu_test.cpp": "172fde73d423d695836cebb7a2a247755f32c57b798c84104e63c118c023246f",
+        "native/hip/CMakeLists.txt": "e4da3beabc6a0721fe54d2688d227153797ccc33c72d970eb4ea1c3a8471dda3"
+      },
+      "scope": "public matmul_prepare/execute、FC/up/downのM=63/64/65/1024、12ケース。M=63はprovider 2、他はprovider 91。行依存の独立BF16 oracle（row 64 と最終rowを含むサンプル）、finite、guardを確認。",
+      "limitation": "public prefill launcherの証拠であり、Qwen3.8 full-model、MTP、API/CLI生成、BF16 full-model品質同等性の証明ではない。"
+    },
+    {
+      "id": "r26-release-build-gfx1030",
+      "status": "PASS",
+      "target": "gfx1030",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/candidate-gfx1030-r26-public-launch/identity.json",
+          "sha256": "345554e51dd198398293122b5a9e0818262767207f1274ca36b79e3cd98ef5f1"
+        },
+        {
+          "path": ".local-artifacts/phase83/candidate-gfx1030-r26-public-launch/build.log",
+          "sha256": "b95b89fd834043ea352be55204be53c2b8ca4c1448ff4ee729aedf50d0ade1d2"
+        }
+      ],
+      "source_identity": "identity.jsonのsource_before/source_afterは460ファイルで一致。release build exit_code=0。",
+      "binaries": {
+        "sllm": "60a834398dc27526de9357a63a66992260924f67f1c3c3392fcb6e65b702a4d8",
+        "sllm-server": "10eb514ef745bf11b679ccb89e070f7f91fc18b295acbd1687a25f216823ba78",
+        "sllm-phase78-qwen38-benchmark": "b178bfe8b5a3222db435a653225bfb164e5a728ed74fe3727031eeaba28e6062"
+      },
+      "limitation": "build/source identityのみ。GPU full-model品質、長文生成、公開CI、BF16 full-model品質同等性を主張しない。"
+    },
+    {
+      "id": "r26-release-build-gfx1201",
+      "status": "PASS",
+      "target": "gfx1201",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/candidate-gfx1201-r26-public-launch/identity.json",
+          "sha256": "8b2d06a4c5aa91fc2575944c6e4611668da152085dac7f0776cbeabf1039cbad"
+        },
+        {
+          "path": ".local-artifacts/phase83/candidate-gfx1201-r26-public-launch/build.log",
+          "sha256": "921adb6cd333adfcbf002a7e3de67986957b00e0f351de96e3ae9761ab4bb842"
+        }
+      ],
+      "source_identity": "identity.jsonのsource_before/source_afterは460ファイルで一致。release build exit_code=0。",
+      "binaries": {
+        "sllm": "7828ac511cb057bf1311e60ce21c70b67f81b27c149e0a902fd9e2e7410ec8c9",
+        "sllm-server": "de1ccebee5bddd7a050d81edaf570b28216343dede1ad410d572e63001bb0af7",
+        "sllm-phase78-qwen38-benchmark": "e72995314f8a917e510bd90ccef7b103306e412a184def2a02557862a5330a6a"
+      },
+      "limitation": "build/source identityのみ。GPU full-model品質、長文生成、公開CI、BF16 full-model品質同等性を主張しない。"
+    },
+    {
+      "id": "r26-h3-contracts",
+      "status": "PASS",
+      "target": "host/H3",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/r26-h3-tests-fixed.log",
+          "sha256": "778def7d8b5b5573a2d882af65a06a0424560ef14bb96fa33f207053681ad499"
+        },
+        {
+          "path": ".local-artifacts/phase83/r26-public-clippy-fixed.log",
+          "sha256": "f38828ab82443f5dcc09094e8e82ec46a9a24d667cdc0873b80c360c62788aaf"
+        }
+      ],
+      "result": "H3 86 tests / 651 subtests passed。r26 public clippyもwarnings-as-errors相当で完了。",
+      "scope": "matrix、source inventory、public-runtime/H3契約とhost compile/lint契約。",
+      "limitation": "compile/host契約であり、GPU実行またはモデル生成の正しさを示さない。"
+    },
+    {
+      "id": "r9700-r25-api-default",
+      "status": "PASS",
+      "target": "gfx1201 (R9700)",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/api-r9700-r25-default-sequence/execution.json",
+          "sha256": "24572e2ef14e52e3e428d8735cdc6296bc869b9087f0e030c40b851d571e5fa7"
+        },
+        {
+          "path": ".local-artifacts/phase83/api-r9700-r25-default-sequence/assessment.json",
+          "sha256": "4564b3020835fe0e18cef794afe8d8effd681ddccd54f38d7a60693254f01d38"
+        }
+      ],
+      "binary_sha256": "d60b39b39472b1cba4ad8359303a9bb905273554931da085f2729ef3ac093aaa",
+      "scope": "r25 default fixed sampling + standard kv-mxfp8-e4 + MTP、要求履歴後の8,192入力/128出力、API text/SSE/cancel/recovery lifecycle。",
+      "result": "HTTP 200、128 completion tokens、MTP 113 proposed / 70 accepted、全dispatch HIP、fallbackなし、cleanup 0。textはRust ownership/error-handling reviewとしてcoherent。VRAM peak 34,196,402,176 / total 34,208,743,424 bytes、GTT delta 114,688 bytes。",
+      "limitation": "gfx1030専用ID91 public-launch修正の対象外であり、r25 binaryをr26へ読み替えない。VRAM余裕は小さく別workloadの収容保証ではない。textはBF16 full-model品質同等性の証明ではない。"
+    },
+    {
+      "id": "r9700-r25-cli-default-long",
+      "status": "PASS",
+      "target": "gfx1201 (R9700)",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/cli-r9700-r25-default-long/assessment.json",
+          "sha256": "577819f2c0af7b0660e061f39f81e1af44cc1b3ed12044360297689e75e35a40"
+        },
+        {
+          "path": ".local-artifacts/phase83/cli-r9700-r25-default-long/execution.json",
+          "sha256": "6739ec9a79c4d493c3d647eddd15ebaf11ed8269d39f9c0ed10c07f8e7c5c00f"
+        },
+        {
+          "path": ".local-artifacts/phase83/cli-r9700-r25-default-long/stdout.json",
+          "sha256": "20dc0a0b25c8cc058a8f32ed91d2094a73e4d9a0849fbb9ac94a19e05842a6a9"
+        }
+      ],
+      "binary_sha256": "0d1e44e964f6d59aaf83a3293b7aaea86d9ba8649044040d340705c54726158a",
+      "scope": "CLI default fixed sampling + standard kv-mxfp8-e4 + MTP、8,192入力/128出力。",
+      "result": "HIP-only、fallbackなし、MTP 113 proposed / 70 accepted、completion 128、終了code 0。Rust ownership/overflow reviewとしてcoherent。VRAM peak 34,198,695,936 bytes、headroom 10,047,488 bytes、終了後VRAM 61,235,200 bytes。",
+      "limitation": "gfx1030専用ID91 public-launch修正の対象外であり、r25 binaryをr26へ読み替えない。収容余裕は小さく別workloadへ一般化しない。BF16 full-model品質同等性の証明ではない。"
+    },
+    {
+      "id": "r9700-r26-cli-interactive",
+      "status": "PASS",
+      "target": "gfx1201 (R9700)",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/cli-r9700-r26-default-interactive/execution.json",
+          "sha256": "f2575e68c3bbbbbb4846c57c26b6b8154b87be403109b2caeb9f8235c3e54906"
+        },
+        {
+          "path": ".local-artifacts/phase83/cli-r9700-r26-default-interactive/stdout.json",
+          "sha256": "a3f790224c82611bb3f1b640f2bb9967a8648b62dc1b754be3251b501ff4238a"
+        }
+      ],
+      "binary_sha256": "7828ac511cb057bf1311e60ce21c70b67f81b27c149e0a902fd9e2e7410ec8c9",
+      "scope": "r26 interactive CLIの1 turn。session.eof、turn.completed(committed=true)、exit_code=0。",
+      "limitation": "短いinteractive lifecycle smokeのみであり、8,192/128長文、API lifecycle、BF16 full-model品質同等性の証明ではない。"
+    },
+    {
+      "id": "mxfp8-append-chain-gfx1030",
+      "status": "PASS",
+      "target": "gfx1030",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/kv-chain-gfx1030-r2/identity.json",
+          "sha256": "db67173e6ea212c8a43d2d373b251b2add11d712716cff3b82294259b1689733"
+        },
+        {
+          "path": ".local-artifacts/phase83/kv-chain-gfx1030-r2/run.log",
+          "sha256": "70c172adb5fb1a78d552ae268b9b7cb6f262b972d03ab8e898d9105a5bf9bfe3"
+        }
+      ],
+      "binary_sha256": "135adeb5465a0e4d779d5ac88542602302937f413b0902ca55e5f89571b34527",
+      "source_sha256": "65581d8fbd172df56eb240bbd3d6d45907b091ee144b087690f4b9c70dcf8a86",
+      "scope": "standard OCP MXFP8 E4 append chain length 31/32/33、2 chained appends、repeat、cancel、independent oracle。",
+      "result": "prefix/second/third chained output max_abs=0、max_rel=0、max_ulp=0、fallback=false、cleanup_failures=0。",
+      "limitation": "native KV append/attention chainの数値証拠であり、Qwen3.8 full-model、MTP、API/CLI、BF16 full-model品質同等性の証明ではない。"
+    },
+    {
+      "id": "mxfp8-append-chain-gfx1201",
+      "status": "PASS",
+      "target": "gfx1201",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/kv-chain-gfx1201-r2/identity.json",
+          "sha256": "2b64b1e20ee31d8d5dfb7e659f178c3be4379800ffdadb9435c7cdc310f0c484"
+        },
+        {
+          "path": ".local-artifacts/phase83/kv-chain-gfx1201-r2/run.log",
+          "sha256": "6aadecd88dadce04dc04d7949c73a6f1b71a247084c8a27b0e71bac60ac26301"
+        }
+      ],
+      "binary_sha256": "acf3cb5b95a1863a2be0b1117217bae8bac0978c8992362f7dfa07efa1795516",
+      "source_sha256": "65581d8fbd172df56eb240bbd3d6d45907b091ee144b087690f4b9c70dcf8a86",
+      "scope": "standard OCP MXFP8 E4 append chain length 31/32/33、2 chained appends、repeat、cancel、independent oracle。",
+      "result": "prefix/second/third chained output max_abs=0、max_rel=0、max_ulp=0、fallback=false、cleanup_failures=0。",
+      "limitation": "native KV append/attention chainの数値証拠であり、Qwen3.8 full-model、MTP、API/CLI、BF16 full-model品質同等性の証明ではない。"
+    },
+    {
+      "id": "phase83-kv-host-boundaries",
+      "status": "PASS",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/r25-kv-host-tests.log",
+          "sha256": "796dd39c6b9b9606ac9e0bb1131b2c339eb9fb6efaeea5ba82156fe810c624e3"
+        }
+      ],
+      "result": "28 passed。gfx1201 capacity 1/8191/8192/8193/8320/65535、gfx1030 capacity 65535/65536/65537、KV encoding/selector/rollback契約を確認。",
+      "limitation": "host state契約であり、GPU full-model生成の証明ではない。"
+    },
+    {
+      "id": "phase83-qwen38-fixture",
+      "status": "PASS",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/fixture-export.json",
+          "sha256": "3dc4d0f4c8b98248c4b839557fed7c82c985f87970d46eec3faa1350b6d5f5cc"
+        }
+      ],
+      "result": "deterministic coding fixture 8,192 token、token列SHA-256 sha256:855240c09609a19b9c1124043b763ecc97e3cfde84a16acfaba445a0f8c83b23、model SHA sha256:c473512c70eace07e2256fe9fd76596ac03e3295bee7d54cfb72676416afcc05。",
+      "limitation": "fixture constructionのみで推論実行や品質同等性の証明ではない。"
+    },
+    {
+      "id": "r26-mtp-contract-host-tests",
+      "status": "PASS",
+      "passed": 28,
+      "ignored": 4,
+      "scope": "Current core MTP contracts including Qwen hidden widths, partial prefix row aliases, target prefill hidden rows; external artifact tests ignored.",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/r26-mtp-contract-host-tests.log",
+          "sha256": "569d1214ad4144971b3760b955b9adb0508d57164986ccf2cf038384dd1b6810"
+        }
+      ],
+      "limitation": "Host contract evidence only; ignored tests are not PASS and this does not establish BF16 full-model quality equivalence."
+    },
+    {
+      "id": "r26-frontend-mtp-host-tests",
+      "status": "PASS",
+      "passed": 9,
+      "ignored": 0,
+      "scope": "Current frontend MTP draft width/capacity, selector seed/counter/constraints, replayed hidden row selection.",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/r26-frontend-mtp-host-tests.log",
+          "sha256": "f7742b285d0b7994c1aba60ec579c67ce758feeaac169b956a0e908b5d8a4bd3"
+        }
+      ],
+      "limitation": "Host contract evidence only; ignored tests are not PASS and this does not establish BF16 full-model quality equivalence."
+    },
+    {
+      "id": "api-v620a-r26-default-sequence",
+      "status": "PASS",
+      "binary_sha256": "10eb514ef745bf11b679ccb89e070f7f91fc18b295acbd1687a25f216823ba78",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/api-v620a-r26-default-sequence/execution.json",
+          "sha256": "f23ec8c41cbbf96e02d97b09231ce1f29c4be926e54bc4f076f8897edc99ab96"
+        },
+        {
+          "path": ".local-artifacts/phase83/api-v620a-r26-default-sequence/assessment.json",
+          "sha256": "7c26d833368f361862f464b938c4e8ccfadf889850e3e03ace32b53465079a4a"
+        },
+        {
+          "path": ".local-artifacts/phase83/api-v620a-r26-default-sequence/delayed-post-exit-memory.json",
+          "sha256": "a9ed3985c47615e111698cf84f92b212426e1560307367e02fab38505be38dc2"
+        }
+      ],
+      "summary": {
+        "state": "PASS",
+        "scope": "default MXFP8 fixed sampling MTP, actual8192 input/128 output",
+        "binary_sha256": "10eb514ef745bf11b679ccb89e070f7f91fc18b295acbd1687a25f216823ba78",
+        "text_assessment": "Coherent task-relevant Rust checked_sum/boundary_case code, limited to requested128 tokens; not BF16 full-model quality equivalence.",
+        "mtp_proposed": 95,
+        "mtp_accepted": 80,
+        "mtp_rejected": 15,
+        "delayed_post_exit": {
+          "timestamp": 1788932612.2533662,
+          "mem_info_vram_used": 17219584,
+          "mem_info_gtt_used": 15020032,
+          "gpu_busy_percent": 0
+        },
+        "note": "Immediate post-exit sysfs sample preceded driver resource release; delayed sample records actual return before next GPU run.",
+        "long_wall_seconds": 1049.242293243995
+      }
+    },
+    {
+      "id": "cli-v620b-r26-default-long",
+      "status": "PASS",
+      "binary_sha256": "60a834398dc27526de9357a63a66992260924f67f1c3c3392fcb6e65b702a4d8",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/cli-v620b-r26-default-long/execution.json",
+          "sha256": "4c98a30b5f30ad0fa2e950b58bab843a9f7b7f001d6257f8869c66fe6efb2a66"
+        },
+        {
+          "path": ".local-artifacts/phase83/cli-v620b-r26-default-long/assessment.json",
+          "sha256": "f42c98bb3335b20f2361cb0c42032ff1223b953d86178c27adfd9f67e029b08f"
+        },
+        {
+          "path": ".local-artifacts/phase83/cli-v620b-r26-default-long/delayed-post-exit-memory.json",
+          "sha256": "9d93473594cf35dddd0a8a442eeb858cfe0ada77162d74fd16149d55f659e66a"
+        }
+      ],
+      "summary": {
+        "state": "PASS",
+        "scope": "default MXFP8 fixed sampling MTP, actual8192 input/128 output",
+        "binary_sha256": "60a834398dc27526de9357a63a66992260924f67f1c3c3392fcb6e65b702a4d8",
+        "text_assessment": "Coherent task-relevant Rust checked_sum/boundary_case code, limited to requested128 tokens; not BF16 full-model quality equivalence.",
+        "mtp_proposed": 95,
+        "mtp_accepted": 80,
+        "mtp_rejected": 15,
+        "delayed_post_exit": {
+          "timestamp": 1788932612.2511196,
+          "mem_info_vram_used": 17244160,
+          "mem_info_gtt_used": 21311488,
+          "gpu_busy_percent": 0
+        },
+        "note": "Immediate post-exit sysfs sample preceded driver resource release; delayed sample records actual return before next GPU run.",
+        "wall_seconds_including_load": 1141.5784094333649
+      }
+    },
+    {
+      "id": "cli-v620b-r26-default-interactive",
+      "status": "PASS",
+      "binary_sha256": "60a834398dc27526de9357a63a66992260924f67f1c3c3392fcb6e65b702a4d8",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/cli-v620b-r26-default-interactive/execution.json",
+          "sha256": "eb3cc2fc4e67842350aa823992f69d32f07b37ad5b92d55e43bce5bd3b80e2fe"
+        }
+      ],
+      "summary": {
+        "event_count": 5,
+        "events": [
+          "session.started",
+          "turn.started",
+          "assistant.delta",
+          "turn.completed",
+          "session.eof"
+        ],
+        "completed_turns": 1
+      }
+    },
+    {
+      "id": "benchmark-r9700-r26-default-target-cold",
+      "status": "PASS",
+      "binary_sha256": "e72995314f8a917e510bd90ccef7b103306e412a184def2a02557862a5330a6a",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/benchmark-r9700-r26-default-target-cold/execution.json",
+          "sha256": "097e4f890358d3a0f34a9cb1ced7570c5e4457af2a6fa5d4954fbd256fa54708"
+        },
+        {
+          "path": ".local-artifacts/phase83/benchmark-r9700-r26-default-target-cold/assessment.json",
+          "sha256": "38a6f3bcf93c976a54c6e3fbc79979169f188ec433db1a94710e01f8722825db"
+        }
+      ],
+      "summary": {
+        "scope": "Single first request after resident load; default MXFP8/MTP off; not stable performance or Phase83.5 acceptance",
+        "result_sha256": "825c32aeb488fc86308f65275565d2de2533ad53c312f263982d74e4c6e06882",
+        "state": "PASS",
+        "baseline_first_run_timing": {
+          "request_setup_ns": 28010306,
+          "prefill_ns": 766438317611,
+          "ttft_ns": 766466522310,
+          "decode_ns": 13069187606,
+          "e2e_ns": 779535756367,
+          "prefill_tokens_per_second": 10.68840089510998,
+          "decode_tokens_per_second": 9.71751296474579,
+          "output_tokens_per_e2e_second": 0.16420029351384685,
+          "total_tokens_per_e2e_second": 10.673019078400046,
+          "tpot_ms": 102.90698902362205
+        },
+        "current_first_run_timing": {
+          "request_setup_ns": 26855899,
+          "prefill_ns": 764506195696,
+          "ttft_ns": 764533226598,
+          "decode_ns": 12996363228,
+          "e2e_ns": 777529638987,
+          "prefill_tokens_per_second": 10.71541348666517,
+          "decode_tokens_per_second": 9.77196449283481,
+          "output_tokens_per_e2e_second": 0.1646239494699701,
+          "total_tokens_per_e2e_second": 10.700556715548059,
+          "tpot_ms": 102.33356872440945
+        },
+        "prefill_percent_change": 0.25272809113614514,
+        "decode_percent_change": 0.5603442803376213,
+        "visible_tokens": 128,
+        "cleanup_zero": true
+      }
+    },
+    {
+      "id": "id92-fp8-public-gfx1030",
+      "status": "PASS",
+      "target": {
+        "gpu_uuid": "GPU-76a08c022586fed6",
+        "card": "AMD Radeon Pro V620",
+        "gfx": "gfx1030",
+        "selector_env": "default (force overrides unset)"
+      },
+      "coverage": [
+        {
+          "family": "FP8",
+          "role": "gdn_qkv",
+          "k": 5120,
+          "n": 10240,
+          "m": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "m1_provider": 82,
+          "m2_4_provider": 92,
+          "oracle_max_bf16_ulp": 0
+        },
+        {
+          "family": "FP8",
+          "role": "gdn_z",
+          "k": 5120,
+          "n": 6144,
+          "m": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "m1_provider": 82,
+          "m2_4_provider": 92,
+          "oracle_max_bf16_ulp": 0
+        },
+        {
+          "family": "FP8",
+          "role": "lm_head",
+          "k": 5120,
+          "n": 248320,
+          "m": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "m1_provider": 68,
+          "m2_4_provider": 92,
+          "oracle_max_bf16_ulp": 0
+        }
+      ],
+      "assertions": [
+        "all public plans prepared and executed through sllm_matmul_execute",
+        "dispatch_count=2 for every case",
+        "ID92 selected for every FP8 M2-M4 exact shape",
+        "M1 existing providers preserved",
+        "finite output and sampled independent BF16 oracle passed",
+        "sllm plan, queue, context, and buffers released"
+      ],
+      "binary_sha256": "672a6cff3ef6bcab84d2110856c13f4f214143c8a564cbc6ee47068ab58073c4",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/fp8-id92-public-gfx1030-r1/summary.json",
+          "sha256": "b3de7a1a66f18720efcf02119ffd1132d1043fedd9305b780e7326f06d383ba9"
+        },
+        {
+          "path": ".local-artifacts/phase83/fp8-id92-public-gfx1030-r1/run.log",
+          "sha256": "1ec39ccb2d486827f8365d2472aed0feca447340e0f8eb6184ba4016b869d478"
+        },
+        {
+          "path": ".local-artifacts/phase83/fp8-id92-public-gfx1030-r1/source-binary-sha256sums.txt",
+          "sha256": "7b401b323d1e64c28cf6a292d152c48d36d62f663949906105f6f1ac85f99531"
+        }
+      ],
+      "limitation": "Operator-level sampled independent oracle; does not prove full-model BF16 quality equivalence or performance."
+    },
+    {
+      "id": "r26-cpp-format-and-host-static",
+      "status": "PASS",
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/r26-format-map.json",
+          "sha256": "f064d073ba10e925f95e4067fc4279234a060bebd2f3ed20350e80678291a757"
+        },
+        {
+          "path": ".local-artifacts/phase83/r26-cpp-format-fixed.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": ".local-artifacts/phase83/r26-cpp-static-fixed.log",
+          "sha256": "6e69378ca41839cb6ca3df48a87e67532dd491a96390065729b192012443ec14"
+        }
+      ],
+      "limitation": "Formatting/host build evidence, not an additional GPU run."
+    },
+    {
+      "id": "h3-post-format-contracts",
+      "status": "PASS",
+      "passed": 31,
+      "subtests_passed": 463,
+      "artifacts": [
+        {
+          "path": ".local-artifacts/phase83/r26-h3-post-format-tests.log",
+          "sha256": "3841396142e8acc6b9c14651348c5ccbf92978bce0a68c5a399d21eef754e0c1"
+        }
+      ]
+    }
+  ],
+  "source_mapping": {
+    "schema": "phase83-r25-r26-source-mapping-v1",
+    "target_evidence_reuse": "gfx1201 r25 CLI/API runtime evidence only; not gfx1030 ID91 or r26 binary identity",
+    "changed_sources": [
+      {
+        "path": "crates/sllm-cli/src/model.rs",
+        "r25_sha256": "64fb7c981268f58feb933594b6a0895f07a8e2f978730106d3b8a305966c2938",
+        "r26_sha256": "829c81c52e3a62a1aae48eb87f9f8466de8df4a1af26610e31f68a187b355367",
+        "scope": "host-test Path comparison only; exact replacement in r25-source-followups.json"
+      },
+      {
+        "path": "crates/sllm-hip-sys/src/bindings.rs",
+        "r25_sha256": "591a424aba889da23319cd5990e3ac0997e05c71ad6417cd0c16a4d5852282f8",
+        "r26_sha256": "ebcdb68f1c125daed6fe429571e7af15b314bf5de967001f3a97d400975f2b51",
+        "scope": "adds public ID92 integer constant; no runtime control-flow change"
+      },
+      {
+        "path": "crates/sllm-server/src/api.rs",
+        "r25_sha256": "a2d7372ca3f930f2c99ff9f44234ff56269d62739e57f6a097555e741ac87e66",
+        "r26_sha256": "cba81c87cf352d584012de0496f1cad359efdd761cc9a2c16bb8749d29c6f675",
+        "scope": "Clippy lint attribute only; exact replacement in r25-source-followups.json"
+      },
+      {
+        "path": "native/hip/CMakeLists.txt",
+        "r25_sha256": "48c7c6b074f511e826aebc6a533d58ee83e2217f5f7277e4b67bf42dde23dcfa",
+        "r26_sha256": "e4da3beabc6a0721fe54d2688d227153797ccc33c72d970eb4ea1c3a8471dda3",
+        "scope": "adds default-OFF standalone GPU test target"
+      },
+      {
+        "path": "native/hip/src/matmul_kernel.hip.cpp",
+        "r25_sha256": "d3cd4080c6b152d7457589c69499491179339e556fc6b2bdb8804beeaa1dc50b",
+        "r26_sha256": "73b2baf6a57ab9c659cf2c2619caa13c960ac22fb896d8f803a233411e6c3942",
+        "scope": "ID91 flattened launch repair; changes gfx1030 admitted BF16 MTP shapes, not gfx1201 selected providers"
+      },
+      {
+        "path": "native/hip/tests/phase83_bf16_prefill_public_gpu_test.cpp",
+        "r25_sha256": null,
+        "r26_sha256": "172fde73d423d695836cebb7a2a247755f32c57b798c84104e63c118c023246f",
+        "scope": "standalone public GPU regression test, not production binary source"
+      }
+    ],
+    "unchanged_source_count": 454,
+    "current_r26_source_matches": false,
+    "r26_source_count": 460,
+    "notes": [
+      "CI inventory/docs changes are separate from production source identity.",
+      "gfx1030 r25 long runs remain invalidated; r26 replacement runs passed."
+    ],
+    "current_source_mapping_note": "Production implementation corresponds to r26 via post_build_format_mapping; current bytes changed by clang-format-18 after r26 builds."
+  },
+  "excluded": [
+    {
+      "paths": [
+        ".local-artifacts/phase83/api-v620a-r25-default-sequence/acceptance-invalidated.json",
+        ".local-artifacts/phase83/cli-v620b-r25-default-long/acceptance-invalidated.json"
+      ],
+      "reason": "gfx1030 ID91 public launcherの1D/2D tile-index不具合で数値受入を無効化済み。通信、128 token、cleanupだけを最終数値証拠へ使わない。"
+    },
+    {
+      "paths": [
+        ".local-artifacts/phase83/api-r9700-r11-hidden-sequence",
+        ".local-artifacts/phase83/api-r9700-r12-replay-sequence",
+        ".local-artifacts/phase83/api-r9700-r14-layer3-sequence",
+        ".local-artifacts/phase83/api-r9700-r15-kv-sequence",
+        ".local-artifacts/phase83/api-r9700-r16-kv-sequence",
+        ".local-artifacts/phase83/api-r9700-r20-layer51-sequence",
+        ".local-artifacts/phase83/api-r9700-r22-vmm-sequence",
+        ".local-artifacts/phase83/kv-prefix-regression",
+        ".local-artifacts/phase83/kv-prefix-pressure-r2",
+        ".local-artifacts/phase83/fp8-same-context-r1"
+      ],
+      "reason": "原因切分け用の診断またはscratch。実行成功や小型oracleがあっても、最終Phase83 full-model受入証拠へ数えない。"
+    }
+  ],
+  "limitations": [
+    "BF16 full-model quality equivalence remains unproven; numerical kernel oracle and coherent text do not prove model quality.",
+    "Speed targets belong Phase83.5.",
+    "Single first-request timings exclude resident loading and are not repeated stable-performance evidence.",
+    "gfx1201 r25 runtime evidence is mapped by exact source differences, not relabeled as r26 binary."
+  ],
+  "pending": [],
+  "post_build_format_mapping": {
+    "protocol": "sllm-phase83-r26-format-map-v1",
+    "tool": "clang-format-18",
+    "clang_format_version": "Ubuntu clang-format version 18.1.3 (1ubuntu1)",
+    "snapshot_directory": ".local-artifacts/phase83/r26-format-before",
+    "snapshot_manifest": ".local-artifacts/phase83/r26-format-before/manifest-before.json",
+    "format_command": "clang-format-18 -i include/sllm/hip.h native/hip/src/causal_attention_kernel.hip.cpp native/hip/src/matmul_kernel.hip.cpp native/hip/src/matmul_kernel_internal.hpp native/hip/tests/phase83_bf16_prefill_public_gpu_test.cpp native/hip/tests/phase83_causal_wave_split_staged_gpu_test.hip.cpp native/hip/tests/phase83_compensated_selector_test.cpp native/hip/tests/phase83_mxfp8_chain_gpu_test.cpp native/hip/tests/phase83_mxfp8_prefill_gpu_test.cpp native/hip/tests/phase83_mxfp8_staged_public_gpu_test.cpp native/hip/tests/phase83_nvfp4_compensated_probe.hip.cpp native/hip/tests/phase83_nvfp4_wmma_compensated_probe.hip.cpp native/hip/tests/phase83_small_m_matmul_probe.hip.cpp native/hip/tests/phase83_wmma_kahan_selector_test.cpp native/hip/tests/public_runtime_host_test.cpp",
+    "validation_command": "python3 ci/tools/validate_cpp.py --mode format",
+    "validation_log": ".local-artifacts/phase83/r26-cpp-format-fixed.log",
+    "token_comparison": "C/C++ lexical scanner; whitespace/comments ignored; known clang-format include sorting and adjacent string literal joining normalized separately",
+    "changed_paths": [
+      "include/sllm/hip.h",
+      "native/hip/src/causal_attention_kernel.hip.cpp",
+      "native/hip/src/matmul_kernel.hip.cpp",
+      "native/hip/src/matmul_kernel_internal.hpp",
+      "native/hip/tests/phase83_bf16_prefill_public_gpu_test.cpp",
+      "native/hip/tests/phase83_causal_wave_split_staged_gpu_test.hip.cpp",
+      "native/hip/tests/phase83_compensated_selector_test.cpp",
+      "native/hip/tests/phase83_mxfp8_chain_gpu_test.cpp",
+      "native/hip/tests/phase83_mxfp8_prefill_gpu_test.cpp",
+      "native/hip/tests/phase83_mxfp8_staged_public_gpu_test.cpp",
+      "native/hip/tests/phase83_nvfp4_compensated_probe.hip.cpp",
+      "native/hip/tests/phase83_nvfp4_wmma_compensated_probe.hip.cpp",
+      "native/hip/tests/phase83_small_m_matmul_probe.hip.cpp",
+      "native/hip/tests/phase83_wmma_kahan_selector_test.cpp",
+      "native/hip/tests/public_runtime_host_test.cpp"
+    ],
+    "known_nonsemantic_lexical_rewrites": [
+      {
+        "path": "native/hip/tests/phase83_mxfp8_staged_public_gpu_test.cpp",
+        "kind": "include-order",
+        "detail": "clang-format sorted the existing contiguous <cstdlib>/<cstring> include block"
+      },
+      {
+        "path": "native/hip/tests/phase83_mxfp8_staged_public_gpu_test.cpp",
+        "kind": "adjacent-string-literals",
+        "detail": "clang-format split a long kernel-symbol string literal into adjacent literals; C++ concatenates them"
+      },
+      {
+        "path": "native/hip/tests/phase83_nvfp4_compensated_probe.hip.cpp",
+        "kind": "adjacent-string-literals",
+        "detail": "clang-format split one long diagnostic string literal into adjacent literals; C++ concatenates them"
+      }
+    ],
+    "all_exact_lexical_token_streams_equal": false,
+    "all_normalized_lexical_token_streams_equal": true,
+    "files": [
+      {
+        "path": "include/sllm/hip.h",
+        "before_sha256": "8269c064feb0072c05d7c20acf7e5e2fe86fe685fe4f435042d20fde8f395456",
+        "after_sha256": "bb53f2dd1cc0223ff88a2b051ce11229b74d7ef3ddc7d4b81d207254b4563749",
+        "before_bytes": 100546,
+        "after_bytes": 100553,
+        "before_lines": 2433,
+        "after_lines": 2433,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/src/causal_attention_kernel.hip.cpp",
+        "before_sha256": "3f8ebec564973bceb41f1dbe629173d5730e8ac71da19108d3796a497dfe3b79",
+        "after_sha256": "554523e0fe4e31ea0ea7225db8a7bf9ea879518d302e66fcf1d478fe4f563859",
+        "before_bytes": 213742,
+        "after_bytes": 213772,
+        "before_lines": 4657,
+        "after_lines": 4655,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/src/matmul_kernel.hip.cpp",
+        "before_sha256": "73b2baf6a57ab9c659cf2c2619caa13c960ac22fb896d8f803a233411e6c3942",
+        "after_sha256": "35ad0547c17c3bfa4a1efa12bc43579649b8cde281bd3632cb722eb5d33aea30",
+        "before_bytes": 344268,
+        "after_bytes": 344451,
+        "before_lines": 7543,
+        "after_lines": 7537,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/src/matmul_kernel_internal.hpp",
+        "before_sha256": "c5b0c9a139be7cb69aada39d61a17dc41782f3c5c1297481d3591923332cd169",
+        "after_sha256": "6183d893caba61b86ba9a5048302e168fdc91e964fd1fb79f97d8d41be54da23",
+        "before_bytes": 169450,
+        "after_bytes": 169508,
+        "before_lines": 3284,
+        "after_lines": 3273,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/tests/phase83_bf16_prefill_public_gpu_test.cpp",
+        "before_sha256": "172fde73d423d695836cebb7a2a247755f32c57b798c84104e63c118c023246f",
+        "after_sha256": "6491112280878b84902c9ae76fbcddd023e348ded6d090487d00dc29732b234c",
+        "before_bytes": 16229,
+        "after_bytes": 16121,
+        "before_lines": 420,
+        "after_lines": 420,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/tests/phase83_causal_wave_split_staged_gpu_test.hip.cpp",
+        "before_sha256": "8dd508700c846f6ac52c5c0146f178effd967a65bc67514219ee065eccf58632",
+        "after_sha256": "fff828025b7f393199353bd4aeea85ff67e15536ad07a85937006e0f9350b69d",
+        "before_bytes": 23499,
+        "after_bytes": 23443,
+        "before_lines": 576,
+        "after_lines": 589,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/tests/phase83_compensated_selector_test.cpp",
+        "before_sha256": "01ce0bcdb93b1d6bdf0365e339a5ce5ee8f2f1e537c9b50b01c99a62b87f33d2",
+        "after_sha256": "d77d4dabe1e9bab7ced8511475bbeb2305e0d971bc03afc031b876bd334501b3",
+        "before_bytes": 2599,
+        "after_bytes": 2641,
+        "before_lines": 51,
+        "after_lines": 56,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/tests/phase83_mxfp8_chain_gpu_test.cpp",
+        "before_sha256": "65581d8fbd172df56eb240bbd3d6d45907b091ee144b087690f4b9c70dcf8a86",
+        "after_sha256": "9b4c3ceb143e5ae9fd661b4d9bfa92a065a23749b74d78886f2e0cbf846ac021",
+        "before_bytes": 38144,
+        "after_bytes": 38324,
+        "before_lines": 883,
+        "after_lines": 887,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/tests/phase83_mxfp8_prefill_gpu_test.cpp",
+        "before_sha256": "245f8a973fa840c0060f54e98c43c0c4cc037e837d2854d96eae20bb32a3b294",
+        "after_sha256": "9a69f373ca1125c5af494da99733bc2f561d8dda88a5a3f872a40f9189d2082d",
+        "before_bytes": 29370,
+        "after_bytes": 29431,
+        "before_lines": 716,
+        "after_lines": 715,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/tests/phase83_mxfp8_staged_public_gpu_test.cpp",
+        "before_sha256": "5c56e93f4d6936baff33d409b1cc03c40d14581889e15a59637e870e21e5aae7",
+        "after_sha256": "d95fc25d432eec2a519249a76b53d2e2d65e89ed3d46d7b7f1108ef0cd095ad1",
+        "before_bytes": 31750,
+        "after_bytes": 32109,
+        "before_lines": 751,
+        "after_lines": 759,
+        "changed": true,
+        "lexical_token_stream_equal_exact": false,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/tests/phase83_nvfp4_compensated_probe.hip.cpp",
+        "before_sha256": "a057dfd19522a92950087c08b6f779812d448d5dd0b81ef493bb39dbdc308b5c",
+        "after_sha256": "acba7cc34b2cbafc16ed6c223e8af451a576b28a010996a736b309032a3ed499",
+        "before_bytes": 5402,
+        "after_bytes": 5656,
+        "before_lines": 119,
+        "after_lines": 141,
+        "changed": true,
+        "lexical_token_stream_equal_exact": false,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/tests/phase83_nvfp4_wmma_compensated_probe.hip.cpp",
+        "before_sha256": "8c1008e86167d131294162b64c8b7a5dc018d72f27811c648fe87f3a7760ab9d",
+        "after_sha256": "c71c61f698b9c8aa49db7d31bb800252f607a27afe202656d41cdfa8aa1e9fca",
+        "before_bytes": 20850,
+        "after_bytes": 20949,
+        "before_lines": 508,
+        "after_lines": 504,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/tests/phase83_small_m_matmul_probe.hip.cpp",
+        "before_sha256": "f5e70f67d67631fef92320b98a2b241ae102d63f37d2b2e02a75a4e919162cc9",
+        "after_sha256": "fa331d82f2a4de9a6862fde6eb6dd575ee06bec6b21a7b88fd19e0a89680dbcb",
+        "before_bytes": 21356,
+        "after_bytes": 21368,
+        "before_lines": 526,
+        "after_lines": 542,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/tests/phase83_wmma_kahan_selector_test.cpp",
+        "before_sha256": "7fa882fce1e70e4cce07c9a348838d78ac60b8a44328ec58abf87c2955af311f",
+        "after_sha256": "d0b3a54477ad0d5c84bda6c59d02b068c00186cb426901146ca33618fb3dbcf9",
+        "before_bytes": 2448,
+        "after_bytes": 2437,
+        "before_lines": 59,
+        "after_lines": 63,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      },
+      {
+        "path": "native/hip/tests/public_runtime_host_test.cpp",
+        "before_sha256": "4f844e6796bd801ae1a84e021fefeeb61f20f205831402e2d3b23f348e749486",
+        "after_sha256": "8b4379626f021dcc0f6f8c93edf425eea4ba015f449cb4081ef3dfb6406b9bca",
+        "before_bytes": 592114,
+        "after_bytes": 592075,
+        "before_lines": 13012,
+        "after_lines": 13010,
+        "changed": true,
+        "lexical_token_stream_equal_exact": true,
+        "lexical_token_stream_equal_after_include_sort_and_adjacent_string_join": true
+      }
+    ]
+  },
+  "service_restore": {
+    "unit": "sllm-qwen38-r9700.service",
+    "manager": "user",
+    "restored_at": 1788933963.9274385,
+    "health_checks": {
+      "/healthz": {
+        "status": 200,
+        "body": "{\"status\":\"ok\",\"state\":\"ready\"}"
+      },
+      "/readyz": {
+        "status": 200,
+        "body": "{\"status\":\"ready\",\"state\":\"ready\",\"scheduler_accepting\":true}"
+      }
+    },
+    "scope": "Restored pre-existing configured service; no new binary deployment."
+  },
+  "performance_comparison": "phase83-first-request-comparison.json",
+  "publication_evidence": "GitHub host-required, h3-compile-only, h3-public-runtime-compile-only check runs attached to the commit containing this record; not inferred from local checks.",
+  "final_source_mapping_verified": true
+}

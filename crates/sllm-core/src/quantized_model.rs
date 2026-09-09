@@ -2079,6 +2079,29 @@ mod tests {
         assert!(!graph.is_mtp());
         assert!(!graph.is_multimodal());
         assert_eq!(graph.weight_bindings().len(), 851);
+        let mtp_plan = crate::build_qwen38_nvfp4_mtp_weight_load_plan(&lock, &artifact)
+            .expect("Qwen3.8 companion MTP plan builds");
+        assert_eq!(mtp_plan.schema_version, "qwen38-nvfp4-mtp-plan-v1");
+        assert_eq!(mtp_plan.entries.len(), 17);
+        assert_eq!(
+            mtp_plan
+                .entries
+                .iter()
+                .filter(|entry| entry.tensor_name.starts_with("mtp."))
+                .count(),
+            15
+        );
+        let mtp_graph = crate::build_qwen38_nvfp4_mtp_graph(
+            &lock,
+            &mtp_plan,
+            &artifact,
+            17,
+            crate::KvCacheEncoding::Mxfp8E4,
+        )
+        .expect("Qwen3.8 companion MTP graph builds");
+        assert!(mtp_graph.is_mtp());
+        assert_eq!(mtp_graph.weight_bindings().len(), 17);
+        assert!(mtp_graph.states().iter().all(|state| state.layer() == 64));
         let packs = graph
             .plan_unsloth_qwen38_projection_pack_reuse(&artifact)
             .expect("Qwen3.8 projection-pack planner succeeds")

@@ -700,11 +700,19 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_token_selector_fixed_topp_select_v1",
             "sllm_token_selector_fixed_topp_token_block_prefix_v1",
             "sllm_token_selector_fixed_topp_weight_prefix_v1",
+            "sllm_matmul_bf16_fp32_prefill_gfx1030_64x64_k32_transposed_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n10240_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n248320_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n6144_v1",
+            "sllm_nvfp4_w4a4_prefill_compensated64x64_v1",
+            "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1",
+            "sllm_nvfp4_w4a4_small_m_gfx1201_rowgrid_v1",
+            "sllm_nvfp4_w4a4_small_m_rowgrid_v1",
         }
-        self.assertEqual(len(KERNEL_SYMBOLS), 147)
+        self.assertEqual(len(KERNEL_SYMBOLS), 155)
         self.assertEqual(tuple(sorted(KERNEL_SYMBOLS)), KERNEL_SYMBOLS)
         self.assertTrue(expected_additions <= set(KERNEL_SYMBOLS))
-        self.assertEqual(len(expected_additions), 44)
+        self.assertEqual(len(expected_additions), 52)
 
     def test_causal_attention_stub_allowlist_is_exact_and_duplicate_free(self) -> None:
         expected = (
@@ -724,9 +732,15 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage2_kernelILj16EEEvPKtPtjPKf",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage2_kernelILj32EEEvPKtPtjPKf",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_166__device_stub__causal_attention_decode_wave_split_fp16_pair_kernelEPKtPKvS4_S4_S4_PKfS6_Ptmjjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb0ELj6ELj32EEEvPKtPKvS5_S5_S5_PKfS7_Pfjmjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb0ELj6ELj8EEEvPKtPKvS5_S5_S5_PKfS7_Pfjmjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb1ELj6ELj32EEEvPKtPKvS5_S5_S5_PKfS7_Pfjmjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb1ELj6ELj8EEEvPKtPKvS5_S5_S5_PKfS7_Pfjmjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage2_kernelILj32EEEvPKfPtjjjj",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage2_kernelILj8EEEvPKfPtjjjj",
         )
-        self.assertEqual(len(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS), 16)
-        self.assertEqual(len(set(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)), 16)
+        self.assertEqual(len(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS), 22)
+        self.assertEqual(len(set(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)), 22)
         self.assertEqual(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS, expected)
         self.assertEqual(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS, tuple(sorted(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)))
 

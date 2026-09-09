@@ -4,7 +4,7 @@
   "role": "dedicated-g2-runtime",
   "binary_name": "sllm-rmsnorm-g2-evidence",
   "source_path": "crates/sllm-hip/src/bin/sllm-rmsnorm-g2-evidence.rs",
-  "source_order_sha256": "928c35a5d42a8816d5052c99ee1cc13b3465c5904202479816f026ccb0328325",
+  "source_order_sha256": "ad634ccc2e90b3593589aab37590b9224bd17cd06beb74db268c665adaabf8d9",
   "source_paths": [
     {
       "order": 0,
@@ -292,38 +292,42 @@
     },
     {
       "order": 71,
-      "path": "native/hip/src/matmul_kernel_internal.hpp"
+      "path": "native/hip/src/nvfp4_prefill_wmma_compensated.inc"
     },
     {
       "order": 72,
-      "path": "native/hip/src/matmul_runtime.inc"
+      "path": "native/hip/src/matmul_kernel_internal.hpp"
     },
     {
       "order": 73,
-      "path": "native/hip/src/public_runtime.hip.cpp"
+      "path": "native/hip/src/matmul_runtime.inc"
     },
     {
       "order": 74,
-      "path": "native/hip/src/public_runtime_internal.hpp"
+      "path": "native/hip/src/public_runtime.hip.cpp"
     },
     {
       "order": 75,
-      "path": "native/hip/src/public_runtime_stub.cpp"
+      "path": "native/hip/src/public_runtime_internal.hpp"
     },
     {
       "order": 76,
-      "path": "native/hip/src/rmsnorm_api.cpp"
+      "path": "native/hip/src/public_runtime_stub.cpp"
     },
     {
       "order": 77,
-      "path": "native/hip/src/rmsnorm_api.hpp"
+      "path": "native/hip/src/rmsnorm_api.cpp"
     },
     {
       "order": 78,
-      "path": "native/hip/src/rmsnorm_kernel.hip.cpp"
+      "path": "native/hip/src/rmsnorm_api.hpp"
     },
     {
       "order": 79,
+      "path": "native/hip/src/rmsnorm_kernel.hip.cpp"
+    },
+    {
+      "order": 80,
       "path": "native/hip/src/rmsnorm_kernel_internal.hpp"
     }
   ]

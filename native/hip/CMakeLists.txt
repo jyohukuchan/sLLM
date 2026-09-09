@@ -654,6 +654,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 src/low_precision_block_codec.hpp
                 src/nvfp4_decode_scale_lut.inc
                 src/fp8_prefill_short_m32.inc
+                src/nvfp4_prefill_wmma_compensated.inc
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -1705,4 +1706,53 @@ if(SLLM_ENABLE_PHASE41_STATE_GPU_TEST)
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
     )
     target_link_libraries(sllm_phase41_state_gpu_test PRIVATE sllm_hip_stub)
+endif()
+
+option(SLLM_ENABLE_PHASE83_MXFP8_CHAIN_GPU_TEST
+    "Build the Phase83 MXFP8 append/attention chain GPU oracle" OFF)
+if(SLLM_ENABLE_PHASE83_MXFP8_CHAIN_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase83 MXFP8 chain test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase83_mxfp8_chain_gpu_test
+        tests/phase83_mxfp8_chain_gpu_test.cpp)
+    target_compile_features(sllm_phase83_mxfp8_chain_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase83_mxfp8_chain_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase83_mxfp8_chain_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    target_link_libraries(sllm_phase83_mxfp8_chain_gpu_test PRIVATE sllm_hip_stub)
+    add_test(NAME sllm_phase83_mxfp8_chain_gpu_test
+        COMMAND sllm_phase83_mxfp8_chain_gpu_test)
+    set_tests_properties(sllm_phase83_mxfp8_chain_gpu_test PROPERTIES
+        LABELS "gpu;phase83;mxfp8;kv-chain"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE83_BF16_PREFILL_PUBLIC_GPU_TEST
+    "Build the Phase83 BF16 prefill public launcher regression" OFF)
+if(SLLM_ENABLE_PHASE83_BF16_PREFILL_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase83 BF16 prefill test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase83_bf16_prefill_public_gpu_test
+        tests/phase83_bf16_prefill_public_gpu_test.cpp)
+    target_compile_features(sllm_phase83_bf16_prefill_public_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase83_bf16_prefill_public_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase83_bf16_prefill_public_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    target_link_libraries(sllm_phase83_bf16_prefill_public_gpu_test PRIVATE
+        sllm_hip_stub)
+    add_test(NAME sllm_phase83_bf16_prefill_public_gpu_test
+        COMMAND sllm_phase83_bf16_prefill_public_gpu_test)
+    set_tests_properties(sllm_phase83_bf16_prefill_public_gpu_test PROPERTIES
+        LABELS "gpu;phase83;bf16;matmul"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
 endif()

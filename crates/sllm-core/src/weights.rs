@@ -23,6 +23,10 @@ pub const WEIGHT_LOAD_CHUNK_BYTES: u64 = 16 * 1024 * 1024;
 /// Keeping it outside the text decoder's `0..32` namespace makes combined
 /// plans one-to-one without leaking an MTP-specific key type into executors.
 pub const QWEN35_MTP_CONSUMER_LAYER: u64 = 32;
+/// Logical consumer layer reserved for the one-layer Qwen3.8/27B MTP block.
+/// The MTP block follows the 64-layer target decoder and therefore uses the
+/// first layer index outside the target namespace.
+pub const QWEN38_MTP_CONSUMER_LAYER: u64 = 64;
 
 const PLAN_DOMAIN: &[u8] = b"sLLM-weight-load-plan-v1\0";
 const QWEN_SCHEMA_VERSION: &str = "model-lock-v1";
@@ -1069,7 +1073,7 @@ fn build_qwen_component_weight_load_plan_inner<'a>(
         ));
     }
     if selection.mtp {
-        selected_consumers.extend(expected_mtp_consumers());
+        selected_consumers.extend(expected_mtp_consumers(config.num_hidden_layers));
         selected_consumers.insert(WeightConsumerKey {
             layer: None,
             role: WeightConsumer::EmbeddingAndTiedOutput,
@@ -1122,7 +1126,10 @@ fn build_qwen_component_weight_load_plan_inner<'a>(
                 .ok_or_else(|| WeightPlanError::invalid("MTP tensor count overflow"))?;
             if selection.mtp {
                 classification = WeightClassification::Required;
-                consumer = Some(classify_mtp_consumer(&descriptor.tensor_name)?);
+                consumer = Some(classify_mtp_consumer(
+                    &descriptor.tensor_name,
+                    config.num_hidden_layers,
+                )?);
             }
         }
         if classification == WeightClassification::Required {
@@ -1211,48 +1218,40 @@ fn build_qwen_component_weight_load_plan_inner<'a>(
     })
 }
 
-fn classify_mtp_consumer(name: &str) -> Result<WeightConsumerKey, WeightPlanError> {
+fn classify_mtp_consumer(
+    name: &str,
+    consumer_layer: u64,
+) -> Result<WeightConsumerKey, WeightPlanError> {
     let (layer, role) = match name {
         "mtp.fc.weight" => (None, WeightConsumer::MtpFusion),
         "mtp.pre_fc_norm_embedding.weight" => (None, WeightConsumer::MtpEmbeddingNorm),
         "mtp.pre_fc_norm_hidden.weight" => (None, WeightConsumer::MtpHiddenNorm),
         "mtp.norm.weight" => (None, WeightConsumer::MtpFinalNorm),
-        "mtp.layers.0.input_layernorm.weight" => {
-            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::InputNorm)
+        "mtp.layers.0.input_layernorm.weight" => (Some(consumer_layer), WeightConsumer::InputNorm),
+        "mtp.layers.0.post_attention_layernorm.weight" => {
+            (Some(consumer_layer), WeightConsumer::PostAttentionNorm)
         }
-        "mtp.layers.0.post_attention_layernorm.weight" => (
-            Some(QWEN35_MTP_CONSUMER_LAYER),
-            WeightConsumer::PostAttentionNorm,
-        ),
-        "mtp.layers.0.mlp.gate_proj.weight" => {
-            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::MlpGate)
-        }
-        "mtp.layers.0.mlp.up_proj.weight" => {
-            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::MlpUp)
-        }
-        "mtp.layers.0.mlp.down_proj.weight" => {
-            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::MlpDown)
-        }
+        "mtp.layers.0.mlp.gate_proj.weight" => (Some(consumer_layer), WeightConsumer::MlpGate),
+        "mtp.layers.0.mlp.up_proj.weight" => (Some(consumer_layer), WeightConsumer::MlpUp),
+        "mtp.layers.0.mlp.down_proj.weight" => (Some(consumer_layer), WeightConsumer::MlpDown),
         "mtp.layers.0.self_attn.q_proj.weight" => {
-            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::AttentionQ)
+            (Some(consumer_layer), WeightConsumer::AttentionQ)
         }
         "mtp.layers.0.self_attn.k_proj.weight" => {
-            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::AttentionK)
+            (Some(consumer_layer), WeightConsumer::AttentionK)
         }
         "mtp.layers.0.self_attn.v_proj.weight" => {
-            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::AttentionV)
+            (Some(consumer_layer), WeightConsumer::AttentionV)
         }
         "mtp.layers.0.self_attn.o_proj.weight" => {
-            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::AttentionO)
+            (Some(consumer_layer), WeightConsumer::AttentionO)
         }
-        "mtp.layers.0.self_attn.q_norm.weight" => (
-            Some(QWEN35_MTP_CONSUMER_LAYER),
-            WeightConsumer::AttentionQNorm,
-        ),
-        "mtp.layers.0.self_attn.k_norm.weight" => (
-            Some(QWEN35_MTP_CONSUMER_LAYER),
-            WeightConsumer::AttentionKNorm,
-        ),
+        "mtp.layers.0.self_attn.q_norm.weight" => {
+            (Some(consumer_layer), WeightConsumer::AttentionQNorm)
+        }
+        "mtp.layers.0.self_attn.k_norm.weight" => {
+            (Some(consumer_layer), WeightConsumer::AttentionKNorm)
+        }
         _ => {
             return Err(WeightPlanError::invalid(format!(
                 "unknown component-enabled MTP tensor: {name}"
@@ -1262,7 +1261,7 @@ fn classify_mtp_consumer(name: &str) -> Result<WeightConsumerKey, WeightPlanErro
     Ok(WeightConsumerKey { layer, role })
 }
 
-fn expected_mtp_consumers() -> BTreeSet<WeightConsumerKey> {
+fn expected_mtp_consumers(consumer_layer: u64) -> BTreeSet<WeightConsumerKey> {
     use WeightConsumer::*;
     [
         WeightConsumerKey {
@@ -1282,47 +1281,47 @@ fn expected_mtp_consumers() -> BTreeSet<WeightConsumerKey> {
             role: MtpFinalNorm,
         },
         WeightConsumerKey {
-            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            layer: Some(consumer_layer),
             role: InputNorm,
         },
         WeightConsumerKey {
-            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            layer: Some(consumer_layer),
             role: PostAttentionNorm,
         },
         WeightConsumerKey {
-            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            layer: Some(consumer_layer),
             role: MlpGate,
         },
         WeightConsumerKey {
-            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            layer: Some(consumer_layer),
             role: MlpUp,
         },
         WeightConsumerKey {
-            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            layer: Some(consumer_layer),
             role: MlpDown,
         },
         WeightConsumerKey {
-            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            layer: Some(consumer_layer),
             role: AttentionQ,
         },
         WeightConsumerKey {
-            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            layer: Some(consumer_layer),
             role: AttentionK,
         },
         WeightConsumerKey {
-            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            layer: Some(consumer_layer),
             role: AttentionV,
         },
         WeightConsumerKey {
-            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            layer: Some(consumer_layer),
             role: AttentionO,
         },
         WeightConsumerKey {
-            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            layer: Some(consumer_layer),
             role: AttentionQNorm,
         },
         WeightConsumerKey {
-            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            layer: Some(consumer_layer),
             role: AttentionKNorm,
         },
     ]
@@ -1539,6 +1538,8 @@ pub fn build_qwen38_nvfp4_weight_load_plan(
             "Qwen3.8 NVFP4 requires the reviewed Qwen3.5-27B semantic lock",
         ));
     }
+    crate::validate_qwen38_mtp_artifact(lock, artifact)
+        .map_err(|error| WeightPlanError::invalid(error.to_string()))?;
     let expected = expected_consumers(
         &lock.model.architecture.text_config.layer_types,
         lock.model.architecture.text_config.tie_word_embeddings,
@@ -1678,6 +1679,175 @@ pub fn build_qwen38_nvfp4_weight_load_plan(
     })
 }
 
+/// Build the companion-only Qwen3.8 MTP plan from the exact mixed artifact.
+/// The target plan intentionally leaves these tensors known-unconsumed; this
+/// plan gives the MTP resident its own packed allocation and digest while
+/// retaining the shared BF16 embedding/head from the main model file.
+pub fn build_qwen38_nvfp4_mtp_weight_load_plan(
+    lock: &ModelLock,
+    artifact: &crate::VerifiedUnslothQwen38Nvfp4,
+) -> Result<WeightLoadPlan, WeightPlanError> {
+    validate_fixed_lock(lock)?;
+    let spec = reviewed_qwen35_spec(lock)
+        .ok_or_else(|| WeightPlanError::invalid("Qwen3.8 lock is not reviewed"))?;
+    if spec.repo_id != crate::model::QWEN35_27B_REPO_ID
+        || artifact.repository() != crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY
+    {
+        return Err(WeightPlanError::invalid(
+            "Qwen3.8 MTP requires the reviewed Qwen3.5-27B lock and exact mixed artifact",
+        ));
+    }
+    crate::validate_qwen38_mtp_artifact(lock, artifact)
+        .map_err(|error| WeightPlanError::invalid(error.to_string()))?;
+    let model_file = artifact
+        .root()
+        .join("model.safetensors")
+        .display()
+        .to_string();
+    let mtp_file = artifact
+        .root()
+        .join("model_mtp.safetensors")
+        .display()
+        .to_string();
+    let mut entries = Vec::with_capacity(16);
+    let mut destination_cursor = 0_u64;
+    let mut push_entry = |tensor_name: String,
+                          shape: Vec<u64>,
+                          source_file: String,
+                          source_range: [u64; 2],
+                          locked_file_size: u64,
+                          locked_file_sha256: String,
+                          consumer: WeightConsumerKey,
+                          require_bf16_bytes: bool|
+     -> Result<(), WeightPlanError> {
+        let byte_size = source_range[1]
+            .checked_sub(source_range[0])
+            .ok_or_else(|| WeightPlanError::invalid("Qwen3.8 MTP source range underflows"))?;
+        let logical_bytes = shape
+            .iter()
+            .try_fold(dtype_width(TensorDType::Bf16), |bytes, extent| {
+                bytes.checked_mul(*extent)
+            })
+            .ok_or_else(|| WeightPlanError::invalid("Qwen3.8 MTP logical size overflows"))?;
+        if require_bf16_bytes && byte_size != logical_bytes {
+            return Err(WeightPlanError::invalid(format!(
+                "Qwen3.8 MTP source size differs for {tensor_name}: {byte_size} != {logical_bytes}"
+            )));
+        }
+        let destination_start = destination_cursor;
+        destination_cursor = destination_cursor
+            .checked_add(logical_bytes)
+            .ok_or_else(|| WeightPlanError::invalid("Qwen3.8 MTP destination size overflows"))?;
+        entries.push(WeightLoadEntry {
+            tensor_name,
+            classification: WeightClassification::Required,
+            consumer: Some(consumer),
+            dtype: TensorDType::Bf16,
+            shape,
+            source_file,
+            locked_file_size,
+            locked_file_sha256,
+            source_range,
+            destination_start: Some(destination_start),
+            chunks: Vec::new(),
+        });
+        Ok(())
+    };
+
+    let shared = artifact
+        .tensor("model.language_model.embed_tokens.weight")
+        .ok_or_else(|| WeightPlanError::invalid("Qwen3.8 shared embedding is absent"))?;
+    if shared.encoding != crate::QuantizedTensorEncoding::UnquantizedBf16 {
+        return Err(WeightPlanError::invalid(
+            "Qwen3.8 shared MTP embedding is not BF16",
+        ));
+    }
+    push_entry(
+        shared.logical_name.clone(),
+        shared.logical_shape.clone(),
+        model_file.clone(),
+        shared.value_range,
+        crate::UNSLOTH_QWEN38_NVFP4_MODEL_SIZE,
+        crate::UNSLOTH_QWEN38_NVFP4_MODEL_SHA256.to_owned(),
+        WeightConsumerKey {
+            layer: None,
+            role: if lock.model.architecture.text_config.tie_word_embeddings {
+                WeightConsumer::EmbeddingAndTiedOutput
+            } else {
+                WeightConsumer::Embedding
+            },
+        },
+        true,
+    )?;
+
+    if !lock.model.architecture.text_config.tie_word_embeddings {
+        let output = artifact
+            .tensor("lm_head.weight")
+            .ok_or_else(|| WeightPlanError::invalid("Qwen3.8 output projection is absent"))?;
+        if output.encoding != crate::QuantizedTensorEncoding::OcpFp8E4M3FnChannelBf16Scale {
+            return Err(WeightPlanError::invalid(
+                "Qwen3.8 MTP output projection is not the verified FP8 channel format",
+            ));
+        }
+        push_entry(
+            output.logical_name.clone(),
+            output.logical_shape.clone(),
+            model_file.clone(),
+            output.value_range,
+            crate::UNSLOTH_QWEN38_NVFP4_MODEL_SIZE,
+            crate::UNSLOTH_QWEN38_NVFP4_MODEL_SHA256.to_owned(),
+            WeightConsumerKey {
+                layer: None,
+                role: WeightConsumer::OutputProjection,
+            },
+            false,
+        )?;
+    }
+
+    for tensor in artifact
+        .tensors()
+        .filter(|tensor| tensor.logical_name.starts_with("mtp."))
+    {
+        if tensor.encoding != crate::QuantizedTensorEncoding::UnquantizedBf16 {
+            return Err(WeightPlanError::invalid(format!(
+                "Qwen3.8 MTP tensor is not BF16: {}",
+                tensor.logical_name
+            )));
+        }
+        push_entry(
+            tensor.logical_name.clone(),
+            tensor.logical_shape.clone(),
+            mtp_file.clone(),
+            tensor.value_range,
+            crate::UNSLOTH_QWEN38_NVFP4_MTP_SIZE,
+            crate::UNSLOTH_QWEN38_NVFP4_MTP_SHA256.to_owned(),
+            classify_mtp_consumer(&tensor.logical_name, QWEN38_MTP_CONSUMER_LAYER)?,
+            true,
+        )?;
+    }
+    entries.sort_by(|left, right| left.tensor_name.cmp(&right.tensor_name));
+    let expected_entries =
+        16 + usize::from(!lock.model.architecture.text_config.tie_word_embeddings);
+    if entries.len() != expected_entries {
+        return Err(WeightPlanError::invalid(format!(
+            "Qwen3.8 MTP plan requires {expected_entries} required tensors, got {}",
+            entries.len(),
+        )));
+    }
+    WeightLoadPlan::from_verified_entries(
+        VerifiedWeightPlanMetadata {
+            schema_version: "qwen38-nvfp4-mtp-plan-v1".to_owned(),
+            repo_id: lock.model.repo_id.clone(),
+            resolved_revision: lock.model.resolved_revision.clone(),
+            lock_fingerprint: lock.fingerprint().to_owned(),
+            tied_embeddings: lock.model.architecture.text_config.tie_word_embeddings,
+            chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+            total_destination_bytes: destination_cursor,
+        },
+        entries,
+    )
+}
+
 fn dtype_width(dtype: TensorDType) -> u64 {
     match dtype {
         TensorDType::Bf16 | TensorDType::F16 => 2,
@@ -1704,7 +1874,7 @@ fn build_qwen_gguf_quantized_plan(
         ));
     }
     if selection.mtp {
-        selected_consumers.extend(expected_mtp_consumers());
+        selected_consumers.extend(expected_mtp_consumers(config.num_hidden_layers));
         selected_consumers.insert(WeightConsumerKey {
             layer: None,
             role: WeightConsumer::EmbeddingAndTiedOutput,
@@ -1755,7 +1925,10 @@ fn build_qwen_gguf_quantized_plan(
                 .ok_or_else(|| WeightPlanError::invalid("MTP tensor count overflow"))?;
             if selection.mtp {
                 classification = WeightClassification::Required;
-                consumer = Some(classify_mtp_consumer(&descriptor.tensor_name)?);
+                consumer = Some(classify_mtp_consumer(
+                    &descriptor.tensor_name,
+                    config.num_hidden_layers,
+                )?);
             }
         }
         if classification == WeightClassification::Required {

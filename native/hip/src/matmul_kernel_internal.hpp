@@ -14,6 +14,18 @@ constexpr const char *kLogicalKernelId = "matmul.bf16_fp32.v1";
 constexpr const char *kDeviceSymbol = "sllm_matmul_bf16_fp32_v1";
 constexpr const char *kPrefillLogicalKernelId = "matmul.bf16_fp32.tiled16.v2";
 constexpr const char *kPrefillDeviceSymbol = "sllm_matmul_bf16_fp32_tiled16_v2";
+// Phase 83: gfx1030 large-prefill BF16 register tile.  The shape selector is
+// kept separate from the model path so any BF16 [M,K] x [N,K] caller with the
+// measured MTP dimensions can use the same provider contract.
+constexpr const char *kBf16PrefillGfx1030_64x64LogicalKernelId =
+    "matmul.bf16_fp32.prefill.gfx1030.64x64.k32_transposed.v1";
+constexpr const char *kBf16PrefillGfx1030_64x64DeviceSymbol =
+    "sllm_matmul_bf16_fp32_prefill_gfx1030_64x64_k32_transposed_v1";
+static_assert(
+    sizeof("matmul.bf16_fp32.prefill.gfx1030.64x64.k32_transposed.v1") <= 64U);
+static_assert(
+    sizeof("sllm_matmul_bf16_fp32_prefill_gfx1030_64x64_k32_transposed_v1") <=
+    64U);
 constexpr const char *kDecodeLogicalKernelId = "matmul.bf16_fp32.decode.v4";
 constexpr const char *kDecodeDeviceSymbol = "sllm_matmul_bf16_fp32_decode_v4";
 constexpr const char *kDecodeWave64LogicalKernelId =
@@ -117,6 +129,17 @@ constexpr const char *kFp8OuterDecodeGfx1030LdsLutK5120N6144DeviceSymbol =
     "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k5120n6144_v1";
 constexpr const char *kFp8OuterDecodeGfx1030LdsLutEnvironment =
     "SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_LDS_LUT";
+// Phase 83 ID92: gfx1030 FP8 outer-scale M=2..4 fusion. One CTA keeps each
+// output-column weight dword/scale live while accumulating independent rows;
+// M=1 remains on the existing ID82/ID68 providers.
+constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4LogicalKernelId =
+    "matmul.fp8.outer.decode.gfx1030.fused.m2_4.v1";
+constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4K5120N10240DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n10240_v1";
+constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4K5120N6144DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n6144_v1";
+constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4K5120N248320DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n248320_v1";
 constexpr uint32_t kFp8OuterDecodeGfx1030LdsLutWorkgroupSize = 256U;
 constexpr uint32_t kFp8OuterDecodeGfx1030LdsLutStaticLdsBytes = 544U;
 constexpr const char *kFp8OuterDecodeBaselineEnvironment =
@@ -141,6 +164,14 @@ static_assert(sizeof("sllm_matmul_fp8_outer_prefill_gfx1030_half2_128x64_v1") <=
 static_assert(sizeof("matmul.fp8.outer.prefill.gfx1030.half2.64x64.v1") <= 64U);
 static_assert(sizeof("sllm_matmul_fp8_outer_prefill_gfx1030_half2_64x64_v1") <=
               64U);
+static_assert(sizeof("matmul.fp8.outer.decode.gfx1030.fused.m2_4.v1") <= 64U);
+static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n10240_v1") <= 64U);
+static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n6144_v1") <= 64U);
+static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n248320_v1") <=
+    64U);
 static_assert(sizeof("rocblas_gemm_ex") <= 64U);
 static_assert(sizeof("matmul.fp8.outer.decode.gfx1030.half2.wave4col32.v1") <=
               64U);
@@ -221,7 +252,28 @@ constexpr const char *kNvfp4W4A4PrefillGfx1201Wmma128x64DeviceSymbol =
     "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_v1";
 constexpr const char *kNvfp4W4A4Gfx1201WmmaOrdinaryDeviceSymbol =
     "sllm_nvfp4_w4a4_prefill_gfx1201_wmma_ordinary_v1";
+constexpr const char *kNvfp4W4A4PrefillGfx1201WmmaKahanLogicalKernelId =
+    "matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x64.kahan.v1";
+constexpr const char *kNvfp4W4A4PrefillGfx1201WmmaKahanDeviceSymbol =
+    "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1";
+constexpr const char *kNvfp4W4A4PrefillGfx1201WmmaKahanEnvironment =
+    "SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED";
+// Phase 83: gfx1201 small-M row grid reuses ID84's activation-shared M=1
+// body once per row.  Keep a separate identity and flag from ID88 because
+// the latter is the gfx1030 ID73 wrapper and has different LDS behavior.
+constexpr const char *kNvfp4W4A4SmallMGfx1201RowGridLogicalKernelId =
+    "matmul.nvfp4.w4a4.small_m.gfx1201.rowgrid.v1";
+constexpr const char *kNvfp4W4A4SmallMGfx1201RowGridDeviceSymbol =
+    "sllm_nvfp4_w4a4_small_m_gfx1201_rowgrid_v1";
+constexpr const char *kNvfp4W4A4SmallMGfx1201RowGridEnvironment =
+    "SLLM_NVFP4_W4A4_SMALL_M_ROWGRID_GFX1201";
+static_assert(sizeof("matmul.nvfp4.w4a4.small_m.gfx1201.rowgrid.v1") <= 64U);
+static_assert(sizeof("sllm_nvfp4_w4a4_small_m_gfx1201_rowgrid_v1") <= 64U);
 static_assert(sizeof("sllm_nvfp4_w4a4_prefill_gfx1201_wmma_ordinary_v1") <=
+              64U);
+static_assert(sizeof("matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x64.kahan.v1") <=
+              64U);
+static_assert(sizeof("sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1") <=
               64U);
 
 constexpr bool
@@ -537,6 +589,12 @@ enum class KernelVariant : uint32_t {
   Fp8OuterDecodeGfx1030ActivationSharedWave8Col64 = 76U,
   Fp8OuterDecodeGfx1030LdsLutWave4Col32 = 82U,
   Nvfp4W4A4DecodeScaleLut = 84U,
+  Nvfp4W4A4PrefillCompensated64x64 = 87U,
+  Nvfp4W4A4SmallMRowGrid = 88U,
+  Nvfp4W4A4PrefillGfx1201WmmaKahan = 89U,
+  Nvfp4W4A4SmallMGfx1201RowGrid = 90U,
+  Bf16PrefillGfx1030_64x64 = 91U,
+  Fp8OuterDecodeGfx1030FusedM2_4 = 92U,
 };
 
 // Selector state is intentionally kept inside the native runtime.  The
@@ -1117,6 +1175,23 @@ phase78_gfx1201_nvfp4_w4a4_f16_staging_shape(const uint64_t m, const uint64_t k,
          (k % 16U) == 0U && n != 0U && n <= 17408U && (n % 16U) == 0U;
 }
 
+// Phase 83 ID89: compensated FP8-WMMA is an explicit gfx1201 candidate. Keep
+// admission to the two measured Qwen projection pairs until register pressure
+// and full-model numerical/performance evidence justify a wider family rule.
+constexpr bool
+phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(const uint64_t m, const uint64_t k,
+                                            const uint64_t n) noexcept {
+  return m > 1U && k >= 2048U && (k % 16U) == 0U &&
+         ((k == 5120U && n == 17408U) || (k == 17408U && n == 5120U));
+}
+
+static_assert(phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(2U, 5120U, 17408U));
+static_assert(phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(1024U, 17408U,
+                                                          5120U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(1U, 5120U, 17408U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(2U, 5121U, 17408U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(2U, 5120U, 5120U));
+
 // ID62's separate gfx1030 index32 body is selected only when every logical
 // extent and byte-plane product fits in uint32_t. The 128-element headroom
 // keeps tile-rounding additions and the final 64x64 grid arithmetic from
@@ -1222,6 +1297,13 @@ phase78_nvfp4_w4a4_decode_scale_lut_gfx1201_activation_shared_shape(
                      (k == UINT64_C(17408) && n == UINT64_C(5120)));
 }
 
+constexpr bool phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(
+    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
+  return m >= 2U && m <= 4U &&
+         phase78_nvfp4_w4a4_decode_scale_lut_gfx1201_activation_shared_shape(
+             1U, k, n);
+}
+
 constexpr uint64_t
 nvfp4_w4a4_decode_activation_shared_lds_bytes(const uint64_t k) noexcept {
   return (k / UINT64_C(16)) * UINT64_C(5) * sizeof(uint32_t);
@@ -1247,6 +1329,16 @@ static_assert(
 static_assert(
     !phase78_nvfp4_w4a4_decode_scale_lut_gfx1201_activation_shared_shape(
         1U, 5120U, 5120U));
+static_assert(phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(2U, 5120U,
+                                                               17408U));
+static_assert(phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(4U, 17408U,
+                                                               5120U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(1U, 5120U,
+                                                                17408U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(5U, 5120U,
+                                                                17408U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(2U, 5120U,
+                                                                5120U));
 static_assert(nvfp4_w4a4_decode_activation_shared_lds_bytes(5120U) == 6400U);
 static_assert(nvfp4_w4a4_decode_activation_shared_lds_bytes(17408U) == 21760U);
 
@@ -1321,6 +1413,16 @@ select_nvfp4_w4a4_variant(const uint64_t m, const uint64_t k, const uint64_t n,
     }
     return KernelVariant::Nvfp4W4A4Decode;
   }
+  if (target_is(target, "gfx1030") && m >= 2U && m <= 4U &&
+      phase78_nvfp4_w4a4_decode_activation_shared_shape(1U, k, n) &&
+      selector_env_is_one("SLLM_NVFP4_W4A4_SMALL_M_ROWGRID")) {
+    return KernelVariant::Nvfp4W4A4SmallMRowGrid;
+  }
+  if (target_is(target, "gfx1201") &&
+      phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(m, k, n) &&
+      selector_env_is_one(kNvfp4W4A4SmallMGfx1201RowGridEnvironment)) {
+    return KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid;
+  }
   const char *const force_row8 =
       std::getenv("SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8");
   if (force_row8 != nullptr && std::strcmp(force_row8, "1") == 0) {
@@ -1330,6 +1432,16 @@ select_nvfp4_w4a4_variant(const uint64_t m, const uint64_t k, const uint64_t n,
       std::getenv("SLLM_NVFP4_W4A4_PREFILL_FORCE_COL8");
   if (force_col8 != nullptr && std::strcmp(force_col8, "1") == 0) {
     return KernelVariant::Nvfp4W4A4PrefillRow8Col8Tiled256;
+  }
+  if ((target_is(target, "gfx1030") || target_is(target, "gfx1201")) &&
+      m > 1U && k != 0U && (k % 16U) == 0U && n != 0U &&
+      selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED")) {
+    return KernelVariant::Nvfp4W4A4PrefillCompensated64x64;
+  }
+  if (target_is(target, "gfx1201") &&
+      phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(m, k, n) &&
+      selector_env_is_one(kNvfp4W4A4PrefillGfx1201WmmaKahanEnvironment)) {
+    return KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan;
   }
   const char *const force_dp4a =
       std::getenv("SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A");
@@ -1429,6 +1541,43 @@ select_nvfp4_w4a4_decision(const uint64_t m, const uint64_t k, const uint64_t n,
         !supported ? kSelectorReasonUnsupported
         : adopted  ? kSelectorReasonAdopted
                    : kSelectorReasonForcedShape);
+  }
+  case KernelVariant::Nvfp4W4A4SmallMRowGrid: {
+    const bool supported =
+        exact_gfx1030 && m >= 2U && m <= 4U &&
+        phase78_nvfp4_w4a4_decode_activation_shared_shape(1U, k, n);
+    return make_selector_decision(
+        variant, supported,
+        supported && selector_env_is_one("SLLM_NVFP4_W4A4_SMALL_M_ROWGRID"),
+        false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid: {
+    const bool supported =
+        exact_gfx1201 &&
+        phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported,
+        supported &&
+            selector_env_is_one(kNvfp4W4A4SmallMGfx1201RowGridEnvironment),
+        false,
+        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan: {
+    const bool supported =
+        exact_gfx1201 && phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(m, k, n);
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one(kNvfp4W4A4PrefillGfx1201WmmaKahanEnvironment),
+        false, supported ? kSelectorReasonForced : kSelectorReasonUnsupported);
+  }
+  case KernelVariant::Nvfp4W4A4PrefillCompensated64x64: {
+    const bool supported =
+        known_target && k != 0U && (k % 16U) == 0U && n != 0U && m > 1U;
+    return make_selector_decision(
+        variant, supported,
+        selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED"), false,
+        supported ? kSelectorReasonForced : kSelectorReasonUnsupported);
   }
   case KernelVariant::Nvfp4W4A4PrefillDp4a64x64: {
     const bool supported =
@@ -1660,6 +1809,27 @@ static_assert(phase49_gfx1030_short_mixed_rocblas_solution(17U, 2560U,
 static_assert(phase49_gfx1030_short_mixed_rocblas_solution(16U, 2560U, 9216U) ==
               0);
 
+// Phase 83 BF16 prefill provider. These are the three real MTP companion
+// matrix orientations, with M>=64 as the measured large-tile crossover. The
+// M dimension is intentionally a threshold rather than an alignment
+// requirement: the kernel has guarded tails and the M=63/65 boundary is part
+// of its numerical contract.
+constexpr bool
+phase83_gfx1030_bf16_prefill_64x64_shape(const uint64_t m, const uint64_t k,
+                                         const uint64_t n) noexcept {
+  return m >= 64U && ((k == UINT64_C(10240) && n == UINT64_C(5120)) ||
+                      (k == UINT64_C(5120) && n == UINT64_C(17408)) ||
+                      (k == UINT64_C(17408) && n == UINT64_C(5120)));
+}
+
+static_assert(!phase83_gfx1030_bf16_prefill_64x64_shape(63U, 5120U, 17408U));
+static_assert(phase83_gfx1030_bf16_prefill_64x64_shape(64U, 5120U, 17408U));
+static_assert(phase83_gfx1030_bf16_prefill_64x64_shape(65U, 5120U, 17408U));
+static_assert(phase83_gfx1030_bf16_prefill_64x64_shape(1024U, 10240U, 5120U));
+static_assert(phase83_gfx1030_bf16_prefill_64x64_shape(1024U, 17408U, 5120U));
+static_assert(!phase83_gfx1030_bf16_prefill_64x64_shape(64U, 5120U, 17407U));
+static_assert(!phase83_gfx1030_bf16_prefill_64x64_shape(64U, 4096U, 2560U));
+
 inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
                                     const uint64_t n,
                                     const char *const target) noexcept {
@@ -1690,6 +1860,10 @@ inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
         std::strcmp(disable_short_serial, "0") == 0) &&
       phase49_gfx1030_short_serial_shape(m, k, n)) {
     return KernelVariant::PrefillShortSerial;
+  }
+  if (target_is(target, "gfx1030") &&
+      phase83_gfx1030_bf16_prefill_64x64_shape(m, k, n)) {
+    return KernelVariant::Bf16PrefillGfx1030_64x64;
   }
   if (m > 1U && (target_is(target, "gfx1201") || target_is(target, "gfx942"))) {
     return KernelVariant::HipBlas;
@@ -1728,6 +1902,20 @@ static_assert(!fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 6143U));
 static_assert(!fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 6145U));
 static_assert(!fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 5120U));
 static_assert(!fp8_outer_decode_gfx1030_lds_lut_tuple_shape(2U, 5120U, 17408U));
+
+constexpr bool
+fp8_outer_decode_gfx1030_fused_m2_4_shape(const uint64_t m, const uint64_t k,
+                                          const uint64_t n) noexcept {
+  return m >= 2U && m <= 4U && k == UINT64_C(5120) &&
+         (n == UINT64_C(6144) || n == UINT64_C(10240) || n == UINT64_C(248320));
+}
+
+static_assert(fp8_outer_decode_gfx1030_fused_m2_4_shape(2U, 5120U, 6144U));
+static_assert(fp8_outer_decode_gfx1030_fused_m2_4_shape(4U, 5120U, 10240U));
+static_assert(fp8_outer_decode_gfx1030_fused_m2_4_shape(3U, 5120U, 248320U));
+static_assert(!fp8_outer_decode_gfx1030_fused_m2_4_shape(1U, 5120U, 10240U));
+static_assert(!fp8_outer_decode_gfx1030_fused_m2_4_shape(2U, 6144U, 10240U));
+static_assert(!fp8_outer_decode_gfx1030_fused_m2_4_shape(2U, 5120U, 10241U));
 
 constexpr bool fp8_outer_decode_gfx1030_activation_shared_wave4_shape(
     const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
@@ -2073,6 +2261,9 @@ select_fp8_outer_variant(const uint64_t m, const uint64_t k, const uint64_t n,
       std::strcmp(force_half2_64x64, "1") == 0) {
     return KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64;
   }
+  if (!fnuz && fp8_outer_decode_gfx1030_fused_m2_4_shape(m, k, n)) {
+    return KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4;
+  }
   const char *const force_half2 =
       std::getenv("SLLM_FP8_OUTER_PREFILL_FORCE_GFX1030_HALF2");
   if (force_half2 != nullptr && std::strcmp(force_half2, "1") == 0 &&
@@ -2161,6 +2352,13 @@ select_fp8_outer_decision(const uint64_t m, const uint64_t k, const uint64_t n,
         : adopted  ? kSelectorReasonAdopted
                    : kSelectorReasonForcedShape);
   }
+  case KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4: {
+    const bool supported = exact_gfx1030 && !fnuz &&
+                           fp8_outer_decode_gfx1030_fused_m2_4_shape(m, k, n);
+    return make_selector_decision(variant, supported, supported, supported,
+                                  supported ? kSelectorReasonAdopted
+                                            : kSelectorReasonUnsupported);
+  }
   case KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64: {
     const bool supported =
         exact_gfx1030 && !fnuz && m > 1U && k != 0U && n != 0U;
@@ -2222,6 +2420,9 @@ select_fp8_outer_decision(const uint64_t m, const uint64_t k, const uint64_t n,
 }
 
 constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
+  if (variant == KernelVariant::Bf16PrefillGfx1030_64x64) {
+    return kBf16PrefillGfx1030_64x64LogicalKernelId;
+  }
   if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double) {
     return kMxfp8W8A8PrefillGfx1030Half2_128x64K32DoubleLogicalKernelId;
   }
@@ -2239,6 +2440,9 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
   }
   if (variant == KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32) {
     return kFp8OuterDecodeGfx1030LdsLutLogicalKernelId;
+  }
+  if (variant == KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4) {
+    return kFp8OuterDecodeGfx1030FusedM2_4LogicalKernelId;
   }
   if (variant == KernelVariant::Nvfp4W4A4DecodeScaleLut) {
     return kNvfp4W4A4DecodeScaleLutLogicalKernelId;
@@ -2267,6 +2471,12 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
              ? kNvfp4W4A4PrefillRow8LogicalKernelId
          : variant == KernelVariant::Nvfp4W4A4PrefillRow8Col8Tiled256
              ? kNvfp4W4A4PrefillRow8Col8LogicalKernelId
+         : variant == KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan
+             ? kNvfp4W4A4PrefillGfx1201WmmaKahanLogicalKernelId
+         : variant == KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid
+             ? kNvfp4W4A4SmallMGfx1201RowGridLogicalKernelId
+         : variant == KernelVariant::Nvfp4W4A4PrefillCompensated64x64
+             ? "matmul.nvfp4.w4a4.block16.prefill.compensated64x64.v1"
          : variant == KernelVariant::Nvfp4W4A4PrefillDp4a64x64
              ? kNvfp4W4A4PrefillDp4a64x64LogicalKernelId
          : variant == KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64
@@ -2277,6 +2487,8 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
              ? kNvfp4W4A4DecodeWave4Column32LogicalKernelId
          : variant == KernelVariant::Nvfp4W4A4DecodeActivationShared
              ? kNvfp4W4A4DecodeActivationSharedLogicalKernelId
+         : variant == KernelVariant::Nvfp4W4A4SmallMRowGrid
+             ? "matmul.nvfp4.w4a4.small_m.rowgrid.v1"
          : variant == KernelVariant::Nvfp4W4A4DecodeScaleLut
              ? kNvfp4W4A4DecodeScaleLutLogicalKernelId
          : variant == KernelVariant::Nvfp4W4A4Packed ? kNvfp4W4A4LogicalKernelId
@@ -2347,6 +2559,9 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
 }
 
 constexpr const char *device_symbol(const KernelVariant variant) noexcept {
+  if (variant == KernelVariant::Bf16PrefillGfx1030_64x64) {
+    return kBf16PrefillGfx1030_64x64DeviceSymbol;
+  }
   if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double) {
     return kMxfp8W8A8PrefillGfx1030Half2_128x64K32DoubleDeviceSymbol;
   }
@@ -2364,6 +2579,9 @@ constexpr const char *device_symbol(const KernelVariant variant) noexcept {
   }
   if (variant == KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32) {
     return kFp8OuterDecodeGfx1030LdsLutDeviceSymbol;
+  }
+  if (variant == KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4) {
+    return kFp8OuterDecodeGfx1030FusedM2_4K5120N10240DeviceSymbol;
   }
   if (variant == KernelVariant::Nvfp4W4A4DecodeScaleLut) {
     return kNvfp4W4A4DecodeScaleLutDeviceSymbol;
@@ -2392,6 +2610,12 @@ constexpr const char *device_symbol(const KernelVariant variant) noexcept {
              ? kNvfp4W4A4PrefillRow8DeviceSymbol
          : variant == KernelVariant::Nvfp4W4A4PrefillRow8Col8Tiled256
              ? kNvfp4W4A4PrefillRow8Col8DeviceSymbol
+         : variant == KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan
+             ? kNvfp4W4A4PrefillGfx1201WmmaKahanDeviceSymbol
+         : variant == KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid
+             ? kNvfp4W4A4SmallMGfx1201RowGridDeviceSymbol
+         : variant == KernelVariant::Nvfp4W4A4PrefillCompensated64x64
+             ? "sllm_nvfp4_w4a4_prefill_compensated64x64_v1"
          : variant == KernelVariant::Nvfp4W4A4PrefillDp4a64x64
              ? kNvfp4W4A4PrefillDp4a64x64DeviceSymbol
          : variant == KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64
@@ -2402,6 +2626,8 @@ constexpr const char *device_symbol(const KernelVariant variant) noexcept {
              ? kNvfp4W4A4DecodeWave4Column32DeviceSymbol
          : variant == KernelVariant::Nvfp4W4A4DecodeActivationShared
              ? kNvfp4W4A4DecodeActivationSharedDeviceSymbol
+         : variant == KernelVariant::Nvfp4W4A4SmallMRowGrid
+             ? "sllm_nvfp4_w4a4_small_m_rowgrid_v1"
          : variant == KernelVariant::Nvfp4W4A4DecodeScaleLut
              ? kNvfp4W4A4DecodeScaleLutDeviceSymbol
          : variant == KernelVariant::Nvfp4W4A4Packed ? kNvfp4W4A4DeviceSymbol
@@ -2522,6 +2748,17 @@ inline const char *device_symbol_for_target(const KernelVariant variant,
     }
     return kFp8OuterDecodeGfx1030LdsLutK5120N10240DeviceSymbol;
   }
+  if (variant == KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
+      target_is(target, "gfx1030") &&
+      fp8_outer_decode_gfx1030_fused_m2_4_shape(m, k, n)) {
+    if (n == UINT64_C(6144)) {
+      return kFp8OuterDecodeGfx1030FusedM2_4K5120N6144DeviceSymbol;
+    }
+    if (n == UINT64_C(248320)) {
+      return kFp8OuterDecodeGfx1030FusedM2_4K5120N248320DeviceSymbol;
+    }
+    return kFp8OuterDecodeGfx1030FusedM2_4K5120N10240DeviceSymbol;
+  }
   return device_symbol_for_target(variant, target);
 }
 
@@ -2557,6 +2794,10 @@ constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
              ? static_cast<uint32_t>(
                    (n + kFp8OuterDecodeGfx1030Half2ColumnsPerWorkgroup - 1U) /
                    kFp8OuterDecodeGfx1030Half2ColumnsPerWorkgroup)
+         : variant == KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4
+             ? static_cast<uint32_t>(
+                   (n + kFp8OuterDecodeGfx1030Half2ColumnsPerWorkgroup - 1U) /
+                   kFp8OuterDecodeGfx1030Half2ColumnsPerWorkgroup)
          : variant ==
                  KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32
              ? static_cast<uint32_t>(
@@ -2577,9 +2818,13 @@ constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
              ? static_cast<uint32_t>(((m + 7U) / 8U) * n)
          : variant == KernelVariant::Nvfp4W4A4PrefillRow8Col8Tiled256
              ? static_cast<uint32_t>(((m + 7U) / 8U) * ((n + 7U) / 8U))
-         : variant == KernelVariant::Nvfp4W4A4PrefillDp4a64x64
+         : (variant == KernelVariant::Nvfp4W4A4PrefillDp4a64x64 ||
+            variant == KernelVariant::Nvfp4W4A4PrefillCompensated64x64)
              ? static_cast<uint32_t>(((m + 63U) / 64U) * ((n + 63U) / 64U))
-         : variant == KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64
+         : variant == KernelVariant::Bf16PrefillGfx1030_64x64
+             ? static_cast<uint32_t>(((m + 63U) / 64U) * ((n + 63U) / 64U))
+         : (variant == KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 ||
+            variant == KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan)
              ? static_cast<uint32_t>((n + 63U) / 64U)
          : variant == KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging
              ? static_cast<uint32_t>((m * n + kWorkgroupSize - 1U) /
@@ -2587,6 +2832,10 @@ constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
          : variant == KernelVariant::Nvfp4W4A4DecodeWave4Column32
              ? static_cast<uint32_t>((n + 31U) / 32U)
          : variant == KernelVariant::Nvfp4W4A4DecodeActivationShared
+             ? static_cast<uint32_t>((n + 31U) / 32U)
+         : variant == KernelVariant::Nvfp4W4A4SmallMRowGrid
+             ? static_cast<uint32_t>((n + 31U) / 32U)
+         : variant == KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid
              ? static_cast<uint32_t>((n + 31U) / 32U)
          : variant == KernelVariant::Nvfp4W4A4DecodeScaleLut
              ? static_cast<uint32_t>((n + 31U) / 32U)
@@ -2677,8 +2926,13 @@ constexpr uint32_t workgroup_size_x(const KernelVariant variant) noexcept {
                      KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201ViaE4M3N64 ||
                  variant ==
                      KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201Pack4N64 ||
-                 variant == KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64
+                 variant == KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 ||
+                 variant == KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan
              ? kMxfp8W8A8PrefillWmmaWorkgroupSize
+         : variant == KernelVariant::Nvfp4W4A4SmallMRowGrid
+             ? kNvfp4W4A4DecodeScaleLutWorkgroupSize
+         : variant == KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid
+             ? kNvfp4W4A4DecodeScaleLutWorkgroupSize
          : variant == KernelVariant::Nvfp4W4A4DecodeScaleLut
              ? kNvfp4W4A4DecodeScaleLutWorkgroupSize
          : variant == KernelVariant::Nvfp4W4A4DecodeWave4Column32
@@ -2690,6 +2944,8 @@ constexpr uint32_t workgroup_size_x(const KernelVariant variant) noexcept {
          : variant == KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32
              ? kFp8OuterDecodeGfx1030Half2WorkgroupSize
          : variant == KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32
+             ? kFp8OuterDecodeGfx1030LdsLutWorkgroupSize
+         : variant == KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4
              ? kFp8OuterDecodeGfx1030LdsLutWorkgroupSize
          : variant ==
                  KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32
@@ -2706,6 +2962,10 @@ static_assert(workgroup_size_x(
                   KernelVariant::Mxfp8W8A8PrefillWmmaN128DirectBoth) == 256U);
 static_assert(
     workgroup_size_x(KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64) == 256U);
+static_assert(
+    workgroup_size_x(KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan) == 256U);
+static_assert(workgroup_size_x(KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid) ==
+              256U);
 static_assert(workgroup_size_x(KernelVariant::Nvfp4W4A4DecodeScaleLut) ==
               kNvfp4W4A4DecodeScaleLutWorkgroupSize);
 static_assert(workgroup_size_x(KernelVariant::Nvfp4W4A4DecodeWave4Column32) ==
@@ -2719,6 +2979,10 @@ static_assert(
 static_assert(
     workgroup_size_x(KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32) ==
     kFp8OuterDecodeGfx1030LdsLutWorkgroupSize);
+static_assert(workgroup_size_x(KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4) ==
+              kFp8OuterDecodeGfx1030LdsLutWorkgroupSize);
+static_assert(grid_size_x(KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4, 2U,
+                          10240U, 5120U) == 320U);
 static_assert(
     workgroup_size_x(
         KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32) ==
@@ -2758,6 +3022,8 @@ static_assert(grid_size_x(KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64,
                           127U, 63U) == 1U);
 static_assert(grid_size_x(KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64,
                           129U, 65U) == 2U);
+static_assert(grid_size_x(KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan,
+                          1024U, 17408U) == 272U);
 static_assert(grid_size_x(KernelVariant::Nvfp4W4A4Packed, 2U, 7U) == 14U);
 static_assert(grid_size_x(KernelVariant::Fp8OuterPrefillTiled16, 17U, 17U) ==
               4U);
@@ -2793,6 +3059,14 @@ static_assert(grid_size_x(KernelVariant::Nvfp4W4A4DecodeScaleLut, 1U, 32U) ==
               1U);
 static_assert(grid_size_x(KernelVariant::Nvfp4W4A4DecodeScaleLut, 1U, 33U) ==
               2U);
+static_assert(grid_size_x(KernelVariant::Bf16PrefillGfx1030_64x64, 64U,
+                          17408U) == 272U);
+static_assert(grid_size_x(KernelVariant::Bf16PrefillGfx1030_64x64, 65U,
+                          17408U) == 544U);
+static_assert(grid_size_x(KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid, 2U,
+                          32U) == 1U);
+static_assert(grid_size_x(KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid, 4U,
+                          33U) == 2U);
 static_assert(grid_size_x(KernelVariant::Mxfp8W8A8PrefillWmmaN64, 128U, 15U) ==
               1U);
 static_assert(grid_size_x(KernelVariant::Mxfp8W8A8PrefillWmmaN64, 128U, 16U) ==
@@ -2899,6 +3173,11 @@ hipError_t launch_fp8_outer_decode_gfx1030_lds_lut_k5120n10240(
     uint64_t m, uint64_t k, uint64_t n, hipStream_t stream) noexcept;
 
 hipError_t launch_fp8_outer_decode_gfx1030_lds_lut_k5120n6144(
+    const uint8_t *activation, const float *activation_scales,
+    const uint8_t *weight, const float *weight_scales, uint16_t *output,
+    uint64_t m, uint64_t k, uint64_t n, hipStream_t stream) noexcept;
+
+hipError_t launch_fp8_outer_decode_gfx1030_fused_m2_4(
     const uint8_t *activation, const float *activation_scales,
     const uint8_t *weight, const float *weight_scales, uint16_t *output,
     uint64_t m, uint64_t k, uint64_t n, hipStream_t stream) noexcept;

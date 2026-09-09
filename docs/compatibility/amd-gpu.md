@@ -1,6 +1,6 @@
 # AMD GPU互換性方針
 
-> 最終更新: 2026-09-02
+> 最終更新: 2026-09-09
 >
 > この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1とPhase 6 A0 HIP VMM PoCは検証した限定範囲だけ`project-verified`とする。Phase 49のGQA P32とPhase 67のMXFP8 col8はexact `gfx1030`限定、Phase 50のResidual/GDN/MLP/P32、Phase 63のlarge-M MXFP8 WMMA、Phase 64／65のoperand direct-load、Phase 66のN128 ID37と低精度provider移植はexact `gfx1201`の狭いscope限定であり、target全体やSKU全体の昇格ではない。
 
@@ -827,3 +827,21 @@ MXFP8へ拡張せず、既存の汎用量子化KV経路を使用する。GPU/SKU
 HTTP greedy decodeは固定36/128の探索測定で7.881から19.922 tok/sへ改善し、
 生成・SSE・sampling・キャンセル後の再利用・終了時GPU memory0を確認した。
 [高速経路の配置記録](../history/2026/09/1-10/qwen38-r9700-server-fastpath.md)を現在の配置状態とする。
+
+### 2026-09-09 Phase83 exact `gfx1201` VMM alias診断と通常KV resident選択
+
+canonical R9700、exact `gfx1201`、既存local ROCm 7.14 tupleのscratch r22は、別live KV stateの破壊を後段layerの
+VMM grow直後かつappend kernel前へ局所化した。ROCm内部の根本原因は未確定である。
+
+現在のRust HIP adapterでは、sliding windowなしの通常KV stateをexact `gfx1201`で作る場合、logical capacityと
+FP16／FP8／MXFP8／NVFP4 encodingにかかわらず`contiguous-resident`をcreate時に明示選択する。この境界は
+R9700 SKUを含むexact `gfx1201`だけであり、gfx1200やRDNA4全体へ広げない。exact `gfx1030`はcapacity 65,536以上、
+exact `gfx942`は全capacityという既存resident policyを維持する。direct native C ABIの`CAPABILITY_SELECTED`、明示
+`VIRTUAL_CONTIGUOUS`、sliding stateはVMM経路のままであり、provider failure後のretryやCPU/GTT fallbackは追加しない。
+
+同じ履歴をresidentで実行したscratch r23は8,192入力／128出力で4 plane、finite replay、HIP-only、fallbackなし、cleanup 0を
+維持した。main作業ツリーの両target buildとKV host test 28件に加え、診断なしr25のR9700既定CLI/APIでも
+8,192入力／128出力、MTP 113候補／70採用、HIP-only、正常終了を確認した。r26のR9700対話も成功した。
+V620 r26でもCLI/APIの8,192入力／128出力と対話が成功し、遅延観測でVRAM／GTTのbaseline復帰を確認した。公開結果は当該commitのGitHub Checksで確認する。lifecycleは`experimental`を維持し、この結果を別SKU、別driver/runtime tuple、sliding／direct ABI VMM、
+別modelへ一般化しない。詳細は[Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)と
+[数値変更台帳](numerical-output-changes.md)に記録する。

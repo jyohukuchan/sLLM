@@ -134,6 +134,11 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1 UINT32_C(1)
 #define SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2 UINT32_C(2)
+#define SLLM_HIP_MATMUL_KERNEL_ID_BF16_PREFILL_GFX1030_64X64_K32_TRANSPOSED_V1 \
+  UINT32_C(91)
+/* Phase 83 gfx1030 FP8 outer E4M3 fused M=2..4 provider for the measured
+ * Qwen3.8 K=5120 projection and lm-head shapes.  M=1 remains on ID82/ID68. */
+#define SLLM_HIP_MATMUL_KERNEL_ID_FP8_OUTER_GFX1030_FUSED_M2_4_V1 UINT32_C(92)
 #define SLLM_HIP_MATMUL_KERNEL_ID_DECODE_BF16_FP32_V2 UINT32_C(3)
 #define SLLM_HIP_MATMUL_KERNEL_ID_HIPBLAS_DECODE_V1 UINT32_C(4)
 #define SLLM_HIP_MATMUL_KERNEL_ID_HIPBLAS_BF16_FP32_V2 UINT32_C(4)
@@ -429,6 +434,17 @@ typedef uint32_t sllm_deepseek_v4_moe_route_mode_t;
  * explicit opt-in and is never selected for gfx1201. */
 #define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_SPLIT_P128_GFX1030_V1         \
   UINT32_C(78)
+/* Phase 83 gfx1030 MXFP8 E4 M=1 decode wave-split staged provider.  Stage 1
+ * publishes the same eight contiguous interval partials as the v5 provider;
+ * stage 2 performs the existing ordered merge from request-owned workspace. */
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_GFX1030_V1 \
+  UINT32_C(80)
+/* Phase 83 gfx1030/gfx1201 MXFP8 E4 Qwen3.8 decode provider.  Stage 1
+ * publishes thirty-two interval partials and stage 2 performs the ordered
+ * merge from request-owned FP32 workspace.  This is opt-in until public GPU
+ * evidence is complete. */
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_V1        \
+  UINT32_C(93)
 #define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE UINT32_C(256)

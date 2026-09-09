@@ -90,6 +90,7 @@ pub struct QwenExecutionOutput {
     token_ids: Vec<i32>,
     last_logits: Option<Vec<f32>>,
     selection: Option<SamplingSelectionV1>,
+    selections: Option<Vec<SamplingSelectionV1>>,
     logits_bf16: Option<Vec<u16>>,
     hidden_states_bf16: Option<Vec<u16>>,
     /// Final-RMSNorm output rows used by the explicit embedding execution
@@ -1564,6 +1565,13 @@ impl QwenExecutionOutput {
         self.selection()
     }
 
+    /// Selection records for a batched target-verification transition. The
+    /// records are row ordered and are present only on the explicit MTP
+    /// speculative route; ordinary transitions continue to expose `selection`.
+    pub fn selections(&self) -> Option<&[SamplingSelectionV1]> {
+        self.selections.as_deref()
+    }
+
     /// All target-logit rows in row-major BF16, published only by the
     /// explicit Phase 18 exactness hooks.
     pub fn logits_bf16(&self) -> Option<&[u16]> {
@@ -1981,6 +1989,112 @@ impl QwenResidentModel {
         let source = Qwen38Nvfp4ProvisionSource { artifact };
         let inner =
             QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Provision the BF16 Qwen3.8 MTP companion graph.  The companion plan
+    /// contains only its fifteen MTP tensors plus the shared embedding/head;
+    /// the exact mixed artifact source performs the same range and identity
+    /// checks as the target resident constructor.
+    pub fn new_unsloth_qwen38_nvfp4_mtp(
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        artifact: Arc<crate::VerifiedUnslothQwen38Nvfp4>,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        if completion_timeout.is_zero()
+            || !graph.is_mtp()
+            || plan.schema_version != "qwen38-nvfp4-mtp-plan-v1"
+            || graph.fp8_sidecar_fingerprint() != Some(artifact.recipe_digest())
+            || plan.lock_fingerprint != graph.model_fingerprint()
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Qwen3.8 MTP artifact, graph, and companion-plan identities differ".to_owned(),
+            ));
+        }
+        for binding in graph.weight_bindings() {
+            let descriptor = artifact.tensor(binding.tensor_name()).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "Qwen3.8 MTP artifact is missing graph weight {}",
+                    binding.tensor_name()
+                ))
+            })?;
+            if descriptor.logical_shape.as_slice() != binding.shape()
+                || descriptor.value_range != binding.source_range()
+            {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "Qwen3.8 MTP artifact and graph source binding differ: {}",
+                    binding.tensor_name()
+                )));
+            }
+        }
+        let source = Qwen38Nvfp4ProvisionSource { artifact };
+        let inner =
+            QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Provision a Qwen3.8 MTP companion while borrowing the target
+    /// resident's embedding and untied FP8 output projection. The target is
+    /// retained by the companion for the lifetime of every request created
+    /// from it; only companion-specific tensors are newly allocated.
+    pub fn new_unsloth_qwen38_nvfp4_mtp_shared(
+        target: &QwenResidentModel,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        artifact: Arc<crate::VerifiedUnslothQwen38Nvfp4>,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        if completion_timeout.is_zero()
+            || !graph.is_mtp()
+            || plan.schema_version != "qwen38-nvfp4-mtp-plan-v1"
+            || graph.fp8_sidecar_fingerprint() != Some(artifact.recipe_digest())
+            || plan.lock_fingerprint != graph.model_fingerprint()
+            || target.inner.model_fingerprint != graph.model_fingerprint()
+            || target.inner.fp8_sidecar_fingerprint.as_deref() != Some(artifact.recipe_digest())
+            || target
+                .inner
+                .qwen38_artifact
+                .as_ref()
+                .is_none_or(|existing| existing.recipe_digest() != artifact.recipe_digest())
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Qwen3.8 target, MTP graph, artifact, and companion-plan identities differ"
+                    .to_owned(),
+            ));
+        }
+        for binding in graph.weight_bindings() {
+            let descriptor = artifact.tensor(binding.tensor_name()).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "Qwen3.8 MTP artifact is missing graph weight {}",
+                    binding.tensor_name()
+                ))
+            })?;
+            if descriptor.logical_shape.as_slice() != binding.shape()
+                || descriptor.value_range != binding.source_range()
+            {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "Qwen3.8 MTP artifact and graph source binding differ: {}",
+                    binding.tensor_name()
+                )));
+            }
+        }
+        let source = Qwen38Nvfp4ProvisionSource {
+            artifact: Arc::clone(&artifact),
+        };
+        let inner = QwenResidentInner::provision_shared(
+            Arc::clone(&target.inner.session),
+            graph,
+            plan,
+            completion_timeout,
+            &source,
+            Arc::clone(&target.inner),
+        )?;
         Ok(Self {
             inner: Arc::new(inner),
         })
@@ -2490,6 +2604,18 @@ impl QwenExecutionRequest {
         self.core.prefill_with_mtp_state(token_ids)
     }
 
+    /// Target prefill with MTP hidden rows and one fixed device-sampler
+    /// record. This keeps the target distribution on device while retaining
+    /// the hidden rows needed to prime the BF16 companion request.
+    pub fn prefill_with_mtp_state_and_device_selector(
+        &mut self,
+        token_ids: &[i32],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core
+            .prefill_with_mtp_state_and_device_selector(token_ids, selector)
+    }
+
     /// Runs the verified Qwen prefill route in explicit embedding mode.  The
     /// final normalized hidden rows are read back in BF16; LM-head/Argmax
     /// output is not read back and no generation token is published.
@@ -2567,6 +2693,16 @@ impl QwenExecutionRequest {
         self.core.decode_with_mtp_state(token_id)
     }
 
+    /// Target decode with MTP hidden state and a fixed device-sampler record.
+    pub fn decode_with_mtp_state_and_device_selector(
+        &mut self,
+        token_id: i32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core
+            .decode_with_mtp_state_and_device_selector(token_id, selector)
+    }
+
     /// Evidence-only exactness hook: returns the raw BF16 target-logit row in
     /// addition to the MTP hidden row.
     pub fn decode_with_mtp_state_and_logits(
@@ -2588,6 +2724,18 @@ impl QwenExecutionRequest {
         token_ids: &[i32],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.core.decode_block_with_mtp_state(token_ids)
+    }
+
+    /// Verifies a target block while running one fixed device selector for
+    /// every logits row. Selectors are ordered with `token_ids`; the returned
+    /// records contain no host vocabulary transfer.
+    pub fn decode_block_with_mtp_state_and_device_selectors(
+        &mut self,
+        token_ids: &[i32],
+        selectors: &[DeviceTokenSelectorRequestV1],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core
+            .decode_block_with_mtp_state_and_device_selectors(token_ids, selectors)
     }
 
     /// Evidence-only exactness hook: returns every raw BF16 target-logit row
@@ -2623,14 +2771,25 @@ impl QwenExecutionRequest {
         self.core.kv_payload_bytes_for_evidence()
     }
 
-    /// Runs one MTP row. `target_hidden_bf16` must contain exactly 2560 BF16
-    /// values and the graph must expose the typed MTP hidden input.
+    /// Runs one MTP row. `target_hidden_bf16` must contain exactly one BF16
+    /// hidden row for the graph's typed MTP hidden input.
     pub fn prefill_mtp(
         &mut self,
         token_id: i32,
         target_hidden_bf16: &[u16],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.core.prefill_mtp(token_id, target_hidden_bf16)
+    }
+
+    /// Primes one MTP state row without running the companion LM head. This
+    /// is used for prompt catch-up, where no draft token is published.
+    pub fn prefill_mtp_state_only(
+        &mut self,
+        token_id: i32,
+        target_hidden_bf16: &[u16],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core
+            .prefill_mtp_state_only(token_id, target_hidden_bf16)
     }
 
     pub fn decode_mtp(
@@ -2641,8 +2800,37 @@ impl QwenExecutionRequest {
         self.core.decode_mtp(token_id, target_hidden_bf16)
     }
 
+    /// Runs one MTP draft transition with the fixed device selector. The
+    /// hidden row remains available for the next draft transition while the
+    /// selector returns only its compact selected record.
+    pub fn decode_mtp_with_device_selector(
+        &mut self,
+        token_id: i32,
+        target_hidden_bf16: &[u16],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core
+            .decode_mtp_with_device_selector(token_id, target_hidden_bf16, selector)
+    }
+
+    /// Advances several MTP state rows without evaluating the companion LM
+    /// head. `target_hidden_bf16` is row-major and must contain one hidden row
+    /// per input token.
+    pub fn decode_mtp_state_only_batch(
+        &mut self,
+        token_ids: &[i32],
+        target_hidden_bf16: &[u16],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core
+            .decode_mtp_state_only_batch(token_ids, target_hidden_bf16)
+    }
+
     pub const fn committed_length(&self) -> u64 {
         self.core.committed_length
+    }
+
+    pub const fn state_capacity(&self) -> u64 {
+        self.core.graph.state_capacity()
     }
 
     pub const fn prefill_chunk_capacity(&self) -> u64 {
@@ -2670,6 +2858,25 @@ impl QwenExecutionRequest {
 
     pub fn model_fingerprint(&self) -> &str {
         self.core.graph.model_fingerprint()
+    }
+
+    /// Returns the BF16 hidden width exposed by this graph's MTP input or
+    /// embedding row. Frontends use this instead of assuming the Qwen3.5-4B
+    /// width when attaching a Qwen3.8 companion graph.
+    pub fn mtp_hidden_width(&self) -> Result<usize, QwenExecutionError> {
+        self.core
+            .graph
+            .tensor_metadata()
+            .iter()
+            .find(|tensor| {
+                tensor.name() == "input.target_hidden" || tensor.name() == "embedding.output"
+            })
+            .and_then(|tensor| tensor.view().shape().get(1).copied())
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "Qwen graph does not expose a hidden-width tensor".to_owned(),
+                )
+            })
     }
 
     pub fn plan_digest(&self) -> &[u8; 32] {
@@ -2834,6 +3041,9 @@ struct QwenResidentInner {
     static_tensors: BTreeMap<String, TensorAllocation>,
     scales: BTreeMap<String, CachedScale>,
     qwen38_artifact: Option<Arc<crate::VerifiedUnslothQwen38Nvfp4>>,
+    /// Keeps the target resident alive when a Qwen3.8 MTP companion borrows
+    /// its embedding and untied output-projection buffers.
+    _shared_target: Option<Arc<QwenResidentInner>>,
     completion_timeout: Duration,
 }
 
@@ -2867,6 +3077,7 @@ struct QwenExecutionCore {
     // Graph payloads release before cached plans, buffers and the queue.
     graph_replay: Mutex<PreparedGraphReplayState>,
     device_sampling: Mutex<Option<DeviceSamplingBuffers>>,
+    selector_batch: Option<Vec<DeviceTokenSelectorRequestV1>>,
     graph_collect_node: AtomicBool,
     qwen38_graph_spans_enabled: bool,
     session: Arc<ExecutionSession>,
@@ -2988,6 +3199,7 @@ fn select_terminal_output_rows(
 struct TerminalSelection {
     token_ids: Vec<i32>,
     selection: Option<SamplingSelectionV1>,
+    selections: Option<Vec<SamplingSelectionV1>>,
 }
 
 const TERMINAL_ROW_MIN_TOKENS: u64 = 255;
@@ -4231,6 +4443,31 @@ fn normalize_gguf_fp8_scales(
     }
 }
 
+fn validate_hidden_row_view(
+    view: &TensorView,
+    rows: usize,
+    label: &str,
+) -> Result<usize, QwenExecutionError> {
+    let shape = view.shape();
+    let hidden_width = shape.get(1).copied().ok_or_else(|| {
+        QwenExecutionError::InvalidGraph(format!(
+            "{label} must be rank-2 BF16, got shape {shape:?}"
+        ))
+    })?;
+    if shape.len() != 2
+        || shape[0] != rows
+        || view.dtype() != DType::Bf16
+        || view.encoding() != Encoding::Unquantized
+        || !view.is_contiguous()
+    {
+        return Err(QwenExecutionError::InvalidGraph(format!(
+            "{label} must be contiguous unquantized BF16 [{rows},hidden], got {:?}",
+            view.shape()
+        )));
+    }
+    Ok(hidden_width)
+}
+
 impl QwenProvisionSource for Fp8ProvisionSource {
     fn upload_weight(
         &self,
@@ -4891,6 +5128,156 @@ impl QwenResidentInner {
             static_tensors,
             scales,
             qwen38_artifact,
+            _shared_target: None,
+            completion_timeout,
+        })
+    }
+
+    fn provision_shared<S: QwenProvisionSource>(
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        completion_timeout: Duration,
+        source: &S,
+        shared_target: Arc<QwenResidentInner>,
+    ) -> Result<Self, QwenExecutionError> {
+        if !Arc::ptr_eq(&session, &shared_target.session) {
+            return Err(QwenExecutionError::InvalidRequest(
+                "shared Qwen3.8 MTP target uses a different execution session".to_owned(),
+            ));
+        }
+        let qwen38_artifact = source.qwen38_artifact();
+        let layout = validate_graph_plan(&graph, &plan)?;
+        preflight_semantic_support(session.as_ref(), &graph)?;
+        let total_memory =
+            session
+                .total_memory_bytes()?
+                .unwrap_or(session.available_memory_bytes()?.ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "backend did not report device memory for shared MTP placement".to_owned(),
+                    )
+                })?);
+        let estimate = memory_estimate_from_layout(&graph, &layout, total_memory)?;
+        let shared_model_bytes = graph
+            .tensor_metadata()
+            .iter()
+            .filter(|tensor| {
+                tensor.backing() == QwenGraphTensorBacking::Owned
+                    && !layout.dynamic_tensors[tensor.id()]
+                    && shared_target.static_tensors.contains_key(tensor.name())
+            })
+            .try_fold(0_u64, |total, tensor| {
+                total
+                    .checked_add(
+                        tensor
+                            .view()
+                            .byte_offset()
+                            .checked_add(resident_weight_bytes(tensor.view())?)
+                            .ok_or_else(|| {
+                                QwenExecutionError::InvalidGraph(
+                                    "shared MTP model byte count overflowed".to_owned(),
+                                )
+                            })?,
+                    )
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(
+                            "shared MTP model byte count overflowed".to_owned(),
+                        )
+                    })
+            })?;
+        let placement_required = estimate
+            .required_bytes
+            .checked_sub(shared_model_bytes)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "shared MTP placement byte count underflowed".to_owned(),
+                )
+            })?;
+        if let Some(available) = session.available_memory_bytes()? {
+            if placement_required > available {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "shared Qwen3.8 MTP placement requires {placement_required} bytes after shared weights, but only {available} bytes are available"
+                )));
+            }
+        }
+        let queue = session.create_queue()?;
+        // Borrow matching target allocations from the start.  Allocating a
+        // complete companion first would temporarily duplicate the large
+        // embedding/output tensors and can fail before the replacement below
+        // gets a chance to release them.
+        let static_tensors = allocate_resident_tensors_with_shared(
+            &session,
+            &graph,
+            &layout,
+            Some(&shared_target.static_tensors),
+        )?;
+        let mut uploaded = BTreeSet::new();
+        for binding in graph.weight_bindings() {
+            let name = binding.tensor_name();
+            let allocation = static_tensors.get(name).ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("resident weight allocation is absent".to_owned())
+            })?;
+            if let Some(shared) = shared_target.static_tensors.get(name) {
+                if allocation.graph_view.dtype() != shared.graph_view.dtype()
+                    || allocation.graph_view.encoding() != shared.graph_view.encoding()
+                    || allocation.graph_view.shape() != shared.graph_view.shape()
+                    || allocation.graph_view.strides() != shared.graph_view.strides()
+                    || allocation.graph_view.byte_offset() != shared.graph_view.byte_offset()
+                {
+                    return Err(QwenExecutionError::InvalidGraph(format!(
+                        "shared target tensor view differs from MTP graph: {name}"
+                    )));
+                }
+                continue;
+            }
+            if !uploaded.insert(name.to_owned()) {
+                return Err(QwenExecutionError::InvalidGraph(format!(
+                    "required MTP weight is represented more than once: {name}"
+                )));
+            }
+            let destination = allocation.buffer.range(
+                allocation.graph_view.byte_offset(),
+                resident_weight_bytes(&allocation.graph_view)?,
+            )?;
+            source.upload_weight_for_resident_dtype(
+                &plan,
+                binding,
+                session.as_ref(),
+                &queue,
+                destination,
+                allocation.graph_view.dtype(),
+                completion_timeout,
+            )?;
+        }
+        let scales = provision_resident_scales(
+            source,
+            &session,
+            &queue,
+            &graph,
+            &static_tensors,
+            &layout.scales,
+            completion_timeout,
+        )?;
+        let mut scales = scales
+            .into_iter()
+            .map(|(tensor_id, scale)| (graph.tensor_metadata()[tensor_id].name().to_owned(), scale))
+            .collect::<BTreeMap<_, _>>();
+        for (name, shared) in &shared_target.scales {
+            if scales.contains_key(name) {
+                scales.insert(name.clone(), shared.clone());
+            }
+        }
+        validate_resident_graph(&graph, &layout, &static_tensors, &scales)?;
+        Ok(Self {
+            session,
+            model_fingerprint: graph.model_fingerprint().to_owned(),
+            fp8_sidecar_fingerprint: graph.fp8_sidecar_fingerprint().map(str::to_owned),
+            plan: Arc::new(plan),
+            queue,
+            static_tensors,
+            scales,
+            qwen38_artifact,
+            _shared_target: Some(shared_target),
             completion_timeout,
         })
     }
@@ -5334,13 +5721,17 @@ impl QwenExecutionCore {
         let qwen38_deferred_completion =
             qwen38_deferred_completion_enabled(resident.session.as_ref(), &graph, &adapters);
         let qwen38_kv_append_attention_chain = qwen38_kv_append_attention_chain_enabled(resident.session.as_ref(), &graph, &adapters)
-                // The chain candidate currently has only the FP16-KV kernel
-                // contract.  Keep the resident selector closed for graphs
-                // carrying any quantized KV state; those requests use the
-                // ordinary append/fence/attention route.
+                // The chain candidate has the FP16 and standard OCP MXFP8 E4
+                // append/attention contracts. Other physical KV encodings
+                // remain on the ordinary append/fence/attention route.
                 && kv_states
                     .values()
-                    .all(|state| state.descriptor().cache_encoding() == KvCacheEncoding::Fp16);
+                    .all(|state| {
+                        matches!(
+                            state.descriptor().cache_encoding(),
+                            KvCacheEncoding::Fp16 | KvCacheEncoding::Mxfp8E4
+                        )
+                    });
         let queue = if qwen38_deferred_completion || qwen38_kv_append_attention_chain {
             resident.session.create_queue()?
         } else {
@@ -5397,6 +5788,7 @@ impl QwenExecutionCore {
         let core = Self {
             graph_replay: Mutex::new(PreparedGraphReplayState::default()),
             device_sampling: Mutex::new(None),
+            selector_batch: None,
             graph_collect_node: AtomicBool::new(false),
             qwen38_graph_spans_enabled,
             session: Arc::clone(&resident.session),
@@ -6233,6 +6625,7 @@ impl QwenExecutionCore {
             short_terminal_last_row: false,
             graph_replay: Mutex::new(PreparedGraphReplayState::default()),
             device_sampling: Mutex::new(None),
+            selector_batch: None,
             graph_collect_node: AtomicBool::new(false),
             qwen38_graph_spans_enabled: false,
             qwen38_deferred_completion: false,
@@ -6314,6 +6707,19 @@ impl QwenExecutionCore {
         self.prefill_impl(token_ids, true, true, None, None, None)
     }
 
+    fn prefill_with_mtp_state_and_device_selector(
+        &mut self,
+        token_ids: &[i32],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if self.graph.is_mtp() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "target MTP-state selector requires the text target graph".to_owned(),
+            ));
+        }
+        self.prefill_impl(token_ids, false, true, None, None, Some(selector))
+    }
+
     fn prefill_with_embeddings(
         &mut self,
         token_ids: &[i32],
@@ -6358,8 +6764,19 @@ impl QwenExecutionCore {
         }
 
         let chunk_count = token_ids.len().div_ceil(chunk_capacity);
+        let hidden_width = self
+            .graph
+            .tensor_metadata()
+            .iter()
+            .find(|tensor| tensor.name() == "embedding.output")
+            .and_then(|tensor| tensor.view().shape().get(1).copied())
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "embedding output does not expose a hidden width".to_owned(),
+                )
+            })?;
         let mut all_embeddings = Vec::new();
-        let expected_words = token_ids.len().checked_mul(2_560).ok_or_else(|| {
+        let expected_words = token_ids.len().checked_mul(hidden_width).ok_or_else(|| {
             QwenExecutionError::InvalidRequest("embedding output size overflowed".to_owned())
         })?;
         all_embeddings.try_reserve(expected_words).map_err(|_| {
@@ -6434,6 +6851,56 @@ impl QwenExecutionCore {
             None,
             None,
         )
+    }
+
+    fn prefill_mtp_state_only(
+        &mut self,
+        token_id: i32,
+        target_hidden_bf16: &[u16],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if self.committed_length != 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "MTP state-only prefill is only valid before the first committed transition"
+                    .to_owned(),
+            ));
+        }
+        let hidden_width = self
+            .graph
+            .tensor_metadata()
+            .iter()
+            .find(|tensor| tensor.name() == "input.target_hidden")
+            .and_then(|tensor| tensor.view().shape().get(1).copied())
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "MTP graph does not expose target hidden width".to_owned(),
+                )
+            })?;
+        if target_hidden_bf16.len() != hidden_width {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "MTP hidden row has {} values, expected {hidden_width}",
+                target_hidden_bf16.len()
+            )));
+        }
+        // State-only priming must bypass the companion MTP head entirely. In
+        // particular, `prefill_impl(..., emit_terminal=true)` would still
+        // lower the projection and sampler even when logits are discarded.
+        let output = self.run_transition(
+            &[token_id],
+            AttentionPreprocessPositionMode::Prefill,
+            false,
+            false,
+            false,
+            false,
+            Some(target_hidden_bf16),
+            None,
+            false,
+            None,
+        )?;
+        self.prefill_chunk_count = 1;
+        Ok(output)
     }
 
     fn prefill_impl(
@@ -6577,6 +7044,19 @@ impl QwenExecutionCore {
         self.decode_impl(token_id, false, true, true, None, None)
     }
 
+    fn decode_with_mtp_state_and_device_selector(
+        &mut self,
+        token_id: i32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if self.graph.is_mtp() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "target MTP-state selector requires the text target graph".to_owned(),
+            ));
+        }
+        self.decode_impl(token_id, false, false, true, None, Some(selector))
+    }
+
     fn decode_block_with_mtp_state(
         &mut self,
         token_ids: &[i32],
@@ -6616,6 +7096,31 @@ impl QwenExecutionCore {
             token_ids: token_ids.to_vec(),
         });
         Ok(output)
+    }
+
+    fn decode_block_with_mtp_state_and_device_selectors(
+        &mut self,
+        token_ids: &[i32],
+        selectors: &[DeviceTokenSelectorRequestV1],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if token_ids.len() != selectors.len() || selectors.is_empty() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "batched MTP selectors must match the target block rows".to_owned(),
+            ));
+        }
+        let vocab = selectors[0].vocab_size();
+        if selectors
+            .iter()
+            .any(|selector| selector.vocab_size() != vocab)
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "batched MTP selectors changed vocabulary".to_owned(),
+            ));
+        }
+        self.selector_batch = Some(selectors.to_vec());
+        let result = self.decode_block_with_mtp_state(token_ids);
+        self.selector_batch = None;
+        result
     }
 
     fn decode_block_with_mtp_state_and_logits(
@@ -6773,6 +7278,85 @@ impl QwenExecutionCore {
         target_hidden_bf16: &[u16],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.decode_impl(token_id, true, false, true, Some(target_hidden_bf16), None)
+    }
+
+    fn decode_mtp_with_device_selector(
+        &mut self,
+        token_id: i32,
+        target_hidden_bf16: &[u16],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.decode_impl(
+            token_id,
+            false,
+            false,
+            true,
+            Some(target_hidden_bf16),
+            Some(selector),
+        )
+    }
+
+    fn decode_mtp_state_only_batch(
+        &mut self,
+        token_ids: &[i32],
+        target_hidden_bf16: &[u16],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if token_ids.is_empty() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "MTP state batch requires at least one token".to_owned(),
+            ));
+        }
+        let capacity = usize::try_from(self.graph.token_count()).map_err(|_| {
+            QwenExecutionError::InvalidGraph(
+                "MTP graph token capacity does not fit usize".to_owned(),
+            )
+        })?;
+        if token_ids.len() > capacity {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "MTP state batch has {} rows but graph capacity is {capacity}",
+                token_ids.len()
+            )));
+        }
+        let hidden_width = self
+            .graph
+            .tensor_metadata()
+            .iter()
+            .find(|tensor| tensor.name() == "input.target_hidden")
+            .and_then(|tensor| tensor.view().shape().get(1).copied())
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "MTP graph does not expose target hidden width".to_owned(),
+                )
+            })?;
+        let expected = token_ids.len().checked_mul(hidden_width).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("MTP hidden row count overflowed".to_owned())
+        })?;
+        if target_hidden_bf16.len() != expected {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "MTP hidden rows have {} values, expected {expected}",
+                target_hidden_bf16.len()
+            )));
+        }
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if self.committed_length == 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "MTP state batch decode requires a committed prefill".to_owned(),
+            ));
+        }
+        self.run_transition(
+            token_ids,
+            AttentionPreprocessPositionMode::DecodeContinuation,
+            false,
+            false,
+            false,
+            false,
+            Some(target_hidden_bf16),
+            None,
+            false,
+            None,
+        )
     }
 
     fn decode_impl(
@@ -7018,6 +7602,7 @@ impl QwenExecutionCore {
             token_ids: output.token_ids,
             last_logits,
             selection: output.selection,
+            selections: output.selections,
             logits_bf16,
             hidden_states_bf16,
             embeddings_bf16: None,
@@ -7128,6 +7713,15 @@ impl QwenExecutionCore {
                 self.current_node_ordinal
                     .store(node_ordinal, Ordering::Release);
                 let node = planned.operation();
+                if self.graph.is_mtp()
+                    && !qwen_mtp_row_copy_is_active(node.label(), transition.token_count())
+                {
+                    // The Qwen3.8 MTP graph has one contiguous copy pair per
+                    // graph row. A short runtime transition owns only its
+                    // prefix of the fusion workspace; inactive row copies
+                    // would otherwise address rows beyond that view.
+                    return Ok(());
+                }
                 self.graph_collect_node.store(false, Ordering::Release);
                 if let Some(spans) = replay_spans.as_ref() {
                     if replay_skip_through.is_some_and(|last| node_ordinal <= last) {
@@ -7293,6 +7887,7 @@ impl QwenExecutionCore {
             return Ok(TerminalSelection {
                 token_ids: Vec::new(),
                 selection: None,
+                selections: None,
             });
         }
         if let Some(argmax) = argmax {
@@ -7512,22 +8107,11 @@ impl QwenExecutionCore {
         let hidden_id = *final_norm.inputs().first().ok_or_else(|| {
             QwenExecutionError::InvalidGraph("final RMSNorm hidden input is absent".to_owned())
         })?;
+        let rows = usize::try_from(token_count).map_err(|_| {
+            QwenExecutionError::InvalidRequest("hidden token count does not fit usize".to_owned())
+        })?;
         let view = self.view(hidden_id, token_count)?;
-        if view.dtype() != DType::Bf16
-            || view.shape()
-                != [
-                    usize::try_from(token_count).map_err(|_| {
-                        QwenExecutionError::InvalidRequest(
-                            "hidden token count does not fit usize".to_owned(),
-                        )
-                    })?,
-                    2_560,
-                ]
-        {
-            return Err(QwenExecutionError::InvalidGraph(
-                "MTP hidden hook requires BF16 [tokens,2560] before final RMSNorm".to_owned(),
-            ));
-        }
+        validate_hidden_row_view(&view, rows, "MTP hidden hook")?;
         let allocation = self.tensors.get(hidden_id).ok_or_else(|| {
             QwenExecutionError::InvalidGraph("hidden state allocation is absent".to_owned())
         })?;
@@ -7584,17 +8168,9 @@ impl QwenExecutionCore {
             )
         })?;
         let view = self.view(output_id, token_count)?;
-        if view.dtype() != DType::Bf16
-            || view.encoding() != Encoding::Unquantized
-            || view.shape() != [rows, 2_560]
-            || !view.is_contiguous()
-        {
-            return Err(QwenExecutionError::InvalidGraph(
-                "embedding final RMSNorm output must be contiguous BF16 [tokens,2560]".to_owned(),
-            ));
-        }
+        let hidden_width = validate_hidden_row_view(&view, rows, "embedding final RMSNorm output")?;
         let expected_bytes = rows
-            .checked_mul(2_560)
+            .checked_mul(hidden_width)
             .and_then(|words| words.checked_mul(2))
             .ok_or_else(|| {
                 QwenExecutionError::InvalidRequest("embedding readback size overflowed".to_owned())
@@ -8086,6 +8662,7 @@ impl QwenExecutionCore {
         Ok(Some(TerminalSelection {
             token_ids: decode_argmax_bytes(&bytes)?,
             selection: None,
+            selections: None,
         }))
     }
 
@@ -8097,6 +8674,68 @@ impl QwenExecutionCore {
         selector: &DeviceTokenSelectorRequestV1,
         pending: &mut ExecutionSegment,
     ) -> Result<Option<TerminalSelection>, QwenExecutionError> {
+        let selection = self.execute_device_token_selector_row(
+            node,
+            token_count,
+            boundary_after,
+            0,
+            selector,
+            pending,
+        )?;
+        Ok(Some(TerminalSelection {
+            token_ids: vec![selection.token_id as i32],
+            selection: Some(selection),
+            selections: None,
+        }))
+    }
+
+    fn execute_device_token_selector_batch(
+        &self,
+        node: &QwenGraphNode,
+        token_count: u64,
+        boundary_after: Option<ExecutionBoundaryKind>,
+        selectors: &[DeviceTokenSelectorRequestV1],
+        pending: &mut ExecutionSegment,
+    ) -> Result<Option<TerminalSelection>, QwenExecutionError> {
+        let rows = usize::try_from(token_count).map_err(|_| {
+            QwenExecutionError::InvalidRequest("selector row count does not fit usize".to_owned())
+        })?;
+        if selectors.len() != rows {
+            return Err(QwenExecutionError::InvalidRequest(
+                "selector count differs from target logits rows".to_owned(),
+            ));
+        }
+        let mut selections = Vec::with_capacity(rows);
+        for (row, selector) in selectors.iter().enumerate() {
+            selections.push(self.execute_device_token_selector_row(
+                node,
+                token_count,
+                boundary_after,
+                row,
+                selector,
+                pending,
+            )?);
+        }
+        let token_ids = selections
+            .iter()
+            .map(|selection| selection.token_id as i32)
+            .collect();
+        Ok(Some(TerminalSelection {
+            token_ids,
+            selection: None,
+            selections: Some(selections),
+        }))
+    }
+
+    fn execute_device_token_selector_row(
+        &self,
+        node: &QwenGraphNode,
+        token_count: u64,
+        boundary_after: Option<ExecutionBoundaryKind>,
+        row: usize,
+        selector: &DeviceTokenSelectorRequestV1,
+        pending: &mut ExecutionSegment,
+    ) -> Result<SamplingSelectionV1, QwenExecutionError> {
         if boundary_after != Some(ExecutionBoundaryKind::TerminalReadback)
             || node.inputs().len() != 1
             || node.outputs().len() != 1
@@ -8105,7 +8744,7 @@ impl QwenExecutionCore {
                 "terminal selector requires one logits input and a readback boundary".to_owned(),
             ));
         }
-        let logits = first_row_view(&self.view(node.inputs()[0], token_count)?)?;
+        let logits = row_view(&self.view(node.inputs()[0], token_count)?, row)?;
         let vocab = selector.vocab_size();
         if logits.dtype() != DType::Bf16 || logits.shape() != [1, vocab] {
             return Err(QwenExecutionError::InvalidGraph(
@@ -8151,10 +8790,7 @@ impl QwenExecutionCore {
             ));
         }
         let selection = decode_selected_record(&bytes, selector)?;
-        Ok(Some(TerminalSelection {
-            token_ids: vec![selection.token_id as i32],
-            selection: Some(selection),
-        }))
+        Ok(selection)
     }
 
     fn node_weight_name<'a>(&'a self, node: &'a QwenGraphNode) -> Option<&'a str> {
@@ -8571,6 +9207,17 @@ impl QwenExecutionCore {
                 node.label()
             ))
         })?;
+        if operation.kind() == SemanticOpKind::Argmax {
+            if let Some(selectors) = self.selector_batch.as_deref() {
+                return self.execute_device_token_selector_batch(
+                    node,
+                    token_count,
+                    boundary_after,
+                    selectors,
+                    pending,
+                );
+            }
+        }
         if operation.kind() == SemanticOpKind::GdnProjectionBundle && token_count != 1 {
             return self.execute_gdn_projection_bundle_decomposed(
                 node,
@@ -8744,6 +9391,7 @@ impl QwenExecutionCore {
         Ok(Some(TerminalSelection {
             token_ids: decode_argmax_bytes(&bytes)?,
             selection: None,
+            selections: None,
         }))
     }
 
@@ -9347,14 +9995,19 @@ impl QwenExecutionCore {
             multimodal,
         ) {
             (Some(tensor_id), Some((words, _))) => {
-                let expected = usize::try_from(token_count)
-                    .ok()
-                    .and_then(|count| count.checked_mul(2_560))
-                    .ok_or_else(|| {
-                        QwenExecutionError::InvalidRequest(
-                            "multimodal embedding length overflowed".to_owned(),
-                        )
-                    })?;
+                let rows = usize::try_from(token_count).map_err(|_| {
+                    QwenExecutionError::InvalidRequest(
+                        "multimodal token count does not fit usize".to_owned(),
+                    )
+                })?;
+                let view = self.view(tensor_id, token_count)?;
+                let hidden_width =
+                    validate_hidden_row_view(&view, rows, "multimodal embedding input")?;
+                let expected = rows.checked_mul(hidden_width).ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "multimodal embedding length overflowed".to_owned(),
+                    )
+                })?;
                 if words.len() != expected {
                     return Err(QwenExecutionError::InvalidRequest(format!(
                         "multimodal embedding words are {}, expected {expected}",
@@ -9365,7 +10018,6 @@ impl QwenExecutionCore {
                     .iter()
                     .flat_map(|word| word.to_le_bytes())
                     .collect::<Vec<_>>();
-                let view = self.view(tensor_id, token_count)?;
                 upload_exact_bytes(
                     self.session.as_ref(),
                     &self.queue,
@@ -9393,14 +10045,19 @@ impl QwenExecutionCore {
             target_hidden_bf16,
         ) {
             (Some(tensor_id), Some(words)) => {
-                let expected_words = usize::try_from(token_count)
-                    .ok()
-                    .and_then(|tokens| tokens.checked_mul(2_560))
-                    .ok_or_else(|| {
-                        QwenExecutionError::InvalidRequest(
-                            "MTP hidden-state length overflowed".to_owned(),
-                        )
-                    })?;
+                let rows = usize::try_from(token_count).map_err(|_| {
+                    QwenExecutionError::InvalidRequest(
+                        "MTP hidden token count does not fit usize".to_owned(),
+                    )
+                })?;
+                let view = self.view(tensor_id, token_count)?;
+                let hidden_width =
+                    validate_hidden_row_view(&view, rows, "MTP target-hidden input")?;
+                let expected_words = rows.checked_mul(hidden_width).ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "MTP hidden-state length overflowed".to_owned(),
+                    )
+                })?;
                 if words.len() != expected_words {
                     return Err(QwenExecutionError::InvalidRequest(format!(
                         "MTP hidden-state words are {}, expected {expected_words}",
@@ -9411,7 +10068,6 @@ impl QwenExecutionCore {
                 for word in words {
                     bytes.extend_from_slice(&word.to_le_bytes());
                 }
-                let view = self.view(tensor_id, token_count)?;
                 upload_exact_bytes(
                     self.session.as_ref(),
                     &self.queue,
@@ -9587,18 +10243,21 @@ impl QwenExecutionCore {
         let allocation = self.tensors.get(tensor_id).ok_or_else(|| {
             QwenExecutionError::InvalidGraph(format!("tensor allocation {tensor_id} is absent"))
         })?;
-        if !self
+        let dynamic = self
             .dynamic_tensors
             .get(tensor_id)
             .copied()
             .ok_or_else(|| {
                 QwenExecutionError::InvalidGraph("dynamic tensor table is short".to_owned())
-            })?
-        {
-            return Ok(allocation.graph_view.clone());
-        }
-        runtime_view(
+            })?;
+        let tensor = self.graph.tensor_metadata().get(tensor_id).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph(format!("graph tensor {tensor_id} is absent"))
+        })?;
+        let alias = matches!(tensor.backing(), QwenGraphTensorBacking::Alias { .. });
+        runtime_binding_view(
             &allocation.graph_view,
+            dynamic,
+            alias,
             self.graph.token_count(),
             token_count,
         )
@@ -10202,7 +10861,12 @@ fn validate_graph_plan_with_terminal_mode(
         QwenExecutionError::InvalidGraph("graph token count does not fit usize".to_owned())
     })?;
     for (tensor_id, dynamic) in dynamic_tensors.iter().copied().enumerate() {
+        // Alias views may intentionally be row-sized (the Qwen3.8 MTP
+        // fusion copies use [1, hidden] views into a [tokens, hidden]
+        // workspace tensor). Their root owns the graph-token extent and the
+        // workspace planner already checks alias bounds separately.
         if dynamic
+            && graph.tensor_metadata()[tensor_id].backing() == QwenGraphTensorBacking::Owned
             && graph.tensor_metadata()[tensor_id]
                 .view()
                 .shape()
@@ -10282,16 +10946,15 @@ fn validate_output_projection_identity(
             )
         })
         .ok_or_else(|| QwenExecutionError::InvalidGraph("embedding node is absent".to_owned()))?;
+    let output_consumer = output_binding.consumer();
     let output = graph
         .nodes()
         .iter()
         .find(|node| {
-            node.label()
-                == if tied_embeddings {
-                    "tied_lm_head_matmul"
-                } else {
-                    "lm_head_matmul"
-                }
+            node.operation()
+                .is_some_and(|operation| operation.kind() == SemanticOpKind::Matmul)
+                && node.inputs().get(1) == Some(&output_id)
+                && node.weight_consumers().contains(&output_consumer)
         })
         .ok_or_else(|| {
             QwenExecutionError::InvalidGraph("output projection node is absent".to_owned())
@@ -10498,10 +11161,34 @@ fn allocate_resident_tensors(
     graph: &QwenGraph,
     layout: &GraphLayout,
 ) -> Result<BTreeMap<String, TensorAllocation>, QwenExecutionError> {
+    allocate_resident_tensors_with_shared(session, graph, layout, None)
+}
+
+fn allocate_resident_tensors_with_shared(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    layout: &GraphLayout,
+    shared: Option<&BTreeMap<String, TensorAllocation>>,
+) -> Result<BTreeMap<String, TensorAllocation>, QwenExecutionError> {
     let mut allocations = BTreeMap::new();
     for tensor in graph.tensor_metadata() {
         if !layout.dynamic_tensors[tensor.id()] && tensor.backing() == QwenGraphTensorBacking::Owned
         {
+            if let Some(existing) = shared.and_then(|values| values.get(tensor.name())) {
+                if existing.graph_view.dtype() != tensor.view().dtype()
+                    || existing.graph_view.encoding() != tensor.view().encoding()
+                    || existing.graph_view.shape() != tensor.view().shape()
+                    || existing.graph_view.strides() != tensor.view().strides()
+                    || existing.graph_view.byte_offset() != tensor.view().byte_offset()
+                {
+                    return Err(QwenExecutionError::InvalidGraph(format!(
+                        "shared target tensor view differs from MTP graph: {}",
+                        tensor.name()
+                    )));
+                }
+                allocations.insert(tensor.name().to_owned(), existing.clone());
+                continue;
+            }
             let buffer = session.allocate_with_category(
                 tensor
                     .view()
@@ -10937,7 +11624,14 @@ fn create_states(
         }
     }
     let full_layers: BTreeSet<u32> = if graph.is_mtp() {
-        BTreeSet::from([crate::weights::QWEN35_MTP_CONSUMER_LAYER as u32])
+        let layer = graph
+            .states()
+            .first()
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("MTP graph has no KV state".to_owned())
+            })?
+            .layer();
+        BTreeSet::from([layer])
     } else {
         graph
             .layer_types()
@@ -11001,6 +11695,35 @@ fn runtime_view(
         &strides,
         graph_view.byte_offset(),
     )?)
+}
+
+fn runtime_binding_view(
+    graph_view: &TensorView,
+    dynamic: bool,
+    alias: bool,
+    graph_token_count: u64,
+    token_count: u64,
+) -> Result<TensorView, QwenExecutionError> {
+    if !dynamic {
+        return Ok(graph_view.clone());
+    }
+    let graph_tokens = usize::try_from(graph_token_count).map_err(|_| {
+        QwenExecutionError::InvalidGraph("graph token count does not fit usize".to_owned())
+    })?;
+    if alias && graph_view.shape().first().copied() != Some(graph_tokens) {
+        // Qwen3.8 MTP's per-row copy aliases intentionally retain shape
+        // [1, hidden] and an offset into the dynamic root workspace.
+        return Ok(graph_view.clone());
+    }
+    runtime_view(graph_view, graph_token_count, token_count)
+}
+
+fn qwen_mtp_row_copy_is_active(label: &str, token_count: u64) -> bool {
+    ["mtp.concat.copy_embedding.", "mtp.concat.copy_hidden."]
+        .iter()
+        .find_map(|prefix| label.strip_prefix(prefix))
+        .map(|row| row.parse::<u64>().is_ok_and(|row| row < token_count))
+        .unwrap_or(true)
 }
 
 fn first_row_view(view: &TensorView) -> Result<TensorView, QwenExecutionError> {
@@ -11689,6 +12412,74 @@ mod tests {
     };
     use crate::kv_state::{KvStateAppendRequest, KvStateSnapshot};
     use crate::linear_attention::{LinearAttentionRequest, LinearAttentionStateSnapshot};
+
+    #[test]
+    fn mtp_hidden_row_validation_accepts_qwen35_and_qwen38_widths() {
+        for hidden_width in [2_560, 5_120] {
+            let view = TensorView::contiguous(DType::Bf16, &[3, hidden_width])
+                .expect("hidden row view builds");
+            assert_eq!(
+                validate_hidden_row_view(&view, 3, "test MTP hidden hook").unwrap(),
+                hidden_width
+            );
+        }
+
+        let wrong_rows =
+            TensorView::contiguous(DType::Bf16, &[2, 5_120]).expect("wrong-row view builds");
+        assert!(validate_hidden_row_view(&wrong_rows, 3, "test MTP hidden hook").is_err());
+        let strided = TensorView::new(
+            DType::Bf16,
+            Encoding::Unquantized,
+            &[3, 5_120],
+            &[5_121, 1],
+            0,
+        )
+        .expect("strided hidden row view builds");
+        assert!(validate_hidden_row_view(&strided, 3, "test MTP hidden hook").is_err());
+    }
+
+    #[test]
+    fn qwen38_mtp_partial_prefix_keeps_row_aliases_and_skips_inactive_copies() {
+        let row = TensorView::new(
+            DType::Bf16,
+            Encoding::Unquantized,
+            &[1, 5_120],
+            &[5_120, 1],
+            128 * 5_120 * 2,
+        )
+        .expect("MTP row alias builds");
+        let bound_row = runtime_binding_view(&row, true, true, 1_024, 129)
+            .expect("row alias remains fixed for partial prefix");
+        assert_eq!(bound_row.shape(), &[1, 5_120]);
+        assert_eq!(bound_row.byte_offset(), row.byte_offset());
+
+        let root = TensorView::contiguous(DType::Bf16, &[1_024, 5_120])
+            .expect("MTP root workspace builds");
+        let bound_root = runtime_binding_view(&root, true, false, 1_024, 129)
+            .expect("MTP root shrinks to partial prefix");
+        assert_eq!(bound_root.shape(), &[129, 5_120]);
+        assert!(qwen_mtp_row_copy_is_active(
+            "mtp.concat.copy_embedding.0",
+            129
+        ));
+        assert!(qwen_mtp_row_copy_is_active(
+            "mtp.concat.copy_hidden.128",
+            129
+        ));
+        assert!(!qwen_mtp_row_copy_is_active(
+            "mtp.concat.copy_hidden.129",
+            129
+        ));
+        assert!(!qwen_mtp_row_copy_is_active(
+            "mtp.concat.copy_embedding.1023",
+            129
+        ));
+        assert!(qwen_mtp_row_copy_is_active("mtp.fusion_matmul", 129));
+        assert!(qwen_mtp_row_copy_is_active(
+            "mtp.concat.copy_hidden.1023",
+            1_024
+        ));
+    }
 
     #[cfg(feature = "phase54-research")]
     #[test]
@@ -14461,6 +15252,81 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the immutable Unsloth Qwen3.8-27B-NVFP4 snapshot via SLLM_QWEN38_NVFP4_CACHE"]
+    fn qwen38_mtp_seed_graph_validates_with_large_batch_and_one_token_state() {
+        let root = std::env::var_os("SLLM_QWEN38_NVFP4_CACHE")
+            .expect("SLLM_QWEN38_NVFP4_CACHE must name the immutable snapshot");
+        let artifact = crate::verify_unsloth_qwen38_nvfp4(root).expect("Qwen3.8 artifact verifies");
+        let lock_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/models/locks/qwen3.5-27b-bf16.json");
+        let lock = crate::read_model_lock(lock_path).expect("Qwen3.8 lock parses");
+        let plan = crate::build_qwen38_nvfp4_mtp_weight_load_plan(&lock, &artifact)
+            .expect("Qwen3.8 MTP plan builds");
+        let graph = crate::build_qwen38_nvfp4_mtp_graph(
+            &lock,
+            &plan,
+            &artifact,
+            1,
+            crate::KvCacheEncoding::Mxfp8E4,
+        )
+        .expect("Qwen3.8 MTP seed graph builds");
+        assert_eq!(graph.token_count(), 1_024);
+        assert_eq!(graph.state_capacity(), 1);
+        let target_hidden = graph
+            .tensor_metadata()
+            .iter()
+            .find(|tensor| tensor.name() == "input.target_hidden")
+            .expect("Qwen3.8 MTP target-hidden input");
+        assert_eq!(target_hidden.view().shape(), &[1_024, 5_120]);
+        let final_norm_input = graph
+            .nodes()
+            .iter()
+            .find(|node| node.label() == "final_rmsnorm")
+            .and_then(|node| node.inputs().first().copied())
+            .expect("Qwen3.8 MTP final RMSNorm hidden input");
+        assert_eq!(
+            graph.tensor_metadata()[final_norm_input].view().shape(),
+            &[1_024, 5_120]
+        );
+        let layout = validate_graph_plan(&graph, &plan)
+            .expect("Qwen3.8 MTP seed graph validates with row aliases");
+        let alias_id = graph
+            .tensor_metadata()
+            .iter()
+            .position(|tensor| tensor.name() == "mtp.concat.embedding_half.row.128")
+            .expect("Qwen3.8 MTP row alias");
+        let alias_view = runtime_binding_view(
+            graph.tensor_metadata()[alias_id].view(),
+            layout.dynamic_tensors[alias_id],
+            true,
+            graph.token_count(),
+            129,
+        )
+        .expect("Qwen3.8 partial prefix keeps row alias extent");
+        assert_eq!(alias_view.shape(), &[1, 5_120]);
+        assert!(qwen_mtp_row_copy_is_active(
+            "mtp.concat.copy_embedding.128",
+            129
+        ));
+        assert!(!qwen_mtp_row_copy_is_active(
+            "mtp.concat.copy_embedding.129",
+            129
+        ));
+        assert!(
+            layout
+                .dynamic_tensors
+                .iter()
+                .enumerate()
+                .any(|(id, dynamic)| {
+                    *dynamic
+                        && graph.tensor_metadata()[id]
+                            .name()
+                            .starts_with("mtp.embedding_norm.row.")
+                })
+        );
+    }
+
+    #[test]
     fn explicit_all_logits_block_preserves_every_row() {
         let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
             vec![11],
@@ -15571,7 +16437,7 @@ mod tests {
     fn device_selector_rejects_mtp_without_fallback() {
         let recorder = Arc::new(ExecutionRecorder::default());
         let (graph, plan) = crate::qwen_graph::qwen35_mtp_execution_fixture();
-        let session = Arc::new(ExecutionSession::new("recorder", recorder));
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
         let mut core = QwenExecutionCore::provision(
             session,
             graph,
@@ -15591,6 +16457,35 @@ mod tests {
             Err(QwenExecutionError::InvalidRequest(reason))
                 if reason.contains("unsupported for MTP")
         ));
+
+        let prefill = core
+            .prefill_mtp(1, &[0; 2_560])
+            .expect("MTP prefill remains the state-only entry point");
+        assert!(prefill.selection().is_none());
+        let before_decode = recorder.events().len();
+        let output = core
+            .decode_mtp_with_device_selector(0, &[0; 2_560], &selector)
+            .expect("MTP draft selector route succeeds");
+        assert!(output.last_logits().is_none());
+        assert!(output.selection().is_some());
+        assert_eq!(output.hidden_states_bf16().unwrap().len(), 2_560);
+        let events = recorder.events();
+        let decode_events = &events[before_decode..];
+        assert!(
+            decode_events
+                .iter()
+                .any(|event| event == "submit:TokenSelect")
+        );
+        assert!(
+            decode_events
+                .iter()
+                .any(|event| event == "token-selector-readback-start")
+        );
+        assert!(
+            !decode_events
+                .iter()
+                .any(|event| event == "argmax-readback-start")
+        );
     }
 
     #[test]

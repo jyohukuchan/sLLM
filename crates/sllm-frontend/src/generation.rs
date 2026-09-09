@@ -1025,6 +1025,41 @@ impl<E: SpeculativeGenerationExecutorV1> GenerationExecutorV1
         self.stage_steps(steps)
     }
 
+    fn supports_device_selector(&self) -> bool {
+        self.inner.supports_device_selector()
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        input_token_ids: &[u32],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        self.finalize_pending_block()?;
+        self.queued.clear();
+        self.committed_target_tokens = input_token_ids.to_vec();
+        self.accounting = SpeculativeAccountingV1::default();
+        if let Some(provider) = self.provider.as_mut() {
+            provider.reset().map_err(GenerationServiceError::from)?;
+        } else if let Some(provider) = self.inner.draft_provider() {
+            provider.reset().map_err(GenerationServiceError::from)?;
+        }
+        self.inner
+            .prefill_with_device_selector(input_token_ids, selector)
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        token_id: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if !self.queued.is_empty() || self.pending_block.is_some() {
+            return Err(GenerationServiceError::Execution(
+                "device sampling cannot switch while speculative rows are queued".to_owned(),
+            ));
+        }
+        self.inner.decode_with_device_selector(token_id, selector)
+    }
+
     fn finish(&mut self) -> Result<(), GenerationServiceError> {
         self.finalize_pending_block()?;
         self.inner.finish()
@@ -1049,20 +1084,69 @@ struct PendingQwenSpeculativeBlockV1 {
     proposed_draft_tokens: usize,
 }
 
+struct PendingQwenDeviceBlockV1 {
+    hidden_rows_bf16: Vec<u16>,
+    target_accepted_draft_tokens: usize,
+    target_input_rows: usize,
+    proposed_draft_tokens: usize,
+    consumed_input_rows: usize,
+}
+
+struct QueuedQwenDeviceStepV1 {
+    expected_input: u32,
+    selector: DeviceTokenSelectorRequestV1,
+    step: GenerationStepV1,
+}
+
+const QWEN_MTP_DRAFT_DEVICE_SELECTOR_ENV: &str = "SLLM_PHASE83_MTP_DRAFT_DEVICE_SELECTOR";
+
+fn mtp_device_draft_selector_enabled() -> bool {
+    std::env::var_os(QWEN_MTP_DRAFT_DEVICE_SELECTOR_ENV)
+        .is_some_and(|value| matches!(value.to_str(), Some("1" | "true" | "yes")))
+}
+
+fn committed_hidden_row(
+    replay_hidden: Option<&[u16]>,
+    cached_hidden: &[u16],
+    committed_rows: usize,
+    hidden_width: usize,
+) -> Result<Vec<u16>, GenerationServiceError> {
+    let hidden = replay_hidden.unwrap_or(cached_hidden);
+    let expected = committed_rows
+        .checked_mul(hidden_width)
+        .ok_or(GenerationServiceError::CountOverflow)?;
+    if committed_rows == 0
+        || hidden_width == 0
+        || hidden.len() < expected
+        || hidden.len() % hidden_width != 0
+        || replay_hidden.is_some_and(|_| hidden.len() != expected)
+    {
+        return Err(GenerationServiceError::Execution(
+            "replayed target hidden rows do not match the committed prefix".to_owned(),
+        ));
+    }
+    let start = (committed_rows - 1)
+        .checked_mul(hidden_width)
+        .ok_or(GenerationServiceError::CountOverflow)?;
+    Ok(hidden[start..start + hidden_width].to_vec())
+}
+
 pub struct QwenMtpGenerationExecutorV1 {
     target: QwenExecutionRequest,
     mtp: QwenExecutionRequest,
     last_target_hidden_bf16: Vec<u16>,
+    hidden_width: usize,
     draft_width: usize,
     proposal_blocks: u64,
     proposed_draft_tokens: u64,
     accepted_draft_tokens: u64,
     committed_target_rows: u64,
     pending_speculative_block: Option<PendingQwenSpeculativeBlockV1>,
+    pending_device_block: Option<PendingQwenDeviceBlockV1>,
+    queued_device_steps: VecDeque<QueuedQwenDeviceStepV1>,
 }
 
 impl QwenMtpGenerationExecutorV1 {
-    const HIDDEN_WIDTH: usize = 2_560;
     /// Maximum number of MTP proposal tokens in one generation block.
     ///
     /// This keeps the public generation transaction aligned with the largest
@@ -1070,16 +1154,20 @@ impl QwenMtpGenerationExecutorV1 {
     pub const MAX_DRAFT_WIDTH: usize = 8;
 
     pub fn new(target: QwenExecutionRequest, mtp: QwenExecutionRequest) -> Self {
+        let hidden_width = target.mtp_hidden_width().unwrap_or(2_560);
         Self {
             target,
             mtp,
             last_target_hidden_bf16: Vec::new(),
+            hidden_width,
             draft_width: 2,
             proposal_blocks: 0,
             proposed_draft_tokens: 0,
             accepted_draft_tokens: 0,
             committed_target_rows: 0,
             pending_speculative_block: None,
+            pending_device_block: None,
+            queued_device_steps: VecDeque::new(),
         }
     }
 
@@ -1089,16 +1177,22 @@ impl QwenMtpGenerationExecutorV1 {
         draft_width: usize,
     ) -> Result<Self, GenerationServiceError> {
         Self::validate_draft_width(draft_width)?;
+        let hidden_width = target
+            .mtp_hidden_width()
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
         Ok(Self {
             target,
             mtp,
             last_target_hidden_bf16: Vec::new(),
+            hidden_width,
             draft_width,
             proposal_blocks: 0,
             proposed_draft_tokens: 0,
             accepted_draft_tokens: 0,
             committed_target_rows: 0,
             pending_speculative_block: None,
+            pending_device_block: None,
+            queued_device_steps: VecDeque::new(),
         })
     }
 
@@ -1121,6 +1215,58 @@ impl QwenMtpGenerationExecutorV1 {
         } else {
             Some(draft_width + 1)
         }
+    }
+
+    fn remaining_capacity(request: &QwenExecutionRequest) -> Result<usize, GenerationServiceError> {
+        let capacity = request.state_capacity();
+        let committed = request.committed_length();
+        let remaining = capacity.checked_sub(committed).ok_or_else(|| {
+            GenerationServiceError::Execution(
+                "MTP request committed length exceeds its state capacity".to_owned(),
+            )
+        })?;
+        usize::try_from(remaining).map_err(|_| GenerationServiceError::CountOverflow)
+    }
+
+    fn device_draft_width_for_capacity(
+        draft_width: usize,
+        target_remaining: usize,
+        mtp_remaining: usize,
+    ) -> Result<Option<usize>, GenerationServiceError> {
+        if target_remaining == 0 {
+            return Err(GenerationServiceError::Execution(
+                "target request has no remaining decode capacity".to_owned(),
+            ));
+        }
+        if mtp_remaining == 0 {
+            return Err(GenerationServiceError::Execution(
+                "MTP request has no remaining decode capacity".to_owned(),
+            ));
+        }
+        let width = draft_width
+            .min(mtp_remaining)
+            .min(target_remaining.saturating_sub(1));
+        Ok((width > 0).then_some(width))
+    }
+
+    fn selector_for_mtp_draft_row(
+        selector: &DeviceTokenSelectorRequestV1,
+        row: usize,
+    ) -> Result<DeviceTokenSelectorRequestV1, GenerationServiceError> {
+        let row = u64::try_from(row).map_err(|_| {
+            GenerationServiceError::Execution(
+                "MTP selector row does not fit the sampler counter".to_owned(),
+            )
+        })?;
+        selector
+            .counter()
+            .checked_add(row)
+            .map(|counter| selector.with_counter(counter))
+            .ok_or_else(|| {
+                GenerationServiceError::Execution(
+                    "MTP selector sampler counter overflowed".to_owned(),
+                )
+            })
     }
 
     pub const fn draft_width(&self) -> usize {
@@ -1151,6 +1297,45 @@ impl QwenMtpGenerationExecutorV1 {
         self.committed_target_rows
     }
 
+    fn prime_mtp_prefix(
+        &mut self,
+        input: &[i32],
+        hidden_rows: &[u16],
+    ) -> Result<(), GenerationServiceError> {
+        let expected_hidden = input
+            .len()
+            .checked_mul(self.hidden_width)
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        if input.is_empty() || hidden_rows.len() != expected_hidden {
+            return Err(GenerationServiceError::Execution(
+                "MTP prefix rows do not match the target hidden width".to_owned(),
+            ));
+        }
+        let zero = vec![0_u16; self.hidden_width];
+        self.mtp
+            .prefill_mtp_state_only(input[0], &zero)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let capacity = usize::try_from(self.mtp.prefill_chunk_capacity())
+            .map_err(|_| {
+                GenerationServiceError::Execution("MTP batch capacity overflowed".to_owned())
+            })?
+            .max(1);
+        let mut index = 1;
+        while index < input.len() {
+            let end = (index + capacity).min(input.len());
+            let hidden_start = (index - 1) * self.hidden_width;
+            let hidden_end = (end - 1) * self.hidden_width;
+            self.mtp
+                .decode_mtp_state_only_batch(
+                    &input[index..end],
+                    &hidden_rows[hidden_start..hidden_end],
+                )
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            index = end;
+        }
+        Ok(())
+    }
+
     fn step_from_output(
         output: &sllm_core::QwenExecutionOutput,
         row: usize,
@@ -1172,9 +1357,12 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
         input_token_ids: &[u32],
         _: bool,
     ) -> Result<GenerationStepV1, GenerationServiceError> {
-        if self.pending_speculative_block.is_some() {
+        if self.pending_speculative_block.is_some()
+            || self.pending_device_block.is_some()
+            || !self.queued_device_steps.is_empty()
+        {
             return Err(GenerationServiceError::Execution(
-                "speculative target block must be finalized before prefill".to_owned(),
+                "pending target block must be finalized before prefill".to_owned(),
             ));
         }
         let input = input_token_ids
@@ -1188,24 +1376,13 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
         let hidden = output.hidden_states_bf16().ok_or_else(|| {
             GenerationServiceError::Execution("target prefill omitted MTP hidden rows".to_owned())
         })?;
-        if hidden.len() != input.len() * Self::HIDDEN_WIDTH {
+        if hidden.len() != input.len() * self.hidden_width {
             return Err(GenerationServiceError::Execution(
                 "target prefill MTP hidden row count differs".to_owned(),
             ));
         }
-        let zero = vec![0_u16; Self::HIDDEN_WIDTH];
-        self.mtp
-            .prefill_mtp(input[0], &zero)
-            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
-        for index in 1..input.len() {
-            self.mtp
-                .decode_mtp(
-                    input[index],
-                    &hidden[(index - 1) * Self::HIDDEN_WIDTH..index * Self::HIDDEN_WIDTH],
-                )
-                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
-        }
-        self.last_target_hidden_bf16 = hidden[(input.len() - 1) * Self::HIDDEN_WIDTH..].to_vec();
+        self.prime_mtp_prefix(&input, hidden)?;
+        self.last_target_hidden_bf16 = hidden[(input.len() - 1) * self.hidden_width..].to_vec();
         let final_row = output
             .token_ids()
             .len()
@@ -1233,7 +1410,125 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
         ))
     }
 
+    fn finish(&mut self) -> Result<(), GenerationServiceError> {
+        if self.pending_device_block.is_some() {
+            self.queued_device_steps.clear();
+            self.finalize_device_block()?;
+        }
+        Ok(())
+    }
+
+    fn supports_device_selector(&self) -> bool {
+        true
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        input_token_ids: &[u32],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.pending_speculative_block.is_some()
+            || self.pending_device_block.is_some()
+            || !self.queued_device_steps.is_empty()
+        {
+            return Err(GenerationServiceError::Execution(
+                "pending target block must be finalized before prefill".to_owned(),
+            ));
+        }
+        let input = input_token_ids
+            .iter()
+            .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = self
+            .target
+            .prefill_with_mtp_state_and_device_selector(&input, selector)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let hidden = output.hidden_states_bf16().ok_or_else(|| {
+            GenerationServiceError::Execution("target prefill omitted MTP hidden rows".to_owned())
+        })?;
+        if hidden.len() != input.len() * self.hidden_width {
+            return Err(GenerationServiceError::Execution(
+                "target prefill MTP hidden row count differs".to_owned(),
+            ));
+        }
+        self.prime_mtp_prefix(&input, hidden)?;
+        self.last_target_hidden_bf16 = hidden[(input.len() - 1) * self.hidden_width..].to_vec();
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        token_id: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if let Some(front) = self.queued_device_steps.front() {
+            if front.expected_input != token_id {
+                return Err(GenerationServiceError::Execution(
+                    "queued MTP target row received a different input token".to_owned(),
+                ));
+            }
+            // A queued row is a completed target sample. Reusing it is safe
+            // only when the frontend presents the exact same sampler request;
+            // this also catches a grammar/mask change between rows.
+            if selector != &front.selector
+                || !selector.is_token_valid(front.step.device_argmax() as usize)
+            {
+                self.queued_device_steps.clear();
+                self.finalize_device_block()?;
+                return self.decode_with_device_selector(token_id, selector);
+            }
+            let step = self
+                .queued_device_steps
+                .pop_front()
+                .expect("queued row checked above")
+                .step;
+            let mut finalize = false;
+            if let Some(pending) = &mut self.pending_device_block {
+                pending.consumed_input_rows = pending
+                    .consumed_input_rows
+                    .checked_add(1)
+                    .ok_or(GenerationServiceError::CountOverflow)?;
+                finalize = pending.consumed_input_rows == pending.target_input_rows;
+            }
+            if finalize {
+                self.finalize_device_block()?;
+            }
+            return Ok(step);
+        }
+        if self.pending_device_block.is_some() {
+            return Err(GenerationServiceError::Execution(
+                "MTP target block is pending without a queued row".to_owned(),
+            ));
+        }
+        if self.pending_speculative_block.is_some() {
+            return Err(GenerationServiceError::Execution(
+                "ordinary speculative target block must be finalized before device sampling"
+                    .to_owned(),
+            ));
+        }
+        if !selector.additive_logits().is_empty() || !selector.valid_mask().is_empty() {
+            return self.decode_with_device_selector_single(token_id, selector);
+        }
+        let target_remaining = Self::remaining_capacity(&self.target)?;
+        let mtp_remaining = Self::remaining_capacity(&self.mtp)?;
+        let width = Self::device_draft_width_for_capacity(
+            self.draft_width.min(3),
+            target_remaining,
+            mtp_remaining,
+        )?;
+        match width {
+            Some(width) => self.decode_with_device_selector_batch(token_id, selector, width),
+            None => self.decode_with_device_selector_single(token_id, selector),
+        }
+    }
+
     fn cancel(&mut self) {
+        self.queued_device_steps.clear();
+        self.pending_device_block = None;
         self.target.cancel();
         self.mtp.cancel();
     }
@@ -1310,6 +1605,311 @@ impl DraftProviderV1 for QwenMtpGenerationExecutorV1 {
 }
 
 impl QwenMtpGenerationExecutorV1 {
+    fn decode_with_device_selector_single(
+        &mut self,
+        token_id: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let previous_hidden = self.last_target_hidden_bf16.clone();
+        if previous_hidden.len() != self.hidden_width {
+            return Err(GenerationServiceError::Execution(
+                "MTP target hidden state is not initialized".to_owned(),
+            ));
+        }
+        // Execute one deterministic MTP proposal before the target's fixed
+        // GPU sample. Width-one verification keeps target state and sampler
+        // counters sequential, so a mismatch never consumes speculative
+        // rows or requires a host-logit fallback.
+        let device_draft = mtp_device_draft_selector_enabled();
+        let draft = if device_draft {
+            let draft_selector = Self::selector_for_mtp_draft_row(selector, 0)?;
+            self.mtp
+                .decode_mtp_with_device_selector(token, &previous_hidden, &draft_selector)
+        } else {
+            self.mtp.decode_mtp(token, &previous_hidden)
+        }
+        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let draft_token = if device_draft {
+            let selection = draft
+                .selection()
+                .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+            i32::try_from(selection.token_id)
+                .map_err(|_| GenerationServiceError::TokenIdOverflow)?
+        } else {
+            draft
+                .token_ids()
+                .first()
+                .copied()
+                .ok_or(GenerationServiceError::MissingDeviceArgmax)?
+        };
+        let output = match self
+            .target
+            .decode_with_mtp_state_and_device_selector(token, selector)
+        {
+            Ok(output) => output,
+            Err(error) => {
+                self.rewind_mtp_rows(1)?;
+                return Err(GenerationServiceError::Execution(error.to_string()));
+            }
+        };
+        let hidden = output.hidden_states_bf16().ok_or_else(|| {
+            GenerationServiceError::Execution("target decode omitted MTP hidden row".to_owned())
+        })?;
+        if hidden.len() != self.hidden_width {
+            return Err(GenerationServiceError::Execution(
+                "target decode MTP hidden row width differs".to_owned(),
+            ));
+        }
+        self.last_target_hidden_bf16 = hidden.to_vec();
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+        self.proposal_blocks = self
+            .proposal_blocks
+            .checked_add(1)
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        self.proposed_draft_tokens = self
+            .proposed_draft_tokens
+            .checked_add(1)
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        if u32::try_from(draft_token).ok() == Some(selection.token_id) {
+            self.accepted_draft_tokens = self
+                .accepted_draft_tokens
+                .checked_add(1)
+                .ok_or(GenerationServiceError::CountOverflow)?;
+        }
+        self.committed_target_rows = self
+            .committed_target_rows
+            .checked_add(1)
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
+    fn decode_with_device_selector_batch(
+        &mut self,
+        token_id: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+        width: usize,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let proposal = if mtp_device_draft_selector_enabled() {
+            self.propose_mtp_draft_with_device_selector(token_id, selector, width)?
+        } else {
+            self.propose_mtp_draft(token_id, width)
+                .map_err(GenerationServiceError::from)?
+        }
+        .ok_or_else(|| {
+            GenerationServiceError::Execution("MTP provider returned no draft".to_owned())
+        })?;
+        let drafts = proposal.token_ids();
+        if drafts.len() != width {
+            return Err(GenerationServiceError::Execution(
+                "MTP device proposal width differs from the requested batch".to_owned(),
+            ));
+        }
+        let mut block_inputs = Vec::with_capacity(width + 1);
+        block_inputs
+            .push(i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?);
+        block_inputs.extend(
+            drafts
+                .iter()
+                .copied()
+                .map(|token| {
+                    i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let selectors = (0..=width)
+            .map(|row| Self::selector_for_mtp_draft_row(selector, row))
+            .collect::<Result<Vec<_>, _>>()?;
+        let block = match self
+            .target
+            .decode_block_with_mtp_state_and_device_selectors(&block_inputs, &selectors)
+        {
+            Ok(block) => block,
+            Err(error) => {
+                self.rewind_mtp_rows(width)?;
+                return Err(GenerationServiceError::Execution(error.to_string()));
+            }
+        };
+        let hidden = match block.hidden_states_bf16() {
+            Some(hidden) if hidden.len() == (width + 1) * self.hidden_width => hidden,
+            Some(_) | None => {
+                self.rewind_mtp_rows(width)?;
+                return Err(GenerationServiceError::Execution(
+                    "target MTP verify omitted or shortened hidden rows".to_owned(),
+                ));
+            }
+        };
+        let selections = match block.selections() {
+            Some(selections) if selections.len() == width + 1 => selections,
+            Some(_) | None => {
+                self.rewind_mtp_rows(width)?;
+                return Err(GenerationServiceError::MissingDeviceSelection);
+            }
+        };
+        let mut accepted = 0_usize;
+        while accepted < width && drafts[accepted] == selections[accepted].token_id {
+            accepted += 1;
+        }
+        let committed_rows = if accepted == width {
+            width + 1
+        } else {
+            accepted + 1
+        };
+        let steps = selections[..committed_rows]
+            .iter()
+            .cloned()
+            .map(GenerationStepV1::from_device_selection)
+            .collect::<Vec<_>>();
+
+        if accepted == width {
+            let hidden_start = (width - 1) * self.hidden_width;
+            self.mtp
+                .decode_mtp(
+                    i32::try_from(drafts[width - 1])
+                        .map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+                    &hidden[hidden_start..hidden_start + self.hidden_width],
+                )
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        } else {
+            self.rewind_mtp_rows(width.saturating_sub(committed_rows))?;
+        }
+        self.pending_device_block = Some(PendingQwenDeviceBlockV1 {
+            hidden_rows_bf16: hidden.to_vec(),
+            target_accepted_draft_tokens: accepted,
+            target_input_rows: committed_rows,
+            proposed_draft_tokens: width,
+            consumed_input_rows: 1,
+        });
+        self.queued_device_steps = (1..committed_rows)
+            .map(|row| QueuedQwenDeviceStepV1 {
+                expected_input: selections[row - 1].token_id,
+                selector: selectors[row].clone(),
+                step: steps[row].clone(),
+            })
+            .collect();
+        if committed_rows == 1 {
+            self.finalize_device_block()?;
+        }
+        Ok(steps.into_iter().next().expect("device batch has one row"))
+    }
+
+    fn rewind_mtp_rows(&mut self, count: usize) -> Result<(), GenerationServiceError> {
+        for _ in 0..count {
+            self.mtp
+                .rewind_last_decode_transition()
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn finalize_device_block(&mut self) -> Result<(), GenerationServiceError> {
+        let pending = self.pending_device_block.take().ok_or_else(|| {
+            GenerationServiceError::Execution(
+                "no MTP target block is pending device finalization".to_owned(),
+            )
+        })?;
+        if pending.consumed_input_rows == 0
+            || pending.consumed_input_rows > pending.target_input_rows
+        {
+            self.pending_device_block = Some(pending);
+            return Err(GenerationServiceError::Speculative(
+                SpeculativeError::InvalidDecision.to_string(),
+            ));
+        }
+        self.rewind_mtp_rows(pending.target_input_rows - pending.consumed_input_rows)?;
+        let replay = self
+            .target
+            .resolve_decode_block(pending.consumed_input_rows)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        self.last_target_hidden_bf16 = committed_hidden_row(
+            replay.hidden_states_bf16(),
+            &pending.hidden_rows_bf16,
+            pending.consumed_input_rows,
+            self.hidden_width,
+        )?;
+        self.proposal_blocks = self
+            .proposal_blocks
+            .checked_add(1)
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        self.proposed_draft_tokens = self
+            .proposed_draft_tokens
+            .checked_add(
+                u64::try_from(pending.proposed_draft_tokens)
+                    .map_err(|_| GenerationServiceError::CountOverflow)?,
+            )
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        self.accepted_draft_tokens = self
+            .accepted_draft_tokens
+            .checked_add(
+                u64::try_from(
+                    pending
+                        .target_accepted_draft_tokens
+                        .min(pending.consumed_input_rows),
+                )
+                .map_err(|_| GenerationServiceError::CountOverflow)?,
+            )
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        self.committed_target_rows = self
+            .committed_target_rows
+            .checked_add(
+                u64::try_from(pending.consumed_input_rows)
+                    .map_err(|_| GenerationServiceError::CountOverflow)?,
+            )
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        self.queued_device_steps.clear();
+        Ok(())
+    }
+
+    fn propose_mtp_draft_with_device_selector(
+        &mut self,
+        pending_token: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+        requested_width: usize,
+    ) -> Result<Option<DraftProposalV1>, GenerationServiceError> {
+        let width = requested_width.min(self.draft_width);
+        if width == 0 {
+            return Err(GenerationServiceError::Execution(
+                "MTP device draft width must be non-zero".to_owned(),
+            ));
+        }
+        if self.last_target_hidden_bf16.len() != self.hidden_width {
+            return Err(GenerationServiceError::Execution(
+                "MTP target hidden state is not initialized".to_owned(),
+            ));
+        }
+        let mut drafts = Vec::with_capacity(width);
+        let mut proposal_token =
+            i32::try_from(pending_token).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let mut proposal_hidden = self.last_target_hidden_bf16.clone();
+        for row in 0..width {
+            let draft_selector = Self::selector_for_mtp_draft_row(selector, row)?;
+            let proposal = self
+                .mtp
+                .decode_mtp_with_device_selector(proposal_token, &proposal_hidden, &draft_selector)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            let selected = proposal
+                .selection()
+                .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+            proposal_token = i32::try_from(selected.token_id)
+                .map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+            proposal_hidden = proposal
+                .hidden_states_bf16()
+                .ok_or_else(|| {
+                    GenerationServiceError::Execution(
+                        "MTP device draft omitted hidden state".to_owned(),
+                    )
+                })?
+                .to_vec();
+            drafts.push(selected.token_id);
+        }
+        Ok(Some(
+            DraftProposalV1::new(self.kind(), drafts).map_err(GenerationServiceError::from)?,
+        ))
+    }
+
     fn propose_mtp_draft(
         &mut self,
         pending_token: u32,
@@ -1319,7 +1919,7 @@ impl QwenMtpGenerationExecutorV1 {
         if width == 0 {
             return Err(SpeculativeError::ZeroDraftWidth);
         }
-        if self.last_target_hidden_bf16.len() != Self::HIDDEN_WIDTH {
+        if self.last_target_hidden_bf16.len() != self.hidden_width {
             return Err(SpeculativeError::HistoryLimitExceeded);
         }
         let pending = i32::try_from(pending_token)
@@ -1386,7 +1986,7 @@ impl QwenMtpGenerationExecutorV1 {
         })?;
         let draft_width = drafts.len();
         if block.token_ids().len() != draft_width + 1
-            || hidden.len() != (draft_width + 1) * Self::HIDDEN_WIDTH
+            || hidden.len() != (draft_width + 1) * self.hidden_width
         {
             return Err(GenerationServiceError::Execution(
                 "target verify row count differs from draft width".to_owned(),
@@ -1421,12 +2021,12 @@ impl QwenMtpGenerationExecutorV1 {
                         .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
                 }
             } else {
-                let previous_hidden_start = (draft_width - 1) * Self::HIDDEN_WIDTH;
+                let previous_hidden_start = (draft_width - 1) * self.hidden_width;
                 self.mtp
                     .decode_mtp(
                         i32::try_from(drafts[draft_width - 1])
                             .map_err(|_| GenerationServiceError::TokenIdOverflow)?,
-                        &hidden[previous_hidden_start..previous_hidden_start + Self::HIDDEN_WIDTH],
+                        &hidden[previous_hidden_start..previous_hidden_start + self.hidden_width],
                     )
                     .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
             }
@@ -1438,8 +2038,8 @@ impl QwenMtpGenerationExecutorV1 {
                 let hidden_before = if row == 0 {
                     self.last_target_hidden_bf16.as_slice()
                 } else {
-                    let start = (row - 1) * Self::HIDDEN_WIDTH;
-                    &hidden[start..start + Self::HIDDEN_WIDTH]
+                    let start = (row - 1) * self.hidden_width;
+                    &hidden[start..start + self.hidden_width]
                 };
                 self.mtp
                     .decode_mtp(block_input, hidden_before)
@@ -1505,12 +2105,16 @@ impl QwenMtpGenerationExecutorV1 {
                 .rewind_last_decode_transition()
                 .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
         }
-        self.target
+        let replay = self
+            .target
             .resolve_decode_block(committed_input_rows)
             .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
-        let hidden_start = (committed_input_rows - 1) * Self::HIDDEN_WIDTH;
-        self.last_target_hidden_bf16 =
-            pending.hidden_rows_bf16[hidden_start..hidden_start + Self::HIDDEN_WIDTH].to_vec();
+        self.last_target_hidden_bf16 = committed_hidden_row(
+            replay.hidden_states_bf16(),
+            &pending.hidden_rows_bf16,
+            committed_input_rows,
+            self.hidden_width,
+        )?;
         self.proposal_blocks = proposal_blocks;
         self.proposed_draft_tokens = proposed_draft_tokens;
         self.accepted_draft_tokens = accepted_draft_tokens;
@@ -3219,6 +3823,73 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn qwen_mtp_finalize_prefers_replayed_hidden_row_over_cached_block() {
+        let replay = [10_u16, 11, 20, 21];
+        let cached = [90_u16, 91, 92, 93];
+        assert_eq!(
+            committed_hidden_row(Some(&replay), &cached, 2, 2).unwrap(),
+            vec![20, 21]
+        );
+        assert_eq!(
+            committed_hidden_row(None, &cached, 2, 2).unwrap(),
+            vec![92, 93]
+        );
+        let cached_full_block = [90_u16, 91, 92, 93, 94, 95];
+        assert_eq!(
+            committed_hidden_row(None, &cached_full_block, 2, 2).unwrap(),
+            vec![92, 93]
+        );
+        assert!(committed_hidden_row(Some(&replay[..2]), &cached, 2, 2).is_err());
+    }
+
+    #[test]
+    fn qwen_mtp_draft_selector_rows_preserve_seed_counter_and_constraints() {
+        let config = SamplerChainConfigV1::new(
+            SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).expect("sampling parameters"),
+        )
+        .with_top_k(20)
+        .expect("top-k selector");
+        let chain = SamplerChainV1::new(config, &[]).expect("sampler chain");
+        let selector = chain
+            .prepare_device_selector(4, Some(&[true, false, true, true]), 123, 77)
+            .expect("device selector");
+        let row = QwenMtpGenerationExecutorV1::selector_for_mtp_draft_row(&selector, 2)
+            .expect("draft row selector");
+        assert_eq!(row.seed(), selector.seed());
+        assert_eq!(row.counter(), 79);
+        assert_eq!(row.valid_mask(), selector.valid_mask());
+        assert_eq!(row.additive_logits(), selector.additive_logits());
+        assert_eq!(row.top_k(), selector.top_k());
+        assert_eq!(row.top_p(), selector.top_p());
+    }
+
+    #[test]
+    fn qwen_mtp_device_width_clamps_to_target_and_mtp_capacity() {
+        assert_eq!(
+            QwenMtpGenerationExecutorV1::device_draft_width_for_capacity(3, 100, 100)
+                .expect("capacity permits full width"),
+            Some(3)
+        );
+        assert_eq!(
+            QwenMtpGenerationExecutorV1::device_draft_width_for_capacity(3, 4, 3)
+                .expect("target rows bound width"),
+            Some(3)
+        );
+        assert_eq!(
+            QwenMtpGenerationExecutorV1::device_draft_width_for_capacity(3, 3, 100)
+                .expect("target capacity clamps draft width"),
+            Some(2)
+        );
+        assert_eq!(
+            QwenMtpGenerationExecutorV1::device_draft_width_for_capacity(3, 1, 1)
+                .expect("one remaining row uses sequential fallback"),
+            None
+        );
+        assert!(QwenMtpGenerationExecutorV1::device_draft_width_for_capacity(3, 0, 1).is_err());
+        assert!(QwenMtpGenerationExecutorV1::device_draft_width_for_capacity(3, 1, 0).is_err());
     }
 
     #[test]

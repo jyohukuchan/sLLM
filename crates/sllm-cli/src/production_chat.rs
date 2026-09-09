@@ -27,11 +27,12 @@ use sllm_frontend::{
     ministral3_generation_stop_policy,
 };
 use sllm_server::{
-    CheckpointStartupConfigV1, ContextWindowStartupConfigV1, DraftStartupConfigV1,
+    BackendErrorV1, ChatCompletionRequestV1, ChatGenerationBackendV1, CheckpointStartupConfigV1,
+    ContextWindowStartupConfigV1, DraftStartupConfigV1, GenerationDeltaSinkV1,
     KvCacheExplicitSourceV1, KvCacheSelectionReportV1, Phase41ProductionConfigV1,
-    PrefixCacheStartupConfigV1, QwenBackendConfigV1, QwenPersistentChatFinishReasonV1,
-    QwenPersistentChatSessionConfigV1, QwenPersistentChatSessionV1,
-    QwenPersistentChatTurnRequestV1,
+    PrefixCacheStartupConfigV1, Qwen38Nvfp4BackendConfigV1, QwenBackendConfigV1, QwenChatBackendV1,
+    QwenPersistentChatFinishReasonV1, QwenPersistentChatSessionConfigV1,
+    QwenPersistentChatSessionV1, QwenPersistentChatTurnRequestV1,
 };
 
 use crate::chat::{
@@ -159,11 +160,13 @@ impl SigintListenerV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProductionChatConfigV1 {
     gguf: std::path::PathBuf,
+    qwen38_artifact: Option<std::path::PathBuf>,
     derived_lock: Option<std::path::PathBuf>,
     device_index: u32,
     target: String,
     context_length: u32,
     kv_cache_encoding: Option<KvCacheEncoding>,
+    mtp_draft_width: Option<u8>,
     completion_timeout_seconds: u64,
     shutdown_timeout_seconds: u64,
     checkpoint_directory: std::path::PathBuf,
@@ -220,11 +223,13 @@ fn is_production_flag(flag: &str) -> bool {
     matches!(
         flag,
         "--gguf"
+            | "--qwen38-nvfp4"
             | "--derived-lock"
             | "--device-index"
             | "--target"
             | "--context-length"
             | "--kv-cache-encoding"
+            | "--mtp-draft-width"
             | "--completion-timeout-seconds"
             | "--shutdown-timeout-seconds"
             | "--checkpoint-directory"
@@ -243,11 +248,13 @@ fn split_args(
         return Err("help".to_owned());
     }
     let mut gguf = None;
+    let mut qwen38_artifact = None;
     let mut derived_lock = None;
     let mut device_index = None;
     let mut target = None;
     let mut context_length = None;
     let mut kv_cache_encoding = None;
+    let mut mtp_draft_width = None;
     let mut completion_timeout_seconds = None;
     let mut shutdown_timeout_seconds = None;
     let mut checkpoint_directory = None;
@@ -263,6 +270,9 @@ fn split_args(
                 .ok_or_else(|| "chat model/runtime option requires a value".to_owned())?;
             match flag.as_str() {
                 "--gguf" if gguf.is_none() => gguf = Some(std::path::PathBuf::from(value)),
+                "--qwen38-nvfp4" if qwen38_artifact.is_none() => {
+                    qwen38_artifact = Some(std::path::PathBuf::from(value))
+                }
                 "--derived-lock" if derived_lock.is_none() => {
                     derived_lock = Some(std::path::PathBuf::from(value))
                 }
@@ -275,6 +285,13 @@ fn split_args(
                 }
                 "--kv-cache-encoding" if kv_cache_encoding.is_none() => {
                     kv_cache_encoding = Some(value.clone())
+                }
+                "--mtp-draft-width" if mtp_draft_width.is_none() => {
+                    mtp_draft_width = Some(
+                        parse_u64(value, flag, 0, 8)?
+                            .try_into()
+                            .map_err(|_| "--mtp-draft-width value is invalid".to_owned())?,
+                    )
                 }
                 "--completion-timeout-seconds" if completion_timeout_seconds.is_none() => {
                     completion_timeout_seconds = Some(parse_u64(value, flag, 1, 86_400)?)
@@ -306,7 +323,39 @@ fn split_args(
             return Err("unknown chat model/runtime option".to_owned());
         }
     }
-    let gguf = gguf.ok_or_else(|| "chat requires --gguf".to_owned())?;
+    if qwen38_artifact.is_some() && gguf.is_some() {
+        return Err("--qwen38-nvfp4 is mutually exclusive with --gguf".to_owned());
+    }
+    if qwen38_artifact.is_some() && derived_lock.is_some() {
+        return Err("--qwen38-nvfp4 is mutually exclusive with --derived-lock".to_owned());
+    }
+    if qwen38_artifact.is_none() && gguf.is_none() {
+        return Err("chat requires --gguf or --qwen38-nvfp4".to_owned());
+    }
+    if let Some(path) = qwen38_artifact.as_deref() {
+        if !path.is_absolute() {
+            return Err("--qwen38-nvfp4 artifact path must be absolute".to_owned());
+        }
+        if device_index != Some(0) || !matches!(target.as_deref(), Some("gfx1030" | "gfx1201")) {
+            return Err(
+                "Qwen3.8 NVFP4 requires --device-index 0 and target gfx1030 or gfx1201".to_owned(),
+            );
+        }
+        if kv_cache_encoding
+            .as_deref()
+            .is_some_and(|encoding| !matches!(encoding, "fp16" | "kv-mxfp8-e4"))
+        {
+            return Err("Qwen3.8 NVFP4 supports only fp16 or kv-mxfp8-e4 KV cache".to_owned());
+        }
+        if mtp_draft_width
+            .is_some_and(|width| width != 0 && width != sllm_core::QWEN38_MTP_DRAFT_WIDTH as u8)
+        {
+            return Err("Qwen3.8 MTP uses fixed draft width 2 (or 0 for target-only)".to_owned());
+        }
+    } else if mtp_draft_width.is_some() {
+        return Err("--mtp-draft-width is supported only for Qwen3.8 NVFP4 chat".to_owned());
+    }
+    let gguf = gguf.unwrap_or_default();
     let device_index = device_index.ok_or_else(|| "chat requires --device-index".to_owned())?;
     let target = target.ok_or_else(|| "chat requires --target".to_owned())?;
     if !matches!(target.as_str(), "gfx1030" | "gfx1201" | "gfx942") {
@@ -326,28 +375,42 @@ fn split_args(
             );
         }
     };
-    let checkpoint_directory =
-        checkpoint_directory.ok_or_else(|| "chat requires --checkpoint-directory".to_owned())?;
-    validate_path_argument(&gguf, "--gguf")?;
+    let checkpoint_directory = match (qwen38_artifact.is_some(), checkpoint_directory) {
+        (true, None) => std::path::PathBuf::from(".sllm-chat-checkpoints"),
+        (_, Some(path)) => path,
+        (false, None) => {
+            return Err("chat requires --checkpoint-directory".to_owned());
+        }
+    };
+    if qwen38_artifact.is_none() {
+        validate_path_argument(&gguf, "--gguf")?;
+    }
     if let Some(derived_lock) = derived_lock.as_deref() {
         validate_path_argument(derived_lock, "--derived-lock")?;
     }
     validate_path_argument(&checkpoint_directory, "--checkpoint-directory")?;
-    let checkpoint_quota_bytes = checkpoint_quota_bytes
-        .ok_or_else(|| "chat requires --checkpoint-quota-bytes".to_owned())?;
-    let default_context_length = if derived_lock.is_none() {
-        MINISTRAL3_GRAPH_ORIGINAL_CONTEXT as u32
-    } else {
+    let checkpoint_quota_bytes = match (qwen38_artifact.is_some(), checkpoint_quota_bytes) {
+        (true, None) => 1,
+        (_, Some(quota)) => quota,
+        (false, None) => {
+            return Err("chat requires --checkpoint-quota-bytes".to_owned());
+        }
+    };
+    let default_context_length = if qwen38_artifact.is_some() || derived_lock.is_some() {
         u32::try_from(QWEN35_RECOMMENDED_CONTEXT_TOKENS).expect("Qwen recommended context fits u32")
+    } else {
+        MINISTRAL3_GRAPH_ORIGINAL_CONTEXT as u32
     };
     Ok((
         ProductionChatConfigV1 {
             gguf,
+            qwen38_artifact,
             derived_lock,
             device_index,
             target,
             context_length: context_length.unwrap_or(default_context_length),
             kv_cache_encoding,
+            mtp_draft_width,
             completion_timeout_seconds: completion_timeout_seconds
                 .unwrap_or(DEFAULT_COMPLETION_TIMEOUT_SECONDS_V1),
             shutdown_timeout_seconds: shutdown_timeout_seconds
@@ -372,7 +435,7 @@ fn validate_direct_chat_options(
     config: &ProductionChatConfigV1,
     chat_args: &[String],
 ) -> Result<(), String> {
-    if config.derived_lock.is_some() {
+    if config.derived_lock.is_some() || config.qwen38_artifact.is_some() {
         return Ok(());
     }
     let mut index = 0;
@@ -576,16 +639,144 @@ impl Drop for Ministral3CliChatBackend {
     }
 }
 
+struct Qwen38CliChatSink {
+    output: String,
+}
+
+impl GenerationDeltaSinkV1 for Qwen38CliChatSink {
+    fn publish(&mut self, delta: &str) -> Result<(), BackendErrorV1> {
+        self.output.push_str(delta);
+        Ok(())
+    }
+}
+
+/// Chat adapter for the reviewed Qwen3.8 NVFP4 route.  The resident backend
+/// is shared across turns while every turn still goes through the validated
+/// server request constructor and fixed T1/P.95/K20 profile.
+struct Qwen38CliChatBackend {
+    backend: QwenChatBackendV1,
+}
+
+impl Qwen38CliChatBackend {
+    fn open(config: &ProductionChatConfigV1) -> Result<Self, String> {
+        let artifact_root = config
+            .qwen38_artifact
+            .as_ref()
+            .ok_or_else(|| "Qwen3.8 chat artifact path is missing".to_owned())?;
+        let kv_cache_encoding = config.kv_cache_encoding.unwrap_or(KvCacheEncoding::Mxfp8E4);
+        let backend = QwenChatBackendV1::open_unsloth_qwen38_nvfp4(Qwen38Nvfp4BackendConfigV1 {
+            artifact_root: artifact_root.clone(),
+            device_index: config.device_index,
+            target: config.target.clone(),
+            completion_timeout: Duration::from_secs(config.completion_timeout_seconds),
+            shutdown_timeout: Duration::from_secs(config.shutdown_timeout_seconds),
+            context_length: config.context_length,
+            kv_cache_encoding,
+            phase41: Phase41ProductionConfigV1 {
+                prefix_cache: PrefixCacheStartupConfigV1::Disabled,
+                context_window: ContextWindowStartupConfigV1::Disabled,
+                checkpoint: CheckpointStartupConfigV1::Disabled,
+                draft: if config.mtp_draft_width == Some(0) {
+                    DraftStartupConfigV1::Disabled
+                } else {
+                    DraftStartupConfigV1::MtpAuto
+                },
+            },
+        })
+        .map_err(|error| format!("Qwen3.8 NVFP4 chat backend failed to open: {error}"))?;
+        Ok(Self { backend })
+    }
+
+    fn generate(
+        &self,
+        request: &ChatGenerationRequestV1,
+        cancellation: &GenerationCancellationV1,
+    ) -> Result<ChatGenerationResultV1, ChatBackendErrorV1> {
+        let thinking = match request.thinking {
+            ChatThinkingModeV1::Default => ThinkingModeV1::TemplateDefault,
+            ChatThinkingModeV1::Enabled => ThinkingModeV1::Enabled,
+            ChatThinkingModeV1::Disabled => ThinkingModeV1::Disabled,
+        };
+        let api_request = ChatCompletionRequestV1::from_local_messages(
+            "qwen3.8-27b-nvfp4".to_owned(),
+            request.messages.clone(),
+            request.max_new_tokens,
+            1.0,
+            0.95,
+            request
+                .stop_sequences
+                .iter()
+                .chain(request.reverse_prompts.iter())
+                .cloned()
+                .collect(),
+            None,
+            matches!(thinking, ThinkingModeV1::Enabled),
+            request.reasoning_budget,
+        )
+        .map_err(|_| ChatBackendErrorV1::Failed)?;
+        let mut sink = Qwen38CliChatSink {
+            output: String::new(),
+        };
+        let completion = self
+            .backend
+            .generate(&api_request, cancellation, &mut sink)
+            .map_err(|_| ChatBackendErrorV1::Failed)?;
+        let finish_reason = if completion.matched_stop.as_ref().is_some_and(|stop| {
+            request
+                .reverse_prompts
+                .iter()
+                .any(|reverse| reverse == stop)
+        }) {
+            ChatFinishReasonV1::ReversePrompt
+        } else {
+            match completion.finish_reason {
+                sllm_server::FinishReasonV1::Stop => ChatFinishReasonV1::Stop,
+                sllm_server::FinishReasonV1::Length => ChatFinishReasonV1::Length,
+            }
+        };
+        Ok(ChatGenerationResultV1 {
+            text: sink.output,
+            reasoning: None,
+            finish_reason,
+            cancelled: cancellation.is_cancelled(),
+        })
+    }
+
+    fn shutdown(&self) -> Result<(), String> {
+        self.backend
+            .shutdown()
+            .map(|_| ())
+            .map_err(|error| format!("Qwen3.8 chat backend shutdown failed: {error}"))
+    }
+}
+
+impl Drop for Qwen38CliChatBackend {
+    fn drop(&mut self) {
+        let _ = self.backend.shutdown();
+    }
+}
+
 fn open_backend(
     config: ProductionChatConfigV1,
     cancellation_registry: CancellationRegistryV1,
 ) -> Result<ProductionChatBackendV1, String> {
+    if config.qwen38_artifact.is_some() {
+        let backend = Qwen38CliChatBackend::open(&config)?;
+        return Ok(ProductionChatBackendV1 {
+            session: None,
+            gemma_moe: None,
+            ministral3: None,
+            qwen38: Some(backend),
+            cancellation_registry,
+        });
+    }
     let Some(derived_lock_path) = config.derived_lock.as_ref() else {
         let backend = Ministral3CliChatBackend::open(&config)?;
         return Ok(ProductionChatBackendV1 {
             session: None,
             gemma_moe: None,
             ministral3: Some(backend),
+            qwen38: None,
             cancellation_registry,
         });
     };
@@ -608,6 +799,7 @@ fn open_backend(
             session: None,
             gemma_moe: Some(backend),
             ministral3: None,
+            qwen38: None,
             cancellation_registry,
         });
     }
@@ -660,6 +852,7 @@ fn open_backend(
         session: Some(session),
         gemma_moe: None,
         ministral3: None,
+        qwen38: None,
         cancellation_registry,
     })
 }
@@ -668,6 +861,7 @@ pub(crate) struct ProductionChatBackendV1 {
     session: Option<QwenPersistentChatSessionV1>,
     gemma_moe: Option<crate::model::Gemma4MoeCliChatBackend>,
     ministral3: Option<Ministral3CliChatBackend>,
+    qwen38: Option<Qwen38CliChatBackend>,
     cancellation_registry: CancellationRegistryV1,
 }
 
@@ -680,6 +874,27 @@ impl Drop for ProductionChatBackendV1 {
         // it from its Drop implementation.
         let _ = self.gemma_moe.take();
         let _ = self.ministral3.take();
+        let _ = self.qwen38.take();
+    }
+}
+
+impl ProductionChatBackendV1 {
+    fn shutdown(&self) -> Result<(), String> {
+        self.qwen38
+            .as_ref()
+            .map_or(Ok(()), Qwen38CliChatBackend::shutdown)
+    }
+}
+
+fn finish_chat_result(
+    result: Result<(), String>,
+    shutdown: Result<(), String>,
+) -> Result<(), String> {
+    match (result, shutdown) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(chat_error), Ok(())) => Err(chat_error),
+        (Ok(()), Err(shutdown_error)) => Err(shutdown_error),
+        (Err(chat_error), Err(shutdown_error)) => Err(format!("{chat_error}; {shutdown_error}")),
     }
 }
 
@@ -688,6 +903,20 @@ impl ChatBackendV1 for ProductionChatBackendV1 {
         &mut self,
         request: &ChatGenerationRequestV1,
     ) -> Result<ChatGenerationResultV1, ChatBackendErrorV1> {
+        if let Some(backend) = self.qwen38.as_ref() {
+            let cancellation = self.cancellation_registry.register();
+            let result = backend.generate(request, &cancellation);
+            let was_cancelled = cancellation.is_cancelled();
+            self.cancellation_registry.clear();
+            return match result {
+                Ok(_result) if was_cancelled => Err(ChatBackendErrorV1::Cancelled),
+                Ok(result) => Ok(result),
+                Err(ChatBackendErrorV1::Failed) if was_cancelled => {
+                    Err(ChatBackendErrorV1::Cancelled)
+                }
+                Err(error) => Err(error),
+            };
+        }
         if let Some(backend) = self.gemma_moe.as_mut() {
             let cancellation = self.cancellation_registry.register();
             backend.set_cancellation(cancellation.clone());
@@ -757,6 +986,10 @@ impl ChatBackendV1 for ProductionChatBackendV1 {
     }
 
     fn load_checkpoint(&mut self, name: &str) -> Result<Option<Vec<u8>>, ChatBackendErrorV1> {
+        if self.qwen38.is_some() {
+            let _ = name;
+            return Err(ChatBackendErrorV1::CheckpointUnavailable);
+        }
         if let Some(backend) = self.gemma_moe.as_mut() {
             return backend.load_checkpoint(name);
         }
@@ -776,6 +1009,10 @@ impl ChatBackendV1 for ProductionChatBackendV1 {
         name: &str,
         conversation: &[u8],
     ) -> Result<(), ChatBackendErrorV1> {
+        if self.qwen38.is_some() {
+            let _ = (name, conversation);
+            return Err(ChatBackendErrorV1::CheckpointUnavailable);
+        }
         if let Some(backend) = self.gemma_moe.as_mut() {
             return backend.save_checkpoint(name, conversation);
         }
@@ -790,6 +1027,10 @@ impl ChatBackendV1 for ProductionChatBackendV1 {
     }
 
     fn commit_turn(&mut self, conversation: &[u8]) -> Result<(), ChatBackendErrorV1> {
+        if self.qwen38.is_some() {
+            let _ = conversation;
+            return Ok(());
+        }
         if let Some(backend) = self.gemma_moe.as_mut() {
             return backend.commit_turn(conversation);
         }
@@ -804,6 +1045,9 @@ impl ChatBackendV1 for ProductionChatBackendV1 {
     }
 
     fn abort_turn(&mut self) -> Result<(), ChatBackendErrorV1> {
+        if self.qwen38.is_some() {
+            return Ok(());
+        }
         if let Some(backend) = self.gemma_moe.as_mut() {
             return backend.abort_turn();
         }
@@ -835,18 +1079,40 @@ where
     };
     let cancellation_registry = CancellationRegistryV1::default();
     let mut backend = open_backend(config, cancellation_registry.clone())?;
-    let listener = SigintListenerV1::start(cancellation_registry)?;
+    let listener = match SigintListenerV1::start(cancellation_registry) {
+        Ok(listener) => listener,
+        Err(error) => return finish_chat_result(Err(error), backend.shutdown()),
+    };
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let mut output = io::stdout();
     let result = crate::chat::run_prepared(options, &mut backend, &mut output, &mut input);
     listener.shutdown();
-    result
+    finish_chat_result(result, backend.shutdown())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_shutdown_failure_is_propagated_after_success_or_error() {
+        assert_eq!(
+            finish_chat_result(Ok(()), Err("shutdown failed".to_owned())),
+            Err("shutdown failed".to_owned())
+        );
+        assert_eq!(
+            finish_chat_result(
+                Err("chat failed".to_owned()),
+                Err("shutdown failed".to_owned())
+            ),
+            Err("chat failed; shutdown failed".to_owned())
+        );
+        assert_eq!(
+            finish_chat_result(Err("chat failed".to_owned()), Ok(())),
+            Err("chat failed".to_owned())
+        );
+    }
 
     #[test]
     fn cancellation_registry_only_targets_current_turn() {
@@ -978,6 +1244,64 @@ mod tests {
             config.context_length,
             u32::try_from(QWEN35_RECOMMENDED_CONTEXT_TOKENS).unwrap()
         );
+    }
+
+    #[test]
+    fn parser_qwen38_chat_selects_absolute_artifact_and_mxfp8_default() {
+        let args = [
+            "--qwen38-nvfp4",
+            "/models/qwen38",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx1030",
+        ];
+        let (config, _) = split_args(args.into_iter().map(str::to_owned)).unwrap();
+        assert_eq!(config.qwen38_artifact, Some("/models/qwen38".into()));
+        assert_eq!(config.gguf, std::path::PathBuf::new());
+        assert_eq!(config.kv_cache_encoding, None);
+        assert_eq!(
+            config.context_length,
+            u32::try_from(QWEN35_RECOMMENDED_CONTEXT_TOKENS).unwrap()
+        );
+    }
+
+    #[test]
+    fn parser_qwen38_chat_rejects_relative_or_unsupported_kv() {
+        let base = [
+            "--qwen38-nvfp4",
+            "qwen38",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx1030",
+        ];
+        assert!(split_args(base.into_iter().map(str::to_owned)).is_err());
+        let args = [
+            "--qwen38-nvfp4",
+            "/models/qwen38",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx1030",
+            "--kv-cache-encoding",
+            "fp8-static",
+        ];
+        let error = split_args(args.into_iter().map(str::to_owned)).unwrap_err();
+        assert!(error.contains("only fp16 or kv-mxfp8-e4"));
+
+        let args = [
+            "--qwen38-nvfp4",
+            "/models/qwen38",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx1030",
+            "--mtp-draft-width",
+            "1",
+        ];
+        let error = split_args(args.into_iter().map(str::to_owned)).unwrap_err();
+        assert!(error.contains("fixed draft width 2"));
     }
 
     #[test]

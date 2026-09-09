@@ -1,6 +1,6 @@
 # GPU互換性方針
 
-> 最終更新: 2026-09-02
+> 最終更新: 2026-09-09
 >
 > この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4、Phase 15Oのmodel量子化最適化、Phase 15Qのmatched品質attribution、Phase 16のFP8/NVFP4 KV cacheを検証済みである。Phase 30ではexact `gfx1201`のnative FP8 readとwave-tiled causal attention、Phase 31では両targetの10,001-token chunk/arenaと明示FP8 KV経路を追加検証した。Phase 49ではGQA P32をexact `gfx1030`だけへ限定採用し、Phase 50ではexact `gfx1201`のResidual/GDN/MLP/P32候補を狭い実機scopeで検証した。Phase 61ではOCP MXFP8 W8A8／MXFP6 W6A6を追加し、Phase 62では共通low-precision codec、両RDNAのbit-exact W/A・KV・attentionと固定Qwen3.5-4B性能を検証した。Phase 63ではexact `gfx1201`のlarge-M MXFP8 WMMA provider、Phase 64／65では同じ演算順のoperand direct-load provider、Phase 66ではN128 ID37とMXFP6／NVFP4／MXFP4へのfrozen provider routingを狭いshape scopeへ採用した。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
 
@@ -560,6 +560,23 @@ resident／peakは同formatのcontrolから増えていない。gfx1201とgfx942
 主張しない。lifecycleは`experimental`のまま、evidenceはこのexact target／SKU／tuple／format／selector shapeへ限定する。
 詳細は[Phase 75履歴](../history/2026/09/1-10/phase75-gfx1030-mxfp8-first-shared-half2-optimization.md)と
 [追跡要約](../../ci/matrix/phase75-gfx1030-mxfp8-mxfp6-shared-half2-v1.json)を正本とする。
+
+### 2026-09-09 Phase83 exact `gfx1201`通常KV resident境界
+
+canonical R9700のscratch r22は、別live KV stateの破壊を後段layerのVMM grow直後かつappend kernel前へ局所化した。
+従ってPhase 6 A0/A1のprimitiveと短いfresh-state PASSを、同じexact `gfx1201`でもrequest履歴を含む正しさへ一般化しない。
+
+現在のRust HIP adapterは、sliding windowなしの通常KV stateをexact `gfx1201`で作る場合、capacityとKV encodingに
+かかわらずcreate時に`contiguous-resident`を明示選択する。exact `gfx1030`の65,536-token以上という既存境界、exact
+`gfx942`の既存resident選択、unknown targetと他targetのcapability選択は変えない。direct native C ABIの
+`CAPABILITY_SELECTED`／明示`VIRTUAL_CONTIGUOUS`、sliding stateはVMM経路を維持し、runtime error後のprovider retryは行わない。
+
+scratch r23のresident候補は同じrequest履歴の8,192入力／128出力で4 plane、finite replay、HIP-only、fallbackなし、cleanup 0を
+維持した。main作業ツリーの両target buildとKV host test 28件に加え、診断なしr25のR9700既定CLI/APIでも
+8,192入力／128出力、MTP 113候補／70採用、HIP-only、正常終了を確認した。r26のR9700対話も成功した。
+V620 r26でもCLI/APIの8,192入力／128出力と対話が成功し、遅延観測でVRAM／GTTのbaseline復帰を確認した。公開結果は当該commitのGitHub Checksで確認する。lifecycleは`experimental`のまま、別RDNA4 SKU、別software tuple、sliding／direct ABI VMM、別modelへ
+一般化しない。診断と検証の詳細は[Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)と
+[数値変更台帳](numerical-output-changes.md)に記録する。
 
 ### software.mdとの関係
 

@@ -28,8 +28,8 @@ use sllm_core::{
     NgramDraftProviderV1, OsSamplingRandom, PrefixCacheConfigV1, PrefixCacheKeyV1, PrefixCacheV1,
     PrefixCacheValueV1, PrefixEntryIdV1, PrefixKvLayoutV1, PrefixLeaseV1, PrefixLookupKind,
     PrefixStateIdentityV1, QWEN35_HIDDEN_SIZE, QWEN35_RECOMMENDED_CONTEXT_TOKENS,
-    QuantizedTensorEncoding, QwenComponentSelection, QwenExecutionRequest, QwenGraph,
-    QwenGraphStateDescriptor, QwenMultimodalImageEmbedding, QwenMultimodalPrompt,
+    QWEN38_MTP_DRAFT_WIDTH, QuantizedTensorEncoding, QwenComponentSelection, QwenExecutionRequest,
+    QwenGraph, QwenGraphStateDescriptor, QwenMultimodalImageEmbedding, QwenMultimodalPrompt,
     QwenPrefixForkAuditV1, QwenPrefixStateV1, QwenResidentModel, QwenVisionExecutionInput,
     QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock, SamplerChainConfigV1,
     SamplerChainV1, SessionCheckpoint, SpeculativeAccountingV1, VerifiedCache,
@@ -47,7 +47,8 @@ use sllm_core::{
     build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_kv_cache_selection,
     build_qwen35_graph_with_position_payload_mode, build_qwen35_moe_execution_graph,
     build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
-    build_qwen35_unsloth_qwen38_nvfp4_graph, build_qwen38_nvfp4_weight_load_plan,
+    build_qwen35_unsloth_qwen38_nvfp4_graph, build_qwen38_nvfp4_mtp_graph,
+    build_qwen38_nvfp4_mtp_weight_load_plan, build_qwen38_nvfp4_weight_load_plan,
     build_verified_gemma4_mtp_weight_load_plan, build_verified_gguf_gemma_weight_load_plan,
     build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
     builtin_reviewed_model_lock, gemma4_mtp_pair_semantic_id,
@@ -416,6 +417,26 @@ fn generate_with_optional_assistant_prefill(
             sink,
         )
     }
+}
+
+// Sampling may require logits mathematically while keeping them on the GPU.
+// MTP can use that selector path; only host-logit generation remains excluded.
+fn qwen_mtp_sampling_supported(
+    generation: &sllm_frontend::GenerationConfigV1,
+    requires_logits: bool,
+) -> bool {
+    if !requires_logits {
+        return true;
+    }
+    generation.device_selector_seed().is_some()
+        && generation.grammar().is_none()
+        && !generation
+            .reasoning()
+            .is_some_and(ReasoningPolicyV1::is_enabled)
+        && generation.sampler_chain().is_some_and(|chain| {
+            SamplerChainV1::new(chain.clone(), &[])
+                .is_ok_and(|sampler| sampler.supports_device_selector())
+        })
 }
 
 fn qwen_embedding_graph_for_rows(
@@ -1457,8 +1478,10 @@ pub struct QwenBackendConfigV1 {
 /// This path intentionally has a separate configuration type: the artifact is
 /// a verified safetensors directory with a mixed NVFP4/FP8 recipe, while the
 /// existing Qwen config accepts derived GGUF and its optional dense-Qwen
-/// lifecycle features. Qwen3.8 production is scoped to one exact R9700
-/// target, one active request, and either FP16 or standard OCP MXFP8 E4 KV.
+/// lifecycle features. Qwen3.8 production is scoped to one exact V620 or
+/// R9700 target, one active request, and either FP16 or standard OCP MXFP8 E4
+/// KV. The optional MTP companion is authenticated from the same artifact
+/// directory when `phase41.draft` is `MtpAuto`.
 #[derive(Clone, Debug)]
 pub struct Qwen38Nvfp4BackendConfigV1 {
     pub artifact_root: PathBuf,
@@ -1468,13 +1491,14 @@ pub struct Qwen38Nvfp4BackendConfigV1 {
     pub shutdown_timeout: Duration,
     pub context_length: u32,
     pub kv_cache_encoding: KvCacheEncoding,
+    pub phase41: Phase41ProductionConfigV1,
 }
 
 impl Qwen38Nvfp4BackendConfigV1 {
     pub fn validate(&self) -> Result<(), BackendErrorV1> {
         if self.artifact_root.as_os_str().is_empty()
             || self.device_index != 0
-            || self.target != "gfx1201"
+            || !matches!(self.target.as_str(), "gfx1030" | "gfx1201")
             || self.completion_timeout.is_zero()
             || self.shutdown_timeout.is_zero()
             || self.context_length == 0
@@ -1484,9 +1508,11 @@ impl Qwen38Nvfp4BackendConfigV1 {
             )
         {
             return Err(BackendErrorV1::new(
-                "Qwen3.8 NVFP4 requires a non-empty artifact root, logical device index 0, exact target gfx1201, valid timeouts, nonzero context length, and FP16 or MXFP8 E4 KV",
+                "Qwen3.8 NVFP4 requires a non-empty artifact root, logical device index 0, exact target gfx1030 or gfx1201, valid timeouts, nonzero context length, and FP16 or MXFP8 E4 KV",
             ));
         }
+        self.phase41.validate()?;
+        validate_qwen_phase41_operational_config(&self.phase41)?;
         Ok(())
     }
 }
@@ -4512,6 +4538,36 @@ impl QwenChatBackendV1 {
         .map_err(|error| {
             BackendErrorV1::new(format!("Qwen3.8 resident model load failed: {error}"))
         })?;
+        let (mtp_resident, mtp_plan) =
+            if matches!(config.phase41.draft, DraftStartupConfigV1::MtpAuto) {
+                let mtp_plan =
+                    build_qwen38_nvfp4_mtp_weight_load_plan(&lock, &artifact).map_err(|error| {
+                        BackendErrorV1::new(format!("Qwen3.8 MTP load plan failed: {error}"))
+                    })?;
+                let mtp_graph = build_qwen38_nvfp4_mtp_graph(
+                    &lock,
+                    &mtp_plan,
+                    &artifact,
+                    1,
+                    config.kv_cache_encoding,
+                )
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("Qwen3.8 MTP resident graph failed: {error}"))
+                })?;
+                let mtp_resident = QwenResidentModel::new_unsloth_qwen38_nvfp4_mtp_shared(
+                    &resident,
+                    mtp_graph,
+                    mtp_plan.clone(),
+                    Arc::clone(&artifact),
+                    config.completion_timeout,
+                )
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("Qwen3.8 MTP resident load failed: {error}"))
+                })?;
+                (Some(mtp_resident), Some(mtp_plan))
+            } else {
+                (None, None)
+            };
         let ready = session.memory_snapshot();
         require_clean_request_memory(ready, "Qwen3.8 model-ready")?;
         let model_ready_current_bytes = ready.model_resident().current_bytes();
@@ -4521,7 +4577,7 @@ impl QwenChatBackendV1 {
             ));
         }
         let kv_cache_selection = KvCacheSelectionReportV1::qwen38_nvfp4(config.kv_cache_encoding);
-        let phase41 = Phase41ProductionConfigV1::default();
+        let phase41 = config.phase41.clone();
         let identity = BackendIdentityV1 {
             target: config.target.clone(),
             model_fingerprint: format!("sha256:{}", sllm_core::UNSLOTH_QWEN38_NVFP4_MODEL_SHA256),
@@ -4542,8 +4598,8 @@ impl QwenChatBackendV1 {
                 renderer,
                 plan,
                 resident,
-                mtp_resident: None,
-                mtp_plan: None,
+                mtp_resident,
+                mtp_plan,
                 session,
                 target: config.target,
                 model_ready_current_bytes,
@@ -6085,8 +6141,15 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             };
         let mtp_target = matches!(state.phase41.draft, DraftStartupConfigV1::MtpAuto)
             && state.mtp_resident.is_some()
-            && !requires_logits
+            && qwen_mtp_sampling_supported(&generation, requires_logits)
             && multimodal_prompt.is_none();
+        let mtp_draft_width = if mtp_target && state.qwen38_artifact.is_some() {
+            QWEN38_MTP_DRAFT_WIDTH
+        } else if mtp_target {
+            1
+        } else {
+            0
+        };
         if adapters_enabled && mtp_target {
             return Err(BackendErrorV1::new(
                 "Qwen adapters cannot be combined with MTP draft execution",
@@ -6103,7 +6166,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         }
         let build_graph = |chunk_rows: u64| {
             let target_rows = if mtp_target {
-                chunk_rows.max(2)
+                chunk_rows.max((mtp_draft_width + 1) as u64)
             } else if ngram_draft_width != 0 {
                 chunk_rows.max(ngram_draft_width as u64 + 1)
             } else {
@@ -6399,11 +6462,21 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             } else if let (true, Some(mtp_resident), Some(mtp_plan)) =
                 (mtp_target, &state.mtp_resident, &state.mtp_plan)
             {
-                let mtp_graph = build_qwen35_mtp_graph(
-                    state.lock.as_ref().expect("MTP requires dense Qwen lock"),
-                    mtp_plan,
-                    state_capacity,
-                )
+                let mtp_graph = if let Some(artifact) = &state.qwen38_artifact {
+                    build_qwen38_nvfp4_mtp_graph(
+                        state.lock.as_ref().expect("MTP requires dense Qwen lock"),
+                        mtp_plan,
+                        artifact,
+                        state_capacity,
+                        state.kv_cache_encoding,
+                    )
+                } else {
+                    build_qwen35_mtp_graph(
+                        state.lock.as_ref().expect("MTP requires dense Qwen lock"),
+                        mtp_plan,
+                        state_capacity,
+                    )
+                }
                 .map_err(|error| {
                     BackendErrorV1::new(format!("MTP request graph failed: {error}"))
                 })?;
@@ -6414,8 +6487,12 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     })?;
                 allocated = state.session.memory_snapshot();
                 let mut executor = SpeculativeGenerationAdapterV1::new(
-                    QwenMtpGenerationExecutorV1::new_with_draft_width(owner, mtp_owner, 1)
-                        .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+                    QwenMtpGenerationExecutorV1::new_with_draft_width(
+                        owner,
+                        mtp_owner,
+                        mtp_draft_width,
+                    )
+                    .map_err(|error| BackendErrorV1::new(error.to_string()))?,
                 );
                 let outcome = generate_with_optional_assistant_prefill(
                     &service,
@@ -10665,6 +10742,31 @@ mod tests {
     }
 
     #[test]
+    fn qwen_mtp_fixed_gpu_sampling_is_not_disabled_by_logit_requirement() {
+        let sampling = sllm_core::SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).unwrap();
+        let chain = SamplerChainConfigV1::new(sampling).with_top_k(20).unwrap();
+        assert!(chain.requires_logits());
+        let generation = sllm_frontend::GenerationConfigV1::new(128, sampling, vec![])
+            .unwrap()
+            .with_sampler_chain(chain.clone())
+            .unwrap();
+        assert!(!qwen_mtp_sampling_supported(&generation, true));
+        let generation = generation.with_device_selector_seed(42);
+        assert!(qwen_mtp_sampling_supported(&generation, true));
+        let host_logprobs = generation
+            .with_sampler_chain(chain.with_top_logprobs(2).unwrap())
+            .unwrap();
+        assert!(!qwen_mtp_sampling_supported(&host_logprobs, true));
+        let greedy = sllm_frontend::GenerationConfigV1::new(
+            128,
+            sllm_core::SamplingParametersV1::greedy(),
+            vec![],
+        )
+        .unwrap();
+        assert!(qwen_mtp_sampling_supported(&greedy, false));
+    }
+
+    #[test]
     fn qwen38_nvfp4_config_is_host_validated_without_loading_artifacts() {
         let config = Qwen38Nvfp4BackendConfigV1 {
             artifact_root: PathBuf::from("/models/Qwen3.8-27B-NVFP4"),
@@ -10674,6 +10776,7 @@ mod tests {
             shutdown_timeout: Duration::from_secs(1),
             context_length: 16_384,
             kv_cache_encoding: KvCacheEncoding::Mxfp8E4,
+            phase41: Phase41ProductionConfigV1::default(),
         };
         config
             .validate()
@@ -10692,11 +10795,19 @@ mod tests {
                 shutdown_timeout: config.shutdown_timeout,
                 context_length,
                 kv_cache_encoding: config.kv_cache_encoding,
+                phase41: config.phase41.clone(),
             };
             assert!(
                 invalid.validate().is_err(),
                 "invalid fixed-profile tuple must be rejected before HIP/model load"
             );
+        }
+        for target in ["gfx1030", "gfx1201"] {
+            let mut mtp = config.clone();
+            mtp.target = target.to_owned();
+            mtp.phase41.draft = DraftStartupConfigV1::MtpAuto;
+            mtp.validate()
+                .expect("Qwen3.8 MTP draft mode should be host-admissible");
         }
         for kv_cache_encoding in [KvCacheEncoding::Mxfp8E5, KvCacheEncoding::Nvfp4] {
             let invalid = Qwen38Nvfp4BackendConfigV1 {

@@ -1,6 +1,6 @@
 {
   "schema_version": "path-to-suite-v1",
-  "revision": 46,
+  "revision": 47,
   "default_suite_ids": ["h0-tracked-tree", "h0-suite-registration"],
   "rules": [
     {"pattern": "crates/sllm-tools/**", "suite_ids": ["h0-phase46-tools-contract", "h0-rust-format", "h0-rust-clippy", "h1-host-contract"]},
@@ -343,6 +343,7 @@
     {"pattern": "native/hip/src/matmul_kernel.hip.cpp", "suite_ids": ["h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
     {"pattern": "native/hip/src/matmul_kernel_internal.hpp", "suite_ids": ["h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
     {"pattern": "native/hip/src/matmul_runtime.inc", "suite_ids": ["h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
+    {"pattern": "native/hip/src/nvfp4_prefill_wmma_compensated.inc", "suite_ids": ["h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
     {"pattern": "native/hip/CMakeLists.txt", "suite_ids": ["h3-compile-only-contract", "h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-semantic-g1-contract", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
     {"pattern": "native/hip/src/abi_layout_probe.cpp", "suite_ids": ["h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
     {"pattern": "native/hip/src/hip_stub.cpp", "suite_ids": ["h0-rmsnorm-semantic-g1-contract", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},

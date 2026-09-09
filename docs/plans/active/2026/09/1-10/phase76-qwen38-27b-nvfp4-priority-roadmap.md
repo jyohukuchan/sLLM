@@ -23,7 +23,7 @@ Phase 80のCI修復とPhase 81の固定GPU samplingを完了した。2026-09-08�
 2026-09-03のユーザー指示により、次の最優先目標を、手持ちGPU上で
 `unsloth/Qwen3.8-27B-NVFP4`を実用的な単一要求速度で文章生成できる状態とする。
 現在はPhase 78のユーザー承認済み完了判断とPhase 81の固定GPU sampling完了を踏まえ、Phase 82で未採用最適化を整理し、
-現行target・shape・KV範囲だけを条件付きで既定採用する。続いてPhase 83でstatic FP8 KV／MTP／文章生成の実用closeout、
+現行target・shape・KV範囲だけを条件付きで既定採用する。続いてPhase 83で標準OCP MXFP8 E4 KV／MTP／文章生成の実用closeout、
 Phase 84で他精度の単一要求最適化、Phase 85でNVFP4 batchingの順とする。Phase 81の共通samplerは既存モデル経路を
 対象として完了した。旧exact-model目標の再達成や実用closeout（現在のPhase 83）の完了は開始条件にしなかった。
 2026-09-07の変更により、既存NVFP4/FP8経路のモデル横断共通化は新Phase 79として先行する。
@@ -38,9 +38,10 @@ Phase 84で他精度の単一要求最適化、Phase 85でNVFP4 batchingの順�
 5. Phase 80: CIの確認・修復、必要なコード／検査変更、対象CIの再実行確認。
 6. Phase 81: 固定設定のGPU sampling最適化。
 7. Phase 82: 不採用最適化の削除・現行target／shape／KV範囲の条件付き既定採用。
-8. Phase 83: static FP8 KV、MTP、長めの実入力、CLI/APIを含む実用closeout（旧Phase 82）。
-9. Phase 84: 他精度の残る単一要求最適化（旧Phase 83）。
-10. Phase 85: NVFP4のGPU batching最適化（旧Phase 84）。
+8. Phase 83: 標準OCP MXFP8 E4 KVの統合、MTP、長めの実入力、CLI/APIを含む実用closeout（旧Phase 82）。
+9. Phase 83.5: Phase 83の正しさを維持する追加最適化と8,192／128の速度目標達成。
+10. Phase 84: 他精度の残る単一要求最適化（旧Phase 83）。
+11. Phase 85: NVFP4のGPU batching最適化（旧Phase 84）。
 
 Phase 76〜84の途中で一般的なFP8 artifact互換、vision、tensor parallel、continuous batchingへscopeを
 広げない。Qwen3.8 artifact内に実在する限定FP8 recipeは対象modelを動かすために扱うが、これを汎用FP8対応とは呼ばない。
@@ -73,17 +74,18 @@ planning時点のSHAは実装開始時に再解決し、変化していた場合
 | `lm_head` | 1 | FP8 W8A8 | weight channel、activation dynamic token |
 
 FP8 weightは合計233本である。embedding、norm、linear-attentionの`in_proj_a`／`in_proj_b`とstate parameter、
-vision tower、MTP 15 tensorなどはBF16または非量子化parameterとして残る。KV recipeはstatic tensor FP8である。
-したがって最終性能はNVFP4だけでなく、FP8 projection、BF16 GDN／normalization、full attention、static FP8 KV、
-248,320-wide FP8 `lm_head`にも依存する。
+vision tower、MTP 15 tensorなどはBF16または非量子化parameterとして残る。固定artifactのsource recipeはstatic tensor FP8 KVを指定する。
+これはartifact inventoryの入力事実であり、現在のruntime既定KV形式を決める記述ではない。最終性能はNVFP4だけでなく、
+FP8 projection、BF16 GDN／normalization、full attention、KV、248,320-wide FP8 `lm_head`にも依存する。
 
 ## Phase 76: model統合とbaseline
 
 実装済みの基盤範囲は、固定revisionのconfig/index/header identity検証、main/MTP safetensorsの範囲検証、
 NVFP4 168本・FP8 233本・BF16を含む1199論理tensorのinventory、直接source load plan、mixed graph、
 FP8 BF16-channel-scaleのF32 resident化、NVFP4のvalue/block/global-scale uploadである。
-CLIのsafetensors直接指定、static FP8 KVのscale materialization、MTP接続はPhase 83の実用closeoutへ残す。
+CLIのsafetensors直接指定、標準OCP MXFP8 E4 KVの共通append／attention／Graph経路への接続、MTP接続はPhase 83の実用closeoutへ残す。
 実モデルの初期GPU smokeはPhase 76〜78でFP16 KVを使って完了している。
+Phase 76〜78のstatic FP8 materializationに関する記述と完了記録は当時のartifact laneの履歴として保持し、現在のPhase 83の完了条件にはしない。
 
 基盤検証は `cargo check`、`cargo test -p sllm-core --lib`（532 passed、20 ignored）、
 exact `gfx1030` HIP compile-only/public-runtime build、NVFP4 selectorのhost fault test（PASS）まで完了している。
@@ -117,8 +119,8 @@ R9700の全GPU可視physical index 2はHIP最小kernelでも`invalid image`（gf
    groupの正規表現優先順位を解決し、末尾8層MLPをNVFP4ではなくFP8へ確実に分類する。
 3. NVFP4 `weight_packed`、block scale、`weight_global_scale`、`input_global_scale`と、FP8 value／channel scale、
    BF16 tensorをversioned GGUF recipeへlosslessに変換する。scaleとinverse-scaleの意味を名前から推測しない。
-4. 既存Qwen3.5-27B graph shapeを再利用しつつ、Qwen3.8 model identity、mixed binding、static FP8 KVを追加する。
-5. まずFP16 KVでweight/activationを分離したoracleを通し、次にartifact指定のstatic FP8 KVを通す。
+4. 既存Qwen3.5-27B graph shapeを再利用しつつ、Qwen3.8 model identity、mixed binding、static FP8 KVを追加する（当時の計画）。
+5. まずFP16 KVでweight/activationを分離したoracleを通し、次にartifact指定のstatic FP8 KVを通す（static FP8部分は2026-09-08の方針変更で対象外）。
 6. exact `gfx1201` R9700を最初の実GPU targetとして切り分け、動作後にexact `gfx1030` V620へ移す。
    V620を使う際は通常運用中のlocal Qwen serviceを停止して2基を解放し、GPU作業中はlocal Qwen subagentを使わない。
 7. short、512、2,048、9,435 tokenのprefillと128-token decodeをprofileし、format、consumer、shape、dispatch、
@@ -128,7 +130,8 @@ R9700の全GPU可視physical index 2はHIP最小kernelでも`invalid image`（gf
 
 - exact artifactからGGUFを生成し、全使用tensorのrole、shape、dtype、scale、range、hashをfail-closedに検証する。
 - NVFP4 168本、FP8 233本、BF16が意図したproviderへ入り、weight側のBF16展開や別precision fallbackが0である。
-  static FP8 KVのmaterializationはPhase 83のcloseout条件とし、Phase 76〜78ではFP16 KVを明示的rollbackとして使う。
+- 標準OCP `kv-mxfp8-e4`（E4M3FN value、block 32、E8M0 scale）の共通KV integrationはPhase 83のcloseout範囲とし、
+  Phase 76〜78のFP16 KVは明示的な比較／rollbackとして扱う。FP16の並列mirrorは作らない。
 - 非整列境界を含むoperator oracleと、固定promptのlogit/token replayを通す。
 - R9700とV620でsingle GPU residentとなり、GTT spillなしでbounded single-request generationとcleanupを完了する。
 - target別baseline profileからPhase 77の上位bottleneckを確定する。
@@ -1256,21 +1259,112 @@ fixed sampling、target別selector、Graph／chain／ProjectionPackの証拠を�
 このPhaseの完了条件に追加しない。公開APIのfixed sampling profileにopt-inを追加せず、既存の省略時契約と実行前拒否を維持する。
 
 共通deferred completionはGemmaで追加効果が確認できなかったことだけを理由に削除せず、既存の共通rollbackとQwenの
-target／KV条件を維持する。Gemma ProjectionPackの既定採用済み範囲も変更しない。Phase 82の完了後、static FP8 KV／MTP／
+target／KV条件を維持する。Gemma ProjectionPackの既定採用済み範囲も変更しない。Phase 82の完了後、標準OCP MXFP8 E4 KV／MTP／
 文章生成の実用closeoutを新Phase 83として開始する。
 
-## Phase 83: 実用closeout（旧Phase 82）
+### 2026-09-08のPhase 83 scope変更
 
-- artifactのstatic FP8 KVをappend、full attention、context growthへ直接接続し、FP16 mirrorを作らない。
+現在のAPI既定KV形式は標準OCP `kv-mxfp8-e4`であり、artifact指定のstatic FP8 KVがそれを置き換えるという
+採用決定や優越性の証拠はない。したがってユーザー指示により、Phase 83は標準OCP MXFP8 E4 KVの既存runtime統合へ変更する。
+固定artifactのstatic FP8 recipeはsource factとしてinventoryと完了済みphaseのhistoryへ残すが、static FP8 materializationを
+Phase 83または後続Phaseへ自動的に割り当てない。これまでのstatic FP8 materialization要件はこのscope変更でsupersedeする。
+KV形式の変更自体は全モデル検証を追加しない。続くユーザー指示による固定sampling／MTP統合、Phase 82比較基準、
+8,192入力／128出力の速度目標と実用完了範囲を以下に定める。
+
+## Phase 83: 標準OCP MXFP8 E4 KV・固定sampling・MTPの正しい実装
+
+2026-09-09のユーザー指示で正しさの完成と速度目標を分離した。追加最適化と速度目標はPhase 83.5へ移す。
+既に実装した最適化は正しさ・採用条件を確認できたものを維持し、未検証候補は切戻しまたは無効化して83.5へ引き継ぐ。
+要求再利用で文章が崩れる不具合をPhase83で修正し、両GPUの8,192入力／128出力・CLI/API・対話・lifecycleを確認した。
+[実装履歴](../../../../../history/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)に比較結果と制限を記録する。既定MTPの速度改善はPhase83.5へ残す。
+
+- 標準OCP `kv-mxfp8-e4`（E4M3FN value、block 32、E8M0 scale）を既存の共通KV append、full-attention、context growth、Graph経路へ正しく接続する。
+  scale、配置、buffer寿命、同期を扱い、FP16専用条件を単に解除しない。FP16は明示比較／rollbackとして残し、常駐FP16 mirrorは作らない。
+  現行MXFP8経路との同条件比較でprefill／decode、VRAM、数値誤差を記録し、確認できた演算条件で既定採用する。
+- Phase 81の固定sampling API（`temperature=1.0`、`top_p=0.95`、model profileの固定`top_k`）をそのまま併用する。
+  sampler profileや追加のsampling gateは作らない。
 - target-only逐次decodeが安定した後で、BF16 MTP companionを追加する。width 1〜3のdraft、逐次accept/reject、
-  rejection replay、target-only同値、acceptance率とwall throughputを分離する。MTPが遅い場合はtarget-onlyをrollbackとして残す。
-- 9,435-token実入力、128-token出力、短い対話、SSE、cancel/recovery、model unloadをsingle requestで確認する。
+  rejection replay、BF16比の精度評価、acceptance率とwall throughputを分離する。固定samplingとの併用に必要なRNG・KV／GDN状態の
+  accept/reject時の扱いを明確にする。MTPが遅い場合はtarget-onlyをrollbackとして残す。
+- 性能の基準入力を8,192 token、出力を128 tokenへ変更する。旧9,435／128の測定は履歴として残し、新基準へ換算しない。
+  短い対話、SSE、cancel/recovery、model unloadもsingle requestで確認する。
 - 32 GB級deviceでmodel、MTP、KV、workspaceを収め、GTT spillとCPU/backend fallbackを許さない。
 - visionはこのcloseoutをblockしない。text target達成後の独立機能項目とする。
 
+### 固定samplingとMTPの統合
+
+- 公開CLI/APIからMXFP8 KVとBF16 MTPを同時に選択でき、`temperature=1.0`、`top_p=0.95`、
+  Qwen3.8の`top_k=20`を共通GPU samplerで実行する。greedy専用MTPを接続しただけでは完了としない。
+- draft、target verification、accept/reject、補正・replayのアルゴリズムとRNG消費を明記し、固定samplingを正しく実装する。
+  token列一致が成立する方式・条件と、分布／数値oracleで確認する条件を区別する。MTP有無で同じseedを指定しただけで
+  同一token列になるとは仮定しない。全語彙logitsのCPU転送・CPU samplingへの切替を高速経路の代替にしない。
+- 2026-09-09ユーザー決定: Phase 83／83.5ではMTPなしとの出力完全一致を必須とせず、同一BF16参照に対する精度劣化が同程度なら出力差を許容する。
+  BF16参照・入力・評価指標・許容差を比較記録に明記し、samplingのばらつきと数値誤差を区別する。
+  出力tokenの不一致だけで棄却せず、単一例の見た目やkernelのBF16出力一致だけでモデル品質同等としない。
+  要求履歴に依存する文章崩壊、状態破損、sampling実装の不具合は引き続き修正対象とする。
+- rejection／cancel時のKV長、MXFP8 value／scale、GDN state、MTP state、RNGのcommit／rollbackを扱う。
+  draft width 1〜3の適用範囲を確認し、性能測定では選択したwidthとacceptance率を記録する。
+
+### Phase 83の完了範囲
+
+- このPhaseの実装完了は、V620／R9700の両single-GPU targetで固定artifactのtext生成をMXFP8 KV＋固定sampling＋MTPで実行し、
+  8,192／128の長文生成、短い対話／SSE／cancel後の回復／要求再利用／unload／cleanupの正しさを確認することとする。
+  同条件の速度とPhase 82との差は記録するが、速度目標の達成は完了条件にしない。
+  V620の専用API接続はPhase 82で未検証だったため、このPhaseの対象として実装・確認する。
+- 32 GB級VRAMにmodel／MTP／KV／workspaceが収まり、GTT spill、CPU/backend fallback、常駐FP16 mirrorがないことを確認する。
+  target-onlyへの明示切戻しは残すが、MTPなしの速度をMTP有効時の目標達成へ読み替えない。
+- coding用途の代表入力は使うが、tool callingの完全対応、全coding taskの品質保証、vision、全モデル／全KV形式、
+  multi-GPU／tensor parallel、batchingはこのPhaseの完了範囲に含めない。現在の専用APIのtools未対応は残件として明記し、
+  text生成の実用完了をコーディングエージェント機能全体の完了と呼ばない。
+- Phase完了時は既定のcommit・push・公開CI確認／必要な修復手順を適用する。
+
+## Phase 83.5: 追加最適化と速度目標の達成
+
+Phase 83完了後に開始する。速度目標と計時条件は維持し、Phase 83の完了を速度探索で遅らせない。
+Phase 83の正しい実装を追加の比較点として固定し、Phase 82との比較基準も維持する。
+ボトルネックを測定し、対象・仮説・比較条件を定め、kernel単体の数値／性能検証後にモデル全体とCLI/APIで効果を確認する。
+共通経路に適用できる改善を優先し、試して不採用となった候補は変更内容・結果・理由を残す。
+Phase 83での探索記録を再利用し、未検証候補は採用済みと扱わない。
+Phase 83の正しさ・資源管理を維持し、以下の速度を満たして完了とする。完了時はcommit・push・公開CI確認と必要な修復を行う。
+
+### 比較基準と性能目標（2026-09-08ユーザー決定）
+
+比較の出発点はPhase 82完了HEAD `63ef9057f6265d99e38b254b8fb31d0b426859a4`の通常設定とする。
+[Phase 82履歴](../../../../../history/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md)と
+[測定identity](../../../../../history/2026/09/1-10/phase82-optimization-evidence.json)へ対応づけ、旧常駐binaryや
+Phase 78の手動高速presetをPhase 82の通常設定として扱わない。過去に測定した9,435／128、17／17、512／32の結果を
+8,192／128へ換算せず、Phase 82版と候補版を新しい同一入力で測る。
+
+比較は同一model revision／tokenizer／prompt token列／GPU個体／toolchain／固定sampling／seedで行う。
+主比較はPhase 82のMXFP8・MTPなし→Phase 83のMXFP8・MTPなし→Phase 83のMXFP8・MTPあり→Phase 83.5のMXFP8・MTPありとし、
+共通経路の改善とMTPの効果を分離する。Phase 82実測に対応するFP16・MTPなしの行も明示比較として残す。
+KV形式を跨ぐ差は別列とし、FP16の過去実測値をMXFP8 baselineと呼ばない。
+
+| GPU（single GPU、batch=1） | 入力／出力 | MTP | prefill目標 | decode目標 |
+| --- | --- | --- | --- | --- |
+| V620（exact `gfx1030`） | 8,192／128 token | 有効 | 200 tok/s以上 | 20 tok/s以上 |
+| R9700（exact `gfx1201`） | 8,192／128 token | 有効 | 500 tok/s以上 | 25 tok/s以上 |
+
+- 両targetともQwen3.8 27B NVFP4、標準OCP MXFP8 E4 KV、固定GPU sampling、MTP有効の通常公開設定を対象とする。
+  速度を満たすための未採用opt-inは達成値へ混ぜず、確認できた条件で既定選択される経路を測る。
+- 入力8,192 tokenはchat template／special tokenを適用した後の実token数とする。代表的なcoding入力のtoken列とhashを固定し、
+  prefix cache再利用なしで測る。出力は実際に確定・公開した128 tokenとし、draft／棄却tokenを出力数に足さない。
+  早期EOSで128 token未満のrunは実出力数を記録して別扱いとし、`ignore_eos=false`を変更して達成扱いにしない。
+- prefillは8,192を入力処理のwall秒で割る。MTPで必要なprefix準備を含め、model loadは除外する。
+  decodeは最初の確定tokenを除く127 tokenを、その後の生成wall秒で割り、draft／verify／rejection／samplingの時間を含める。
+  prefill目標の対応時間はV620 40.96秒、R9700 16.384秒、decode目標のTPOTはそれぞれ50 ms、40 msである。
+  CLI/APIで同じ計時境界を使い、request setup、TTFT、SSE配信を含むend-to-end時間も別に記録する。
+- 同一条件で1 warmup＋3 measuredの中央値とばらつきを記録する。これは代表性能行の測定方法であり、
+  旧Phaseの全測定matrixを再実行する要求ではない。
+- 目標は採用するが、達成可能性は未検証である。Phase 82のV620通常設定9,435／128はprefill約8.35 tok/s、
+  decode 8.2182 tok/sの単回測定だった。旧手動presetでは同入力のprefill約315.5 tok/s、decode約15.58 tok/sを
+  観測したが、KV・候補・数値条件が異なり、MXFP8／MTPでの達成証拠ではない。R9700の8,192／128も新たに確認する。
+  MTPのdecode効果とprefill自体の改善を分け、共通経路に適用できる最適化を優先する。
+  目標未達なら差と原因を記録し、無断で目標を緩和したり「Phase 83.5完了」とせず、既存の停止・再計画方針で扱う。
+
 ## Phase 84: 他精度の単一要求最適化（旧Phase 83）
 
-Phase 83完了後にだけ、次の順で残件を閉じる。
+Phase 83.5完了後に、次の順で残件を閉じる。
 
 1. MXFP8 W8A8 decode。ここで得たMXFP8 activation decodeを後続MXFP4 W4A8へ再利用する。
 2. MXFP6 W6A6 decode。MXFP8のtile/reduction骨格を使い、E3M2 ingressだけを独立評価する。

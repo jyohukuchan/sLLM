@@ -71,6 +71,7 @@ uint32_t qwen38_projection_pack_compute_grid(
   case KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32:
   case KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32:
   case KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32:
+  case KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4:
   case KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32:
     return ceil_grid(n, UINT64_C(32));
   case KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64:
@@ -925,6 +926,13 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
                                     Fp8OuterDecodeGfx1030LdsLutWave4Col32) {
             launch_status = ::sllm_matmul_kernel::
                 launch_fp8_outer_decode_gfx1030_lds_lut_wave4col32(
+                    quantized_activation, activation_scales, fp8_weight,
+                    weight_scales, output, kQwen38ProjectionPackM,
+                    kQwen38ProjectionPackK, member.n, queue->stream);
+          } else if (variant == sllm_matmul_kernel::KernelVariant::
+                                    Fp8OuterDecodeGfx1030FusedM2_4) {
+            launch_status = ::sllm_matmul_kernel::
+                launch_fp8_outer_decode_gfx1030_fused_m2_4(
                     quantized_activation, activation_scales, fp8_weight,
                     weight_scales, output, kQwen38ProjectionPackM,
                     kQwen38ProjectionPackK, member.n, queue->stream);

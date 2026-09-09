@@ -3332,6 +3332,17 @@ impl Context {
             inner: Arc::new(ContextInner::new(None)),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_without_native_for_target(target: &str) -> Self {
+        Self {
+            inner: Arc::new(ContextInner {
+                raw: None,
+                expected_target: Some(Arc::from(target)),
+                drop_probe: None,
+            }),
+        }
+    }
     pub fn device_count() -> Result<u32, RuntimeError> {
         reap_pending_cleanup();
         let mut error_buffer = [0_u8; ERROR_CAPACITY];

@@ -220,6 +220,17 @@ matmul_lowp_concrete_provider_plan(
     concrete_tile = TilePolicy::DecodeDword8Wave4Column32;
     concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
     break;
+  case KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4:
+    if (provider.format != MatmulFormat::Fp8OuterE4M3W8A8 ||
+        provider.target != sllm_lowp::ExactTarget::Gfx1030 ||
+        !::sllm_matmul_kernel::fp8_outer_decode_gfx1030_fused_m2_4_shape(
+            provider.m, provider.k, provider.n)) {
+      return std::nullopt;
+    }
+    concrete_provider = ProviderKind::Fp8OuterGfx1030Software;
+    concrete_tile = TilePolicy::DecodeDword8Wave4Column32;
+    concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
+    break;
   case KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32:
     if (provider.format != MatmulFormat::Fp8OuterE4M3W8A8 ||
         provider.target != sllm_lowp::ExactTarget::Gfx1030 ||
@@ -245,6 +256,25 @@ matmul_lowp_concrete_provider_plan(
     concrete_provider = ProviderKind::Fp8OuterGfx1030Software;
     concrete_tile = TilePolicy::DecodeWave4Column32;
     concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
+    break;
+  case KernelVariant::Nvfp4W4A4SmallMRowGrid:
+    if (provider.format != MatmulFormat::Nvfp4W4A4 ||
+        provider.target != sllm_lowp::ExactTarget::Gfx1030 ||
+        provider.m < 2U || provider.m > 4U ||
+        !::sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_activation_shared_shape(
+            1U, provider.k, provider.n)) return std::nullopt;
+    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
+    concrete_tile = TilePolicy::DecodeWave4Column32;
+    concrete_inner_product = InnerProduct::E2M1BlockScaledDp4aFp32;
+    break;
+  case KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid:
+    if (provider.format != MatmulFormat::Nvfp4W4A4 ||
+        provider.target != sllm_lowp::ExactTarget::Gfx1201 ||
+        !::sllm_matmul_kernel::phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(
+            provider.m, provider.k, provider.n)) return std::nullopt;
+    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
+    concrete_tile = TilePolicy::DecodeWave4Column32;
+    concrete_inner_product = InnerProduct::E2M1BlockScaledDp4aFp32;
     break;
   case KernelVariant::Nvfp4W4A4DecodeScaleLut:
     if (provider.format != MatmulFormat::Nvfp4W4A4 || provider.m != 1U ||
@@ -489,6 +519,7 @@ matmul_lowp_concrete_provider_plan(
     concrete_inner_product = InnerProduct::E2M1BlockScaledFp32;
     break;
   case KernelVariant::Nvfp4W4A4PrefillDp4a64x64:
+  case KernelVariant::Nvfp4W4A4PrefillCompensated64x64:
     if (provider.format != MatmulFormat::Nvfp4W4A4 || provider.m <= 1U ||
         provider.k == 0U || (provider.k % 16U) != 0U) {
       return std::nullopt;
@@ -496,6 +527,17 @@ matmul_lowp_concrete_provider_plan(
     concrete_provider = ProviderKind::Nvfp4W4A4Block16;
     concrete_tile = TilePolicy::BlockRow64Column64;
     concrete_inner_product = InnerProduct::E2M1BlockScaledFp32;
+    break;
+  case KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan:
+    if (provider.format != MatmulFormat::Nvfp4W4A4 ||
+        provider.target != sllm_lowp::ExactTarget::Gfx1201 ||
+        !::sllm_matmul_kernel::phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(
+            provider.m, provider.k, provider.n)) {
+      return std::nullopt;
+    }
+    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
+    concrete_tile = TilePolicy::Wmma128x64x32;
+    concrete_inner_product = InnerProduct::E2M1ViaE4M3WmmaFp32;
     break;
   case KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64:
     if (provider.format != MatmulFormat::Nvfp4W4A4 || provider.m <= 1U ||
@@ -2014,6 +2056,13 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
                            Fp8OuterDecodeGfx1030ActivationSharedWave8Col64) {
               launch_status = ::sllm_matmul_kernel::
                   launch_fp8_outer_decode_gfx1030_activation_shared_wave8col64(
+                      quantized, activation_scales, fp8_weight, weight_scales,
+                      output, plan->matmul_metadata.m, plan->matmul_metadata.k,
+                      plan->matmul_metadata.n, queue->stream);
+            } else if (variant == ::sllm_matmul_kernel::KernelVariant::
+                                      Fp8OuterDecodeGfx1030FusedM2_4) {
+              launch_status = ::sllm_matmul_kernel::
+                  launch_fp8_outer_decode_gfx1030_fused_m2_4(
                       quantized, activation_scales, fp8_weight, weight_scales,
                       output, plan->matmul_metadata.m, plan->matmul_metadata.k,
                       plan->matmul_metadata.n, queue->stream);

@@ -178,6 +178,18 @@
   gfx1201 `0.85`で、gfx1201は旧品質閾値`>=0.99`に未達である。これは隠さずN2台帳へ記録し、default変更は
   品質自動昇格ではなくユーザー明示決定として扱う。gfx942実機は未実施である。
 - `kv-mxfp8-e5`はexact `gfx1030`の明示比較形式として残し、既定にはしない。
+- 2026-09-08のユーザー決定により、Phase 83はstatic tensor FP8 KVの追加から、既存のstandard OCP
+  `kv-mxfp8-e4`（E4M3FN value、block 32、E8M0 scale）の高速経路・API統合へ変更する。
+  Qwen3.8専用APIの省略時KVは既にMXFP8 E4であり、FP16を明示した常駐サービス／Phase 82の測定設定とは区別する。
+  共通のappend／attention／context growthとGraph実行制御をMXFP8で接続・最適化し、固定GPU samplingと併用する。
+  FP16限定の条件を単に解除せず、scale、配置、buffer寿命、同期を検証し、確認できた演算条件で既定採用する。
+  FP16は比較・明示rollbackとして残し、MXFP8経路に常駐FP16 mirrorを設けない。
+  配布artifactのstatic tensor FP8指定はsource metadataの事実として保持するが、そのscale materializationや
+  recipeどおりのKV実行はPhase 83の対象・完了条件から外す。これはモデルの重み／活性値FP8対応の変更ではない。
+  旧計画はartifact recipeへの追従を理由にstatic FP8を含めたもので、MXFP8に対する性能・品質優位や既定変更を
+  確認した結果ではない。static FP8 KVは後続Phaseへ自動移設せず、必要性が生じた場合に別途計画する。
+  MTP、長めの文章生成、CLI/APIの残件はPhase 83に維持する。詳細は
+  [Phase 83計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
 
 ### モデルの数値形式
 
@@ -349,7 +361,50 @@
 [Phase 82: 不採用最適化の削除・条件付き既定採用](archive/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md)では、棄却済み24 matmul候補とattention専用経路を整理し、
 確認済みのdecode・量子化・Qwen実行制御を条件付きで既定化した。数値判断が残る高速prefill／長文attentionは保留し、
 通常設定と手動高速presetの性能差も記録した。次はPhase 83とする。
-直前のPhase 82 static FP8 KV／MTP／文章生成、83他精度、84 batchingは、内容を保持して83〜85へ繰り下げる。
+直前のPhase 82 static FP8 KV／MTP／文章生成、83他精度、84 batchingを83〜85へ繰り下げた。
+その後、2026-09-08のユーザー指示により、Phase 83のKV対象をstatic tensor FP8からstandard OCP MXFP8 E4へ変更する。
+
+### Phase 83の実装完了とPhase 83.5の速度目標（2026-09-09ユーザー変更）
+
+2026-09-09に[専用実行計画](archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)の実装・検証・比較記録を完了した。
+両GPUでMXFP8／固定sampling／MTPのCLI/API、8,192入力／128出力、対話、SSE、cancel/recovery、解放を確認した。
+gfx1201のVMM growによる別live KV破損は通常stateのresident選択で回避し、gfx1030 ID91のpublic launch不具合も修正した。
+既定MTPの初回参考値はV620 prefill/decode 8.257／2.254 tok/s、R9700 10.703／2.127 tok/sで、MTPなしよりdecodeが遅い。
+速度改善はPhase83.5へ残す。BF16 full-model品質同等性は未証明であり、kernel oracleや生成例とは区別する。
+詳細は[履歴と測定条件](../history/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)を参照する。受入条件は以下のとおり。
+
+- 固定GPU sampling（`temperature=1.0`、`top_p=0.95`、Qwen3.8 `top_k=20`）とMTPをCLI/APIから併用する。
+  accept/reject、補正・replay、RNGとKV／GDN／MTP stateのcommit／rollbackを正しく統合する。
+- 2026-09-09ユーザー決定: MTP有無の出力token列・文章の完全一致は必須としない。
+  同一BF16参照に対する精度劣化がMTPなしと同程度であれば、MTPによる出力差を許容する。Phase 83／83.5の両方に適用する。
+  比較するBF16参照・入力・評価指標・許容差を明記し、samplingのばらつきと数値差を区別して評価する。
+  同じseedでの出力差だけを不合格理由とせず、単一の生成例やkernelのBF16出力一致だけでモデル品質の同等性を認定しない。
+  状態破損、要求履歴に依存する文章崩壊、sampling実装の不具合はこの許容に含めない。
+- 比較基準はPhase 82完了HEAD `63ef9057f6265d99e38b254b8fb31d0b426859a4`の通常設定とする。
+  同一8,192入力／128出力でPhase 82 MXFP8・MTPなし、Phase 83 MXFP8・MTPなし／ありを比較し、
+  Phase 82のFP16行は別の明示比較とする。旧常駐binary／手動高速presetや9,435入力の値を新baselineへ読み替えない。
+- 2026-09-09のユーザー指示により、Phase 83は正しい実装の完成まで、追加最適化と速度目標の達成はPhase 83.5へ分離する。
+  Phase 83では両GPUのCLI/API、長文・短い対話、SSE、cancel/recovery、要求再利用、unload、32 GB級VRAMへの収容と数値・samplingの正しさを確認する。
+  性能実測と未達差は記録するが、以下の速度目標をPhase 83の完了条件にしない。
+
+#### Phase 83.5: 追加最適化と速度目標
+
+- Phase 83完了後、正しさを維持したまま測定で特定したボトルネックを最適化する。Phase 84・85の番号は維持し、順序は83→83.5→84→85とする。
+- 新しい代表性能基準はtemplate適用後の8,192入力token／実際に確定した128出力tokenへ統一する。
+  Qwen3.8 27B NVFP4、MXFP8 E4 KV、固定sampling、MTP有効、single GPU／batch=1で次を目標とする。
+
+| GPU | prefill | decode |
+| --- | --- | --- |
+| V620 `gfx1030` | 200 tok/s以上 | 20 tok/s以上 |
+| R9700 `gfx1201` | 500 tok/s以上 | 25 tok/s以上 |
+
+- prefillにはMTPのprefix準備を含める。decodeにはMTPのdraft／verify／棄却・replay／samplingをwall時間へ含め、
+  棄却tokenをthroughputへ加算しない。1 warmup＋3 measuredの中央値を用い、
+  TTFT／end-to-end時間とばらつきも記録する。達成可能性は未検証であり、prefillの改善をMTP統合だけに期待しない。
+- Phase 83.5の完了は上記速度の達成とPhase 83で確認した正しさ・公開経路・資源管理の維持を対象とする。
+  tools未対応は残件として明記し、vision、全モデル、TP、batchingやコーディングエージェント機能全体の完了は含めない。
+  Phase 83.5の目標未達を無断で緩和せず、原因と差を記録して再計画する。両Phaseの完了時にそれぞれcommit・push・CI確認を行う。詳細な計時・比較条件は
+  [Phase 83計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
 
 ### 最適化の共通化と既定採用の方針
 
@@ -551,7 +606,8 @@ Phase 79の共通化内容は[Phase 79計画](archive/2026/09/1-10/phase79-commo
 | 完了・公開CI成功 | 80 | CI修復、公開API／依存manifest同期、Rust資源設定、失敗診断と公開後CI確認 |
 | 完了・公開CI成功 | 81 | 固定sampling profileの共通GPU実装・API統合。代表条件でprefill／decodeへの追加負担がほぼないことを確認 |
 | 完了 | 82 | 不採用最適化の削除・試行と失敗理由の記録、データ不足候補の条件付き既定採用 |
-| 計画済み | 83 | static FP8 KV、MTP、文章生成の実用closeout（旧82） |
+| 完了・実装検証済み | 83 | MXFP8 E4 KV・固定sampling／MTP・CLI/API統合、両GPU長文・対話・lifecycleを確認。速度改善は83.5 |
+| 計画済み | 83.5 | 正しさを維持した追加最適化と8,192入力／128出力の速度目標を達成 |
 | 計画済み | 84 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了（旧83） |
 | 計画済み | 85 | NVFP4のGPU batching最適化（旧84） |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
@@ -604,7 +660,7 @@ attention／linear-attention／最終8層MLP／`lm_head` projectionをFP8 W8A8�
 vision／MTP等をBF16で保持し、KVはstatic tensor FP8 recipeを指定する。generic FP8 artifact対応の保留は維持し、このexact
 recipeの実行に必要な範囲だけを先行する。Phase 76で統合・correctness・baseline／profile、Phase 77でsingle-request decode、
 Phase 78でsingle-request prefill、Phase 79でstatic FP8 KV・MTP・文章生成closeoutを行う。その後Phase 80で他精度を一巡し、
-Phase 81でNVFP4 batchingへ進む。これは2026-09-03時点の旧計画記録であり、現在はPhase 81固定GPU sampling完了後、Phase 82最適化整理、Phase 83 static FP8 KV／MTP、
+Phase 81でNVFP4 batchingへ進む。これは2026-09-03時点の旧計画記録であり、現在はPhase 81固定GPU sampling完了後、Phase 82最適化整理、Phase 83 MXFP8 E4 KV／MTP、
 Phase 84他精度、Phase 85 batchingの順である。詳細は[Phase 76〜85計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
 2026-09-03時点で固定artifactのV620 `gfx1030` 2台とR9700 `gfx1201`（single-GPU visible）のfull-model smoke
 （17-token prefill、4-token decode、replay、fallback 0、cleanup 0）とNVFP4 W4A4 M=1 decode kernel id 58の実dispatchを確認し、
@@ -1037,7 +1093,7 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
     数値順序を保てる範囲でfusionとweight/activation tile再利用を行う。共有expertは既存BF16 providerを再利用する。
   - routerのstable top-8、softmax、expert groupingはthread-0/全pair再走査からwave-parallel reduction、stable selection、
     prefix-sum/compactionへ移す。router projection、status初期化、top-k/group metadata生成の融合も候補とする。
-- 厳密一致MTP:
+- 厳密一致MTP（従来方針。Phase 83／83.5では上記2026-09-09のBF16比精度方針を優先する）:
   - draft argmaxしか使わない経路の全語彙logits D2Hを除去し、target/MTP hidden stateをホスト`Vec`経由で
     D2H/H2Dせずdevice常駐のまま接続する。MTP prompt prefillのtoken-by-token ホストloopもdevice側でまとめる。
   - draft、serial-equivalent verify、逐次acceptをdevice-side orchestrationへ寄せ、reject時のaccepted-prefix replayを
@@ -1062,7 +1118,7 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
     KV、会話、モデルidentityの簡易永続化は再起動後の再prefill削減にも利用する。
   - フェーズ31ではchunked prefillによりprefill workspaceをselected chunkへboundedとし、同時liveでないrequest-owned
     intermediateだけをliveness arenaで再利用する。automatic defaultはtotal VRAM `<=16 GiB`で512、`>16 GiB`で
-    16K/8K/4K/2Kを大きい順にfit判定する。vAttention型`virtual-contiguous` providerを実運用の既定として維持し、
+    16K/8K/4K/2Kを大きい順にfit判定する。当時はvAttention型`virtual-contiguous` providerを実運用の既定として維持し、
     Paged Attentionはopaque KV state下の別physical-layout providerとして後続比較へ残す。
   - chunked prefillは長promptのlatency/peak memoryとrequest間fairnessを改善し、現行matmul一dispatchのM上限
     `65,536`を超える設定contextを実行可能にする境界として実装する。フェーズ31の直接の採用目的はまず10k+ モデル全体の
@@ -1236,6 +1292,10 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
   `325.593963905`秒、HBM peakは`15,388,794,880` bytes、8 KV layerのK/V commitは4 GiBである。
   `10,001/2`も従来VMM経路で13/13 PASSし、短いcapacityをresidentへ広げていない。VMM grow/COWのtransactional rollbackと
   profiled abortのbounded drainもhost failure injectionで固定した。
+  Phase 83では要求履歴後のgfx1201 VMM growが他層の既存KVを破損することを確認し、通常のRust KV stateは
+  capacityによらず`contiguous-resident`へ変更する。MXFP8形式・MTP・演算は維持する。scratchの8,192／128再現検査は
+  prefix保持・有限値・正常な文章生成・HIP-only・cleanupに成功した。現行main全体での最終検証は未完了。
+  sliding descriptorと直接C ABIのVMM選択はこの変更に含まない。詳細は[Phase 83計画](archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)。
 - フェーズ50ではexact `gfx1201`のresidual RMSNorm、GDN projection bundle、MLP gate-up-SiLU bundle、GQA4 P32（KV長4,096以上）を採用し、
   `gfx1030`限定経路、不採用経路、gfx942 wave64再設計を分類した。共通source変更後のV620 exact `gfx1030`通常5行は5/5 PASSで、
   フェーズ49 closeout比`-0.21〜+1.16%`だった。

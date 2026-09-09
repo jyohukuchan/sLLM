@@ -50,6 +50,12 @@ use sllm_frontend::{
     ministral3_generation_stop_policy,
 };
 use sllm_hip::HipBackend;
+use sllm_server::{
+    BackendErrorV1, ChatCompletionRequestV1, ChatGenerationBackendV1, CheckpointStartupConfigV1,
+    ContextWindowStartupConfigV1, DraftStartupConfigV1, GenerationDeltaSinkV1,
+    Phase41ProductionConfigV1, PrefixCacheStartupConfigV1, ProductionDraftProviderV1,
+    Qwen38Nvfp4BackendConfigV1, QwenChatBackendV1,
+};
 
 use crate::benchmark::{
     BenchmarkEvent, BenchmarkSampleInput, BenchmarkTimeline, BenchmarkTiming,
@@ -355,6 +361,7 @@ fn kv_selection_report(selection: KvCacheSelection) -> Value {
 struct GenerateRequest {
     input: GenerationInput,
     image_paths: Vec<PathBuf>,
+    qwen38_artifact: Option<PathBuf>,
     max_new_tokens: u32,
     prefill_chunk_tokens: Option<u64>,
     mtp_draft_width: Option<u8>,
@@ -1555,6 +1562,9 @@ trait ModelFrontendBackend {
         Err("infill is unavailable: no verified production FIM capability".to_owned())
     }
     fn generate(&self, request: &GenerateRequest) -> Result<Value, String>;
+    fn shutdown(&self) -> Result<(), String> {
+        Ok(())
+    }
     fn benchmark(
         &self,
         request: &BenchmarkRequest,
@@ -1566,6 +1576,320 @@ struct ProductionBackend {
     lock: ModelLock,
     lock_path: PathBuf,
     source: QwenDenseSource,
+}
+
+/// Direct CLI owner for the reviewed Unsloth Qwen3.8-27B NVFP4 artifact.
+///
+/// Generation remains in the server production adapter so the CLI and HTTP
+/// surfaces share request validation, fixed sampling, MTP, and cleanup.  The
+/// CLI only adapts the collected deltas into its normal JSON report.
+struct Qwen38ProductionBackend {
+    backend: QwenChatBackendV1,
+    target: String,
+    device_index: u32,
+    kv_cache_encoding: KvCacheEncoding,
+    mtp_enabled: bool,
+}
+
+struct CliGenerationSink {
+    output: String,
+}
+
+impl GenerationDeltaSinkV1 for CliGenerationSink {
+    fn publish(&mut self, delta: &str) -> Result<(), BackendErrorV1> {
+        self.output.push_str(delta);
+        Ok(())
+    }
+}
+
+impl Qwen38ProductionBackend {
+    fn open(
+        artifact_root: PathBuf,
+        device_index: u32,
+        target: String,
+        kv_cache_encoding: Option<KvCacheEncoding>,
+        mtp_draft_width: Option<u8>,
+    ) -> Result<Self, String> {
+        if !artifact_root.is_absolute() {
+            return Err("--qwen38-nvfp4 artifact path must be absolute".to_owned());
+        }
+        if device_index != 0 {
+            return Err("Qwen3.8 NVFP4 requires --device-index 0".to_owned());
+        }
+        if !matches!(target.as_str(), "gfx1030" | "gfx1201") {
+            return Err("Qwen3.8 NVFP4 requires target gfx1030 or gfx1201".to_owned());
+        }
+        let kv_cache_encoding = kv_cache_encoding.unwrap_or(KvCacheEncoding::Mxfp8E4);
+        if !matches!(
+            kv_cache_encoding,
+            KvCacheEncoding::Fp16 | KvCacheEncoding::Mxfp8E4
+        ) {
+            return Err("Qwen3.8 NVFP4 supports only fp16 or kv-mxfp8-e4 KV cache".to_owned());
+        }
+        let mtp_enabled = match mtp_draft_width {
+            None => true,
+            Some(0) => false,
+            Some(width) if width == sllm_core::QWEN38_MTP_DRAFT_WIDTH as u8 => true,
+            Some(width) => {
+                return Err(format!(
+                    "Qwen3.8 MTP uses fixed draft width {}; got {width}",
+                    sllm_core::QWEN38_MTP_DRAFT_WIDTH
+                ));
+            }
+        };
+        let phase41 = Phase41ProductionConfigV1 {
+            prefix_cache: PrefixCacheStartupConfigV1::Disabled,
+            context_window: ContextWindowStartupConfigV1::Disabled,
+            checkpoint: CheckpointStartupConfigV1::Disabled,
+            draft: if mtp_enabled {
+                DraftStartupConfigV1::MtpAuto
+            } else {
+                DraftStartupConfigV1::Disabled
+            },
+        };
+        let backend = QwenChatBackendV1::open_unsloth_qwen38_nvfp4(Qwen38Nvfp4BackendConfigV1 {
+            artifact_root,
+            device_index,
+            target: target.clone(),
+            completion_timeout: COMPLETION_TIMEOUT,
+            shutdown_timeout: SHUTDOWN_TIMEOUT,
+            context_length: u32::try_from(sllm_core::QWEN35_RECOMMENDED_CONTEXT_TOKENS)
+                .map_err(|_| "Qwen3.8 context length does not fit u32".to_owned())?,
+            kv_cache_encoding,
+            phase41,
+        })
+        .map_err(|error| format!("Qwen3.8 NVFP4 backend failed to open: {error}"))?;
+        Ok(Self {
+            backend,
+            target,
+            device_index,
+            kv_cache_encoding,
+            mtp_enabled,
+        })
+    }
+
+    fn fixed_sampling(&self, request: &GenerateRequest) -> Result<(), String> {
+        let expected = SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0)
+            .expect("Qwen3.8 fixed sampling profile is valid");
+        if request.sampling != expected {
+            return Err(
+                "Qwen3.8 NVFP4 CLI uses fixed sampling temperature=1.0, top_p=0.95, and zero penalties"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    fn local_request(&self, request: &GenerateRequest) -> Result<ChatCompletionRequestV1, String> {
+        self.fixed_sampling(request)?;
+        let seed = request
+            .seed
+            .map(|seed| i64::from_ne_bytes(seed.to_ne_bytes()));
+        let max_tokens = request.max_new_tokens;
+        let stop = request.stop_strings.clone();
+        let result = match &request.input {
+            GenerationInput::Prompt(prompt) => ChatCompletionRequestV1::from_local_text(
+                "qwen3.8-27b-nvfp4".to_owned(),
+                prompt.clone(),
+                max_tokens,
+                1.0,
+                0.95,
+                stop,
+                seed,
+                false,
+                None,
+            ),
+            GenerationInput::Messages { messages, options } => {
+                ChatCompletionRequestV1::from_local_messages(
+                    "qwen3.8-27b-nvfp4".to_owned(),
+                    messages.clone(),
+                    max_tokens,
+                    1.0,
+                    0.95,
+                    stop,
+                    seed,
+                    matches!(options.thinking, ThinkingModeV1::Enabled),
+                    None,
+                )
+            }
+        };
+        result.map_err(|error| format!("Qwen3.8 local request validation failed: {error}"))
+    }
+}
+
+/// Converts the backend's retained request audit into the compact execution
+/// report exposed by the CLI. The report uses the observed Phase 41 draft
+/// provider, rather than startup configuration, because request-local
+/// constraints can disable MTP for one request while its resident weights
+/// remain loaded.
+fn qwen_request_execution_audit(
+    backend: &QwenChatBackendV1,
+    requested_target: &str,
+) -> Result<Value, String> {
+    let audit = backend
+        .request_audits()
+        .into_iter()
+        .last()
+        .ok_or_else(|| "Qwen3.8 generation did not publish a request audit".to_owned())?;
+    let selected_backend = audit
+        .selected_backend
+        .as_deref()
+        .ok_or_else(|| "Qwen3.8 request audit omitted the selected backend".to_owned())?;
+    let fallback_used = audit
+        .fallback_used
+        .ok_or_else(|| "Qwen3.8 request audit omitted fallback state".to_owned())?;
+    let all_dispatches_hip = audit
+        .all_dispatches_hip
+        .ok_or_else(|| "Qwen3.8 request audit omitted dispatch state".to_owned())?;
+    if audit.outcome != "completed"
+        || audit.target != requested_target
+        || selected_backend != "hip"
+        || fallback_used
+        || !all_dispatches_hip
+    {
+        return Err("Qwen3.8 request audit is not exact HIP/no-fallback".to_owned());
+    }
+    let mtp_used = matches!(
+        audit.phase41.draft_provider,
+        Some(ProductionDraftProviderV1::Mtp)
+    );
+    Ok(json!({
+        "selected_backend": selected_backend,
+        "target": audit.target,
+        "fallback_used": fallback_used,
+        "all_dispatches_hip": all_dispatches_hip,
+        "submission_count": audit.submission_count,
+        "kernel_dispatch_count": audit.kernel_dispatch_count,
+        "mtp": mtp_used,
+        "mtp_proposed_draft_tokens": audit.phase41.draft_proposed_tokens,
+        "mtp_accepted_draft_tokens": audit.phase41.draft_accepted_tokens,
+        "mtp_rejected_draft_tokens": audit.phase41.draft_rejected_tokens,
+    }))
+}
+
+impl ModelFrontendBackend for Qwen38ProductionBackend {
+    fn identity(&self) -> ModelIdentity {
+        ModelIdentity {
+            repo_id: sllm_core::UNSLOTH_QWEN38_NVFP4_REPOSITORY.to_owned(),
+            resolved_revision: sllm_core::UNSLOTH_QWEN38_NVFP4_REVISION.to_owned(),
+            lock_fingerprint: self.backend.model_fingerprint().to_owned(),
+        }
+    }
+
+    fn verify(&self) -> Result<Value, String> {
+        Ok(json!({
+            "kind": "verify-model",
+            "architecture": "Qwen3_8ForCausalLM",
+            "source_kind": "unsloth-safetensors-nvfp4",
+            "model_alias": "qwen3.8-27b-nvfp4",
+            "model_fingerprint": self.backend.model_fingerprint(),
+            "target": self.target,
+            "device_index": self.device_index,
+            "kv_cache_encoding": self.kv_cache_encoding.canonical_name(),
+            "mtp": self.mtp_enabled,
+            "fixed_sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20},
+        }))
+    }
+
+    fn tokenize(&self, _text: &str) -> Result<Value, String> {
+        Err("Qwen3.8 direct CLI does not expose standalone tokenization".to_owned())
+    }
+
+    fn render(
+        &self,
+        _messages: &[Qwen35ChatMessageV1],
+        _options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        Err("Qwen3.8 direct CLI does not expose a standalone render operation".to_owned())
+    }
+
+    fn decode(&self, _ids: &TokenIdsV1, _mode: DecodeModeV1) -> Result<Value, String> {
+        Err("Qwen3.8 direct CLI does not expose standalone decode".to_owned())
+    }
+
+    fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
+        if request.qwen38_artifact.is_none() {
+            return Err("Qwen3.8 backend requires its explicit artifact path".to_owned());
+        }
+        if !request.image_paths.is_empty() {
+            return Err("Qwen3.8 NVFP4 CLI is text-only".to_owned());
+        }
+        if request.prefill_chunk_tokens.is_some() {
+            return Err("Qwen3.8 CLI does not accept --prefill-chunk-tokens".to_owned());
+        }
+        let expected_width = sllm_core::QWEN38_MTP_DRAFT_WIDTH as u8;
+        if request
+            .mtp_draft_width
+            .is_some_and(|width| width != 0 && width != expected_width)
+        {
+            return Err(format!(
+                "Qwen3.8 MTP uses fixed draft width {expected_width}"
+            ));
+        }
+        let local = self.local_request(request)?;
+        let cancellation = GenerationCancellationV1::new();
+        let mut sink = CliGenerationSink {
+            output: String::new(),
+        };
+        let completion = self
+            .backend
+            .generate(&local, &cancellation, &mut sink)
+            .map_err(|error| format!("Qwen3.8 generation failed: {error}"))?;
+        let mut execution = qwen_request_execution_audit(&self.backend, &self.target)?;
+        let execution_object = execution
+            .as_object_mut()
+            .ok_or_else(|| "Qwen3.8 request audit was not an object".to_owned())?;
+        execution_object.insert("device_index".to_owned(), Value::from(self.device_index));
+        execution_object.insert(
+            "model_fingerprint".to_owned(),
+            Value::from(self.backend.model_fingerprint().to_owned()),
+        );
+        execution_object.insert(
+            "plan_digest".to_owned(),
+            Value::from(self.backend.plan_digest().to_owned()),
+        );
+        execution_object.insert(
+            "kv_cache_encoding".to_owned(),
+            Value::from(self.kv_cache_encoding.canonical_name()),
+        );
+        execution_object.insert(
+            "fixed_sampling".to_owned(),
+            json!({"temperature": 1.0, "top_p": 0.95, "top_k": 20}),
+        );
+        Ok(json!({
+            "kind": "generate",
+            "input_kind": match &request.input { GenerationInput::Prompt(_) => "prompt", GenerationInput::Messages { .. } => "messages" },
+            "output_text": sink.output,
+            "finish_reason": match completion.finish_reason { sllm_server::FinishReasonV1::Stop => "stop", sllm_server::FinishReasonV1::Length => "length" },
+            "usage": {
+                "prompt_tokens": completion.usage.prompt_tokens,
+                "completion_tokens": completion.usage.completion_tokens,
+                "total_tokens": completion.usage.total_tokens,
+            },
+            "execution": execution,
+        }))
+    }
+
+    fn shutdown(&self) -> Result<(), String> {
+        self.backend
+            .shutdown()
+            .map(|_| ())
+            .map_err(|error| format!("Qwen3.8 backend shutdown failed: {error}"))
+    }
+
+    fn benchmark(
+        &self,
+        _request: &BenchmarkRequest,
+        _timing: BenchmarkTiming,
+    ) -> Result<Value, String> {
+        Err("Qwen3.8 NVFP4 benchmark is not exposed by the direct CLI route".to_owned())
+    }
+}
+
+impl Drop for Qwen38ProductionBackend {
+    fn drop(&mut self) {
+        let _ = self.backend.shutdown();
+    }
 }
 
 enum QwenDenseSource {
@@ -4057,6 +4381,18 @@ impl ModelFrontendBackend for GemmaProductionBackend {
 }
 
 fn open_production_backend(request: &Request) -> Result<Box<dyn ModelFrontendBackend>, String> {
+    if let Operation::Generate(generate) = &request.operation {
+        if let Some(artifact_root) = &generate.qwen38_artifact {
+            return Qwen38ProductionBackend::open(
+                artifact_root.clone(),
+                generate.device_index,
+                generate.target.clone(),
+                generate.kv_cache_encoding,
+                generate.mtp_draft_width,
+            )
+            .map(|backend| Box::new(backend) as Box<dyn ModelFrontendBackend>);
+        }
+    }
     let gguf_path = request
         .gguf
         .as_ref()
@@ -6287,11 +6623,20 @@ pub(crate) fn run(
     load_custom_template(&mut request)?;
     let benchmark_timing = (command == "benchmark").then(BenchmarkTiming::start);
     let backend = open_production_backend(&request)?;
-    match benchmark_timing {
+    let execution = match benchmark_timing {
         Some(timing) => {
             execute_with_timing(command, request.operation, backend.as_ref(), Some(timing))
         }
         None => execute(command, request.operation, backend.as_ref()),
+    };
+    let shutdown = backend.shutdown();
+    match (execution, shutdown) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(execution_error), Ok(())) => Err(execution_error),
+        (Ok(_), Err(shutdown_error)) => Err(shutdown_error),
+        (Err(execution_error), Err(shutdown_error)) => {
+            Err(format!("{execution_error}; {shutdown_error}"))
+        }
     }
 }
 
@@ -6451,6 +6796,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
         command
     };
     let mut gguf = None;
+    let mut qwen38_artifact = None;
     let mut derived_lock = None;
     let mut mtp_assistant_gguf = None;
     let mut mtp_assistant_derived_lock = None;
@@ -6506,6 +6852,11 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--gguf" => set_once(&mut gguf, take_value(&mut arguments, "--gguf")?, "--gguf")?,
+            "--qwen38-nvfp4" if command == "generate" => set_once(
+                &mut qwen38_artifact,
+                take_value(&mut arguments, "--qwen38-nvfp4")?,
+                "--qwen38-nvfp4",
+            )?,
             "--derived-lock" => set_once(
                 &mut derived_lock,
                 take_value(&mut arguments, "--derived-lock")?,
@@ -6977,9 +7328,20 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
         }
     }
 
-    let gguf = Some(PathBuf::from(
-        gguf.ok_or_else(|| "missing required --gguf PATH".to_owned())?,
-    ));
+    let qwen38_artifact = qwen38_artifact.map(PathBuf::from);
+    if qwen38_artifact.is_some() && gguf.is_some() {
+        return Err("--qwen38-nvfp4 is mutually exclusive with --gguf".to_owned());
+    }
+    if qwen38_artifact.is_some() && derived_lock.is_some() {
+        return Err("--qwen38-nvfp4 is mutually exclusive with --derived-lock".to_owned());
+    }
+    let gguf = if qwen38_artifact.is_some() {
+        None
+    } else {
+        Some(PathBuf::from(
+            gguf.ok_or_else(|| "missing required --gguf PATH".to_owned())?,
+        ))
+    };
     let derived_lock = derived_lock.map(PathBuf::from);
     let custom_template = match (chat_template_file, chat_template_digest) {
         (Some(path), Some(digest)) => Some(CustomTemplateSpec {
@@ -7106,6 +7468,41 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             if greedy && temperature.is_some() {
                 return Err("generate accepts --greedy or --temperature, not both".to_owned());
             }
+            if let Some(artifact_root) = qwen38_artifact.as_ref() {
+                if !artifact_root.is_absolute() {
+                    return Err("--qwen38-nvfp4 artifact path must be absolute".to_owned());
+                }
+                if device_index != Some(0) {
+                    return Err("Qwen3.8 NVFP4 requires --device-index 0".to_owned());
+                }
+                if !matches!(target.as_deref(), Some("gfx1030" | "gfx1201")) {
+                    return Err("Qwen3.8 NVFP4 requires target gfx1030 or gfx1201".to_owned());
+                }
+                if kv_cache_encoding.is_some_and(|encoding| {
+                    !matches!(encoding, KvCacheEncoding::Fp16 | KvCacheEncoding::Mxfp8E4)
+                }) {
+                    return Err(
+                        "Qwen3.8 NVFP4 supports only fp16 or kv-mxfp8-e4 KV cache".to_owned()
+                    );
+                }
+                if greedy
+                    || temperature.is_some_and(|value| value != 1.0)
+                    || top_p.is_some_and(|value| value != 0.95)
+                    || presence_penalty.is_some_and(|value| value != 0.0)
+                    || frequency_penalty.is_some_and(|value| value != 0.0)
+                    || mtp_draft_width.is_some_and(|width| {
+                        width != 0 && width != sllm_core::QWEN38_MTP_DRAFT_WIDTH as u8
+                    })
+                {
+                    return Err(
+                        "Qwen3.8 NVFP4 CLI requires fixed temperature=1.0, zero penalties, and MTP width 0 or 2"
+                            .to_owned(),
+                    );
+                }
+                if prefill_chunk_tokens.is_some() {
+                    return Err("Qwen3.8 CLI does not accept --prefill-chunk-tokens".to_owned());
+                }
+            }
             let options = Qwen35RenderOptionsV1 {
                 add_generation_prompt: true,
                 thinking: thinking.unwrap_or(ThinkingModeV1::TemplateDefault),
@@ -7146,24 +7543,30 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     "Gemma MTP assistant source is valid only with --mtp-draft-width 1".to_owned(),
                 );
             }
+            let sampling = SamplingParametersV1::new(
+                if greedy {
+                    0.0
+                } else {
+                    temperature.unwrap_or(1.0)
+                },
+                if qwen38_artifact.is_some() {
+                    top_p.unwrap_or(0.95)
+                } else {
+                    top_p.unwrap_or(1.0)
+                },
+                presence_penalty.unwrap_or(0.0),
+                frequency_penalty.unwrap_or(0.0),
+            )
+            .map_err(|error| format!("invalid generation sampling parameters: {error}"))?;
             Operation::Generate(GenerateRequest {
                 input,
                 image_paths,
+                qwen38_artifact,
                 max_new_tokens: max_new_tokens
                     .ok_or_else(|| "generate requires --max-new-tokens".to_owned())?,
                 prefill_chunk_tokens,
                 mtp_draft_width,
-                sampling: SamplingParametersV1::new(
-                    if greedy {
-                        0.0
-                    } else {
-                        temperature.unwrap_or(1.0)
-                    },
-                    top_p.unwrap_or(1.0),
-                    presence_penalty.unwrap_or(0.0),
-                    frequency_penalty.unwrap_or(0.0),
-                )
-                .map_err(|error| format!("invalid generation sampling parameters: {error}"))?,
+                sampling,
                 seed,
                 stop_strings,
                 device_index: device_index
@@ -7998,6 +8401,80 @@ mod tests {
                 ..
             })
         ));
+        let qwen38 = parse_args(
+            "generate",
+            &[
+                "--qwen38-nvfp4",
+                "/models/qwen38",
+                "--prompt",
+                "abc",
+                "--max-new-tokens",
+                "3",
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1030",
+                "--seed",
+                "17",
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            qwen38.operation,
+            Operation::Generate(GenerateRequest {
+                qwen38_artifact: Some(path),
+                sampling,
+                mtp_draft_width: None,
+                kv_cache_encoding: None,
+                seed: Some(17),
+                ..
+            }) if path == Path::new("/models/qwen38")
+                && sampling.temperature() == 1.0
+                && sampling.top_p() == 0.95
+        ));
+        for (flag, value) in [
+            ("--greedy", ""),
+            ("--top-p", "1.0"),
+            ("--temperature", "0.7"),
+            ("--mtp-draft-width", "1"),
+            ("--kv-cache-encoding", "kv-mxfp8-e5"),
+        ] {
+            let mut args = vec![
+                "--qwen38-nvfp4",
+                "/models/qwen38",
+                "--prompt",
+                "abc",
+                "--max-new-tokens",
+                "3",
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1030",
+            ];
+            args.push(flag);
+            if !value.is_empty() {
+                args.push(value);
+            }
+            assert!(parse_args("generate", &args).is_err(), "{flag} {value}");
+        }
+        assert!(
+            parse_args(
+                "generate",
+                &[
+                    "--qwen38-nvfp4",
+                    "relative",
+                    "--prompt",
+                    "abc",
+                    "--max-new-tokens",
+                    "3",
+                    "--device-index",
+                    "0",
+                    "--target",
+                    "gfx1030",
+                ]
+            )
+            .is_err()
+        );
         let low_bit_kv = parse_args(
             "generate",
             &[

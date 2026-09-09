@@ -8,6 +8,9 @@ Radeon AI PRO R9700 `gfx1201`に限定して、HIP VMMによるvirtual-contiguou
 最大logical capacityのvirtual addressをcreate時に予約し、K/V planeのphysical pageをappend時に
 必要量だけcommitする。
 
+これはPhase 6の初期決定である。現在の自動providerは、sliding windowなしの通常KV stateについてexact `gfx1201`を
+全capacityで`contiguous-resident`へ固定する。以下のVMM memory contractはVMMを選ぶtarget、direct ABI、sliding stateに適用する。
+
 vAttentionとFlashAttentionは排他的な方式ではない。vAttentionはKVのmemory management方式で、
 attention kernelには連続したvirtual addressを通常のK/V pointerとして見せる。従って、対象backendで
 利用可能なcontiguous-KV FlashAttention kernelはblock-table対応へ書き換えずに利用できる。
@@ -27,6 +30,18 @@ Phase 52では、exact `gfx1030`と`gfx1201`のlogical capacityが65,536 token�
 contiguous pointerを`contiguous-resident`で実装する。32 GiBのR9700で100,000-token入力がHIP VMMのpage/handle
 commit上限に達した一方、logical capacity全量のK/Vはpreflight上収まるためである。65,535以下、unknown target、他targetの
 capability選択は変更しない。これは実行中OOM後のfallbackではなくcreate時の決定であり、確保失敗時に別providerへ再試行しない。
+
+Phase 83では、Rust HIP adapterから作るsliding windowなしの通常KV stateについて、exact `gfx1201`はlogical capacityと
+KV encodingによらず`contiguous-resident`をcreate時に選ぶ。canonical R9700のscratch r22で、後段layerのVMM grow直後かつ
+append kernel前に別のlive layer 3 K/V prefixが壊れ、scratch r23のresident候補では同じrequest履歴の4 planeとfinite replayを
+維持したためである。診断詳細は[Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)と
+[数値変更台帳](../compatibility/numerical-output-changes.md)に記録する。r22/r23はdraft evidenceであり、current-main binaryの
+build／host確認はPASSし、final GPU API／CLI実行は進行中である。
+
+この変更はruntime error後のfallbackではなく、exact targetに基づくcreate-time policyである。exact `gfx1030`の65,536-token
+境界とexact `gfx942`の既存resident policyは維持する。direct native C ABIの
+`SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED`、明示`VIRTUAL_CONTIGUOUS`、およびsliding KV stateはこの自動選択の
+対象外であり、VMM診断・研究経路として残す。
 
 ## 比較のidentityと範囲
 
@@ -95,16 +110,18 @@ FA3/4相当kernelが現れた場合も、contiguous pointerを受ける限りvAt
 
 ## production契約
 
-- public C ABIのKV create/view versionは2で、memory kind
-  `SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS`とlayout
-  `SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR`を明示する。
-- native `KvState`がVA reservation、physical handles、mapping、event lifetimeを所有する。
-  createはVAだけをreserveし、appendはlaunch前にK/Vを同じpublished capacityまでgrowする。
-- 一つのappendで行う全planeのgrowとshared tailのCOWは一transactionである。途中失敗時はそのappendで追加したmappingと
+- public C ABIのKV create/view versionは2で、memory kindは
+  `SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED`、`SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS`、
+  `SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT`のいずれか、layoutは
+  `SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR`を明示する。Rust HIP adapterの通常stateは下記target policyをcreate時にlowerする。
+- native `KvState`がplane allocation、該当するVA reservation／physical handle／mapping、event lifetimeを所有する。
+  VMM providerのcreateはVAだけをreserveし、appendはlaunch前にK/Vを同じpublished capacityまでgrowする。
+  resident providerのcreateはlogical capacity全量を通常のdevice allocationで確保し、appendはその範囲へ書いて公開する。
+- VMM providerで一つのappendが行う全planeのgrowとshared tailのCOWは一transactionである。途中失敗時はそのappendで追加したmappingと
   handleを逆順に解放し、COW前のshared handleとread-only access、mapped capacity、commit accountingを復元する。
   復元自体に失敗したcontextはpoisonし、部分状態を再利用しない。
-- cancelはpublicationを行わない。既にcommitしたpageはstate lifetime中は保持し、release時に
-  unmap、handle release、VA freeを行う。cancel/release cleanupはidempotentである。
+- cancelはpublicationを行わない。VMM providerの既commit pageとresident providerのallocationはstate lifetime中保持する。
+  release時は前者をunmap、handle release、VA freeし、後者を通常のdevice allocationとして解放する。cleanupはidempotentである。
 - viewはlogical capacity、mapped token capacity、physical page bytes、K/Vのcommitted bytesを返すが、
   scheduler、generation service、HTTP層へdevice pointer、VMM handle、page tableを公開しない。
 - private evidence readbackもpublishedかつmappedな範囲だけを許可し、未map領域を成功扱いにしない。
@@ -114,8 +131,9 @@ FA3/4相当kernelが現れた場合も、contiguous pointerを受ける限りvAt
   FP8とNVFP4は明示選択時だけ使う。10,001-token dynamic FP8はexact gfx1030/gfx1201の双方、16,385-token 2-chunk
   dynamic FP8はgfx1201でHIP-only、fallbackなし、cleanup 0をPASSした。static FP8の固定scale 1.0は実験設定であり、
   model由来calibrationやdefault policyではない。
-- Phase 52の自動providerはexact `gfx942`を全capacityで、exact `gfx1030`/`gfx1201`をcapacity 65,536以上で
-  `contiguous-resident`へ固定する。それ以外は従来のcapability-selected providerを維持する。
+- 現在のRust HIP adapterの自動providerは、sliding windowなしの通常stateについてexact `gfx942`とexact `gfx1201`を
+  全capacityで、exact `gfx1030`をcapacity 65,536以上で`contiguous-resident`へ固定する。それ以外は従来の
+  capability-selected providerを維持する。direct native C ABIとsliding stateの境界は上記Phase 83記載に従う。
 
 ## Phase 53 block-scale KV形式のmemory判定
 
@@ -139,6 +157,9 @@ K/V valueとscaleの全plane完了後だけlogical lengthを公開し、grow/COW
 - 小刻みなpage activationがrequest latencyを支配し、pageの事前growや償却でも解消できない。
 - VA reservation量、fragmentation、mapping数またはdriver制約が実用上の上限になる。
 - 採用予定のAMD attention backendがpaged-KVだけを提供し、同一数値contractで明確な総合優位を示す。
+
+Phase 83のr22 scratch診断はexact `gfx1201`の通常stateについて二つ目の条件を満たしたため、同targetの自動providerを
+residentへ変更した。これはPaged Attention採用やdirect ABIのVMM廃止を意味しない。
 
 比較用proxyはproduction Paged Attentionの完成を意味しない。再検討時は同じ数値oracle、exact target、
 health/cleanup、非整列値とblock境界を維持して測り直す。

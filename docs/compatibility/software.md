@@ -1,6 +1,6 @@
 # ソフトウェア互換性方針
 
-> 最終更新: 2026-09-03
+> 最終更新: 2026-09-09
 
 ## 目的
 
@@ -682,6 +682,27 @@ HIP-only、fallback false、cleanup 0を確認した。gfx1201 wave32とgfx942 w
 runtime evidenceへ昇格しない。software lifecycleは`experimental`のまま、別OS/kernel/driver/runtime/compiler、別V620構成、
 別target、長時間安定性へ一般化しない。詳細は
 [Phase 75追跡要約](../../ci/matrix/phase75-gfx1030-mxfp8-mxfp6-shared-half2-v1.json)を正本とする。
+
+### 2026-09-09 Phase83 local R9700 VMM alias／resident KV tuple
+
+canonical R9700のUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、
+HIP `7.14.60850`、LLVM 23、Code Object V6、wave32、exact `gfx1201` tupleで、固定Qwen3.8-27B-NVFP4、
+standard OCP MXFP8 KV、MTPを使ったscratch診断を実行した。r22の旧VMM選択では、短い通常要求、SSE、cancel、
+recovery後の8,192-token prefill＋MTP verify中に、別live KV stateの破壊を後段layerのVMM grow直後かつappend kernel前へ
+局所化した。これはこのtupleでのVMM live-mapping correctness failureであり、ROCm内部の根本原因は未確定である。
+
+現在のRust HIP adapterは、sliding windowなしの通常KV stateについてexact `gfx1201`の全capacity／encodingを
+`contiguous-resident`へcreate時に固定する。direct native C ABIの`CAPABILITY_SELECTED`、明示
+`VIRTUAL_CONTIGUOUS`、sliding stateはVMM経路を維持し、runtime error後のprovider retry、CPU fallback、GTT fallbackは
+追加しない。gfx1030のcapacity 65,536以上とgfx942の全capacityという既存resident policyも維持する。
+
+resident選択を入れたscratch r23は同じ履歴から8,192入力／128出力を完走し、4 plane、finite replay、HIP-only、
+fallbackなし、cleanup 0を維持した。capacity 8,320のKV committed bytesは`281,149,440`だった。current-main sourceは
+両GPU targetのbuild identity確認とKV host test 28件をPASSした。診断なしr25のR9700既定CLI/APIでも8,192入力／128出力、
+MTP 113候補／70採用、HIP-only、正常終了を確認し、r26の対話も成功した。V620 r26でもCLI/APIの8,192入力／128出力と対話が成功し、遅延観測でVRAM／GTTのbaseline復帰を確認した。公開結果は当該commitのGitHub Checksで確認する。software lifecycleは
+`experimental`のままとし、別OS、kernel、driver、ROCm、GPU SKU、model、direct ABI／sliding VMMへ一般化しない。
+診断と検証の詳細は[Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)と
+[数値変更台帳](numerical-output-changes.md)に記録する。
 
 ## 公式資料
 

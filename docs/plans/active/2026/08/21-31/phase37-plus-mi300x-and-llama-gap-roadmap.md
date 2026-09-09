@@ -41,7 +41,8 @@ decode、KV、他formatは変更していない。Phase 75ではexact gfx1030の
 2026-09-07のユーザー指示により、Phase 79の既存最適化の共通化とPhase 80のCI確認・修復・再実行確認を完了し、
 次のPhase 81へ固定設定GPU samplingを挿入した。2026-09-08の最新指示により、未採用最適化の削除・条件付き既定採用を
 新Phase 82へ挿入する。従来Phase 82（static FP8 KV・MTP・文章生成）を83、従来Phase 83（他精度）を84、従来Phase 84
-（NVFP4 batching）を85へ繰り下げる。詳細は[Phase 76〜85計画](../../09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)と
+（NVFP4 batching）を85へ繰り下げる。同日の追加ユーザー指示でPhase 83のKV対象はstatic tensor FP8から
+既定のstandard OCP MXFP8 E4の高速経路・API統合へ変更した。static FP8の追加は同Phaseの完了条件から外す。詳細は[Phase 76〜85計画](../../09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)と
 [Phase 82専用計画](../../../../archive/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md)へ分離する。
 
 ## 正本と基準値
@@ -122,8 +123,9 @@ decode、KV、他formatは変更していない。Phase 75ではexact gfx1030の
 | 80 | complete | CIの現状確認、必要な修正、再実行確認 | Phase 79完了。専用[Phase 80計画](../../../../archive/2026/09/1-10/phase80-ci-restoration.md) |
 | 81 | completed | 固定設定GPU sampling最適化（temperature 1.0、top_p 0.95、固定penalty/filter） | Phase 76〜80完了、main-plan固定profile |
 | 82 | complete-scoped-adoption | 不採用最適化の削除・現行target／shape／KV範囲の条件付き既定採用 | Phase 76〜81完了。専用[Phase 82計画](../../../../archive/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md) |
-| 83 | planned | static FP8 KV、MTP、文章生成実用closeout（旧Phase 82） | Phase 82完了、target-only基準 |
-| 84 | planned | 他精度の未最適化経路を一巡（旧Phase 83） | Phase 83完了 |
+| 83 | in-progress | MXFP8 KV・固定sampling・MTP・CLI/APIの正しい実装 | Phase 82完了、target-only基準。速度目標は83.5へ分離 |
+| 83.5 | planned | 追加最適化と8,192／128の速度目標達成 | Phase 83完了。V620 200／20、R9700 500／25 tok/s、MTP有効 |
+| 84 | planned | 他精度の未最適化経路を一巡（旧Phase 83） | Phase 83.5完了 |
 | 85 | planned | NVFP4 GPU batching最適化（旧Phase 84） | Phase 84完了、single-request基準 |
 
 直近の性能laneの番号上の既定順はPhase 49→50→51→52である。Phase 49の3候補判定と採用経路の退行確認、Phase 50のR9700採否と
@@ -134,7 +136,7 @@ block16製品経路は廃止し、両local targetを含むreviewed Qwen3.5-4B BF
 `kv-mxfp8-e4`へ変更した。gfx942のfresh実機証拠は追加のMI300X検証項目がまとまった時点の一括実行候補へ延期する。
 Phase 55〜75は完了済みである。Phase 76〜79でQwen3.8-27B混合NVFP4をsingle-requestで実用化し、
 Phase 80でCIを修復・再確認した後、Phase 81で固定設定GPU sampling、Phase 82で未採用最適化の整理・条件付き既定採用、
-Phase 83でstatic FP8 KV／MTPを含む実用closeout、Phase 84で他精度、Phase 85でNVFP4 batchingへ進む。
+Phase 83でMXFP8 E4 KV・固定sampling・MTP・API統合の正しさを完成し、Phase 83.5で追加最適化と速度目標を達成後、Phase 84で他精度、Phase 85でNVFP4 batchingへ進む。
 Phase 47〜48は内容と番号を保持する。
 
 複数surfaceへ現れる機能の所有権は一つに固定する。Phase 39はresumable transport/replay、Phase 40はsamplerと`n` choice

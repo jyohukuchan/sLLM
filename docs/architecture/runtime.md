@@ -438,7 +438,7 @@ runtime providerの不支持へ転用せず、逆に正しいdecodeだけでmode
 
 ## KV cache layout
 
-KV cache は通常の tensor descriptor に加え、layer、K/V の分離または interleave、token/block addressing、head grouping、stride、dtype、quantization encoding を表せる layout descriptor を持つ。Phase 6の初期FP16方式に加え、Phase 16は`kv-fp8-v1`（token/headごとのE4M3FN valueと独立FP32 scale）と`kv-nvfp4-v1`（low-nibble-first E2M1、block-16 E4M3FN scale、token/headごとのFP32 outer scale）を追加した。いずれもlogical shapeはtoken-major `[capacity, kv_heads, head_dim]`で、opaque stateがK/Vのvalue/scale planeを所有する。FP8のNaNはE4M3FN NaN、Infは最大有限値へ写す。NaN/Inf codeを持たないNVFP4はNaNをcanonical zero、Infを有限値由来のrow scaleで表現可能な上限へ飽和する。HIP VMM providerはcreate時に最大logical capacityのVAをreserveし、append前に新規token範囲へ必要なphysical pageだけをcommitする。VMM非対応targetでは同じencoding contractをcontiguous-resident allocationで実装する。model weight/activationのdtypeとKV cacheのdtype/encodingは独立に選ぶ。
+KV cache は通常の tensor descriptor に加え、layer、K/V の分離または interleave、token/block addressing、head grouping、stride、dtype、quantization encoding を表せる layout descriptor を持つ。Phase 6の初期FP16方式に加え、Phase 16は`kv-fp8-v1`（token/headごとのE4M3FN valueと独立FP32 scale）と`kv-nvfp4-v1`（low-nibble-first E2M1、block-16 E4M3FN scale、token/headごとのFP32 outer scale）を追加した。いずれもlogical shapeはtoken-major `[capacity, kv_heads, head_dim]`で、opaque stateがK/Vのvalue/scale planeを所有する。FP8のNaNはE4M3FN NaN、Infは最大有限値へ写す。NaN/Inf codeを持たないNVFP4はNaNをcanonical zero、Infを有限値由来のrow scaleで表現可能な上限へ飽和する。HIP VMM providerはcreate時に最大logical capacityのVAをreserveし、append前に新規token範囲へ必要なphysical pageだけをcommitする。VMM非対応targetまたはexact target policyがresidentを選ぶ場合は、同じencoding contractをcontiguous-resident allocationで実装する。model weight/activationのdtypeとKV cacheのdtype/encodingは独立に選ぶ。
 
 schedulerとgeneration serviceはopaqueなKV state/resource、logical token range、versioned view metadataだけを扱い、value/scale pointer、内部pointer arithmetic、VMM handle、block table、backend page sizeを所有しない。appendは新規BF16 K/Vだけを一度量子化し、K/Vと全scale planeの完了後にlogical lengthをatomicに公開する。causal attentionはFP16、packed FP8、packed NVFP4をstateから直接読み、request全体のFP16/BF16 mirrorを作らない。legacy create/readback ABIはFP16のまま維持し、additive create v2で低bit recipeを指定する。旧evidence readbackへ低bit stateを渡した場合はpacked bytesをFP16と誤認せず`unsupported encoding`でfail-closedにする。Paged Attention production backendは未実装である。詳細は[KV memory decision](kv-memory.md)を正とする。
 
@@ -473,6 +473,20 @@ Phase 52は同じ`contiguous-resident`実装を、exact `gfx1030`/`gfx1201`か�
 create時に選ぶ。短いcapacity、unknown target、他targetのcapability-selected policyは不変であり、OOM後のruntime fallbackは
 行わない。virtual-contiguous appendでは全K/V/scale planeのgrowとshared tail COWをtransaction化し、途中失敗時に追加page、
 replacement handle、旧shared mapping/access、mapped/committed accountingをappend前へ戻す。rollbackが失敗したcontextはpoisonする。
+
+Phase 83はRust HIP adapterが作るsliding windowなしの通常KV stateについて、exact `gfx1201`をcapacityとencodingによらず
+`contiguous-resident`へ固定する。scratch r22は別live stateの破壊を後段layerのVMM grow直後かつappend kernel前へ局所化し、
+scratch r23のresident候補は同じrequest履歴の4 planeとfinite replayを維持した。詳細は
+[Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)と
+[数値変更台帳](../compatibility/numerical-output-changes.md)に記録する。current-main sourceのbuild／host確認はPASSし、
+final GPU API／CLI実行は進行中である。
+
+選択はstate create時に一度だけ行い、確保または実行errorから別providerへretryしない。resident stateも同じopaque owner、
+token-major logical layout、contiguous K/V/scale pointer、append/attention kernel、publication規則を使う。exact `gfx1030`の
+65,536-token境界とexact `gfx942`の既存resident policyは維持する。direct native C ABIで指定する
+`CAPABILITY_SELECTED`／`VIRTUAL_CONTIGUOUS`とsliding stateはVMM経路に残る。state forkは既存どおりVMM stateでは
+complete page sharing＋tail COW、resident stateではsame-device D2D cloneを使うため、論理snapshot contractは共通だが
+物理page sharingの効率はproviderごとに異なる。
 
 Phase 8のproduction causal attentionは、Qwen3.5のhead dim 256を一workgroupで協調reductionし、scoreの
 再計算とthread-0 softmaxを一pass online softmaxへ置き換えたFA2-style pathである。opaque KV owner、

@@ -389,7 +389,7 @@ fn print_help<W: Write>(output: &mut W) -> Result<(), String> {
     writeln!(output, "Usage: sllm chat [OPTIONS]").map_err(|_| "chat output failed".to_owned())?;
     writeln!(
         output,
-        "  --gguf PATH --derived-lock PATH --device-index N --target gfx1030|gfx1201|gfx942"
+        "  --gguf PATH [--derived-lock PATH] | --qwen38-nvfp4 ABSOLUTE_DIRECTORY --device-index 0 --target gfx1030|gfx1201 [--mtp-draft-width 0|2]"
     )
     .map_err(|_| "chat output failed".to_owned())?;
     writeln!(
@@ -399,7 +399,7 @@ fn print_help<W: Write>(output: &mut W) -> Result<(), String> {
     .map_err(|_| "chat output failed".to_owned())?;
     writeln!(
         output,
-        "  --checkpoint-directory PATH --checkpoint-quota-bytes N"
+        "  [--checkpoint-directory PATH --checkpoint-quota-bytes N] (required for GGUF sessions; unused by Qwen3.8 NVFP4)"
     )
     .map_err(|_| "chat output failed".to_owned())?;
     writeln!(

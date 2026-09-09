@@ -280,6 +280,7 @@ fn main() {
     let qwen38_projection_pack_runtime = source_dir.join("src/qwen38_projection_pack_runtime.inc");
     let nvfp4_decode_scale_lut = source_dir.join("src/nvfp4_decode_scale_lut.inc");
     let fp8_prefill_short_m32 = source_dir.join("src/fp8_prefill_short_m32.inc");
+    let nvfp4_prefill_wmma_compensated = source_dir.join("src/nvfp4_prefill_wmma_compensated.inc");
     let mlp_gate_up_silu_bundle_kernel_internal =
         source_dir.join("src/mlp_gate_up_silu_bundle_kernel_internal.hpp");
     let mlp_gate_up_silu_bundle_kernel =
@@ -464,6 +465,10 @@ fn main() {
         nvfp4_decode_scale_lut.display()
     );
     println!("cargo:rerun-if-changed={}", fp8_prefill_short_m32.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        nvfp4_prefill_wmma_compensated.display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         mlp_gate_up_silu_bundle_kernel_internal.display()

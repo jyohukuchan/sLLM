@@ -1,8 +1,9 @@
 //! Exact Qwen3.5-4B MTP component manifest.
 
 use crate::{
-    ModelLock, QWEN35_4B_FINGERPRINT, QWEN35_4B_REPO_ID, QWEN35_4B_REVISION, TensorDType,
-    TensorDescriptor, VerifiedCache,
+    ModelLock, QWEN35_4B_FINGERPRINT, QWEN35_4B_REPO_ID, QWEN35_4B_REVISION,
+    QWEN35_27B_FINGERPRINT, QWEN35_27B_REPO_ID, QWEN35_27B_REVISION, QuantizedTensorEncoding,
+    TensorDType, TensorDescriptor, VerifiedCache, VerifiedUnslothQwen38Nvfp4,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,6 +13,10 @@ pub const QWEN35_MTP_TENSOR_COUNT: usize = 15;
 pub const QWEN35_MTP_HIDDEN_SIZE: u64 = 2_560;
 pub const QWEN35_MTP_INTERMEDIATE_SIZE: u64 = 9_216;
 pub const QWEN35_MTP_DRAFT_WIDTH: usize = 2;
+pub const QWEN38_MTP_TENSOR_COUNT: usize = 15;
+pub const QWEN38_MTP_HIDDEN_SIZE: u64 = 5_120;
+pub const QWEN38_MTP_INTERMEDIATE_SIZE: u64 = 17_408;
+pub const QWEN38_MTP_DRAFT_WIDTH: usize = 2;
 
 const MANIFEST_DOMAIN: &[u8] = b"sLLM-qwen35-mtp-manifest-v1\0";
 
@@ -163,6 +168,80 @@ pub fn build_qwen35_mtp_manifest<'a>(
     })
 }
 
+/// Validate the BF16 companion tensors embedded in the exact Qwen3.8 mixed
+/// artifact.  This check is deliberately separate from the target NVFP4
+/// inventory: the target plan may leave these tensors known-unconsumed, while
+/// the MTP plan must consume the exact fifteen names and shapes.
+pub fn validate_qwen38_mtp_artifact(
+    lock: &ModelLock,
+    artifact: &VerifiedUnslothQwen38Nvfp4,
+) -> Result<(), QwenMtpError> {
+    if lock.schema_version != "model-lock-v1"
+        || lock.model.repo_id != QWEN35_27B_REPO_ID
+        || lock.model.resolved_revision != QWEN35_27B_REVISION
+        || lock.fingerprint() != QWEN35_27B_FINGERPRINT
+        || artifact.repository() != crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY
+    {
+        return Err(QwenMtpError::Invalid(
+            "artifact is not the reviewed Qwen3.8-27B MTP contract".to_owned(),
+        ));
+    }
+    let expected = expected_qwen38_shapes();
+    let mut observed = BTreeSet::new();
+    for tensor in artifact
+        .tensors()
+        .filter(|tensor| tensor.logical_name.starts_with("mtp."))
+    {
+        let shape = expected.get(tensor.logical_name.as_str()).ok_or_else(|| {
+            QwenMtpError::Invalid(format!(
+                "unknown Qwen3.8 MTP tensor: {}",
+                tensor.logical_name
+            ))
+        })?;
+        if tensor.encoding != QuantizedTensorEncoding::UnquantizedBf16
+            || tensor.logical_shape.as_slice() != shape.as_slice()
+        {
+            return Err(QwenMtpError::Invalid(format!(
+                "Qwen3.8 MTP tensor shape or dtype differs: {}",
+                tensor.logical_name
+            )));
+        }
+        if !observed.insert(tensor.logical_name.as_str()) {
+            return Err(QwenMtpError::Invalid(format!(
+                "duplicate Qwen3.8 MTP tensor: {}",
+                tensor.logical_name
+            )));
+        }
+    }
+    let shared = artifact
+        .tensor("model.language_model.embed_tokens.weight")
+        .ok_or_else(|| QwenMtpError::Invalid("Qwen3.8 shared embedding is missing".to_owned()))?;
+    if shared.encoding != QuantizedTensorEncoding::UnquantizedBf16
+        || shared.logical_shape != vec![248_320, QWEN38_MTP_HIDDEN_SIZE]
+    {
+        return Err(QwenMtpError::Invalid(
+            "Qwen3.8 shared embedding is not the expected BF16 shape".to_owned(),
+        ));
+    }
+    let output = artifact
+        .tensor("lm_head.weight")
+        .ok_or_else(|| QwenMtpError::Invalid("Qwen3.8 output projection is missing".to_owned()))?;
+    if output.encoding != QuantizedTensorEncoding::OcpFp8E4M3FnChannelBf16Scale
+        || output.logical_shape != vec![248_320, QWEN38_MTP_HIDDEN_SIZE]
+    {
+        return Err(QwenMtpError::Invalid(
+            "Qwen3.8 output projection is not the expected FP8 shape".to_owned(),
+        ));
+    }
+    if observed.len() != QWEN38_MTP_TENSOR_COUNT || observed.len() != expected.len() {
+        return Err(QwenMtpError::Invalid(format!(
+            "Qwen3.8 MTP tensor set differs: observed={}, expected={QWEN38_MTP_TENSOR_COUNT}",
+            observed.len()
+        )));
+    }
+    Ok(())
+}
+
 fn validate_lock(lock: &ModelLock) -> Result<(), QwenMtpError> {
     let text = &lock.model.architecture.text_config;
     if lock.schema_version != "model-lock-v1"
@@ -198,6 +277,59 @@ fn expected_shapes() -> BTreeMap<&'static str, Vec<u64>> {
         ("mtp.norm.weight", vec![2_560]),
         ("mtp.pre_fc_norm_embedding.weight", vec![2_560]),
         ("mtp.pre_fc_norm_hidden.weight", vec![2_560]),
+    ])
+}
+
+fn expected_qwen38_shapes() -> BTreeMap<&'static str, Vec<u64>> {
+    BTreeMap::from([
+        ("mtp.fc.weight", vec![QWEN38_MTP_HIDDEN_SIZE, 10_240]),
+        (
+            "mtp.layers.0.input_layernorm.weight",
+            vec![QWEN38_MTP_HIDDEN_SIZE],
+        ),
+        (
+            "mtp.layers.0.mlp.down_proj.weight",
+            vec![QWEN38_MTP_HIDDEN_SIZE, QWEN38_MTP_INTERMEDIATE_SIZE],
+        ),
+        (
+            "mtp.layers.0.mlp.gate_proj.weight",
+            vec![QWEN38_MTP_INTERMEDIATE_SIZE, QWEN38_MTP_HIDDEN_SIZE],
+        ),
+        (
+            "mtp.layers.0.mlp.up_proj.weight",
+            vec![QWEN38_MTP_INTERMEDIATE_SIZE, QWEN38_MTP_HIDDEN_SIZE],
+        ),
+        (
+            "mtp.layers.0.post_attention_layernorm.weight",
+            vec![QWEN38_MTP_HIDDEN_SIZE],
+        ),
+        ("mtp.layers.0.self_attn.k_norm.weight", vec![256]),
+        (
+            "mtp.layers.0.self_attn.k_proj.weight",
+            vec![1_024, QWEN38_MTP_HIDDEN_SIZE],
+        ),
+        (
+            "mtp.layers.0.self_attn.o_proj.weight",
+            vec![QWEN38_MTP_HIDDEN_SIZE, 6_144],
+        ),
+        ("mtp.layers.0.self_attn.q_norm.weight", vec![256]),
+        (
+            "mtp.layers.0.self_attn.q_proj.weight",
+            vec![12_288, QWEN38_MTP_HIDDEN_SIZE],
+        ),
+        (
+            "mtp.layers.0.self_attn.v_proj.weight",
+            vec![1_024, QWEN38_MTP_HIDDEN_SIZE],
+        ),
+        ("mtp.norm.weight", vec![QWEN38_MTP_HIDDEN_SIZE]),
+        (
+            "mtp.pre_fc_norm_embedding.weight",
+            vec![QWEN38_MTP_HIDDEN_SIZE],
+        ),
+        (
+            "mtp.pre_fc_norm_hidden.weight",
+            vec![QWEN38_MTP_HIDDEN_SIZE],
+        ),
     ])
 }
 

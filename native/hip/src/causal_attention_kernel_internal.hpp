@@ -31,6 +31,14 @@ constexpr const char *kDecodeWaveSplitLogicalKernelId =
     "causal_attention.decode.wave8_split.v5";
 constexpr const char *kDecodeWaveSplitDeviceSymbol =
     "sllm_causal_attention_decode_wave8_split_v5";
+constexpr const char *kDecodeWaveSplitStagedLogicalKernelId =
+    "causal_attention.decode.wave8_split.staged.gfx1030.v1";
+constexpr const char *kDecodeWaveSplitStagedDeviceSymbol =
+    "sllm_causal_attention_decode_wave8_split_staged_gfx1030_v1";
+constexpr const char *kDecodeWaveSplitStaged32LogicalKernelId =
+    "causal_attention.decode.wave32_split.staged.v1";
+constexpr const char *kDecodeWaveSplitStaged32DeviceSymbol =
+    "sllm_causal_attention_decode_wave32_split_staged_v1";
 constexpr const char *kDecodeWaveSplitQPreloadLogicalKernelId =
     "causal_attention.decode.wave8_split.q_preload.v1";
 constexpr const char *kDecodeWaveSplitQPreloadDeviceSymbol =
@@ -209,6 +217,26 @@ hipError_t launch_decode_wave_split_fp16_pair(
     uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
     uint32_t head_dim, uint32_t encoding, float static_key_scale,
     float static_value_scale, hipStream_t stream) noexcept;
+
+hipError_t launch_decode_wave_split_staged(
+    const uint16_t *query, const void *key, const void *value,
+    const void *key_scales, const void *value_scales,
+    const float *key_outer_scales, const float *value_outer_scales,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, uint32_t encoding, float static_key_scale,
+    float static_value_scale, void *workspace, uint64_t workspace_bytes,
+    bool use_query_preload, hipStream_t stream) noexcept;
+
+hipError_t launch_decode_wave_split_staged32(
+    const uint16_t *query, const void *key, const void *value,
+    const void *key_scales, const void *value_scales,
+    const float *key_outer_scales, const float *value_outer_scales,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, uint32_t encoding, float static_key_scale,
+    float static_value_scale, void *workspace, uint64_t workspace_bytes,
+    bool use_query_preload, hipStream_t stream) noexcept;
 
 hipError_t launch_decode_gqa4_split(
     const uint16_t *query, const void *key, const void *value,

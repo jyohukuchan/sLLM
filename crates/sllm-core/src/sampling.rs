@@ -1100,6 +1100,16 @@ impl DeviceTokenSelectorRequestV1 {
         self.counter
     }
 
+    /// Clone this request for a later committed draw while retaining the
+    /// exact vocabulary, filter, and mask contract. Speculative target
+    /// verification uses this to prepare one request per target row without
+    /// advancing the stream for rows that are later rolled back.
+    pub fn with_counter(&self, counter: u64) -> Self {
+        let mut request = self.clone();
+        request.counter = counter;
+        request
+    }
+
     pub const fn return_logprob(&self) -> bool {
         self.return_logprob
     }

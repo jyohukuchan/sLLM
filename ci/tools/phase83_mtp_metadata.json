@@ -1,0 +1,18 @@
+{
+  "schema_version": "phase83-mtp-measurement-contract-v1",
+  "benchmark": "crates/sllm-hip/src/bin/sllm-phase78-qwen38-benchmark.rs",
+  "sampling": "fixed GPU sampler: temperature=1.0, top_p=0.95, top_k=20, seed=123",
+  "supported_draft_widths": [1, 2, 3],
+  "default_draft_width": 2,
+  "default_rows": ["8192/128"],
+  "diagnostic_rows": {
+    "rows": ["17/17", "129/17"],
+    "scope": "short-prefix parser and first-MTP smoke diagnostics only; excluded from Phase83 performance acceptance"
+  },
+  "selected_kernel_audit_ids": [87, 88],
+  "prefix_timing": "prefill wall time includes target prefix prefill and MTP draft prefix priming; model load is excluded",
+  "decode_timing": "decode wall time includes proposal, target verification, sampling, accept/reject, replay, state commit, and cleanup",
+  "output_accounting": "executor committed_target_rows are decode-only; total committed output = one prefill-selected token + committed decode rows; each block contributes at most one correction row plus accepted drafts, so rejected and accepted-but-unpublished drafts are excluded",
+  "comparison": "same 8192-token Rust chat-template fixture, same 128-token output budget, same KV and binary for target-only and MTP runs",
+  "status": "runtime opt-in uses the Qwen3.8 companion resident and fixed GPU-selector speculative executor; unsupported sampling/replay requests fail closed"
+}

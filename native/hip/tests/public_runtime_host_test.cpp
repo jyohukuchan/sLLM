@@ -6285,6 +6285,23 @@ bool matmul_fp8_outer_decode_selector_contract() {
           KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
       select(2U, 5120U, 17408U) ==
           KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
+      // ID92 is the adopted exact M=2..4 FP8 fusion set. M=1 and every
+      // neighboring K/N tuple stay on the existing providers.
+      select(2U, 5120U, 10240U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
+      select(3U, 5120U, 6144U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
+      select(4U, 5120U, 248320U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
+      select(1U, 5120U, 10240U) !=
+          KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
+      select(2U, 5120U, 10241U) !=
+          KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
+      select(2U, 6144U, 10240U) !=
+          KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
+      select(2U, 5120U, 10240U, "gfx1201") == KernelVariant::Fp8Native &&
+      select(2U, 5120U, 10240U, "gfx1030", true) ==
+          KernelVariant::Fp8OuterPrefillTiled16 &&
       select(1U, 5120U, 17408U, "gfx1201") == KernelVariant::Fp8Native &&
       select(1U, 5120U, 17408U, "gfx1030", true) ==
           KernelVariant::Fp8Emulation &&
@@ -6294,6 +6311,31 @@ bool matmul_fp8_outer_decode_selector_contract() {
       static_cast<uint32_t>(
           KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64) ==
           76U &&
+      static_cast<uint32_t>(KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4) ==
+          92U &&
+      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                      KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4),
+                  "matmul.fp8.outer.decode.gfx1030.fused.m2_4.v1") == 0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol_for_target(
+              KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4, "gfx1030", 2U,
+              5120U, 10240U),
+          "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n10240_v1") == 0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol_for_target(
+                      KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4, "gfx1030",
+                      3U, 5120U, 6144U),
+                  "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n6144_v1") ==
+          0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol_for_target(
+              KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4, "gfx1030", 4U,
+              5120U, 248320U),
+          "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n248320_v1") == 0 &&
+      sllm_matmul_kernel::workgroup_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4) == 256U &&
+      sllm_matmul_kernel::grid_size_x(
+          KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4, 2U, 10240U, 5120U) ==
+          320U &&
       std::strcmp(
           sllm_matmul_kernel::logical_kernel_id(
               KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32),
@@ -7214,12 +7256,25 @@ bool matmul_selector_decision_contract() {
 
   const auto fp8_native =
       sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx1201");
+  const auto fp8_fused = sllm_matmul_kernel::select_fp8_outer_decision(
+      2U, 5120U, 10240U, "gfx1030");
+  const auto fp8_fused_m1 = sllm_matmul_kernel::select_fp8_outer_decision(
+      1U, 5120U, 10240U, "gfx1030");
+  const auto fp8_fused_fnuz = sllm_matmul_kernel::select_fp8_outer_decision(
+      2U, 5120U, 10240U, "gfx1030", true);
   const auto fp8_unknown =
       sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx900");
-  valid = valid && fp8_native.variant == KernelVariant::Fp8Native &&
-          fp8_native.supported && fp8_native.enabled && fp8_native.adopted &&
-          fp8_unknown.variant == KernelVariant::Fp8Emulation &&
-          !fp8_unknown.supported;
+  valid =
+      valid && fp8_native.variant == KernelVariant::Fp8Native &&
+      fp8_native.supported && fp8_native.enabled && fp8_native.adopted &&
+      fp8_fused.variant == KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
+      fp8_fused.supported && fp8_fused.enabled && fp8_fused.adopted &&
+      std::strcmp(fp8_fused.reason, "adopted default for target and shape") ==
+          0 &&
+      fp8_fused_m1.variant != KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
+      fp8_fused_fnuz.variant != KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
+      fp8_unknown.variant == KernelVariant::Fp8Emulation &&
+      !fp8_unknown.supported;
 
   const auto nvfp4_baseline =
       sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 16U, 33U, "gfx1030");

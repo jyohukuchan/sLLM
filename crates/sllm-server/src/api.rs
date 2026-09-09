@@ -1014,6 +1014,73 @@ impl ChatCompletionRequestV1 {
         })
     }
 
+    /// Builds a validated text request for non-HTTP clients that share the
+    /// protocol generation path.  The HTTP adapter remains responsible for
+    /// wire parsing; this constructor only exposes the already bounded,
+    /// transport-independent request shape to trusted local frontends such as
+    /// `sllm-cli`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_local_text(
+        model: String,
+        prompt: String,
+        max_tokens: u32,
+        temperature: f32,
+        top_p: f32,
+        stop: Vec<String>,
+        seed: Option<i64>,
+        reasoning: bool,
+        reasoning_budget: Option<u32>,
+    ) -> Result<Self, ApiErrorV1> {
+        let mut request = Self::from_protocol_text(
+            model,
+            prompt,
+            None,
+            max_tokens,
+            temperature,
+            top_p,
+            stop,
+            false,
+            false,
+            reasoning,
+            reasoning_budget,
+            None,
+        )?;
+        request.seed = seed;
+        Ok(request)
+    }
+
+    /// Builds a validated chat request for a trusted local frontend while
+    /// retaining the same bounds and sampling validation as the protocol
+    /// adapter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_local_messages(
+        model: String,
+        messages: Vec<Qwen35ChatMessageV1>,
+        max_tokens: u32,
+        temperature: f32,
+        top_p: f32,
+        stop: Vec<String>,
+        seed: Option<i64>,
+        reasoning: bool,
+        reasoning_budget: Option<u32>,
+    ) -> Result<Self, ApiErrorV1> {
+        let mut request = Self::from_protocol_messages(
+            model,
+            messages,
+            None,
+            max_tokens,
+            temperature,
+            top_p,
+            stop,
+            false,
+            false,
+            reasoning,
+            reasoning_budget,
+        )?;
+        request.seed = seed;
+        Ok(request)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_protocol_text(
         model: String,
@@ -2368,6 +2435,43 @@ mod tests {
                 ErrorCodeV1::InvalidJson
             );
         }
+    }
+
+    #[test]
+    fn local_generation_helpers_preserve_seed_stop_and_reasoning() {
+        let text = ChatCompletionRequestV1::from_local_text(
+            "qwen3.8-27b-nvfp4".to_owned(),
+            "hello".to_owned(),
+            37,
+            1.0,
+            0.95,
+            vec!["STOP".to_owned()],
+            Some(-7),
+            true,
+            Some(11),
+        )
+        .unwrap();
+        assert_eq!(text.seed(), Some(-7));
+        assert_eq!(text.generation().max_new_tokens(), 37);
+        assert_eq!(text.generation().stop_strings(), ["STOP"]);
+        assert!(text.reasoning().enabled());
+        assert_eq!(text.reasoning().max_reasoning_tokens(), Some(11));
+
+        let messages = ChatCompletionRequestV1::from_local_messages(
+            "qwen3.8-27b-nvfp4".to_owned(),
+            vec![Qwen35ChatMessageV1::user("hello")],
+            19,
+            1.0,
+            0.95,
+            vec!["DONE".to_owned()],
+            Some(9),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(messages.seed(), Some(9));
+        assert_eq!(messages.generation().stop_strings(), ["DONE"]);
+        assert!(!messages.reasoning().enabled());
     }
 
     #[test]

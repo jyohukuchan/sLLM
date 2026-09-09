@@ -120,8 +120,10 @@ pub(crate) fn native_kv_storage(
 const RDNA_CONTIGUOUS_LONG_KV_MIN_TOKENS: u64 = 65_536;
 
 fn selected_memory_kind_for_target(expected_target: Option<&str>, capacity_tokens: u64) -> u32 {
-    if expected_target == Some("gfx942")
-        || (matches!(expected_target, Some("gfx1030" | "gfx1201"))
+    // Phase83: gfx1201 VMM growth can corrupt another live state's backing
+    // after request reuse. Keep the same GPU KV layout with resident storage.
+    if matches!(expected_target, Some("gfx942" | "gfx1201"))
+        || (expected_target == Some("gfx1030")
             && capacity_tokens >= RDNA_CONTIGUOUS_LONG_KV_MIN_TOKENS)
     {
         sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
@@ -822,6 +824,8 @@ impl KvStateResource {
         ) {
             Ok(evidence) => evidence,
             Err(error) => {
+                let mut completion = completion;
+                let _ = completion.wait(Duration::from_secs(30));
                 drop(completion);
                 return Err(error);
             }
@@ -927,6 +931,8 @@ impl KvStateResource {
         ) {
             Ok(evidence) => evidence,
             Err(error) => {
+                let mut completion = completion;
+                let _ = completion.wait(Duration::from_secs(30));
                 drop(completion);
                 return Err(error);
             }
@@ -1047,6 +1053,8 @@ impl KvStateResource {
         ) {
             Ok(evidence) => evidence,
             Err(error) => {
+                let mut completion = completion;
+                let _ = completion.wait(Duration::from_secs(30));
                 drop(completion);
                 return Err(error);
             }
@@ -2195,6 +2203,62 @@ fn validate_causal_attention_info(
     sliding_window: Option<u64>,
     score_scale: Option<f32>,
 ) -> Result<CausalAttentionEvidence, RuntimeError> {
+    let staged_decode_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_STAGED");
+    let staged32_decode_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32");
+    validate_causal_attention_info_with_staged_opt_ins(
+        info,
+        context,
+        start_position,
+        committed_kv_length,
+        descriptor,
+        query_heads,
+        sliding_window,
+        score_scale,
+        staged_decode_opt_in.as_deref(),
+        staged32_decode_opt_in.as_deref(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+fn validate_causal_attention_info_with_staged_opt_in(
+    info: &sys::sllm_causal_attention_dispatch_info_t,
+    context: &Context,
+    start_position: u64,
+    committed_kv_length: u64,
+    descriptor: KvStateDescriptor,
+    query_heads: u32,
+    sliding_window: Option<u64>,
+    score_scale: Option<f32>,
+    staged_decode_opt_in: Option<&std::ffi::OsStr>,
+) -> Result<CausalAttentionEvidence, RuntimeError> {
+    validate_causal_attention_info_with_staged_opt_ins(
+        info,
+        context,
+        start_position,
+        committed_kv_length,
+        descriptor,
+        query_heads,
+        sliding_window,
+        score_scale,
+        staged_decode_opt_in,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_causal_attention_info_with_staged_opt_ins(
+    info: &sys::sllm_causal_attention_dispatch_info_t,
+    context: &Context,
+    start_position: u64,
+    committed_kv_length: u64,
+    descriptor: KvStateDescriptor,
+    query_heads: u32,
+    sliding_window: Option<u64>,
+    score_scale: Option<f32>,
+    staged_decode_opt_in: Option<&std::ffi::OsStr>,
+    staged32_decode_opt_in: Option<&std::ffi::OsStr>,
+) -> Result<CausalAttentionEvidence, RuntimeError> {
     let observed_target = c_string(&info.gcn_arch_name);
     let target = logical_gcn_arch_name(&observed_target).to_owned();
     let query_count = committed_kv_length
@@ -2365,6 +2429,24 @@ fn validate_causal_attention_info(
     let use_phase33_common_provider = matches!(expected_target, Some("gfx1030" | "gfx1201"));
     let force_baseline =
         std::env::var_os("SLLM_CAUSAL_ATTENTION_FORCE_BASELINE").is_some_and(|value| value == "1");
+    let use_decode_wave_split_staged = !force_baseline
+        && expected_target == Some("gfx1030")
+        && staged_decode_opt_in.is_some_and(|value| value == "1")
+        && (1..=4).contains(&query_count)
+        && committed_kv_length >= 1024
+        && query_heads == 24
+        && descriptor.layout().heads() == 4
+        && descriptor.layout().head_dim() == 256
+        && descriptor.cache_encoding() == KvCacheEncoding::Mxfp8E4;
+    let use_decode_wave_split_staged32 = !force_baseline
+        && matches!(expected_target, Some("gfx1030" | "gfx1201"))
+        && staged32_decode_opt_in.is_some_and(|value| value == "1")
+        && (1..=4).contains(&query_count)
+        && committed_kv_length >= 1024
+        && query_heads == 24
+        && descriptor.layout().heads() == 4
+        && descriptor.layout().head_dim() == 256
+        && descriptor.cache_encoding() == KvCacheEncoding::Mxfp8E4;
     let use_decode_wave_split_long = use_phase33_common_provider
         && query_count == 1
         && committed_kv_length >= 1024
@@ -2609,39 +2691,60 @@ fn validate_causal_attention_info(
             || use_prefill_gqa6_qtile4_k32_fp16
             || use_prefill_gqa6_blocksoftmax
             || use_prefill_gqa6_blocksoftmax_q8);
-    let (expected_kernel_id, baseline_kernel, baseline_device) =
-        if use_gfx1201_gqa6_rocblas_f16_tail {
-            (
-                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F16_TAIL_GFX1201_V1,
-                "causal_attention.online_softmax_gqa.v2",
-                "sllm_causal_attention_online_softmax_gqa_v2",
-            )
-        } else if use_gfx1201_gqa6_rocblas_f32 {
-            (
-                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F32_GFX1201_V1,
-                "causal_attention.online_softmax_gqa.v2",
-                "sllm_causal_attention_online_softmax_gqa_v2",
-            )
-        } else if use_decode_gqa6_split_p128 {
-            (
-                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_SPLIT_P128_GFX1030_V1,
-                "causal_attention.online_softmax_gqa.v2",
-                "sllm_causal_attention_online_softmax_gqa_v2",
-            )
-        } else if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
-            (
-                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2,
-                "causal_attention.online_softmax_gqa.v2",
-                "sllm_causal_attention_online_softmax_gqa_v2",
-            )
-        } else {
-            (
-                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3,
-                "causal_attention.online_softmax_gqa.packed_kv.v3",
-                "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
-            )
-        };
-    let (expected_kernel, expected_device) = if use_decode_gqa6_split_p128 {
+    let (expected_kernel_id, baseline_kernel, baseline_device) = if use_decode_wave_split_staged32 {
+        (
+            sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_V1,
+            "causal_attention.online_softmax_gqa.packed_kv.v3",
+            "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
+        )
+    } else if use_decode_wave_split_staged {
+        (
+            sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_GFX1030_V1,
+            "causal_attention.decode.wave8_split.staged.gfx1030.v1",
+            "sllm_causal_attention_decode_wave8_split_staged_gfx1030_v1",
+        )
+    } else if use_gfx1201_gqa6_rocblas_f16_tail {
+        (
+            sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F16_TAIL_GFX1201_V1,
+            "causal_attention.online_softmax_gqa.v2",
+            "sllm_causal_attention_online_softmax_gqa_v2",
+        )
+    } else if use_gfx1201_gqa6_rocblas_f32 {
+        (
+            sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F32_GFX1201_V1,
+            "causal_attention.online_softmax_gqa.v2",
+            "sllm_causal_attention_online_softmax_gqa_v2",
+        )
+    } else if use_decode_gqa6_split_p128 {
+        (
+            sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_SPLIT_P128_GFX1030_V1,
+            "causal_attention.online_softmax_gqa.v2",
+            "sllm_causal_attention_online_softmax_gqa_v2",
+        )
+    } else if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
+        (
+            sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2,
+            "causal_attention.online_softmax_gqa.v2",
+            "sllm_causal_attention_online_softmax_gqa_v2",
+        )
+    } else {
+        (
+            sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3,
+            "causal_attention.online_softmax_gqa.packed_kv.v3",
+            "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
+        )
+    };
+    let (expected_kernel, expected_device) = if use_decode_wave_split_staged32 {
+        (
+            "causal_attention.decode.wave32_split.staged.v1",
+            "sllm_causal_attention_decode_wave32_split_staged_v1",
+        )
+    } else if use_decode_wave_split_staged {
+        (
+            "causal_attention.decode.wave8_split.staged.gfx1030.v1",
+            "sllm_causal_attention_decode_wave8_split_staged_gfx1030_v1",
+        )
+    } else if use_decode_gqa6_split_p128 {
         (
             "causal_attention.decode.gqa6_split_p128.fp16.v1",
             "sllm_causal_attention_decode_gqa6_split_p128_v1",
@@ -2773,7 +2876,9 @@ fn validate_causal_attention_info(
         || info.backend != sys::SLLM_BACKEND_HIP
         || info.dispatch_id == 0
         || info.dispatch_count
-            != if use_gfx1201_gqa6_rocblas_f16_tail {
+            != if use_decode_wave_split_staged32 || use_decode_wave_split_staged {
+                2
+            } else if use_gfx1201_gqa6_rocblas_f16_tail {
                 5
             } else if use_any_gqa6_rocblas_f32 {
                 7
@@ -2800,7 +2905,17 @@ fn validate_causal_attention_info(
                 sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE
             }
         || Some(info.grid_size_x)
-            != if use_decode_gqa6_split_p128 {
+            != if use_decode_wave_split_staged32 {
+                query_count
+                    .checked_mul(24)
+                    .and_then(|value| value.checked_mul(32))
+                    .and_then(|value| u32::try_from(value).ok())
+            } else if use_decode_wave_split_staged {
+                query_count
+                    .checked_mul(24)
+                    .and_then(|value| value.checked_mul(8))
+                    .and_then(|value| u32::try_from(value).ok())
+            } else if use_decode_gqa6_split_p128 {
                 Some(512)
             } else if use_decode_gqa6_split_p64 {
                 Some(256)
@@ -3197,7 +3312,227 @@ mod tests {
     }
 
     #[test]
-    fn long_rdna_and_gfx942_use_only_the_fixed_contiguous_provider() {
+    fn mxfp8_e4_packed_attention_metadata_accepts_chain_shape() {
+        let context = Context::test_without_native();
+        let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            65,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        )
+        .unwrap();
+        let mut info = empty_causal_attention_info();
+        info.backend = sys::SLLM_BACKEND_HIP;
+        info.dispatch_id = 11;
+        info.dispatch_count = 1;
+        info.kernel_id = sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3;
+        info.workgroup_size_x = sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+        info.grid_size_x = 24;
+        info.query_count = 1;
+        info.start_position = 32;
+        info.committed_kv_length = 33;
+        info.q_heads = 24;
+        info.kv_heads = 4;
+        info.head_dim = 256;
+        info.scale_denominator = 16;
+        set_test_c_string(
+            &mut info.kernel_symbol,
+            "causal_attention.online_softmax_gqa.packed_kv.v3",
+        );
+        set_test_c_string(
+            &mut info.device_symbol,
+            "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
+        );
+        set_test_c_string(&mut info.gcn_arch_name, "gfx1030");
+
+        let evidence =
+            validate_causal_attention_info(&info, &context, 32, 33, descriptor, 24, None, None)
+                .unwrap();
+        assert_eq!(evidence.dispatch_count, 1);
+        assert_eq!(evidence.query_count, 1);
+        assert_eq!(evidence.start_position, 32);
+        assert_eq!(evidence.committed_kv_length, 33);
+        assert_eq!(
+            evidence.kernel_id,
+            sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3
+        );
+        assert!(!evidence.fallback_allowed);
+        assert!(!evidence.fallback_used);
+    }
+
+    #[test]
+    fn mxfp8_e4_staged_decode_metadata_accepts_exact_opt_in_and_rejects_invalid() {
+        let context = Context::test_without_native_for_target("gfx1030");
+        let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            8192,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        )
+        .unwrap();
+        for query_count in 1..=4_u64 {
+            let start_position = 1024;
+            let committed_kv_length = start_position + query_count;
+            let mut info = empty_causal_attention_info();
+            info.backend = sys::SLLM_BACKEND_HIP;
+            info.dispatch_id = 80 + query_count;
+            info.dispatch_count = 2;
+            info.kernel_id =
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_GFX1030_V1;
+            info.workgroup_size_x = sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+            info.grid_size_x = u32::try_from(query_count * 24 * 8).unwrap();
+            info.query_count = query_count;
+            info.start_position = start_position;
+            info.committed_kv_length = committed_kv_length;
+            info.q_heads = 24;
+            info.kv_heads = 4;
+            info.head_dim = 256;
+            info.scale_denominator = 16;
+            set_test_c_string(
+                &mut info.kernel_symbol,
+                "causal_attention.decode.wave8_split.staged.gfx1030.v1",
+            );
+            set_test_c_string(
+                &mut info.device_symbol,
+                "sllm_causal_attention_decode_wave8_split_staged_gfx1030_v1",
+            );
+            set_test_c_string(&mut info.gcn_arch_name, "gfx1030");
+
+            let evidence = validate_causal_attention_info_with_staged_opt_in(
+                &info,
+                &context,
+                start_position,
+                committed_kv_length,
+                descriptor,
+                24,
+                None,
+                None,
+                Some(std::ffi::OsStr::new("1")),
+            )
+            .unwrap();
+            assert_eq!(evidence.kernel_id, info.kernel_id);
+            assert_eq!(evidence.dispatch_count, 2);
+            assert_eq!(evidence.grid_size_x, query_count as u32 * 24 * 8);
+            assert_eq!(evidence.query_count, query_count);
+
+            assert!(
+                validate_causal_attention_info_with_staged_opt_in(
+                    &info,
+                    &context,
+                    start_position,
+                    committed_kv_length,
+                    descriptor,
+                    24,
+                    None,
+                    None,
+                    None,
+                )
+                .is_err()
+            );
+
+            let mut fallback = info;
+            fallback.fallback_used = 1;
+            assert!(
+                validate_causal_attention_info_with_staged_opt_in(
+                    &fallback,
+                    &context,
+                    start_position,
+                    committed_kv_length,
+                    descriptor,
+                    24,
+                    None,
+                    None,
+                    Some(std::ffi::OsStr::new("1")),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn mxfp8_e4_staged32_metadata_accepts_both_supported_targets() {
+        let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            8192,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        )
+        .unwrap();
+        for target in ["gfx1030", "gfx1201"] {
+            let context = Context::test_without_native_for_target(target);
+            for query_count in 1..=4_u64 {
+                let start_position = 1024;
+                let committed_kv_length = start_position + query_count;
+                let mut info = empty_causal_attention_info();
+                info.backend = sys::SLLM_BACKEND_HIP;
+                info.dispatch_id = 9300 + query_count;
+                info.dispatch_count = 2;
+                info.kernel_id =
+                    sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_V1;
+                info.workgroup_size_x = sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+                info.grid_size_x = u32::try_from(query_count * 24 * 32).unwrap();
+                info.query_count = query_count;
+                info.start_position = start_position;
+                info.committed_kv_length = committed_kv_length;
+                info.q_heads = 24;
+                info.kv_heads = 4;
+                info.head_dim = 256;
+                info.scale_denominator = 16;
+                set_test_c_string(
+                    &mut info.kernel_symbol,
+                    "causal_attention.decode.wave32_split.staged.v1",
+                );
+                set_test_c_string(
+                    &mut info.device_symbol,
+                    "sllm_causal_attention_decode_wave32_split_staged_v1",
+                );
+                set_test_c_string(&mut info.gcn_arch_name, target);
+
+                let evidence = validate_causal_attention_info_with_staged_opt_ins(
+                    &info,
+                    &context,
+                    start_position,
+                    committed_kv_length,
+                    descriptor,
+                    24,
+                    None,
+                    None,
+                    None,
+                    Some(std::ffi::OsStr::new("1")),
+                )
+                .unwrap();
+                assert_eq!(evidence.kernel_id, info.kernel_id);
+                assert_eq!(evidence.dispatch_count, 2);
+                assert_eq!(evidence.grid_size_x, query_count as u32 * 24 * 32);
+                assert_eq!(evidence.query_count, query_count);
+
+                assert!(
+                    validate_causal_attention_info_with_staged_opt_ins(
+                        &info,
+                        &context,
+                        start_position,
+                        committed_kv_length,
+                        descriptor,
+                        24,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rdna_vmm_workarounds_and_gfx942_select_contiguous_storage() {
         assert_eq!(
             selected_memory_kind_for_target(Some("gfx942"), 1),
             sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
@@ -3214,10 +3549,12 @@ mod tests {
             selected_memory_kind_for_target(Some("gfx1030"), 65_537),
             sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
         );
-        assert_eq!(
-            selected_memory_kind_for_target(Some("gfx1201"), 65_535),
-            sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
-        );
+        for capacity in [1, 8_191, 8_192, 8_193, 8_320, 65_535] {
+            assert_eq!(
+                selected_memory_kind_for_target(Some("gfx1201"), capacity),
+                sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
+            );
+        }
         assert_eq!(
             selected_memory_kind_for_target(Some("gfx1201"), 65_536),
             sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT

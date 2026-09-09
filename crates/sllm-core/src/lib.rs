@@ -627,12 +627,15 @@ pub use qwen_graph::{
     build_qwen35_graph_with_kv_cache_selection, build_qwen35_graph_with_position_payload_mode,
     build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
     build_qwen35_nvfp4_graph, build_qwen35_nvfp4_graph_with_kv_cache_encoding,
-    build_qwen35_unsloth_qwen38_nvfp4_graph,
+    build_qwen35_unsloth_qwen38_nvfp4_graph, build_qwen38_nvfp4_mtp_graph,
+    build_qwen38_nvfp4_mtp_graph_with_token_count,
 };
 pub use qwen_mtp::{
     QWEN35_MTP_DRAFT_WIDTH, QWEN35_MTP_HIDDEN_SIZE, QWEN35_MTP_INTERMEDIATE_SIZE,
-    QWEN35_MTP_TENSOR_COUNT, QwenMtpError, QwenMtpManifest, QwenMtpTensor,
-    build_qwen35_mtp_manifest, build_verified_qwen35_mtp_manifest,
+    QWEN35_MTP_TENSOR_COUNT, QWEN38_MTP_DRAFT_WIDTH, QWEN38_MTP_HIDDEN_SIZE,
+    QWEN38_MTP_INTERMEDIATE_SIZE, QWEN38_MTP_TENSOR_COUNT, QwenMtpError, QwenMtpManifest,
+    QwenMtpTensor, build_qwen35_mtp_manifest, build_verified_qwen35_mtp_manifest,
+    validate_qwen38_mtp_artifact,
 };
 pub use qwen_vision::{
     QWEN35_VISION_DEPTH, QWEN35_VISION_HIDDEN_SIZE, QWEN35_VISION_INTERMEDIATE_SIZE,
@@ -693,11 +696,12 @@ pub use weights::{
     WeightConsumerKey, WeightLoadChunk, WeightLoadEntry, WeightLoadPlan, WeightPlanError,
     WeightUploadError, WeightUploadReceipt, WeightUploadRequest, build_gemma4_mtp_weight_load_plan,
     build_gemma4_weight_load_plan, build_qwen_component_weight_load_plan,
-    build_qwen38_nvfp4_weight_load_plan, build_unsloth_gemma4_nvfp4_weight_load_plan,
-    build_verified_gemma4_mtp_weight_load_plan, build_verified_gemma4_weight_load_plan,
-    build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
-    build_verified_qwen_component_weight_load_plan, build_verified_weight_load_plan,
-    build_weight_load_plan, upload_verified_gguf_weight, upload_verified_weight,
+    build_qwen38_nvfp4_mtp_weight_load_plan, build_qwen38_nvfp4_weight_load_plan,
+    build_unsloth_gemma4_nvfp4_weight_load_plan, build_verified_gemma4_mtp_weight_load_plan,
+    build_verified_gemma4_weight_load_plan, build_verified_gguf_gemma_weight_load_plan,
+    build_verified_gguf_qwen_weight_load_plan, build_verified_qwen_component_weight_load_plan,
+    build_verified_weight_load_plan, build_weight_load_plan, upload_verified_gguf_weight,
+    upload_verified_weight,
 };
 
 #[cfg(test)]
