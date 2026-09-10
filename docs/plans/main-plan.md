@@ -420,6 +420,8 @@ gfx1201のVMM growによる別live KV破損は通常stateのresident選択で回
 
 2026-09-10の追加指示により、Phase83・83.5の採用済み変更をモデル方向へ共通化し、MTPをモデルアーキテクチャではなく投機的デコーディングの提案方式として整理する。モデル固有のhead・hidden・状態処理はadapterへ残し、適用判断と実行制御を演算契約・能力に基づく共通経路へ接続する。次のPhase84に先立つ[追加共通化](archive/2026/09/1-10/phase83-common-speculation.md)は実装・検証を完了した。Qwen/Ministralの残差融合、Gemma NVFP4 decode共有、MTP方式とmodel adapterの分離を通常経路へ接続した。形状・状態に必要な制限と非適用範囲は対応履歴に記録する。
 
+2026-09-10にQwen3.8 27Bを両GPU・MTP on/offで再計測した。8192/128・1 warmup＋3 measuredでPhase83.5最終版と出力token列・audit・MTP統計が全run一致し、速度低下と資源解放の問題は観測しなかった。現行MTPありprefill/decodeはV620 216.593/25.423、R9700 541.969/35.110 tok/s。[条件・差分・証拠](../history/2026/09/1-10/phase83-common-qwen38-remeasurement.md)を次Phase84の共通化後baselineとして参照する。
+
 2026-09-07のユーザー指示によるPhase 79の共通化は完了した。同日の追加指示でPhase 80にCI修復を挿入し、
 その後の同日の指示でPhase 81に固定GPU samplingを挿入した。2026-09-08の指示でPhase 82に最適化整理を追加し、
 後続はPhase 83〜85とする。以下の共通化方針は継続する。

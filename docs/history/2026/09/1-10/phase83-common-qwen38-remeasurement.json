@@ -1,0 +1,1680 @@
+{
+  "schema": "phase83-common-qwen38-remeasurement-v1",
+  "date": "2026-09-10",
+  "source_commit": "c27e346d5f3332d6e8ce794b7913b87c42455c99",
+  "baseline_commit": "865a9e9e2201df2b8996007a12e64c739a009399",
+  "conditions": {
+    "input_tokens": 8192,
+    "output_tokens": 128,
+    "warmups": 1,
+    "measured": 3,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 20,
+    "seed": 123,
+    "kv": "MXFP8 E4",
+    "chunk_capacity": 2048,
+    "state_capacity": 8320,
+    "mtp_width": 2,
+    "batch": 1,
+    "runner": ".local-artifacts/phase83-5/run.py",
+    "runner_sha256": "aba796f9c4b947f7c82e21c707b0d720cda2bd9679a2bdbd6fa259e5eea6798b"
+  },
+  "pairs": [
+    {
+      "gpu": "v620",
+      "mtp": "off",
+      "checks": {
+        "baseline_cleanup": true,
+        "baseline_hip_no_fallback": true,
+        "baseline_pass": true,
+        "baseline_schema": true,
+        "binary_identity_recorded": true,
+        "current_cleanup": true,
+        "current_hip_no_fallback": true,
+        "current_pass": true,
+        "current_schema": true,
+        "execution_binary_sha_matches": true,
+        "fixture_equal": true,
+        "model_equal": true,
+        "mtp_counts_equal": true,
+        "output_equal": true,
+        "protocol_stable_equal": true,
+        "repetitions_equal": true,
+        "run_count_equal": true,
+        "sampling_equal": true,
+        "target": true
+      },
+      "measurements": {
+        "baseline": {
+          "label": "closeout-v620-mtp-off-r1",
+          "result_sha256": "11b4edc23c8729fbc3b2e74e1bd583a3eeb08e4d529460feb1837cb2fa72e138",
+          "execution_sha256": "46925a0a850bbf8c95dbfcb270a8d640c0b21337063b84b84925f682ea11c19d",
+          "binary_sha256": "74e4f6646d9d68d73b5396ffb08e110eacfc58828be47fd28e729f0e95f5d3b7",
+          "summary": {
+            "measured_samples": 3,
+            "request_setup_ms": {
+              "median": 20.082408,
+              "mad": 0.6186360000000022
+            },
+            "prefill_ms": {
+              "median": 36426.562045,
+              "mad": 251.1325680000009
+            },
+            "ttft_ms": {
+              "median": 36446.275842,
+              "mad": 251.76388399999996
+            },
+            "decode_ms": {
+              "median": 8865.861988,
+              "mad": 0.10248399999909452
+            },
+            "e2e_ms": {
+              "median": 45305.109596,
+              "mad": 258.97597400000086
+            },
+            "prefill_tokens_per_second": {
+              "median": 224.89083624965522,
+              "mad": 1.539829965404266
+            },
+            "decode_tokens_per_second": {
+              "median": 14.324608275190307,
+              "mad": 0.00016558189005877466
+            },
+            "tpot_ms": {
+              "median": 69.80993691338583,
+              "mad": 0.0008069606299159204
+            }
+          },
+          "output_token_sha256": "sha256:e38500f139e36819d6ed273c95f17e9384aba6e623106b162b679535efb2d9c9",
+          "runs": [
+            {
+              "sample_kind": "warmup",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 34624235,
+                "prefill_ns": 36013146405,
+                "ttft_ns": 36047990254,
+                "decode_ns": 8866073228,
+                "e2e_ns": 44914138703,
+                "prefill_tokens_per_second": 227.47248762642516,
+                "decode_tokens_per_second": 14.324266982018662,
+                "output_tokens_per_e2e_second": 2.849882101634298,
+                "total_tokens_per_e2e_second": 185.24233660622937,
+                "tpot_ms": 69.81160022047244
+              },
+              "generated_tokens_sha256": "sha256:e38500f139e36819d6ed273c95f17e9384aba6e623106b162b679535efb2d9c9",
+              "generated_text_sha256": "sha256:ab1b8157b69eb8ce392b720aed8e189b1ba250d17312cb1b92033fc4d7b1dcb8",
+              "mtp": null
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 24540943,
+                "prefill_ns": 36130218168,
+                "ttft_ns": 36155047947,
+                "decode_ns": 8865861988,
+                "e2e_ns": 45020964136,
+                "prefill_tokens_per_second": 226.7354147132035,
+                "decode_tokens_per_second": 14.324608275190307,
+                "output_tokens_per_e2e_second": 2.84311992105135,
+                "total_tokens_per_e2e_second": 184.80279486833777,
+                "tpot_ms": 69.80993691338583
+              },
+              "generated_tokens_sha256": "sha256:e38500f139e36819d6ed273c95f17e9384aba6e623106b162b679535efb2d9c9",
+              "generated_text_sha256": "sha256:ab1b8157b69eb8ce392b720aed8e189b1ba250d17312cb1b92033fc4d7b1dcb8",
+              "mtp": null
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 1,
+              "timing": {
+                "request_setup_ns": 19463772,
+                "prefill_ns": 36426562045,
+                "ttft_ns": 36446275842,
+                "decode_ns": 8858752222,
+                "e2e_ns": 45305109596,
+                "prefill_tokens_per_second": 224.89083624965522,
+                "decode_tokens_per_second": 14.336104771573327,
+                "output_tokens_per_e2e_second": 2.8252883867055285,
+                "total_tokens_per_e2e_second": 183.64374513585935,
+                "tpot_ms": 69.753954503937
+              },
+              "generated_tokens_sha256": "sha256:e38500f139e36819d6ed273c95f17e9384aba6e623106b162b679535efb2d9c9",
+              "generated_text_sha256": "sha256:ab1b8157b69eb8ce392b720aed8e189b1ba250d17312cb1b92033fc4d7b1dcb8",
+              "mtp": null
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 2,
+              "timing": {
+                "request_setup_ns": 20082408,
+                "prefill_ns": 36677694613,
+                "ttft_ns": 36698039726,
+                "decode_ns": 8865964472,
+                "e2e_ns": 45564085570,
+                "prefill_tokens_per_second": 223.35100628425096,
+                "decode_tokens_per_second": 14.324442693300249,
+                "output_tokens_per_e2e_second": 2.8092300854661922,
+                "total_tokens_per_e2e_second": 182.5999555553025,
+                "tpot_ms": 69.81074387401574
+              },
+              "generated_tokens_sha256": "sha256:e38500f139e36819d6ed273c95f17e9384aba6e623106b162b679535efb2d9c9",
+              "generated_text_sha256": "sha256:ab1b8157b69eb8ce392b720aed8e189b1ba250d17312cb1b92033fc4d7b1dcb8",
+              "mtp": null
+            }
+          ],
+          "cleanup": {
+            "allocation_after_resident_drop_before_shutdown": {
+              "model_resident": {
+                "current_bytes": 0,
+                "high_water_bytes": 21650549568
+              },
+              "request_state": {
+                "current_bytes": 0,
+                "high_water_bytes": 436412880
+              },
+              "workspace": {
+                "current_bytes": 0,
+                "high_water_bytes": 1897021440
+              },
+              "current_bytes": 0,
+              "high_water_bytes": 23983983888,
+              "poisoned": false,
+              "high_water_scope": "cumulative execution-session allocation accounting"
+            },
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+            "zero": true
+          }
+        },
+        "current": {
+          "label": "common-recheck-v620-mtp-off-r1",
+          "result_sha256": "4dd4c67942292f3bf8d88fb933a7019e3d7790dd37baa2b6b20512b2fdfa0e0a",
+          "execution_sha256": "3c6e2cc3ecd2c30ed0ea2ccd1cd47bf5174c66181b9cc8c2ca8be6880e224ef8",
+          "binary_sha256": "f22ffce2bb547742c954154803d148f1288af74f6cfcc1946a9a6d8021d7b2db",
+          "summary": {
+            "measured_samples": 3,
+            "request_setup_ms": {
+              "median": 21.146758,
+              "mad": 0.855715
+            },
+            "prefill_ms": {
+              "median": 36293.247566,
+              "mad": 101.21880399999645
+            },
+            "ttft_ms": {
+              "median": 36313.793543,
+              "mad": 95.74932299999637
+            },
+            "decode_ms": {
+              "median": 8861.409438,
+              "mad": 3.8441750000001775
+            },
+            "e2e_ms": {
+              "median": 45184.763944,
+              "mad": 105.25426499999594
+            },
+            "prefill_tokens_per_second": {
+              "median": 225.71691841857591,
+              "mad": 0.6312659805598173
+            },
+            "decode_tokens_per_second": {
+              "median": 14.331805892569568,
+              "mad": 0.006219990288666821
+            },
+            "tpot_ms": {
+              "median": 69.77487746456693,
+              "mad": 0.030269094488190262
+            }
+          },
+          "output_token_sha256": "sha256:e38500f139e36819d6ed273c95f17e9384aba6e623106b162b679535efb2d9c9",
+          "runs": [
+            {
+              "sample_kind": "warmup",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 35947342,
+                "prefill_ns": 35741430730,
+                "ttft_ns": 35777631436,
+                "decode_ns": 8866147489,
+                "e2e_ns": 44643835436,
+                "prefill_tokens_per_second": 229.2017927845274,
+                "decode_tokens_per_second": 14.324147004949515,
+                "output_tokens_per_e2e_second": 2.867137170225815,
+                "total_tokens_per_e2e_second": 186.36391606467797,
+                "tpot_ms": 69.8121849527559
+              },
+              "generated_tokens_sha256": "sha256:e38500f139e36819d6ed273c95f17e9384aba6e623106b162b679535efb2d9c9",
+              "generated_text_sha256": "sha256:ab1b8157b69eb8ce392b720aed8e189b1ba250d17312cb1b92033fc4d7b1dcb8",
+              "mtp": null
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 25728373,
+                "prefill_ns": 36192028762,
+                "ttft_ns": 36218044220,
+                "decode_ns": 8861409438,
+                "e2e_ns": 45079509679,
+                "prefill_tokens_per_second": 226.34818439913573,
+                "decode_tokens_per_second": 14.331805892569568,
+                "output_tokens_per_e2e_second": 2.839427511777662,
+                "total_tokens_per_e2e_second": 184.56278826554805,
+                "tpot_ms": 69.77487746456693
+              },
+              "generated_tokens_sha256": "sha256:e38500f139e36819d6ed273c95f17e9384aba6e623106b162b679535efb2d9c9",
+              "generated_text_sha256": "sha256:ab1b8157b69eb8ce392b720aed8e189b1ba250d17312cb1b92033fc4d7b1dcb8",
+              "mtp": null
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 1,
+              "timing": {
+                "request_setup_ns": 20291043,
+                "prefill_ns": 36293247566,
+                "ttft_ns": 36313793543,
+                "decode_ns": 8870891130,
+                "e2e_ns": 45184763944,
+                "prefill_tokens_per_second": 225.71691841857591,
+                "decode_tokens_per_second": 14.316487277191959,
+                "output_tokens_per_e2e_second": 2.8328132942918005,
+                "total_tokens_per_e2e_second": 184.13286412896704,
+                "tpot_ms": 69.84953645669292
+              },
+              "generated_tokens_sha256": "sha256:e38500f139e36819d6ed273c95f17e9384aba6e623106b162b679535efb2d9c9",
+              "generated_text_sha256": "sha256:ab1b8157b69eb8ce392b720aed8e189b1ba250d17312cb1b92033fc4d7b1dcb8",
+              "mtp": null
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 2,
+              "timing": {
+                "request_setup_ns": 21146758,
+                "prefill_ns": 36448717301,
+                "ttft_ns": 36470132073,
+                "decode_ns": 8857565263,
+                "e2e_ns": 45327751927,
+                "prefill_tokens_per_second": 224.7541369521732,
+                "decode_tokens_per_second": 14.338025882858235,
+                "output_tokens_per_e2e_second": 2.823877085414318,
+                "total_tokens_per_e2e_second": 183.55201055193066,
+                "tpot_ms": 69.74460837007874
+              },
+              "generated_tokens_sha256": "sha256:e38500f139e36819d6ed273c95f17e9384aba6e623106b162b679535efb2d9c9",
+              "generated_text_sha256": "sha256:ab1b8157b69eb8ce392b720aed8e189b1ba250d17312cb1b92033fc4d7b1dcb8",
+              "mtp": null
+            }
+          ],
+          "cleanup": {
+            "allocation_after_resident_drop_before_shutdown": {
+              "model_resident": {
+                "current_bytes": 0,
+                "high_water_bytes": 21650549568
+              },
+              "request_state": {
+                "current_bytes": 0,
+                "high_water_bytes": 436412880
+              },
+              "workspace": {
+                "current_bytes": 0,
+                "high_water_bytes": 1897021440
+              },
+              "current_bytes": 0,
+              "high_water_bytes": 23983983888,
+              "poisoned": false,
+              "high_water_scope": "cumulative execution-session allocation accounting"
+            },
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+            "zero": true
+          }
+        }
+      },
+      "exact_token_array_audit_mtp_match_all_four_runs": true,
+      "percent_change": {
+        "prefill_tokens_per_second": 0.3673258469294227,
+        "decode_tokens_per_second": 0.05024652151728315,
+        "ttft_ms": -0.3635002368262086,
+        "e2e_ms": -0.26563372889539805
+      }
+    },
+    {
+      "gpu": "v620",
+      "mtp": "on",
+      "checks": {
+        "baseline_cleanup": true,
+        "baseline_hip_no_fallback": true,
+        "baseline_pass": true,
+        "baseline_schema": true,
+        "binary_identity_recorded": true,
+        "current_cleanup": true,
+        "current_hip_no_fallback": true,
+        "current_pass": true,
+        "current_schema": true,
+        "execution_binary_sha_matches": true,
+        "fixture_equal": true,
+        "model_equal": true,
+        "mtp_counts_equal": true,
+        "output_equal": true,
+        "protocol_stable_equal": true,
+        "repetitions_equal": true,
+        "run_count_equal": true,
+        "sampling_equal": true,
+        "target": true
+      },
+      "measurements": {
+        "baseline": {
+          "label": "closeout-v620-mtp-on-r1",
+          "result_sha256": "5e3fd22c93e306b2ccce890ed60f0b67f0473386df05c3cbbe3a86dd6e0a11bb",
+          "execution_sha256": "05bafbf0ff60d7e45613ca9f3b81651bcf350ef3c7891418569d697eb09f80a8",
+          "binary_sha256": "74e4f6646d9d68d73b5396ffb08e110eacfc58828be47fd28e729f0e95f5d3b7",
+          "summary": {
+            "measured_samples": 3,
+            "request_setup_ms": {
+              "median": 29.837768,
+              "mad": 2.391429999999996
+            },
+            "prefill_ms": {
+              "median": 37825.86741,
+              "mad": 52.9399609999964
+            },
+            "ttft_ms": {
+              "median": 37855.85819,
+              "mad": 50.54011999999784
+            },
+            "decode_ms": {
+              "median": 4998.296447,
+              "mad": 4.30375499999991
+            },
+            "e2e_ms": {
+              "median": 42865.124034,
+              "mad": 15.221130999998422
+            },
+            "prefill_tokens_per_second": {
+              "median": 216.57137194517543,
+              "mad": 0.3035316762243099
+            },
+            "decode_tokens_per_second": {
+              "median": 25.40865699877125,
+              "mad": 0.021896835126913317
+            },
+            "tpot_ms": {
+              "median": 39.35666493700787,
+              "mad": 0.033887834645668136
+            }
+          },
+          "output_token_sha256": "sha256:316dc877624f4f03edafe20ff3002ef53dd4f4d90742441bcf23dd61e9ba27ff",
+          "runs": [
+            {
+              "sample_kind": "warmup",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 41220699,
+                "prefill_ns": 37050137198,
+                "ttft_ns": 37091502879,
+                "decode_ns": 5078210548,
+                "e2e_ns": 42169813318,
+                "prefill_tokens_per_second": 221.10579391976478,
+                "decode_tokens_per_second": 25.00880946143866,
+                "output_tokens_per_e2e_second": 3.035346612392134,
+                "total_tokens_per_e2e_second": 197.2975298054887,
+                "tpot_ms": 39.98590982677165
+              },
+              "generated_tokens_sha256": "sha256:316dc877624f4f03edafe20ff3002ef53dd4f4d90742441bcf23dd61e9ba27ff",
+              "generated_text_sha256": "sha256:85fef6694c7837ecf682f907e80686ce218c48bf3cc4da94f2a899b4965aa1ea",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 53,
+                "fixed_k20_pq_blocks": 53,
+                "proposed_draft_tokens": 106,
+                "accepted_draft_tokens": 74,
+                "rejected_draft_tokens": 32,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 67142,
+                "draft_kernel_dispatch_count": 3574,
+                "draft_segment_count": 263,
+                "draft_boundary_count": 263,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 32229198,
+                "prefill_ns": 37772927449,
+                "ttft_ns": 37805318070,
+                "decode_ns": 5059736483,
+                "e2e_ns": 42865124034,
+                "prefill_tokens_per_second": 216.87490362139974,
+                "decode_tokens_per_second": 25.100121404879893,
+                "output_tokens_per_e2e_second": 2.986110570879773,
+                "total_tokens_per_e2e_second": 194.09718710718522,
+                "tpot_ms": 39.840444748031494
+              },
+              "generated_tokens_sha256": "sha256:316dc877624f4f03edafe20ff3002ef53dd4f4d90742441bcf23dd61e9ba27ff",
+              "generated_text_sha256": "sha256:85fef6694c7837ecf682f907e80686ce218c48bf3cc4da94f2a899b4965aa1ea",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 53,
+                "fixed_k20_pq_blocks": 53,
+                "proposed_draft_tokens": 106,
+                "accepted_draft_tokens": 74,
+                "rejected_draft_tokens": 32,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 67142,
+                "draft_kernel_dispatch_count": 3574,
+                "draft_segment_count": 263,
+                "draft_boundary_count": 263,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 1,
+              "timing": {
+                "request_setup_ns": 29837768,
+                "prefill_ns": 37825867410,
+                "ttft_ns": 37855858190,
+                "decode_ns": 4993992692,
+                "e2e_ns": 42849902903,
+                "prefill_tokens_per_second": 216.57137194517543,
+                "decode_tokens_per_second": 25.430553833898163,
+                "output_tokens_per_e2e_second": 2.9871712962747106,
+                "total_tokens_per_e2e_second": 194.16613425785619,
+                "tpot_ms": 39.3227771023622
+              },
+              "generated_tokens_sha256": "sha256:316dc877624f4f03edafe20ff3002ef53dd4f4d90742441bcf23dd61e9ba27ff",
+              "generated_text_sha256": "sha256:85fef6694c7837ecf682f907e80686ce218c48bf3cc4da94f2a899b4965aa1ea",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 53,
+                "fixed_k20_pq_blocks": 53,
+                "proposed_draft_tokens": 106,
+                "accepted_draft_tokens": 74,
+                "rejected_draft_tokens": 32,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 67142,
+                "draft_kernel_dispatch_count": 3574,
+                "draft_segment_count": 263,
+                "draft_boundary_count": 263,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 2,
+              "timing": {
+                "request_setup_ns": 26021273,
+                "prefill_ns": 38044436350,
+                "ttft_ns": 38070628866,
+                "decode_ns": 4998296447,
+                "e2e_ns": 43068980824,
+                "prefill_tokens_per_second": 215.32714861735624,
+                "decode_tokens_per_second": 25.40865699877125,
+                "output_tokens_per_e2e_second": 2.971976525821864,
+                "total_tokens_per_e2e_second": 193.17847417842117,
+                "tpot_ms": 39.35666493700787
+              },
+              "generated_tokens_sha256": "sha256:316dc877624f4f03edafe20ff3002ef53dd4f4d90742441bcf23dd61e9ba27ff",
+              "generated_text_sha256": "sha256:85fef6694c7837ecf682f907e80686ce218c48bf3cc4da94f2a899b4965aa1ea",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 53,
+                "fixed_k20_pq_blocks": 53,
+                "proposed_draft_tokens": 106,
+                "accepted_draft_tokens": 74,
+                "rejected_draft_tokens": 32,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 67142,
+                "draft_kernel_dispatch_count": 3574,
+                "draft_segment_count": 263,
+                "draft_boundary_count": 263,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            }
+          ],
+          "cleanup": {
+            "allocation_after_resident_drop_before_shutdown": {
+              "model_resident": {
+                "current_bytes": 0,
+                "high_water_bytes": 22499962688
+              },
+              "request_state": {
+                "current_bytes": 0,
+                "high_water_bytes": 763193648
+              },
+              "workspace": {
+                "current_bytes": 0,
+                "high_water_bytes": 2663538688
+              },
+              "current_bytes": 0,
+              "high_water_bytes": 25926695024,
+              "poisoned": false,
+              "high_water_scope": "cumulative execution-session allocation accounting"
+            },
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+            "zero": true
+          }
+        },
+        "current": {
+          "label": "common-recheck-v620-mtp-on-r1",
+          "result_sha256": "56c9e5eb08545b7e64984308b866c415983800dbec2649faef2f90269db5cf1f",
+          "execution_sha256": "55a0f2af54ff4c4b970436b16d63cc589c318dfe0a5a887351c90501979c5b8b",
+          "binary_sha256": "f22ffce2bb547742c954154803d148f1288af74f6cfcc1946a9a6d8021d7b2db",
+          "summary": {
+            "measured_samples": 3,
+            "request_setup_ms": {
+              "median": 27.430354,
+              "mad": 1.4362290000000009
+            },
+            "prefill_ms": {
+              "median": 37822.055133,
+              "mad": 67.9828170000037
+            },
+            "ttft_ms": {
+              "median": 37854.603998,
+              "mad": 74.40070500000002
+            },
+            "decode_ms": {
+              "median": 4995.385661,
+              "mad": 4.227179999999862
+            },
+            "e2e_ms": {
+              "median": 42850.04922,
+              "mad": 4.900727000000188
+            },
+            "prefill_tokens_per_second": {
+              "median": 216.59320127351896,
+              "mad": 0.39001397895245304
+            },
+            "decode_tokens_per_second": {
+              "median": 25.42346249490105,
+              "mad": 0.021531985529673392
+            },
+            "tpot_ms": {
+              "median": 39.33374536220472,
+              "mad": 0.033284881889763085
+            }
+          },
+          "output_token_sha256": "sha256:316dc877624f4f03edafe20ff3002ef53dd4f4d90742441bcf23dd61e9ba27ff",
+          "runs": [
+            {
+              "sample_kind": "warmup",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 41076837,
+                "prefill_ns": 37028072442,
+                "ttft_ns": 37069280801,
+                "decode_ns": 4979346191,
+                "e2e_ns": 42048717303,
+                "prefill_tokens_per_second": 221.23754923596894,
+                "decode_tokens_per_second": 25.505356552542622,
+                "output_tokens_per_e2e_second": 3.0440881008959515,
+                "total_tokens_per_e2e_second": 197.86572655823684,
+                "tpot_ms": 39.20745032283465
+              },
+              "generated_tokens_sha256": "sha256:316dc877624f4f03edafe20ff3002ef53dd4f4d90742441bcf23dd61e9ba27ff",
+              "generated_text_sha256": "sha256:85fef6694c7837ecf682f907e80686ce218c48bf3cc4da94f2a899b4965aa1ea",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 53,
+                "fixed_k20_pq_blocks": 53,
+                "proposed_draft_tokens": 106,
+                "accepted_draft_tokens": 74,
+                "rejected_draft_tokens": 32,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 67142,
+                "draft_kernel_dispatch_count": 3574,
+                "draft_segment_count": 263,
+                "draft_boundary_count": 263,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 25994125,
+                "prefill_ns": 37754072316,
+                "ttft_ns": 37780203293,
+                "decode_ns": 5064893679,
+                "e2e_ns": 42845148493,
+                "prefill_tokens_per_second": 216.9832152524714,
+                "decode_tokens_per_second": 25.07456386035621,
+                "output_tokens_per_e2e_second": 2.987502774576975,
+                "total_tokens_per_e2e_second": 194.1876803475034,
+                "tpot_ms": 39.88105259055118
+              },
+              "generated_tokens_sha256": "sha256:316dc877624f4f03edafe20ff3002ef53dd4f4d90742441bcf23dd61e9ba27ff",
+              "generated_text_sha256": "sha256:85fef6694c7837ecf682f907e80686ce218c48bf3cc4da94f2a899b4965aa1ea",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 53,
+                "fixed_k20_pq_blocks": 53,
+                "proposed_draft_tokens": 106,
+                "accepted_draft_tokens": 74,
+                "rejected_draft_tokens": 32,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 67142,
+                "draft_kernel_dispatch_count": 3574,
+                "draft_segment_count": 263,
+                "draft_boundary_count": 263,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 1,
+              "timing": {
+                "request_setup_ns": 32403152,
+                "prefill_ns": 37822055133,
+                "ttft_ns": 37854603998,
+                "decode_ns": 4995385661,
+                "e2e_ns": 42850049220,
+                "prefill_tokens_per_second": 216.59320127351896,
+                "decode_tokens_per_second": 25.42346249490105,
+                "output_tokens_per_e2e_second": 2.9871610961944186,
+                "total_tokens_per_e2e_second": 194.16547125263722,
+                "tpot_ms": 39.33374536220472
+              },
+              "generated_tokens_sha256": "sha256:316dc877624f4f03edafe20ff3002ef53dd4f4d90742441bcf23dd61e9ba27ff",
+              "generated_text_sha256": "sha256:85fef6694c7837ecf682f907e80686ce218c48bf3cc4da94f2a899b4965aa1ea",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 53,
+                "fixed_k20_pq_blocks": 53,
+                "proposed_draft_tokens": 106,
+                "accepted_draft_tokens": 74,
+                "rejected_draft_tokens": 32,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 67142,
+                "draft_kernel_dispatch_count": 3574,
+                "draft_segment_count": 263,
+                "draft_boundary_count": 263,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 2,
+              "timing": {
+                "request_setup_ns": 27430354,
+                "prefill_ns": 37992669746,
+                "ttft_ns": 38020269273,
+                "decode_ns": 4991158481,
+                "e2e_ns": 43011490395,
+                "prefill_tokens_per_second": 215.62054087716442,
+                "decode_tokens_per_second": 25.444994480430722,
+                "output_tokens_per_e2e_second": 2.975948957464625,
+                "total_tokens_per_e2e_second": 193.43668223520064,
+                "tpot_ms": 39.30046048031496
+              },
+              "generated_tokens_sha256": "sha256:316dc877624f4f03edafe20ff3002ef53dd4f4d90742441bcf23dd61e9ba27ff",
+              "generated_text_sha256": "sha256:85fef6694c7837ecf682f907e80686ce218c48bf3cc4da94f2a899b4965aa1ea",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 53,
+                "fixed_k20_pq_blocks": 53,
+                "proposed_draft_tokens": 106,
+                "accepted_draft_tokens": 74,
+                "rejected_draft_tokens": 32,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 67142,
+                "draft_kernel_dispatch_count": 3574,
+                "draft_segment_count": 263,
+                "draft_boundary_count": 263,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            }
+          ],
+          "cleanup": {
+            "allocation_after_resident_drop_before_shutdown": {
+              "model_resident": {
+                "current_bytes": 0,
+                "high_water_bytes": 22499962688
+              },
+              "request_state": {
+                "current_bytes": 0,
+                "high_water_bytes": 763193648
+              },
+              "workspace": {
+                "current_bytes": 0,
+                "high_water_bytes": 2663538688
+              },
+              "current_bytes": 0,
+              "high_water_bytes": 25926695024,
+              "poisoned": false,
+              "high_water_scope": "cumulative execution-session allocation accounting"
+            },
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+            "zero": true
+          }
+        }
+      },
+      "exact_token_array_audit_mtp_match_all_four_runs": true,
+      "percent_change": {
+        "prefill_tokens_per_second": 0.010079507807270183,
+        "decode_tokens_per_second": 0.0582694950406637,
+        "ttft_ms": -0.0033130724278018775,
+        "e2e_ms": -0.035168016749564934
+      }
+    },
+    {
+      "gpu": "r9700",
+      "mtp": "off",
+      "checks": {
+        "baseline_cleanup": true,
+        "baseline_hip_no_fallback": true,
+        "baseline_pass": true,
+        "baseline_schema": true,
+        "binary_identity_recorded": true,
+        "current_cleanup": true,
+        "current_hip_no_fallback": true,
+        "current_pass": true,
+        "current_schema": true,
+        "execution_binary_sha_matches": true,
+        "fixture_equal": true,
+        "model_equal": true,
+        "mtp_counts_equal": true,
+        "output_equal": true,
+        "protocol_stable_equal": true,
+        "repetitions_equal": true,
+        "run_count_equal": true,
+        "sampling_equal": true,
+        "target": true
+      },
+      "measurements": {
+        "baseline": {
+          "label": "closeout-r9700-mtp-off-r1",
+          "result_sha256": "61dab441f109a370fdaab9013dd3fe2b855f3f654b3a69ed6d2b6559c3054f73",
+          "execution_sha256": "35ee1815ae01628a45d88685787b4d8540998f56feff44003ab9d34c6a7286d5",
+          "binary_sha256": "6d80caa932093166c96fe40ba816a04a5cb01602ecaad69b7853c439b2a30d5b",
+          "summary": {
+            "measured_samples": 3,
+            "request_setup_ms": {
+              "median": 19.441007,
+              "mad": 1.695917999999999
+            },
+            "prefill_ms": {
+              "median": 14890.518578,
+              "mad": 26.67832300000009
+            },
+            "ttft_ms": {
+              "median": 14908.502731,
+              "mad": 28.357240999999703
+            },
+            "decode_ms": {
+              "median": 6655.013665,
+              "mad": 0.5484099999994214
+            },
+            "e2e_ms": {
+              "median": 21559.1768,
+              "mad": 4.3924669999978505
+            },
+            "prefill_tokens_per_second": {
+              "median": 550.1487377412948,
+              "mad": 0.9839010519812064
+            },
+            "decode_tokens_per_second": {
+              "median": 19.08335675821636,
+              "mad": 0.0015724447555029997
+            },
+            "tpot_ms": {
+              "median": 52.4016824015748,
+              "mad": 0.004318188976377257
+            }
+          },
+          "output_token_sha256": "sha256:ded3d447d4d100eaff932a5c70e8be1e55b84af4bfee6649acde91b6dd60c506",
+          "runs": [
+            {
+              "sample_kind": "warmup",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 30088689,
+                "prefill_ns": 15585142317,
+                "ttft_ns": 15615457660,
+                "decode_ns": 8253591047,
+                "e2e_ns": 23869149029,
+                "prefill_tokens_per_second": 525.6288222061539,
+                "decode_tokens_per_second": 15.387241659636349,
+                "output_tokens_per_e2e_second": 5.362570732810183,
+                "total_tokens_per_e2e_second": 348.5670976326619,
+                "tpot_ms": 64.98890588188976
+              },
+              "generated_tokens_sha256": "sha256:ded3d447d4d100eaff932a5c70e8be1e55b84af4bfee6649acde91b6dd60c506",
+              "generated_text_sha256": "sha256:a75284a2920768c1719eaca412054ce14a53f5e3d7b5ad423596e0be8a8e0310",
+              "mtp": null
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 24711386,
+                "prefill_ns": 14786385019,
+                "ttft_ns": 14811336749,
+                "decode_ns": 6655562075,
+                "e2e_ns": 21466966096,
+                "prefill_tokens_per_second": 554.0231766908247,
+                "decode_tokens_per_second": 19.081784313460858,
+                "output_tokens_per_e2e_second": 5.962649748808733,
+                "total_tokens_per_e2e_second": 387.5722336725677,
+                "tpot_ms": 52.40600059055118
+              },
+              "generated_tokens_sha256": "sha256:ded3d447d4d100eaff932a5c70e8be1e55b84af4bfee6649acde91b6dd60c506",
+              "generated_text_sha256": "sha256:a75284a2920768c1719eaca412054ce14a53f5e3d7b5ad423596e0be8a8e0310",
+              "mtp": null
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 1,
+              "timing": {
+                "request_setup_ns": 17745089,
+                "prefill_ns": 14890518578,
+                "ttft_ns": 14908502731,
+                "decode_ns": 6655013665,
+                "e2e_ns": 21563569267,
+                "prefill_tokens_per_second": 550.1487377412948,
+                "decode_tokens_per_second": 19.08335675821636,
+                "output_tokens_per_e2e_second": 5.9359375256992335,
+                "total_tokens_per_e2e_second": 385.83593917045016,
+                "tpot_ms": 52.4016824015748
+              },
+              "generated_tokens_sha256": "sha256:ded3d447d4d100eaff932a5c70e8be1e55b84af4bfee6649acde91b6dd60c506",
+              "generated_text_sha256": "sha256:a75284a2920768c1719eaca412054ce14a53f5e3d7b5ad423596e0be8a8e0310",
+              "mtp": null
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 2,
+              "timing": {
+                "request_setup_ns": 19441007,
+                "prefill_ns": 14917196901,
+                "ttft_ns": 14936859972,
+                "decode_ns": 6622264307,
+                "e2e_ns": 21559176800,
+                "prefill_tokens_per_second": 549.1648366893136,
+                "decode_tokens_per_second": 19.177730472907264,
+                "output_tokens_per_e2e_second": 5.937146913698486,
+                "total_tokens_per_e2e_second": 385.9145493904016,
+                "tpot_ms": 52.14381344094488
+              },
+              "generated_tokens_sha256": "sha256:ded3d447d4d100eaff932a5c70e8be1e55b84af4bfee6649acde91b6dd60c506",
+              "generated_text_sha256": "sha256:a75284a2920768c1719eaca412054ce14a53f5e3d7b5ad423596e0be8a8e0310",
+              "mtp": null
+            }
+          ],
+          "cleanup": {
+            "allocation_after_resident_drop_before_shutdown": {
+              "model_resident": {
+                "current_bytes": 0,
+                "high_water_bytes": 21650549568
+              },
+              "request_state": {
+                "current_bytes": 0,
+                "high_water_bytes": 436412880
+              },
+              "workspace": {
+                "current_bytes": 0,
+                "high_water_bytes": 1897021440
+              },
+              "current_bytes": 0,
+              "high_water_bytes": 23983983888,
+              "poisoned": false,
+              "high_water_scope": "cumulative execution-session allocation accounting"
+            },
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+            "zero": true
+          }
+        },
+        "current": {
+          "label": "common-recheck-r9700-mtp-off-r1",
+          "result_sha256": "53545cb72236dc34714863b32bb4847b6eaaa7849838e29744fca321ccc15abc",
+          "execution_sha256": "f18e3f5edb06672651751ee776c3ca4d11b49f969502d2bf2149b9c27f84bb95",
+          "binary_sha256": "ec59c692b65319e0282820bfd103606269134951a0212f1d94a62d6b9416433a",
+          "summary": {
+            "measured_samples": 3,
+            "request_setup_ms": {
+              "median": 18.502679,
+              "mad": 0.4216370000000005
+            },
+            "prefill_ms": {
+              "median": 14861.86199,
+              "mad": 33.251626999999644
+            },
+            "ttft_ms": {
+              "median": 14880.606933,
+              "mad": 25.89303099999961
+            },
+            "decode_ms": {
+              "median": 6620.318033,
+              "mad": 6.547531999999592
+            },
+            "e2e_ms": {
+              "median": 21547.396525,
+              "mad": 41.8904079999993
+            },
+            "prefill_tokens_per_second": {
+              "median": 551.209532527761,
+              "mad": 1.2360304388462282
+            },
+            "decode_tokens_per_second": {
+              "median": 19.18336843742987,
+              "mad": 0.018991242392349506
+            },
+            "tpot_ms": {
+              "median": 52.1284884488189,
+              "mad": 0.051555370078745
+            }
+          },
+          "output_token_sha256": "sha256:ded3d447d4d100eaff932a5c70e8be1e55b84af4bfee6649acde91b6dd60c506",
+          "runs": [
+            {
+              "sample_kind": "warmup",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 33067099,
+                "prefill_ns": 15560110540,
+                "ttft_ns": 15593400253,
+                "decode_ns": 8187232440,
+                "e2e_ns": 23780676974,
+                "prefill_tokens_per_second": 526.474408966506,
+                "decode_tokens_per_second": 15.511957298234467,
+                "output_tokens_per_e2e_second": 5.3825212856616975,
+                "total_tokens_per_e2e_second": 349.86388356801035,
+                "tpot_ms": 64.46639716535434
+              },
+              "generated_tokens_sha256": "sha256:ded3d447d4d100eaff932a5c70e8be1e55b84af4bfee6649acde91b6dd60c506",
+              "generated_text_sha256": "sha256:a75284a2920768c1719eaca412054ce14a53f5e3d7b5ad423596e0be8a8e0310",
+              "mtp": null
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 25839895,
+                "prefill_ns": 14828610363,
+                "ttft_ns": 14854713902,
+                "decode_ns": 6620318033,
+                "e2e_ns": 21475084486,
+                "prefill_tokens_per_second": 552.4455629666072,
+                "decode_tokens_per_second": 19.18336843742987,
+                "output_tokens_per_e2e_second": 5.960395642841151,
+                "total_tokens_per_e2e_second": 387.4257167846748,
+                "tpot_ms": 52.1284884488189
+              },
+              "generated_tokens_sha256": "sha256:ded3d447d4d100eaff932a5c70e8be1e55b84af4bfee6649acde91b6dd60c506",
+              "generated_text_sha256": "sha256:a75284a2920768c1719eaca412054ce14a53f5e3d7b5ad423596e0be8a8e0310",
+              "mtp": null
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 1,
+              "timing": {
+                "request_setup_ns": 18081042,
+                "prefill_ns": 14957132344,
+                "ttft_ns": 14975436121,
+                "decode_ns": 6613770501,
+                "e2e_ns": 21589286933,
+                "prefill_tokens_per_second": 547.6985702601069,
+                "decode_tokens_per_second": 19.20235967982222,
+                "output_tokens_per_e2e_second": 5.92886649740837,
+                "total_tokens_per_e2e_second": 385.37632233154403,
+                "tpot_ms": 52.076933078740154
+              },
+              "generated_tokens_sha256": "sha256:ded3d447d4d100eaff932a5c70e8be1e55b84af4bfee6649acde91b6dd60c506",
+              "generated_text_sha256": "sha256:a75284a2920768c1719eaca412054ce14a53f5e3d7b5ad423596e0be8a8e0310",
+              "mtp": null
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 2,
+              "timing": {
+                "request_setup_ns": 18502679,
+                "prefill_ns": 14861861990,
+                "ttft_ns": 14880606933,
+                "decode_ns": 6666736891,
+                "e2e_ns": 21547396525,
+                "prefill_tokens_per_second": 551.209532527761,
+                "decode_tokens_per_second": 19.04979933608122,
+                "output_tokens_per_e2e_second": 5.940392838248007,
+                "total_tokens_per_e2e_second": 386.1255344861205,
+                "tpot_ms": 52.49399126771654
+              },
+              "generated_tokens_sha256": "sha256:ded3d447d4d100eaff932a5c70e8be1e55b84af4bfee6649acde91b6dd60c506",
+              "generated_text_sha256": "sha256:a75284a2920768c1719eaca412054ce14a53f5e3d7b5ad423596e0be8a8e0310",
+              "mtp": null
+            }
+          ],
+          "cleanup": {
+            "allocation_after_resident_drop_before_shutdown": {
+              "model_resident": {
+                "current_bytes": 0,
+                "high_water_bytes": 21650549568
+              },
+              "request_state": {
+                "current_bytes": 0,
+                "high_water_bytes": 436412880
+              },
+              "workspace": {
+                "current_bytes": 0,
+                "high_water_bytes": 1897021440
+              },
+              "current_bytes": 0,
+              "high_water_bytes": 23983983888,
+              "poisoned": false,
+              "high_water_scope": "cumulative execution-session allocation accounting"
+            },
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+            "zero": true
+          }
+        }
+      },
+      "exact_token_array_audit_mtp_match_all_four_runs": true,
+      "percent_change": {
+        "prefill_tokens_per_second": 0.1928196347084965,
+        "decode_tokens_per_second": 0.524078025059449,
+        "ttft_ms": -0.18711334399795776,
+        "e2e_ms": -0.05464158074904857
+      }
+    },
+    {
+      "gpu": "r9700",
+      "mtp": "on",
+      "checks": {
+        "baseline_cleanup": true,
+        "baseline_hip_no_fallback": true,
+        "baseline_pass": true,
+        "baseline_schema": true,
+        "binary_identity_recorded": true,
+        "current_cleanup": true,
+        "current_hip_no_fallback": true,
+        "current_pass": true,
+        "current_schema": true,
+        "execution_binary_sha_matches": true,
+        "fixture_equal": true,
+        "model_equal": true,
+        "mtp_counts_equal": true,
+        "output_equal": true,
+        "protocol_stable_equal": true,
+        "repetitions_equal": true,
+        "run_count_equal": true,
+        "sampling_equal": true,
+        "target": true
+      },
+      "measurements": {
+        "baseline": {
+          "label": "closeout-r9700-mtp-on-r1",
+          "result_sha256": "d9779a7e12fc5cd0f8806b577e29abf9d641e166ed5b9a7c6ef98c7b35d5222f",
+          "execution_sha256": "d9a75efb6c3d22f44cd7de8719c55d0825088ea4e4151a4cb5fec40e909a2605",
+          "binary_sha256": "6d80caa932093166c96fe40ba816a04a5cb01602ecaad69b7853c439b2a30d5b",
+          "summary": {
+            "measured_samples": 3,
+            "request_setup_ms": {
+              "median": 31.139791,
+              "mad": 0.9180349999999997
+            },
+            "prefill_ms": {
+              "median": 15131.072038,
+              "mad": 18.636003999999957
+            },
+            "ttft_ms": {
+              "median": 15163.792325,
+              "mad": 20.972572000000582
+            },
+            "decode_ms": {
+              "median": 3676.745804,
+              "mad": 16.17170699999997
+            },
+            "e2e_ms": {
+              "median": 18870.291724,
+              "mad": 66.81769200000053
+            },
+            "prefill_tokens_per_second": {
+              "median": 541.4024848620578,
+              "mad": 0.6676341822587801
+            },
+            "decode_tokens_per_second": {
+              "median": 34.54141427504571,
+              "mad": 0.15259727469508988
+            },
+            "tpot_ms": {
+              "median": 28.950754362204723,
+              "mad": 0.1273362755905474
+            }
+          },
+          "output_token_sha256": "sha256:7d939adfc7c9b60bb30677bd1c56d462cc6a3b1b86c7512c29913f5d0bb99155",
+          "runs": [
+            {
+              "sample_kind": "warmup",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 40290215,
+                "prefill_ns": 16347781036,
+                "ttft_ns": 16388229813,
+                "decode_ns": 5172320116,
+                "e2e_ns": 21560627650,
+                "prefill_tokens_per_second": 501.1077639197711,
+                "decode_tokens_per_second": 24.55377802451545,
+                "output_tokens_per_e2e_second": 5.936747393344089,
+                "total_tokens_per_e2e_second": 385.8885805673658,
+                "tpot_ms": 40.726930047244096
+              },
+              "generated_tokens_sha256": "sha256:7d939adfc7c9b60bb30677bd1c56d462cc6a3b1b86c7512c29913f5d0bb99155",
+              "generated_text_sha256": "sha256:376acf36219f44832c8a72e4fdb90cabd41f6db1f0facb015a2adfc72c8adfb5",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 50,
+                "fixed_k20_pq_blocks": 50,
+                "proposed_draft_tokens": 100,
+                "accepted_draft_tokens": 78,
+                "rejected_draft_tokens": 22,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 63623,
+                "draft_kernel_dispatch_count": 3436,
+                "draft_segment_count": 254,
+                "draft_boundary_count": 254,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 30221756,
+                "prefill_ns": 15112436034,
+                "ttft_ns": 15142819753,
+                "decode_ns": 3660574097,
+                "e2e_ns": 18803474032,
+                "prefill_tokens_per_second": 542.0701190443166,
+                "decode_tokens_per_second": 34.6940115497408,
+                "output_tokens_per_e2e_second": 6.807252733307043,
+                "total_tokens_per_e2e_second": 442.4714276649578,
+                "tpot_ms": 28.823418086614176
+              },
+              "generated_tokens_sha256": "sha256:7d939adfc7c9b60bb30677bd1c56d462cc6a3b1b86c7512c29913f5d0bb99155",
+              "generated_text_sha256": "sha256:376acf36219f44832c8a72e4fdb90cabd41f6db1f0facb015a2adfc72c8adfb5",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 50,
+                "fixed_k20_pq_blocks": 50,
+                "proposed_draft_tokens": 100,
+                "accepted_draft_tokens": 78,
+                "rejected_draft_tokens": 22,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 63623,
+                "draft_kernel_dispatch_count": 3436,
+                "draft_segment_count": 254,
+                "draft_boundary_count": 254,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 1,
+              "timing": {
+                "request_setup_ns": 31139791,
+                "prefill_ns": 15649062938,
+                "ttft_ns": 15680371192,
+                "decode_ns": 3676745804,
+                "e2e_ns": 19357195267,
+                "prefill_tokens_per_second": 523.481823317848,
+                "decode_tokens_per_second": 34.54141427504571,
+                "output_tokens_per_e2e_second": 6.61252822190689,
+                "total_tokens_per_e2e_second": 429.8143344239479,
+                "tpot_ms": 28.950754362204723
+              },
+              "generated_tokens_sha256": "sha256:7d939adfc7c9b60bb30677bd1c56d462cc6a3b1b86c7512c29913f5d0bb99155",
+              "generated_text_sha256": "sha256:376acf36219f44832c8a72e4fdb90cabd41f6db1f0facb015a2adfc72c8adfb5",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 50,
+                "fixed_k20_pq_blocks": 50,
+                "proposed_draft_tokens": 100,
+                "accepted_draft_tokens": 78,
+                "rejected_draft_tokens": 22,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 63623,
+                "draft_kernel_dispatch_count": 3436,
+                "draft_segment_count": 254,
+                "draft_boundary_count": 254,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 2,
+              "timing": {
+                "request_setup_ns": 32566724,
+                "prefill_ns": 15131072038,
+                "ttft_ns": 15163792325,
+                "decode_ns": 3706438648,
+                "e2e_ns": 18870291724,
+                "prefill_tokens_per_second": 541.4024848620578,
+                "decode_tokens_per_second": 34.264697749288096,
+                "output_tokens_per_e2e_second": 6.783148976822887,
+                "total_tokens_per_e2e_second": 440.90468349348765,
+                "tpot_ms": 29.184556283464566
+              },
+              "generated_tokens_sha256": "sha256:7d939adfc7c9b60bb30677bd1c56d462cc6a3b1b86c7512c29913f5d0bb99155",
+              "generated_text_sha256": "sha256:376acf36219f44832c8a72e4fdb90cabd41f6db1f0facb015a2adfc72c8adfb5",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 50,
+                "fixed_k20_pq_blocks": 50,
+                "proposed_draft_tokens": 100,
+                "accepted_draft_tokens": 78,
+                "rejected_draft_tokens": 22,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 63623,
+                "draft_kernel_dispatch_count": 3436,
+                "draft_segment_count": 254,
+                "draft_boundary_count": 254,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            }
+          ],
+          "cleanup": {
+            "allocation_after_resident_drop_before_shutdown": {
+              "model_resident": {
+                "current_bytes": 0,
+                "high_water_bytes": 22499962688
+              },
+              "request_state": {
+                "current_bytes": 0,
+                "high_water_bytes": 763193648
+              },
+              "workspace": {
+                "current_bytes": 0,
+                "high_water_bytes": 2663538688
+              },
+              "current_bytes": 0,
+              "high_water_bytes": 25926695024,
+              "poisoned": false,
+              "high_water_scope": "cumulative execution-session allocation accounting"
+            },
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+            "zero": true
+          }
+        },
+        "current": {
+          "label": "common-recheck-r9700-mtp-on-r1",
+          "result_sha256": "29f961322f4c5827492d2e23e2c26dac20d24ec4523f79478835996a2fc0c31e",
+          "execution_sha256": "f0053f3d3e8e88bfa50a7158c7ec96028acdf7e659638360874a9224a7aefcaf",
+          "binary_sha256": "ec59c692b65319e0282820bfd103606269134951a0212f1d94a62d6b9416433a",
+          "summary": {
+            "measured_samples": 3,
+            "request_setup_ms": {
+              "median": 27.500521,
+              "mad": 1.3799339999999987
+            },
+            "prefill_ms": {
+              "median": 15115.247923,
+              "mad": 78.64375799999834
+            },
+            "ttft_ms": {
+              "median": 15142.951887,
+              "mad": 80.88080700000137
+            },
+            "decode_ms": {
+              "median": 3617.175252,
+              "mad": 5.960270999999921
+            },
+            "e2e_ms": {
+              "median": 18819.368661,
+              "mad": 21.737616999998863
+            },
+            "prefill_tokens_per_second": {
+              "median": 541.9692777605524,
+              "mad": 2.80523921181657
+            },
+            "decode_tokens_per_second": {
+              "median": 35.11027007325107,
+              "mad": 0.05794911840497008
+            },
+            "tpot_ms": {
+              "median": 28.481694897637794,
+              "mad": 0.04693126771653766
+            }
+          },
+          "output_token_sha256": "sha256:7d939adfc7c9b60bb30677bd1c56d462cc6a3b1b86c7512c29913f5d0bb99155",
+          "runs": [
+            {
+              "sample_kind": "warmup",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 37684854,
+                "prefill_ns": 15834079841,
+                "ttft_ns": 15871911258,
+                "decode_ns": 5145107831,
+                "e2e_ns": 21017083771,
+                "prefill_tokens_per_second": 517.3650810316134,
+                "decode_tokens_per_second": 24.683642048239903,
+                "output_tokens_per_e2e_second": 6.0902835709594605,
+                "total_tokens_per_e2e_second": 395.8684321123649,
+                "tpot_ms": 40.51266008661417
+              },
+              "generated_tokens_sha256": "sha256:7d939adfc7c9b60bb30677bd1c56d462cc6a3b1b86c7512c29913f5d0bb99155",
+              "generated_text_sha256": "sha256:376acf36219f44832c8a72e4fdb90cabd41f6db1f0facb015a2adfc72c8adfb5",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 50,
+                "fixed_k20_pq_blocks": 50,
+                "proposed_draft_tokens": 100,
+                "accepted_draft_tokens": 78,
+                "rejected_draft_tokens": 22,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 63623,
+                "draft_kernel_dispatch_count": 3436,
+                "draft_segment_count": 254,
+                "draft_boundary_count": 254,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 0,
+              "timing": {
+                "request_setup_ns": 26120587,
+                "prefill_ns": 15033648511,
+                "ttft_ns": 15059928511,
+                "decode_ns": 3611214981,
+                "e2e_ns": 18671211483,
+                "prefill_tokens_per_second": 544.9109704810498,
+                "decode_tokens_per_second": 35.16821919165604,
+                "output_tokens_per_e2e_second": 6.85547373915951,
+                "total_tokens_per_e2e_second": 445.60579304536816,
+                "tpot_ms": 28.434763629921257
+              },
+              "generated_tokens_sha256": "sha256:7d939adfc7c9b60bb30677bd1c56d462cc6a3b1b86c7512c29913f5d0bb99155",
+              "generated_text_sha256": "sha256:376acf36219f44832c8a72e4fdb90cabd41f6db1f0facb015a2adfc72c8adfb5",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 50,
+                "fixed_k20_pq_blocks": 50,
+                "proposed_draft_tokens": 100,
+                "accepted_draft_tokens": 78,
+                "rejected_draft_tokens": 22,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 63623,
+                "draft_kernel_dispatch_count": 3436,
+                "draft_segment_count": 254,
+                "draft_boundary_count": 254,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 1,
+              "timing": {
+                "request_setup_ns": 29770480,
+                "prefill_ns": 15193891681,
+                "ttft_ns": 15223832694,
+                "decode_ns": 3617175252,
+                "e2e_ns": 18841106278,
+                "prefill_tokens_per_second": 539.1640385487358,
+                "decode_tokens_per_second": 35.11027007325107,
+                "output_tokens_per_e2e_second": 6.793656280653776,
+                "total_tokens_per_e2e_second": 441.5876582424954,
+                "tpot_ms": 28.481694897637794
+              },
+              "generated_tokens_sha256": "sha256:7d939adfc7c9b60bb30677bd1c56d462cc6a3b1b86c7512c29913f5d0bb99155",
+              "generated_text_sha256": "sha256:376acf36219f44832c8a72e4fdb90cabd41f6db1f0facb015a2adfc72c8adfb5",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 50,
+                "fixed_k20_pq_blocks": 50,
+                "proposed_draft_tokens": 100,
+                "accepted_draft_tokens": 78,
+                "rejected_draft_tokens": 22,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 63623,
+                "draft_kernel_dispatch_count": 3436,
+                "draft_segment_count": 254,
+                "draft_boundary_count": 254,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            },
+            {
+              "sample_kind": "measured",
+              "sample_index": 2,
+              "timing": {
+                "request_setup_ns": 27500521,
+                "prefill_ns": 15115247923,
+                "ttft_ns": 15142951887,
+                "decode_ns": 3676360183,
+                "e2e_ns": 18819368661,
+                "prefill_tokens_per_second": 541.9692777605524,
+                "decode_tokens_per_second": 34.54503739521107,
+                "output_tokens_per_e2e_second": 6.801503403525892,
+                "total_tokens_per_e2e_second": 442.097721229183,
+                "tpot_ms": 28.94771797637795
+              },
+              "generated_tokens_sha256": "sha256:7d939adfc7c9b60bb30677bd1c56d462cc6a3b1b86c7512c29913f5d0bb99155",
+              "generated_text_sha256": "sha256:376acf36219f44832c8a72e4fdb90cabd41f6db1f0facb015a2adfc72c8adfb5",
+              "mtp": {
+                "draft_width": 2,
+                "proposal_blocks": 50,
+                "fixed_k20_pq_blocks": 50,
+                "proposed_draft_tokens": 100,
+                "accepted_draft_tokens": 78,
+                "rejected_draft_tokens": 22,
+                "committed_target_rows": 127,
+                "prefill_selected_tokens": 1,
+                "committed_decode_tokens": 127,
+                "committed_output_tokens": 128,
+                "prefix_draft_priming_included": true,
+                "target_kernel_dispatch_count": 63623,
+                "draft_kernel_dispatch_count": 3436,
+                "draft_segment_count": 254,
+                "draft_boundary_count": 254,
+                "draft_physical_queue_fence_count": 8,
+                "draft_bf16_row_concat_count": 8,
+                "draft_fallback_used": false,
+                "draft_all_dispatches_hip": true
+              }
+            }
+          ],
+          "cleanup": {
+            "allocation_after_resident_drop_before_shutdown": {
+              "model_resident": {
+                "current_bytes": 0,
+                "high_water_bytes": 22499962688
+              },
+              "request_state": {
+                "current_bytes": 0,
+                "high_water_bytes": 763193648
+              },
+              "workspace": {
+                "current_bytes": 0,
+                "high_water_bytes": 2663538688
+              },
+              "current_bytes": 0,
+              "high_water_bytes": 25926695024,
+              "poisoned": false,
+              "high_water_scope": "cumulative execution-session allocation accounting"
+            },
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+            "zero": true
+          }
+        }
+      },
+      "exact_token_array_audit_mtp_match_all_four_runs": true,
+      "percent_change": {
+        "prefill_tokens_per_second": 0.10468974826352007,
+        "decode_tokens_per_second": 1.6468804481359234,
+        "ttft_ms": -0.1374355276921202,
+        "e2e_ms": -0.2698583770977536
+      }
+    }
+  ],
+  "model": {
+    "root": "/home/homelab1/datapool/ai_models/safetensors/Qwen3.8-27B-NVFP4",
+    "path_environment": "SLLM_PHASE78_MODEL_PATH",
+    "repository": "unsloth/Qwen3.8-27B-NVFP4",
+    "revision": "57926baca9a82b4d6906b43f2750d55315f5b10f",
+    "model_bytes": 22568192096,
+    "model_sha256": "c473512c70eace07e2256fe9fd76596ac03e3295bee7d54cfb72676416afcc05"
+  },
+  "fixture": {
+    "schema_version": "phase83-qwen38-chat-coding-fixture-v1",
+    "construction": "Qwen3.8 reviewed chat template applied to a deterministic coding message; tokenizer output is exactly 8192 IDs",
+    "total_tokens": 8192,
+    "token_encoding": "signed-i32 token IDs; SHA-256 over concatenated little-endian i32",
+    "sha256": "sha256:855240c09609a19b9c1124043b763ecc97e3cfde84a16acfaba445a0f8c83b23",
+    "fixed_prefix_17": [
+      248045,
+      846,
+      198,
+      60856,
+      321,
+      3286,
+      411,
+      32671,
+      10505,
+      3274,
+      13,
+      79091,
+      14834,
+      11,
+      1412,
+      11256,
+      11
+    ],
+    "chat_template_applied": true,
+    "rendered_prompt_sha256": "sha256:e419a10e00a0795dd23c6b529bc0e8ed5b2d0b3c190f6224c3431382a44c9d63",
+    "message_sha256": "sha256:e539fd5404ff273279857f9ea12190b489a37cd8f5a4b0bda4f56c131a7fd2a8"
+  },
+  "r9700_service": {
+    "service_restored": true,
+    "healthz_after_http": "200",
+    "readyz_after_http": "200",
+    "frozen_input_hashes_equal": true,
+    "service_unit_unchanged": true,
+    "service_active_after": true,
+    "post_kfd_unique_id": "a8e9ddefa2d60f55"
+  },
+  "v620_after": {
+    "vram_bytes": 17215488,
+    "gpu_busy_percent": 0
+  },
+  "limits": [
+    "One coding fixture and seed, no BF16 full-model quality claim.",
+    "Direct benchmark rerun; prior CLI/API/cancel evidence is separate.",
+    "Small speed increases are observations, not proven improvements."
+  ]
+}
