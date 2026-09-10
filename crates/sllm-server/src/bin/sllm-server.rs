@@ -128,6 +128,7 @@ struct Config {
     models: Option<PathBuf>,
     library_only: bool,
     qwen38_nvfp4: Option<PathBuf>,
+    mtp_weights: Option<PathBuf>,
     gguf: PathBuf,
     derived_lock: Option<PathBuf>,
     mtp_assistant_gguf_path: Option<PathBuf>,
@@ -192,6 +193,13 @@ where
     {
         return Err("--qwen38-nvfp4 model directory must be absolute".to_owned());
     }
+    let mtp_weights = values.remove("--mtp-weights").map(PathBuf::from);
+    if mtp_weights
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty() || !path.is_absolute())
+    {
+        return Err("--mtp-weights path must be absolute".to_owned());
+    }
     let legacy_gguf = values.remove("--gguf");
     let legacy_derived_lock = values.remove("--derived-lock");
     let mtp_assistant_gguf_path = values.remove("--mtp-assistant-gguf").map(PathBuf::from);
@@ -219,6 +227,7 @@ where
             || legacy_target.is_some()
             || requested_model.is_some()
             || qwen38_nvfp4.is_some()
+            || mtp_weights.is_some()
         {
             return Err(
                 "--models is mutually exclusive with --gguf, --derived-lock, --device-index, --target, and --model"
@@ -265,6 +274,9 @@ where
             requested_model.unwrap_or_else(|| "qwen3.8-27b-nvfp4".to_owned()),
         )
     } else if !has_legacy_source {
+        if mtp_weights.is_some() {
+            return Err("--mtp-weights requires --qwen38-nvfp4".to_owned());
+        }
         (
             true,
             PathBuf::new(),
@@ -274,6 +286,9 @@ where
             "dynamic".to_owned(),
         )
     } else {
+        if mtp_weights.is_some() {
+            return Err("--mtp-weights requires --qwen38-nvfp4".to_owned());
+        }
         let gguf = PathBuf::from(
             legacy_gguf.ok_or_else(|| "missing required argument --gguf".to_owned())?,
         );
@@ -559,6 +574,14 @@ where
     {
         return Err("--qwen38-nvfp4 supports single-request text generation with prefix cache, context policy, and checkpoint disabled; draft may be disabled or mtp-auto".to_owned());
     }
+    if qwen38_nvfp4.is_some()
+        && mtp_weights.is_some()
+        && matches!(phase41.draft, DraftStartupConfigV1::Disabled)
+    {
+        return Err(
+            "--mtp-weights requires --draft mtp-auto; remove the sidecar or enable MTP".to_owned(),
+        );
+    }
     if mtp_assistant_gguf_path.is_some() {
         if models.is_some() || library_only {
             return Err(
@@ -578,6 +601,7 @@ where
     }
     Ok(Config {
         qwen38_nvfp4,
+        mtp_weights,
         models,
         library_only,
         gguf,
@@ -656,6 +680,7 @@ fn run(config: Config) -> Result<(), String> {
             let kv_cache_encoding = config.kv_cache_encoding.unwrap_or(KvCacheEncoding::Mxfp8E4);
             let backend = QwenChatBackendV1::open_unsloth_qwen38_nvfp4(Qwen38Nvfp4BackendConfigV1 {
                 artifact_root,
+                mtp_weights: config.mtp_weights.clone(),
                 kv_cache_encoding,
                 device_index: config.device_index,
                 target: config.target.clone(),
@@ -2154,7 +2179,7 @@ fn reject_disabled_options(
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server [--qwen38-nvfp4 ABSOLUTE_DIRECTORY (V620 gfx1030 or R9700 gfx1201, single request, FP16 or MXFP8 E4 KV; --draft mtp-auto uses model_mtp.safetensors) | --models PATH | --gguf PATH [--derived-lock PATH] --device-index N --target GFX [--mtp-assistant-gguf PATH --mtp-assistant-derived-lock PATH --draft mtp-auto]] [--listen HOST:PORT] [--webui true|false] [--webui-port PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4|kv-mxfp8-e4|kv-mxfp8-e5] (Qwen default: kv-mxfp8-e4; Gemma 4 MoE: auto or fp8-static only; direct official Ministral 3: FP16 only; FP16 rollback applies to Qwen) [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
+    "usage: sllm-server [--qwen38-nvfp4 ABSOLUTE_DIRECTORY [--mtp-weights ABSOLUTE_DIRECTORY] (V620 gfx1030 or R9700 gfx1201, single request, FP16 or MXFP8 E4 KV; --draft mtp-auto uses bundled model_mtp.safetensors when --mtp-weights is absent) | --models PATH | --gguf PATH [--derived-lock PATH] --device-index N --target GFX [--mtp-assistant-gguf PATH --mtp-assistant-derived-lock PATH --draft mtp-auto]] [--listen HOST:PORT] [--webui true|false] [--webui-port PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4|kv-mxfp8-e4|kv-mxfp8-e5] (Qwen default: kv-mxfp8-e4; Gemma 4 MoE: auto or fp8-static only; direct official Ministral 3: FP16 only; FP16 rollback applies to Qwen) [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
 }
 
 #[cfg(test)]
@@ -2204,6 +2229,30 @@ mod tests {
         assert_eq!(config.device_index, 0);
         assert_eq!(config.model, "qwen3.8-27b-nvfp4");
         assert_eq!(config.kv_cache_encoding, Some(KvCacheEncoding::Mxfp8E4));
+        let companion = parse_args_from([
+            "--qwen38-nvfp4",
+            "/models/qwen38",
+            "--mtp-weights",
+            "/models/qwen38-mtp-mxfp8",
+            "--draft",
+            "mtp-auto",
+        ])
+        .unwrap();
+        assert_eq!(
+            companion.mtp_weights,
+            Some(PathBuf::from("/models/qwen38-mtp-mxfp8"))
+        );
+        assert!(
+            parse_args_from([
+                "--qwen38-nvfp4",
+                "/models/qwen38",
+                "--mtp-weights",
+                "/models/qwen38-mtp-mxfp8",
+                "--draft",
+                "disabled",
+            ])
+            .is_err()
+        );
         let v620 = parse_args_from([
             "--qwen38-nvfp4",
             "/models/qwen38",
@@ -2252,6 +2301,26 @@ mod tests {
             assert!(parse_args_from(args).is_err());
         }
         assert!(parse_args_from(["--qwen38-nvfp4", "relative"]).is_err());
+        assert!(
+            parse_args_from([
+                "--qwen38-nvfp4",
+                "/models/qwen38",
+                "--mtp-weights",
+                "relative",
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_args_from([
+                "--gguf",
+                "/models/qwen.gguf",
+                "--derived-lock",
+                "/models/qwen.lock",
+                "--mtp-weights",
+                "/models/qwen38-mtp-mxfp8",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

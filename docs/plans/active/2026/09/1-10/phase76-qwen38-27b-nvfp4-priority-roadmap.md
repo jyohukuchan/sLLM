@@ -1,6 +1,6 @@
 # Phase 76以降: Qwen3.8-27B NVFP4優先ロードマップ
 
-> 状態: Phase 76〜82完了。Phase 78は2026-09-05のユーザー承認により旧目標の未達・未実施を記録して終了。Phase 83〜85は未完了。2026-09-07のユーザー指示によりCI修復をPhase 80で完了後、固定GPU samplingを新Phase 81へ挿入し、2026-09-08の最新指示で未採用最適化の整理・条件付き既定採用を新Phase 82へ挿入した。旧Phase 82〜84は83〜85へ繰り下げた。
+> 状態: Phase 76〜84（83.5を含む）完了。Phase 78は2026-09-05のユーザー承認により旧目標の未達・未実施を記録して終了。Phase 85〜86は未完了。2026-09-07のユーザー指示によりCI修復をPhase 80で完了後、固定GPU samplingを新Phase 81へ挿入し、2026-09-08の最新指示で未採用最適化の整理・条件付き既定採用を新Phase 82へ挿入した。旧Phase 82〜84は83〜85へ繰り下げた。
 > 作成日: 2026-09-03
 
 ## 2026-09-10の最新決定
@@ -44,7 +44,7 @@ Phase83.5の追加最適化、Phase84のMTP量子化、Phase85の他精度単一
 7. Phase 82: 不採用最適化の削除・現行target／shape／KV範囲の条件付き既定採用。
 8. Phase 83: 標準OCP MXFP8 E4 KVの統合、MTP、長めの実入力、CLI/APIを含む実用closeout（旧Phase 82）。
 9. Phase 83.5: 追加最適化の統合・検証・公開。旧速度目標は緩和済み。
-10. Phase 84: MTP重み量子化と固定sampling・公開経路への統合。
+10. Phase 84: MTPをMXFP8 W8A8から量子化し、問題がなければ同PhaseでMXFP6 W6A6へ進む。固定sampling・公開経路へ統合。
 11. Phase 85: 他精度の残る単一要求最適化（従来Phase84）。
 12. Phase 86: NVFP4のGPU batching最適化（従来Phase85）。
 
@@ -1369,13 +1369,17 @@ KV形式を跨ぐ差は別列とし、FP16の過去実測値をMXFP8 baselineと
   MTPのdecode効果とprefill自体の改善を分け、共通経路に適用できる最適化を優先する。
   旧目標との差と原因の判明範囲を記録し、2026-09-10の承認に基づき速度未達を完了の妨げにしない。
 
-## Phase 84: MTP重みの量子化
+## Phase 84: MTP重みの量子化（完了）
 
-Phase83.5完了後に着手する。BF16 companionを基準に量子化形式・対象tensorを決め、loader・graph・GPU演算・固定K20 p/q sampling・通常CLI/APIまで接続する。llama.cppを基本の実装参照とし、重みサイズだけで高速化を認定しない。draft時間、採用率、target検証回数、8192/128のprefill/decode/E2E、VRAMと品質をBF16 companion構成と比較する。量子化形式と新しい速度閾値は未決定。[Phase84計画](phase84-mtp-weight-quantization.md)に対象と実装順を記録し、形式・評価条件を実装開始前に確定する。
+2026-09-11ユーザー決定により、共通化後BF16 companionを基準にMXFP8 E4M3 W8A8から着手し、採用率・実効速度に大きな問題がなければ同じPhase84内でMXFP6 E3M2 W6A6の実装・比較・採否まで進める。両GPUの既存providerを利用し、companion専用8行列の変換・artifact identity・loader・graph・固定K20 p/q sampling・通常CLI/APIを接続する。normとtarget共有embedding/headは維持する。
+
+8192/128の速度基準と12 prompt×3 seedの言語/タスク採用率suiteを使い、GPUごとにBF16／MXFP8／MXFP6のdraft時間、採用率、target検証回数、prefill/decode/E2E、VRAMを比較する。採用率の小幅低下だけで止めず、実効速度との収支で判断する。GPU間の率一致や新しい必達速度は要求しない。MXFP6が不利ならMXFP8、両方が不利ならBF16を維持し、不採用・未実施の理由を残す。条件を満たした場合はMXFP8だけでPhaseを閉じない。[Phase84計画](../../../../archive/2026/09/1-10/phase84-mtp-weight-quantization.md)を実装順・移行判断・完了範囲の正本とする。
+
+完了結果: MXFP8/MXFP6 sidecarと通常CLI/API接続、両GPUの数値・公開経路・資源検査を実施した。MXFP8は採用率を概ね維持したがdecode退行が残り、BF16既定を維持した。MXFP6は移行条件未成立のため包括的採用率・性能比較を保留した。追加M=1 kernel候補は撤去し、試行と不採用理由を履歴に残した。
 
 ## Phase 85: 他精度の単一要求最適化（従来Phase84）
 
-Phase84完了後に、次の順で残件を閉じる。
+Phase84完了後に、次の順で残件を閉じる。Phase84のsidecar・既存provider接続と不採用候補の記録を引き継ぎ、未対応shape・一般経路の残件を再棚卸しして重複実装を避ける。MTPでの確認を全モデル・全shapeの確認へ読み替えない。provider改善時に、Phase84で保留したMXFP6 MTPの包括的採用率・性能比較を再検討する。
 
 1. MXFP8 W8A8 decode。ここで得たMXFP8 activation decodeを後続MXFP4 W4A8へ再利用する。
 2. MXFP6 W6A6 decode。MXFP8のtile/reduction骨格を使い、E3M2 ingressだけを独立評価する。

@@ -363,6 +363,7 @@ struct GenerateRequest {
     input: GenerationInput,
     image_paths: Vec<PathBuf>,
     qwen38_artifact: Option<PathBuf>,
+    mtp_weights: Option<PathBuf>,
     max_new_tokens: u32,
     prefill_chunk_tokens: Option<u64>,
     mtp_draft_width: Option<u8>,
@@ -1610,6 +1611,7 @@ impl Qwen38ProductionBackend {
         target: String,
         kv_cache_encoding: Option<KvCacheEncoding>,
         mtp_draft_width: Option<u8>,
+        mtp_weights: Option<PathBuf>,
     ) -> Result<Self, String> {
         if !artifact_root.is_absolute() {
             return Err("--qwen38-nvfp4 artifact path must be absolute".to_owned());
@@ -1650,6 +1652,7 @@ impl Qwen38ProductionBackend {
         };
         let backend = QwenChatBackendV1::open_unsloth_qwen38_nvfp4(Qwen38Nvfp4BackendConfigV1 {
             artifact_root,
+            mtp_weights,
             device_index,
             target: target.clone(),
             completion_timeout: COMPLETION_TIMEOUT,
@@ -1762,9 +1765,16 @@ fn qwen_request_execution_audit(
         "submission_count": audit.submission_count,
         "kernel_dispatch_count": audit.kernel_dispatch_count,
         "mtp": mtp_used,
+        "mtp_weight_encoding": audit.mtp_weight_encoding,
+        "mtp_companion_digest": audit.mtp_companion_digest,
         "mtp_proposed_draft_tokens": audit.phase41.draft_proposed_tokens,
         "mtp_accepted_draft_tokens": audit.phase41.draft_accepted_tokens,
         "mtp_rejected_draft_tokens": audit.phase41.draft_rejected_tokens,
+        "mtp_draft_accounting_available": audit.phase41.draft_accounting_available,
+        "mtp_draft_proposal_blocks": audit.phase41.draft_proposal_blocks,
+        "mtp_draft_committed_target_rows": audit.phase41.draft_committed_target_rows,
+        "mtp_prefix_priming_wall_ns": audit.phase41.mtp_prefix_priming_wall_ns,
+        "mtp_decode_proposal_wall_ns": audit.phase41.mtp_decode_proposal_wall_ns,
     }))
 }
 
@@ -4390,6 +4400,7 @@ fn open_production_backend(request: &Request) -> Result<Box<dyn ModelFrontendBac
                 generate.target.clone(),
                 generate.kv_cache_encoding,
                 generate.mtp_draft_width,
+                generate.mtp_weights.clone(),
             )
             .map(|backend| Box::new(backend) as Box<dyn ModelFrontendBackend>);
         }
@@ -6835,6 +6846,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     };
     let mut gguf = None;
     let mut qwen38_artifact = None;
+    let mut mtp_weights = None;
     let mut derived_lock = None;
     let mut mtp_assistant_gguf = None;
     let mut mtp_assistant_derived_lock = None;
@@ -6894,6 +6906,11 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 &mut qwen38_artifact,
                 take_value(&mut arguments, "--qwen38-nvfp4")?,
                 "--qwen38-nvfp4",
+            )?,
+            "--mtp-weights" if command == "generate" => set_once(
+                &mut mtp_weights,
+                take_value(&mut arguments, "--mtp-weights")?,
+                "--mtp-weights",
             )?,
             "--derived-lock" => set_once(
                 &mut derived_lock,
@@ -7367,11 +7384,21 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     }
 
     let qwen38_artifact = qwen38_artifact.map(PathBuf::from);
+    let mtp_weights = mtp_weights.map(PathBuf::from);
     if qwen38_artifact.is_some() && gguf.is_some() {
         return Err("--qwen38-nvfp4 is mutually exclusive with --gguf".to_owned());
     }
     if qwen38_artifact.is_some() && derived_lock.is_some() {
         return Err("--qwen38-nvfp4 is mutually exclusive with --derived-lock".to_owned());
+    }
+    if qwen38_artifact.is_none() && mtp_weights.is_some() {
+        return Err("--mtp-weights is supported only for --qwen38-nvfp4 generate".to_owned());
+    }
+    if mtp_weights
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty() || !path.is_absolute())
+    {
+        return Err("--mtp-weights path must be absolute".to_owned());
     }
     let gguf = if qwen38_artifact.is_some() {
         None
@@ -7537,6 +7564,12 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                             .to_owned(),
                     );
                 }
+                if mtp_weights.is_some() && mtp_draft_width == Some(0) {
+                    return Err(
+                        "--mtp-weights requires MTP draft execution; remove --mtp-draft-width 0"
+                            .to_owned(),
+                    );
+                }
                 if prefill_chunk_tokens.is_some() {
                     return Err("Qwen3.8 CLI does not accept --prefill-chunk-tokens".to_owned());
                 }
@@ -7600,6 +7633,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 input,
                 image_paths,
                 qwen38_artifact,
+                mtp_weights,
                 max_new_tokens: max_new_tokens
                     .ok_or_else(|| "generate requires --max-new-tokens".to_owned())?,
                 prefill_chunk_tokens,
@@ -8461,6 +8495,8 @@ mod tests {
             &[
                 "--qwen38-nvfp4",
                 "/models/qwen38",
+                "--mtp-weights",
+                "/models/qwen38-mtp-mxfp8",
                 "--prompt",
                 "abc",
                 "--max-new-tokens",
@@ -8478,12 +8514,14 @@ mod tests {
             qwen38.operation,
             Operation::Generate(GenerateRequest {
                 qwen38_artifact: Some(path),
+                mtp_weights: Some(companion),
                 sampling,
                 mtp_draft_width: None,
                 kv_cache_encoding: None,
                 seed: Some(17),
                 ..
             }) if path == Path::new("/models/qwen38")
+                && companion == Path::new("/models/qwen38-mtp-mxfp8")
                 && sampling.temperature() == 1.0
                 && sampling.top_p() == 0.95
         ));
@@ -8518,6 +8556,28 @@ mod tests {
                 &[
                     "--qwen38-nvfp4",
                     "relative",
+                    "--prompt",
+                    "abc",
+                    "--max-new-tokens",
+                    "3",
+                    "--device-index",
+                    "0",
+                    "--target",
+                    "gfx1030",
+                ]
+            )
+            .is_err()
+        );
+        assert!(
+            parse_args(
+                "generate",
+                &[
+                    "--qwen38-nvfp4",
+                    "/models/qwen38",
+                    "--mtp-weights",
+                    "/models/qwen38-mtp-mxfp8",
+                    "--mtp-draft-width",
+                    "0",
                     "--prompt",
                     "abc",
                     "--max-new-tokens",

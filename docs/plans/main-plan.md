@@ -389,7 +389,7 @@ gfx1201のVMM growによる別live KV破損は通常stateのresident選択で回
 
 #### Phase 83.5: 追加最適化と速度目標
 
-- **2026-09-10ユーザー決定:** Phase83.5の速度目標を緩和し、追加の速度追求を終了する。旧V620 200/20・R9700 500/25 tok/sは比較用に残し、未達を達成扱いにしない。正しさ・公開経路・資源管理・最終比較記録・CIと公開の残件を閉じて完了する。次の[Phase84はMTP重みの量子化](active/2026/09/1-10/phase84-mtp-weight-quantization.md)とし、従来の他精度最適化をPhase85、batchingをPhase86へ繰り下げる。新しい速度下限は設定しない。
+- **2026-09-10ユーザー決定:** Phase83.5の速度目標を緩和し、追加の速度追求を終了する。旧V620 200/20・R9700 500/25 tok/sは比較用に残し、未達を達成扱いにしない。正しさ・公開経路・資源管理・最終比較記録・CIと公開の残件を閉じて完了する。次の[Phase84はMTP重みの量子化](archive/2026/09/1-10/phase84-mtp-weight-quantization.md)とし、従来の他精度最適化をPhase85、batchingをPhase86へ繰り下げる。新しい速度下限は設定しない。
 
 - 2026-09-09ユーザー指示により、llama.cppを基本の実装参照として[Phase83.5実行計画](archive/2026/09/1-10/phase83-5-llama-guided-performance.md)を作成し着手した。
   量子化matmul・attentionとMTPのbatch／state／samplingを比較し、共通経路の改善と既定採用を進める。
@@ -415,6 +415,14 @@ gfx1201のVMM growによる別live KV破損は通常stateのresident選択で回
   tools未対応は残件として明記し、vision、全モデル、TP、batchingやコーディングエージェント機能全体の完了は含めない。
   Phase 83.5の旧目標未達とユーザー承認による緩和を記録する。両Phaseの完了時にそれぞれcommit・push・CI確認を行う。詳細な計時・比較条件は
   [Phase 83計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
+
+### Phase84の量子化順序（2026-09-11ユーザー決定）
+
+[Phase84計画](archive/2026/09/1-10/phase84-mtp-weight-quantization.md)はMTP専用重みのMXFP8 E4M3 W8A8から着手し、採用率・実効速度に大きな問題がなければ同じPhase内でMXFP6 E3M2 W6A6の実装・通常CLI/API統合・比較・採否まで進める。共通化後のBF16 companionをGPUごとの基準とし、8192/128速度行と12言語/タスク条件×3 seedの採用率suiteを使う。小さな採用率低下だけで止めず、draft時間・検証負担・decode/E2E・prefill/TTFTを合わせて判断する。MXFP6が不利ならMXFP8、両方が不利ならBF16を既定に維持できる。MXFP6未実施時は理由と残件を明記する。
+
+対象はcompanion専用のfusion、attention q/k/v/o、MLP gate/up/downの8行列で、normはBF16、target重み・共有embedding/head・KV形式は維持する。MXFP8/MXFP6ともblock32/E8M0の既存providerを流用し、必要な修正は共通演算経路へ適用する。MXFP4/NVFP4 MTP、汎用FP8 artifact対応、再学習は追加しない。Phase85は共通化済み改善を引き継いだ残りの他精度最適化、Phase86はbatchingとし、番号は維持する。
+
+Phase84は実装・ローカル検証を完了した。MXFP8の採用率はV620 66.56%／R9700 67.68%と基準を概ね維持したが、matched decodeはBF16 25.063／35.054に対しMXFP8 20.743／31.639 tok/sで、BF16既定を維持する。MXFP6は変換・接続と両GPUの数値/API限定検証まで実施し、包括的比較は速度条件未成立のため保留した。追加kernel候補は撤去した。[実装・採否・検証範囲](../history/2026/09/11-20/phase84-mtp-weight-quantization.md)、[利用手順](../development/mtp-companion-quantization.md)を参照する。公開後CIは当該commitのchecksで確認する。
 
 ### 最適化の共通化と既定採用の方針
 
@@ -624,7 +632,7 @@ Phase 79の共通化内容は[Phase 79計画](archive/2026/09/1-10/phase79-commo
 | 完了 | 82 | 不採用最適化の削除・試行と失敗理由の記録、データ不足候補の条件付き既定採用 |
 | 完了・実装検証済み | 83 | MXFP8 E4 KV・固定sampling／MTP・CLI/API統合、両GPU長文・対話・lifecycleを確認。速度改善は83.5 |
 | 完了・公開CI成功 | 83.5 | 共通演算とMTPを最適化。速度条件緩和を記録し、最終反復値は旧目標も達成。モデル方向の追加共通化も実装・検証完了 |
-| 計画済み・次 | 84 | MTP重みの量子化・通常CLI/API統合・BF16 companionとの比較 |
+| 完了 | 84 | MTP sidecarと通常CLI/APIを接続。MXFP8のdecode退行によりBF16既定を維持。MXFP6は限定検証済み、包括的比較は移行条件未成立で保留 |
 | 計画済み | 85 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了（旧84） |
 | 計画済み | 86 | NVFP4のGPU batching最適化（旧85） |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |

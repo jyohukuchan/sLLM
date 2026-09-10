@@ -2267,7 +2267,10 @@ impl QwenResidentModel {
                 )));
             }
         }
-        let source = Qwen38Nvfp4ProvisionSource { artifact };
+        let source = Qwen38Nvfp4ProvisionSource {
+            artifact,
+            companion: None,
+        };
         let inner =
             QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
         Ok(Self {
@@ -2312,7 +2315,10 @@ impl QwenResidentModel {
                 )));
             }
         }
-        let source = Qwen38Nvfp4ProvisionSource { artifact };
+        let source = Qwen38Nvfp4ProvisionSource {
+            artifact,
+            companion: None,
+        };
         let inner =
             QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
         Ok(Self {
@@ -2331,10 +2337,42 @@ impl QwenResidentModel {
         artifact: Arc<crate::VerifiedUnslothQwen38Nvfp4>,
         completion_timeout: Duration,
     ) -> Result<Self, QwenExecutionError> {
+        Self::new_unsloth_qwen38_nvfp4_mtp_shared_with_companion(
+            target,
+            graph,
+            plan,
+            artifact,
+            None,
+            completion_timeout,
+        )
+    }
+
+    /// Provision a verified quantized MTP companion, sharing the unchanged
+    /// target embedding and output head. An absent sidecar preserves BF16.
+    pub fn new_unsloth_qwen38_nvfp4_mtp_shared_with_companion(
+        target: &QwenResidentModel,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        artifact: Arc<crate::VerifiedUnslothQwen38Nvfp4>,
+        companion: Option<Arc<crate::VerifiedQwen38MtpQuantizedSidecar>>,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        let recipe = companion.as_ref().map_or_else(
+            || artifact.recipe_digest().to_owned(),
+            |sidecar| sidecar.combined_recipe_digest(artifact.recipe_digest()),
+        );
+        if companion.as_ref().is_some_and(|sidecar| {
+            sidecar.source_lock_fingerprint() != graph.model_fingerprint()
+                || sidecar.base_recipe_digest() != artifact.recipe_digest()
+        }) {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Qwen3.8 MTP sidecar source identity differs".to_owned(),
+            ));
+        }
         if completion_timeout.is_zero()
             || !graph.is_mtp()
             || plan.schema_version != "qwen38-nvfp4-mtp-plan-v1"
-            || graph.fp8_sidecar_fingerprint() != Some(artifact.recipe_digest())
+            || graph.fp8_sidecar_fingerprint() != Some(recipe.as_str())
             || plan.lock_fingerprint != graph.model_fingerprint()
             || target.inner.model_fingerprint != graph.model_fingerprint()
             || target.inner.fp8_sidecar_fingerprint.as_deref() != Some(artifact.recipe_digest())
@@ -2367,6 +2405,7 @@ impl QwenResidentModel {
         }
         let source = Qwen38Nvfp4ProvisionSource {
             artifact: Arc::clone(&artifact),
+            companion,
         };
         let inner = QwenResidentInner::provision_shared(
             Arc::clone(&target.inner.session),
@@ -3979,6 +4018,7 @@ struct Nvfp4ProvisionSource {
 }
 
 struct Qwen38Nvfp4ProvisionSource {
+    companion: Option<Arc<crate::VerifiedQwen38MtpQuantizedSidecar>>,
     artifact: Arc<crate::VerifiedUnslothQwen38Nvfp4>,
 }
 
@@ -5172,6 +5212,41 @@ impl QwenProvisionSource for Qwen38Nvfp4ProvisionSource {
                 "Qwen3.8 tensor shape differs: {}",
                 binding.tensor_name()
             )));
+        }
+        if let Some((sidecar, tensor)) = self.companion.as_ref().and_then(|sidecar| {
+            sidecar
+                .tensor(binding.tensor_name())
+                .map(|tensor| (sidecar, tensor))
+        }) {
+            let expected_dtype = match sidecar.encoding() {
+                crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => DType::F8E4M3Fn,
+                crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => DType::U8,
+                crate::MtpWeightEncoding::Bf16 => DType::Bf16,
+            };
+            if tensor.logical_shape.as_slice() != binding.shape()
+                || resident_dtype != expected_dtype
+            {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "Qwen3.8 MTP sidecar and resident layout differ".to_owned(),
+                ));
+            }
+            let (mut bytes, scales) = sidecar
+                .read_tensor_bytes(binding.tensor_name())
+                .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+            bytes.extend_from_slice(&scales);
+            if bytes.len() as u64 != destination.size_bytes() {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "Qwen3.8 MTP packed resident size differs".to_owned(),
+                ));
+            }
+            return upload_buffer_bytes(
+                session,
+                queue,
+                &destination,
+                &bytes,
+                completion_timeout,
+                "Qwen3.8 MTP quantized weight upload",
+            );
         }
         let bytes = match descriptor.encoding {
             crate::QuantizedTensorEncoding::OcpFp8E4M3FnChannelBf16Scale => {
@@ -17634,6 +17709,84 @@ mod tests {
             .store(incremental, Ordering::Relaxed);
         preflight_device_memory(&session, &graph, &layout, true)
             .expect("exact incremental request bytes fit after resident allocation");
+    }
+
+    #[test]
+    #[ignore = "requires SLLM_QWEN38_NVFP4_CACHE and SLLM_MTP_COMPANION_CACHE"]
+    fn qwen38_quantized_mtp_graph_preserves_source_and_shared_layout() {
+        let root = std::env::var_os("SLLM_QWEN38_NVFP4_CACHE").expect("source snapshot");
+        let sidecar_root = std::path::PathBuf::from(
+            std::env::var_os("SLLM_MTP_COMPANION_CACHE").expect("companion sidecar"),
+        );
+        let artifact = crate::verify_unsloth_qwen38_nvfp4(root).unwrap();
+        let lock = crate::read_model_lock(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../docs/models/locks/qwen3.5-27b-bf16.json"),
+        )
+        .unwrap();
+        let sidecar = crate::verify_qwen38_mtp_quantized_sidecar(
+            &lock,
+            &artifact,
+            &sidecar_root.join("manifest.json"),
+            &sidecar_root.join("payload.safetensors"),
+        )
+        .unwrap();
+        let plan = crate::build_qwen38_nvfp4_mtp_weight_load_plan(&lock, &artifact).unwrap();
+        let baseline = crate::build_qwen38_nvfp4_mtp_graph_with_token_count(
+            &lock,
+            &plan,
+            &artifact,
+            8320,
+            crate::KvCacheEncoding::Mxfp8E4,
+            129,
+        )
+        .unwrap();
+        let graph = crate::build_qwen38_nvfp4_mtp_graph_with_companion(
+            &lock,
+            &plan,
+            &artifact,
+            8320,
+            crate::KvCacheEncoding::Mxfp8E4,
+            129,
+            Some(&sidecar),
+        )
+        .unwrap();
+        let baseline_layout = validate_graph_plan(&baseline, &plan).unwrap();
+        let layout = validate_graph_plan(&graph, &plan).unwrap();
+        assert_ne!(
+            graph.fp8_sidecar_fingerprint(),
+            baseline.fp8_sidecar_fingerprint()
+        );
+        assert_eq!(graph.plan_digest(), baseline.plan_digest());
+        assert!(
+            model_resident_bytes(&graph, &layout).unwrap()
+                < model_resident_bytes(&baseline, &baseline_layout).unwrap()
+        );
+        let mut changed = 0;
+        for binding in graph.weight_bindings() {
+            let tensor = graph
+                .tensor_metadata()
+                .iter()
+                .find(|tensor| tensor.name() == binding.tensor_name())
+                .unwrap();
+            let original = baseline
+                .tensor_metadata()
+                .iter()
+                .find(|tensor| tensor.name() == binding.tensor_name())
+                .unwrap();
+            if sidecar.tensor(binding.tensor_name()).is_some() {
+                changed += 1;
+                assert!(is_mx_weight_activation_view(tensor.view()));
+                let (values, scales) = sidecar.read_tensor_bytes(binding.tensor_name()).unwrap();
+                assert_eq!(
+                    resident_weight_bytes(tensor.view()).unwrap(),
+                    (values.len() + scales.len()) as u64
+                );
+            } else {
+                assert_eq!(tensor.view(), original.view());
+            }
+        }
+        assert_eq!(changed, 8);
     }
 
     #[test]

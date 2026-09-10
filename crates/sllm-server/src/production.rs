@@ -36,28 +36,28 @@ use sllm_core::{
     VerifiedControlVectorPayloadV1, VerifiedFp8Sidecar, VerifiedGgufGemma4Moe,
     VerifiedGgufGemma4Mtp, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe,
     VerifiedGgufWeightSource, VerifiedLoraPayloadV1, VerifiedMinistral3WeightSource,
-    VerifiedNvfp4Sidecar, VerifiedQwen35Moe, VerifiedUnslothQwen38Nvfp4, WeightClassification,
-    WeightLoadPlan, XtcSamplingConfigV1 as CoreXtcSamplingConfigV1,
-    assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
-    build_gemma4_execution_layout, build_gemma4_graph, build_gemma4_moe_gguf_graph,
-    build_gemma4_moe_resident_weight_load_plan, build_gemma4_mtp_graph,
-    build_gguf_qwen35_moe_weight_load_plan, build_ministral3_weight_load_plan,
-    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
-    build_qwen35_gguf_moe_execution_graph, build_qwen35_gguf_mx_weight_activation_graph,
-    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_kv_cache_selection,
-    build_qwen35_graph_with_position_payload_mode, build_qwen35_moe_execution_graph,
-    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
-    build_qwen35_unsloth_qwen38_nvfp4_graph, build_qwen38_nvfp4_mtp_graph,
-    build_qwen38_nvfp4_mtp_weight_load_plan, build_qwen38_nvfp4_weight_load_plan,
-    build_verified_gemma4_mtp_weight_load_plan, build_verified_gguf_gemma_weight_load_plan,
-    build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
-    builtin_reviewed_model_lock, gemma4_mtp_pair_semantic_id,
-    open_and_verify_official_ministral3_gguf, parse_control_vector_lock_v1,
-    parse_gemma4_mtp_model_lock, parse_lora_lock_v1, parse_ministral3_model_lock,
-    qwen_graph_memory_estimate_with_prepared_workspace, qwen_prefill_chunk_candidates,
-    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, verify_derived_gguf,
-    verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp, verify_gguf_qwen35_moe,
-    verify_unsloth_qwen38_nvfp4,
+    VerifiedNvfp4Sidecar, VerifiedQwen35Moe, VerifiedQwen38MtpQuantizedSidecar,
+    VerifiedUnslothQwen38Nvfp4, WeightClassification, WeightLoadPlan,
+    XtcSamplingConfigV1 as CoreXtcSamplingConfigV1, assemble_gguf_qwen35_multimodal_prompt,
+    assemble_qwen35_multimodal_prompt, build_gemma4_execution_layout, build_gemma4_graph,
+    build_gemma4_moe_gguf_graph, build_gemma4_moe_resident_weight_load_plan,
+    build_gemma4_mtp_graph, build_gguf_qwen35_moe_weight_load_plan,
+    build_ministral3_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
+    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph,
+    build_qwen35_gguf_mx_weight_activation_graph, build_qwen35_graph_with_kv_cache_encoding,
+    build_qwen35_graph_with_kv_cache_selection, build_qwen35_graph_with_position_payload_mode,
+    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
+    build_qwen35_nvfp4_graph, build_qwen35_unsloth_qwen38_nvfp4_graph,
+    build_qwen38_nvfp4_mtp_graph_with_companion, build_qwen38_nvfp4_mtp_weight_load_plan,
+    build_qwen38_nvfp4_weight_load_plan, build_verified_gemma4_mtp_weight_load_plan,
+    build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
+    build_verified_gguf_qwen35_vision_manifest, builtin_reviewed_model_lock,
+    gemma4_mtp_pair_semantic_id, open_and_verify_official_ministral3_gguf,
+    parse_control_vector_lock_v1, parse_gemma4_mtp_model_lock, parse_lora_lock_v1,
+    parse_ministral3_model_lock, qwen_graph_memory_estimate_with_prepared_workspace,
+    qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy, read_derived_gguf_lock,
+    verify_derived_gguf, verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp, verify_gguf_qwen35_moe,
+    verify_qwen38_mtp_quantized_sidecar, verify_unsloth_qwen38_nvfp4,
 };
 use sllm_frontend::{
     ApplyTemplateResultV1, DecodeModeV1, Gemma4MoeChatTemplateV1, Gemma4MtpGenerationExecutorV1,
@@ -1512,6 +1512,9 @@ pub struct QwenBackendConfigV1 {
 #[derive(Clone, Debug)]
 pub struct Qwen38Nvfp4BackendConfigV1 {
     pub artifact_root: PathBuf,
+    /// Optional verified MTP companion sidecar.  When absent, the exact
+    /// bundled BF16 `model_mtp.safetensors` path remains the rollback/default.
+    pub mtp_weights: Option<PathBuf>,
     pub device_index: u32,
     pub target: String,
     pub completion_timeout: Duration,
@@ -1524,6 +1527,10 @@ pub struct Qwen38Nvfp4BackendConfigV1 {
 impl Qwen38Nvfp4BackendConfigV1 {
     pub fn validate(&self) -> Result<(), BackendErrorV1> {
         if self.artifact_root.as_os_str().is_empty()
+            || self
+                .mtp_weights
+                .as_ref()
+                .is_some_and(|path| path.as_os_str().is_empty() || !path.is_absolute())
             || self.device_index != 0
             || !matches!(self.target.as_str(), "gfx1030" | "gfx1201")
             || self.completion_timeout.is_zero()
@@ -1535,11 +1542,18 @@ impl Qwen38Nvfp4BackendConfigV1 {
             )
         {
             return Err(BackendErrorV1::new(
-                "Qwen3.8 NVFP4 requires a non-empty artifact root, logical device index 0, exact target gfx1030 or gfx1201, valid timeouts, nonzero context length, and FP16 or MXFP8 E4 KV",
+                "Qwen3.8 NVFP4 requires a non-empty absolute artifact root, an optional absolute MTP sidecar path, logical device index 0, exact target gfx1030 or gfx1201, valid timeouts, nonzero context length, and FP16 or MXFP8 E4 KV",
             ));
         }
         self.phase41.validate()?;
         validate_qwen_phase41_operational_config(&self.phase41)?;
+        if self.mtp_weights.is_some()
+            && matches!(self.phase41.draft, DraftStartupConfigV1::Disabled)
+        {
+            return Err(BackendErrorV1::new(
+                "Qwen3.8 MTP companion sidecar requires MTP draft execution",
+            ));
+        }
         Ok(())
     }
 }
@@ -2515,6 +2529,11 @@ pub struct ProductionRequestAuditV1 {
     pub outcome: String,
     pub target: String,
     pub weight_encoding: String,
+    /// Optional authenticated Qwen3.8 MTP companion identity.  The target
+    /// artifact identity remains in `weight_encoding`; these fields expose
+    /// the sidecar recipe without exposing a filesystem path.
+    pub mtp_weight_encoding: Option<String>,
+    pub mtp_companion_digest: Option<String>,
     pub kv_cache_encoding: String,
     pub kv_cache_selection: KvCacheSelectionReportV1,
     pub fp8_provider: Option<String>,
@@ -2600,6 +2619,19 @@ pub struct ProductionPhase41AuditV1 {
     pub draft_proposed_tokens: u64,
     pub draft_accepted_tokens: u64,
     pub draft_rejected_tokens: u64,
+    /// Whether exact MTP proposal-block accounting was available for this
+    /// request. Legacy API lanes leave this false rather than estimating it.
+    pub draft_accounting_available: bool,
+    pub draft_proposal_blocks: Option<u64>,
+    /// Number of target rows committed by MTP after accept/reject handling.
+    pub draft_committed_target_rows: Option<u64>,
+    /// Host elapsed wall time spent priming the MTP prefix, in nanoseconds;
+    /// this is not a sum of device kernel timestamps.
+    pub mtp_prefix_priming_wall_ns: u64,
+    /// Host elapsed wall time spent in MTP draft forward and sampling
+    /// proposals, in nanoseconds. Target verification, replay, and waiting
+    /// are excluded.
+    pub mtp_decode_proposal_wall_ns: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3030,12 +3062,15 @@ struct QwenBackendStateV1 {
     resident: QwenResidentModel,
     mtp_resident: Option<QwenResidentModel>,
     mtp_plan: Option<WeightLoadPlan>,
+    mtp_companion: Option<Arc<VerifiedQwen38MtpQuantizedSidecar>>,
     session: Arc<ExecutionSession>,
     target: String,
     model_ready_current_bytes: u64,
     sidecar: Option<Arc<VerifiedFp8Sidecar>>,
     nvfp4_sidecar: Option<Arc<VerifiedNvfp4Sidecar>>,
     fp8_provider: Option<String>,
+    mtp_weight_encoding: Option<String>,
+    mtp_companion_digest: Option<String>,
     cache: Option<Arc<VerifiedCache>>,
     gguf_source: Option<Arc<VerifiedGgufWeightSource>>,
     vision_manifest: Option<QwenVisionManifest>,
@@ -4449,6 +4484,8 @@ impl ChatGenerationBackendV1 for Ministral3ChatBackendV1 {
             },
             target: state.target.clone(),
             weight_encoding: "bf16".to_owned(),
+            mtp_weight_encoding: None,
+            mtp_companion_digest: None,
             kv_cache_encoding: "fp16".to_owned(),
             kv_cache_selection: selection,
             fp8_provider: None,
@@ -4526,6 +4563,24 @@ impl QwenChatBackendV1 {
                     ));
                 }
             };
+        let mtp_companion = config
+            .mtp_weights
+            .as_ref()
+            .map(|directory| {
+                verify_qwen38_mtp_quantized_sidecar(
+                    &lock,
+                    &artifact,
+                    &directory.join("manifest.json"),
+                    &directory.join("payload.safetensors"),
+                )
+                .map(Arc::new)
+                .map_err(|error| {
+                    BackendErrorV1::new(format!(
+                        "Qwen3.8 MTP companion verification failed: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
         let plan = build_qwen38_nvfp4_weight_load_plan(&lock, &artifact).map_err(|error| {
             BackendErrorV1::new(format!("Qwen3.8 NVFP4 load plan failed: {error}"))
         })?;
@@ -4577,26 +4632,30 @@ impl QwenChatBackendV1 {
                     build_qwen38_nvfp4_mtp_weight_load_plan(&lock, &artifact).map_err(|error| {
                         BackendErrorV1::new(format!("Qwen3.8 MTP load plan failed: {error}"))
                     })?;
-                let mtp_graph = build_qwen38_nvfp4_mtp_graph(
+                let mtp_graph = build_qwen38_nvfp4_mtp_graph_with_companion(
                     &lock,
                     &mtp_plan,
                     &artifact,
                     1,
                     config.kv_cache_encoding,
+                    1_024,
+                    mtp_companion.as_deref(),
                 )
                 .map_err(|error| {
                     BackendErrorV1::new(format!("Qwen3.8 MTP resident graph failed: {error}"))
                 })?;
-                let mtp_resident = QwenResidentModel::new_unsloth_qwen38_nvfp4_mtp_shared(
-                    &resident,
-                    mtp_graph,
-                    mtp_plan.clone(),
-                    Arc::clone(&artifact),
-                    config.completion_timeout,
-                )
-                .map_err(|error| {
-                    BackendErrorV1::new(format!("Qwen3.8 MTP resident load failed: {error}"))
-                })?;
+                let mtp_resident =
+                    QwenResidentModel::new_unsloth_qwen38_nvfp4_mtp_shared_with_companion(
+                        &resident,
+                        mtp_graph,
+                        mtp_plan.clone(),
+                        Arc::clone(&artifact),
+                        mtp_companion.clone(),
+                        config.completion_timeout,
+                    )
+                    .map_err(|error| {
+                        BackendErrorV1::new(format!("Qwen3.8 MTP resident load failed: {error}"))
+                    })?;
                 (Some(mtp_resident), Some(mtp_plan))
             } else {
                 (None, None)
@@ -4623,7 +4682,7 @@ impl QwenChatBackendV1 {
             state: Mutex::new(Some(QwenBackendStateV1 {
                 lock: Some(lock),
                 moe_artifact: None,
-                qwen38_artifact: Some(artifact),
+                qwen38_artifact: Some(Arc::clone(&artifact)),
                 gguf_moe: None,
                 reasoning_close_token_ids,
                 stop_policy,
@@ -4633,12 +4692,19 @@ impl QwenChatBackendV1 {
                 resident,
                 mtp_resident,
                 mtp_plan,
+                mtp_companion: mtp_companion.clone(),
                 session,
                 target: config.target,
                 model_ready_current_bytes,
                 sidecar: None,
                 nvfp4_sidecar: None,
                 fp8_provider: Some("qwen38-mixed-nvfp4-v1".to_owned()),
+                mtp_weight_encoding: mtp_companion
+                    .as_ref()
+                    .map(|sidecar| sidecar.encoding().manifest_name().to_owned()),
+                mtp_companion_digest: mtp_companion
+                    .as_ref()
+                    .map(|sidecar| sidecar.combined_recipe_digest(artifact.recipe_digest())),
                 cache: None,
                 gguf_source: None,
                 vision_manifest: None,
@@ -4921,12 +4987,15 @@ impl QwenChatBackendV1 {
                 resident,
                 mtp_resident,
                 mtp_plan,
+                mtp_companion: None,
                 session,
                 target: config.target,
                 model_ready_current_bytes,
                 sidecar: None,
                 nvfp4_sidecar: None,
                 fp8_provider,
+                mtp_weight_encoding: None,
+                mtp_companion_digest: None,
                 cache: None,
                 gguf_source: Some(source),
                 vision_manifest,
@@ -5028,12 +5097,15 @@ impl QwenChatBackendV1 {
                 resident,
                 mtp_resident: None,
                 mtp_plan: None,
+                mtp_companion: None,
                 session,
                 target: config.target,
                 model_ready_current_bytes,
                 sidecar: None,
                 nvfp4_sidecar: None,
                 fp8_provider: Some("ocp-mxfp4-w4a4-mixed".to_owned()),
+                mtp_weight_encoding: None,
+                mtp_companion_digest: None,
                 cache: None,
                 gguf_source: None,
                 vision_manifest: None,
@@ -6513,12 +6585,14 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 (mtp_target, &state.mtp_resident, &state.mtp_plan)
             {
                 let mtp_graph = if let Some(artifact) = &state.qwen38_artifact {
-                    build_qwen38_nvfp4_mtp_graph(
+                    build_qwen38_nvfp4_mtp_graph_with_companion(
                         state.lock.as_ref().expect("MTP requires dense Qwen lock"),
                         mtp_plan,
                         artifact,
                         state_capacity,
                         state.kv_cache_encoding,
+                        1_024,
+                        state.mtp_companion.as_deref(),
                     )
                 } else {
                     build_qwen35_mtp_graph(
@@ -6563,6 +6637,16 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 phase41_audit.draft_proposed_tokens = proposed;
                 phase41_audit.draft_accepted_tokens = accepted;
                 phase41_audit.draft_rejected_tokens = proposed.saturating_sub(accepted);
+                phase41_audit.draft_accounting_available = true;
+                phase41_audit.draft_proposal_blocks = Some(executor.inner().proposal_blocks());
+                phase41_audit.draft_committed_target_rows =
+                    Some(executor.inner().committed_target_rows());
+                phase41_audit.mtp_prefix_priming_wall_ns =
+                    u64::try_from(executor.inner().mtp_prefix_priming_wall_time().as_nanos())
+                        .unwrap_or(u64::MAX);
+                phase41_audit.mtp_decode_proposal_wall_ns =
+                    u64::try_from(executor.inner().mtp_decode_proposal_wall_time().as_nanos())
+                        .unwrap_or(u64::MAX);
                 drop(executor);
                 (outcome, dispatch, memory, Some(prefill_chunk_count), None)
             } else if let DraftStartupConfigV1::Ngram { order, width } = &state.phase41.draft {
@@ -6827,6 +6911,8 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 Some("mxfp6-e3m2-w6a6") => "mxfp6-e3m2-block32-e8m0-w6a6".to_owned(),
                 Some(_) => "ocp-e4m3fn-outer-f32".to_owned(),
             },
+            mtp_weight_encoding: state.mtp_weight_encoding.clone(),
+            mtp_companion_digest: state.mtp_companion_digest.clone(),
             kv_cache_encoding: state.kv_cache_encoding.canonical_name().to_owned(),
             kv_cache_selection: state.kv_cache_selection.clone(),
             fp8_provider: state.fp8_provider.clone(),
@@ -7742,6 +7828,8 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             },
             target: state.target.clone(),
             weight_encoding: state.weight_encoding.clone(),
+            mtp_weight_encoding: None,
+            mtp_companion_digest: None,
             kv_cache_encoding: "fp8-static".to_owned(),
             kv_cache_selection: KvCacheSelectionReportV1 {
                 requested: "fp8-static".to_owned(),
@@ -8506,6 +8594,8 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
             },
             target: state.target.clone(),
             weight_encoding: state.weight_encoding.clone(),
+            mtp_weight_encoding: None,
+            mtp_companion_digest: None,
             kv_cache_encoding: "fp8-static-e4m3".to_owned(),
             kv_cache_selection: KvCacheSelectionReportV1 {
                 requested: "auto".to_owned(),
@@ -10829,6 +10919,7 @@ mod tests {
     fn qwen38_nvfp4_config_is_host_validated_without_loading_artifacts() {
         let config = Qwen38Nvfp4BackendConfigV1 {
             artifact_root: PathBuf::from("/models/Qwen3.8-27B-NVFP4"),
+            mtp_weights: None,
             device_index: 0,
             target: "gfx1201".to_owned(),
             completion_timeout: Duration::from_secs(1),
@@ -10840,6 +10931,26 @@ mod tests {
         config
             .validate()
             .expect("the fixed Qwen3.8 production profile should validate on host");
+        let relative_companion = Qwen38Nvfp4BackendConfigV1 {
+            mtp_weights: Some(PathBuf::from("relative-mtp-sidecar")),
+            ..config.clone()
+        };
+        assert!(
+            relative_companion.validate().is_err(),
+            "MTP companion path must be absolute before HIP/model load"
+        );
+        let disabled_companion = Qwen38Nvfp4BackendConfigV1 {
+            mtp_weights: Some(PathBuf::from("/models/qwen38-mtp-mxfp8")),
+            phase41: Phase41ProductionConfigV1 {
+                draft: DraftStartupConfigV1::Disabled,
+                ..config.phase41.clone()
+            },
+            ..config.clone()
+        };
+        assert!(
+            disabled_companion.validate().is_err(),
+            "MTP companion must not be accepted when MTP is disabled"
+        );
 
         for (device_index, target, context_length) in [
             (1, "gfx1201", 16_384),
@@ -10848,6 +10959,7 @@ mod tests {
         ] {
             let invalid = Qwen38Nvfp4BackendConfigV1 {
                 artifact_root: config.artifact_root.clone(),
+                mtp_weights: config.mtp_weights.clone(),
                 device_index,
                 target: target.to_owned(),
                 completion_timeout: config.completion_timeout,
@@ -11482,6 +11594,11 @@ mod tests {
             draft_proposed_tokens: 7,
             draft_accepted_tokens: 5,
             draft_rejected_tokens: 2,
+            draft_accounting_available: false,
+            draft_proposal_blocks: None,
+            draft_committed_target_rows: None,
+            mtp_prefix_priming_wall_ns: 0,
+            mtp_decode_proposal_wall_ns: 0,
         })
         .unwrap();
         assert_eq!(json["prefix_cache_result"], "partial-hit");

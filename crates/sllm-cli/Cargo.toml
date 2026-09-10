@@ -25,3 +25,7 @@ path = "src/main.rs"
 [[bin]]
 name = "sllm-convert-gguf"
 path = "src/bin/sllm-convert-gguf.rs"
+
+[[bin]]
+name = "sllm-convert-qwen38-mtp"
+path = "src/bin/sllm-convert-qwen38-mtp.rs"

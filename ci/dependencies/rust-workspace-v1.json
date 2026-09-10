@@ -74,6 +74,20 @@
           "test": true,
           "doc": true,
           "doctest": false
+        },
+        {
+          "name": "sllm-convert-qwen38-mtp",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
         }
       ]
     },

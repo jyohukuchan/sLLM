@@ -623,8 +623,9 @@ profile connects it to OpenWebUI through `/v1/models` and `/v1/chat/completions`
 Tokenization and apply-template utilities use the artifact's verified frontend.
 Embeddings and tool protocol are unavailable for this text-only profile.
 
-This scoped safetensors entrypoint does not complete Phase83 MXFP8 E4 KV fast-path integration/MTP
-or add batching, vision, MXFP6 KV, other artifacts, or other GPUs. See the
+The 2026-09-06 deployment snapshot did not include Phase83 MXFP8 E4 KV fast-path integration/MTP,
+batching, vision, MXFP6 KV, other artifacts, or other GPUs. The current companion
+selection is described in the Phase84 section below. See the
 [deployment and validation record](../history/2026/09/1-10/qwen38-nvfp4-r9700-server.md).
 
 Phase82 enables the verified Qwen3.8 projection packs, deferred completion and
@@ -636,3 +637,18 @@ positive tool-calling claim. This source change does not replace the locally
 deployed binary or change its explicitly configured Phase78 preset.
 See the [Phase82 adoption scope](../history/2026/09/1-10/phase82-default-adoption-scope.md)
 and [validation record](../history/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md).
+
+## Phase84 MTP companion selection
+
+The Qwen3.8 NVFP4 profile accepts a verified quantized companion directory via
+`--mtp-weights` on exact `gfx1030` and `gfx1201`, logical device 0. Selection is
+server configuration, not a new Chat Completions request field. Requests reuse
+the configured recipe; target weights and KV encoding remain unchanged. Omitting
+the option preserves the BF16 companion. Combining it with `--draft disabled`
+is rejected before model loading.
+
+The audit records `mtp_weight_encoding` and `mtp_companion_digest`, plus observed
+proposal/acceptance counts and separate prefix/proposal wall times. An encoding
+being selectable does not imply a throughput or full-model quality improvement.
+See [conversion, CLI/API usage and evaluation limits](../development/mtp-companion-quantization.md)
+and the [Phase84 measurements](../history/2026/09/11-20/phase84-mtp-weight-quantization.md).

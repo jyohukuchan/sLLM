@@ -4,6 +4,7 @@ use core::fmt;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use sllm_core::{
     CompiledGrammar, DeviceTokenSelectorRequestV1, DraftProposalV1, DraftProviderV1,
@@ -1231,6 +1232,12 @@ pub struct QwenMtpGenerationExecutorV1 {
     proposed_draft_tokens: u64,
     accepted_draft_tokens: u64,
     committed_target_rows: u64,
+    /// Host wall time spent priming the MTP prefix. This is elapsed wall time
+    /// around the prefix calls, not a sum of device kernel timestamps.
+    mtp_prefix_priming_wall_time: Duration,
+    /// Host wall time spent in MTP draft forward and sampling proposals. This
+    /// excludes target verification, replay, and user-visible waiting.
+    mtp_decode_proposal_wall_time: Duration,
     pending_speculative_block: Option<PendingQwenSpeculativeBlockV1>,
     pending_device_block: Option<PendingQwenDeviceBlockV1>,
     queued_device_steps: VecDeque<QueuedSpeculativeDeviceStepV1>,
@@ -1256,6 +1263,8 @@ impl QwenMtpGenerationExecutorV1 {
             proposed_draft_tokens: 0,
             accepted_draft_tokens: 0,
             committed_target_rows: 0,
+            mtp_prefix_priming_wall_time: Duration::ZERO,
+            mtp_decode_proposal_wall_time: Duration::ZERO,
             pending_speculative_block: None,
             pending_device_block: None,
             queued_device_steps: VecDeque::new(),
@@ -1282,6 +1291,8 @@ impl QwenMtpGenerationExecutorV1 {
             proposed_draft_tokens: 0,
             accepted_draft_tokens: 0,
             committed_target_rows: 0,
+            mtp_prefix_priming_wall_time: Duration::ZERO,
+            mtp_decode_proposal_wall_time: Duration::ZERO,
             pending_speculative_block: None,
             pending_device_block: None,
             queued_device_steps: VecDeque::new(),
@@ -1375,6 +1386,18 @@ impl QwenMtpGenerationExecutorV1 {
         self.committed_target_rows
     }
 
+    /// Accumulated host wall time for MTP prefix priming. The duration is
+    /// deliberately separate from kernel dispatch accounting.
+    pub const fn mtp_prefix_priming_wall_time(&self) -> Duration {
+        self.mtp_prefix_priming_wall_time
+    }
+
+    /// Accumulated host wall time for MTP draft forward and sampling
+    /// proposals. Target verification, replay, and waiting are excluded.
+    pub const fn mtp_decode_proposal_wall_time(&self) -> Duration {
+        self.mtp_decode_proposal_wall_time
+    }
+
     fn prime_mtp_prefix(
         &mut self,
         input: &[i32],
@@ -1412,6 +1435,19 @@ impl QwenMtpGenerationExecutorV1 {
             index = end;
         }
         Ok(())
+    }
+
+    fn prime_mtp_prefix_timed(
+        &mut self,
+        input: &[i32],
+        hidden_rows: &[u16],
+    ) -> Result<(), GenerationServiceError> {
+        let started = Instant::now();
+        let result = self.prime_mtp_prefix(input, hidden_rows);
+        self.mtp_prefix_priming_wall_time = self
+            .mtp_prefix_priming_wall_time
+            .saturating_add(started.elapsed());
+        result
     }
 
     fn step_from_output(
@@ -1459,7 +1495,7 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
                 "target prefill MTP hidden row count differs".to_owned(),
             ));
         }
-        self.prime_mtp_prefix(&input, hidden)?;
+        self.prime_mtp_prefix_timed(&input, hidden)?;
         self.last_target_hidden_bf16 = hidden[(input.len() - 1) * self.hidden_width..].to_vec();
         let final_row = output
             .token_ids()
@@ -1529,7 +1565,7 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
                 "target prefill MTP hidden row count differs".to_owned(),
             ));
         }
-        self.prime_mtp_prefix(&input, hidden)?;
+        self.prime_mtp_prefix_timed(&input, hidden)?;
         self.last_target_hidden_bf16 = hidden[(input.len() - 1) * self.hidden_width..].to_vec();
         let selection = output
             .selection()
@@ -1629,8 +1665,12 @@ impl SpeculativeGenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
         &mut self,
         pending_token: u32,
     ) -> Result<Vec<GenerationStepV1>, GenerationServiceError> {
-        let proposal = self
-            .propose_mtp_draft(pending_token, self.draft_width)
+        let proposal_started = Instant::now();
+        let proposal_result = self.propose_mtp_draft(pending_token, self.draft_width);
+        self.mtp_decode_proposal_wall_time = self
+            .mtp_decode_proposal_wall_time
+            .saturating_add(proposal_started.elapsed());
+        let proposal = proposal_result
             .map_err(GenerationServiceError::from)?
             .ok_or_else(|| {
                 GenerationServiceError::Execution("MTP provider returned no draft".to_owned())
@@ -1678,7 +1718,12 @@ impl DraftProviderV1 for QwenMtpGenerationExecutorV1 {
             .last()
             .copied()
             .ok_or(SpeculativeError::HistoryLimitExceeded)?;
-        self.propose_mtp_draft(pending_token, max_width)
+        let proposal_started = Instant::now();
+        let proposal_result = self.propose_mtp_draft(pending_token, max_width);
+        self.mtp_decode_proposal_wall_time = self
+            .mtp_decode_proposal_wall_time
+            .saturating_add(proposal_started.elapsed());
+        proposal_result
     }
 }
 
@@ -1700,14 +1745,23 @@ impl QwenMtpGenerationExecutorV1 {
         // counters sequential, so a mismatch never consumes speculative
         // rows or requires a host-logit fallback.
         let device_draft = mtp_device_draft_selector_enabled();
-        let draft = if device_draft {
-            let draft_selector = speculative_selector_for_draft_row(selector, 0)?;
+        let draft_selector = if device_draft {
+            Some(speculative_selector_for_draft_row(selector, 0)?)
+        } else {
+            None
+        };
+        let proposal_started = Instant::now();
+        let draft_result = if let Some(draft_selector) = draft_selector.as_ref() {
             self.mtp
-                .decode_mtp_with_device_selector(token, &previous_hidden, &draft_selector)
+                .decode_mtp_with_device_selector(token, &previous_hidden, draft_selector)
         } else {
             self.mtp.decode_mtp_argmax(token, &previous_hidden)
-        }
-        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        };
+        self.mtp_decode_proposal_wall_time = self
+            .mtp_decode_proposal_wall_time
+            .saturating_add(proposal_started.elapsed());
+        let draft =
+            draft_result.map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
         let draft_token = if device_draft {
             let selection = draft
                 .selection()
@@ -1788,13 +1842,17 @@ impl QwenMtpGenerationExecutorV1 {
                 .begin_fixed_k20_support_capture(width)
                 .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
         }
-        let proposal = if use_pq || mtp_device_draft_selector_enabled() {
-            self.propose_mtp_draft_with_device_selector(token_id, selector, width, use_pq)?
+        let proposal_started = Instant::now();
+        let proposal_result = if use_pq || mtp_device_draft_selector_enabled() {
+            self.propose_mtp_draft_with_device_selector(token_id, selector, width, use_pq)
         } else {
             self.propose_mtp_draft(token_id, width)
-                .map_err(GenerationServiceError::from)?
-        }
-        .ok_or_else(|| {
+                .map_err(GenerationServiceError::from)
+        };
+        self.mtp_decode_proposal_wall_time = self
+            .mtp_decode_proposal_wall_time
+            .saturating_add(proposal_started.elapsed());
+        let proposal = proposal_result?.ok_or_else(|| {
             GenerationServiceError::Execution("MTP provider returned no draft".to_owned())
         })?;
         let drafts = proposal.token_ids();

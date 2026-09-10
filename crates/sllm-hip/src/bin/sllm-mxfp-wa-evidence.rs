@@ -859,6 +859,10 @@ enum EvidenceMode {
         provider: Phase75Provider,
         production_shape: bool,
     },
+    Phase84 {
+        repeats: usize,
+        format: Format,
+    },
 }
 
 impl EvidenceMode {
@@ -872,6 +876,7 @@ impl EvidenceMode {
             Self::Phase70 { repeats, .. } => repeats,
             Self::Phase74 { repeats, .. } => repeats,
             Self::Phase75 { repeats, .. } => repeats,
+            Self::Phase84 { repeats, .. } => repeats,
         }
     }
 
@@ -885,6 +890,7 @@ impl EvidenceMode {
             Self::Phase70 { .. } => "sllm-phase70-rdna-mxfp6-via-e4m3-provider-gpu-v1",
             Self::Phase74 { .. } => "sllm-phase74-rdna-mxfp6-provider-gpu-v1",
             Self::Phase75 { .. } => "sllm-phase75-gfx1030-shared-half2-provider-gpu-v1",
+            Self::Phase84 { .. } => "sllm-phase84-qwen38-mtp-mx-provider-gpu-v1",
         }
     }
 
@@ -894,6 +900,7 @@ impl EvidenceMode {
             Self::Phase70 { .. } => 1,
             Self::Phase74 { .. } => 1,
             Self::Phase75 { .. } => 1,
+            Self::Phase84 { .. } => 1,
             _ => 0,
         }
     }
@@ -908,6 +915,7 @@ impl EvidenceMode {
             Self::Phase70 { .. } => Some("phase70-provider"),
             Self::Phase74 { .. } => Some("phase74-provider"),
             Self::Phase75 { .. } => Some("phase75-provider"),
+            Self::Phase84 { .. } => Some("phase84"),
         }
     }
 
@@ -1099,6 +1107,9 @@ fn matrix(rows: usize, columns: usize, phase: usize) -> Vec<u16> {
     if matches!(phase, 100 | 111) {
         return special_matrix(rows, columns, phase);
     }
+    if matches!(phase, 1840 | 1841 | 1851 | 1852) {
+        return phase84_m1_range_boundary_matrix(rows, columns);
+    }
     if phase >= 120 {
         return (0..rows * columns)
             .map(|index| {
@@ -1142,6 +1153,55 @@ fn special_matrix(rows: usize, columns: usize, _phase: usize) -> Vec<u16> {
         values[7 * columns + 1] = bf16(1.0625);
     }
     values
+}
+
+fn phase84_m1_range_boundary_matrix(rows: usize, columns: usize) -> Vec<u16> {
+    let mut values = vec![bf16(1.0); rows * columns];
+    for row in 0..rows {
+        for column in 0..columns {
+            values[row * columns + column] = match column / 32 {
+                // 65536 is finite in BF16 but exceeds IEEE FP16's max finite
+                // value; it exercises the scalar FP32 decode contract.
+                0 => bf16(65_536.0),
+                // This block drives a nonzero minimum-scale path.
+                1 => bf16(2.0_f32.powi(-17)),
+                _ => bf16(1.0625),
+            };
+        }
+    }
+    values
+}
+
+fn validate_phase84_m1_range_boundary(
+    source: &[u16],
+    quantized: &QuantizedMx,
+    rows: usize,
+    k: usize,
+) -> Result<(), String> {
+    if rows == 0 || k < 32 || source.len() != rows * k {
+        return Err("Phase 84 M=1 range fixture has an invalid shape".to_owned());
+    }
+    if source[0] != bf16(65_536.0) {
+        return Err("Phase 84 M=1 range fixture lost the >FP16 finite input".to_owned());
+    }
+    let decoded = quantized.dequantize().map_err(|error| error.to_string())?;
+    for row in 0..rows {
+        let large = decoded[row * k].abs();
+        if !large.is_finite() || large <= 65_504.0 {
+            return Err(format!(
+                "Phase 84 M=1 range fixture large value was not preserved: row={row} value={large}"
+            ));
+        }
+        if k >= 64 {
+            let tiny = decoded[row * k + 32].abs();
+            if !tiny.is_finite() || tiny == 0.0 || tiny >= 1.0e-3 {
+                return Err(format!(
+                    "Phase 84 M=1 range fixture small-scale value was not preserved: row={row} value={tiny}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_special_encoding(
@@ -1683,6 +1743,10 @@ fn run_case(
             n,
         )?;
     }
+    if matches!(phase, 1840 | 1841) {
+        validate_phase84_m1_range_boundary(&activation_words, &activation_quantized, m, k)?;
+        validate_phase84_m1_range_boundary(&weight_words, &weight_quantized, n, k)?;
+    }
     if (format == Format::Mxfp8 && weight_quantized.format() != MxElementFormat::E4M3Fn)
         || (format == Format::Mxfp6 && weight_quantized.format() != MxElementFormat::E3M2)
     {
@@ -1782,6 +1846,8 @@ fn run_case(
             "Phase 75 warmup"
         } else if matches!(mode, EvidenceMode::Phase74 { .. }) {
             "Phase 74 warmup"
+        } else if matches!(mode, EvidenceMode::Phase84 { .. }) {
+            "Phase 84 warmup"
         } else {
             "Phase 69 warmup"
         };
@@ -1903,6 +1969,15 @@ fn run_case(
     };
     let sampled_row_top1 = matches!(oracle, OracleSelection::BoundarySample)
         .then(|| sampled_row_top1(&output, n, &oracle_indices));
+    let special_value_classes = match phase {
+        100 => Some(
+            "E4M3 subnormal/tie/max/saturation, E8M0 minimum/finite/NaN scale, signed zero, Inf/NaN",
+        ),
+        1840 | 1841 => {
+            Some("M=1 finite >FP16 range, block32 scale boundary, minimum-scale finite value")
+        }
+        _ => None,
+    };
     Ok(CaseReport {
         case_id,
         format: format.name(),
@@ -1918,13 +1993,9 @@ fn run_case(
         output_bf16_sha256: output_digests[0].clone(),
         max_abs_error: oracle_stats.max_abs_error,
         max_relative_error: oracle_stats.max_relative_error,
-        special_value_classes: detailed
-            .then_some((phase == 100).then_some(
-                "E4M3 subnormal/tie/max/saturation, E8M0 minimum/finite/NaN scale, signed zero, Inf/NaN",
-            ))
-            .flatten(),
+        special_value_classes: detailed.then_some(special_value_classes).flatten(),
         special_encoding_contract_validated: detailed
-            .then_some(phase == 100)
+            .then_some(matches!(phase, 100 | 1840 | 1841))
             .filter(|value| *value),
         oracle_mode: detailed.then_some(oracle.name()),
         oracle_point_count: detailed.then_some(oracle_indices.len()),
@@ -1944,8 +2015,7 @@ fn run_case(
         repeat_output_bf16_sha256: detailed.then_some(output_digests),
         phase63_candidate: phase63.then_some(kernel_id == PHASE63_CANDIDATE_KERNEL_ID),
         phase66_provider: phase66_provider.map(Phase66Provider::name),
-        phase66_candidate: phase66_provider
-            .map(|_| kernel_id == PHASE66_CANDIDATE_KERNEL_ID),
+        phase66_candidate: phase66_provider.map(|_| kernel_id == PHASE66_CANDIDATE_KERNEL_ID),
         phase67_provider: phase67_provider.map(Phase67Provider::name),
         phase67_candidate: phase67_provider.map(|provider| kernel_id == provider.kernel_id()),
         phase69_provider: phase69_provider.map(Phase69Provider::name),
@@ -2670,6 +2740,97 @@ fn phase75_cases(production_shape: bool, provider: Phase75Provider) -> Vec<CaseS
     }
 }
 
+fn phase84_cases(format: Format) -> Vec<CaseSpec> {
+    [
+        // The eight Qwen3.8 MTP matrices reduce to six unique M=1 shapes;
+        // K/V and gate/up share dimensions but remain separate role labels.
+        ("mtp-m1-fc", 1, 10240, 5120),
+        ("mtp-m1-q", 1, 5120, 12288),
+        ("mtp-m1-k", 1, 5120, 1024),
+        ("mtp-m1-v", 1, 5120, 1024),
+        ("mtp-m1-o", 1, 6144, 5120),
+        ("mtp-m1-gate-up", 1, 5120, 17408),
+        ("mtp-m1-down", 1, 17408, 5120),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (case_id, m, k, n))| CaseSpec {
+        case_id: Some(case_id),
+        format,
+        m,
+        k,
+        n,
+        phase: 140 + index,
+        // M=1 keeps the full output oracle tractable (the largest matrix is
+        // about 90M FP32 dot products) and covers every output column.
+        oracle: OracleSelection::Full,
+    })
+    .chain(
+        [
+            // Normal M=1 odd-tail/range fixtures. The first covers N-tail
+            // launch mapping; the second crosses a block-scale boundary and
+            // includes finite >FP16 plus a minimum-scale block.
+            ("mtp-m1-k32-n5", 1, 32, 5),
+            ("mtp-m1-k96-n9", 1, 96, 9),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (case_id, m, k, n))| CaseSpec {
+            case_id: Some(case_id),
+            format,
+            m,
+            k,
+            n,
+            phase: 1840 + index,
+            oracle: OracleSelection::Full,
+        }),
+    )
+    .chain(
+        [
+            ("mtp-prefix-m127-n1024", 127, 5120, 1024),
+            ("mtp-prefix-m128-n1024", 128, 5120, 1024),
+            ("mtp-prefix-m129-n1024", 129, 5120, 1024),
+            ("mtp-prefix-gate-up-m128-n17408", 128, 5120, 17408),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (case_id, m, k, n))| CaseSpec {
+            case_id: Some(case_id),
+            format,
+            m,
+            k,
+            n,
+            phase: 150 + index,
+            oracle: OracleSelection::BoundarySample,
+        }),
+    )
+    .chain([
+        CaseSpec {
+            case_id: Some("mtp-odd-tail-m3-k64-n5"),
+            format,
+            m: 3,
+            k: 64,
+            n: 5,
+            phase: 155,
+            oracle: OracleSelection::Full,
+        },
+        CaseSpec {
+            case_id: Some("mtp-scale-boundary-m17-k96-n9"),
+            format,
+            m: 17,
+            k: 96,
+            n: 9,
+            // The shared special fixture is the existing E4M3 scale/value
+            // boundary oracle. MXFP6 keeps the same odd shape with its
+            // ordinary deterministic fixture because its E3M2 byte contract
+            // has a different expected-value table.
+            phase: if format == Format::Mxfp8 { 100 } else { 102 },
+            oracle: OracleSelection::Full,
+        },
+    ])
+    .collect()
+}
+
 fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, String> {
     match mode {
         EvidenceMode::Phase62 { .. } if !matches!(target.as_str(), "gfx1030" | "gfx1201") => {
@@ -2721,6 +2882,9 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
                 "Phase 75 {} mode requires exact gfx1030",
                 provider.name()
             ));
+        }
+        EvidenceMode::Phase84 { .. } if !matches!(target.as_str(), "gfx1030" | "gfx1201") => {
+            return Err("Phase 84 mode requires exact gfx1030 or gfx1201".to_owned());
         }
         _ => {}
     }
@@ -2844,6 +3008,7 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
                 provider,
                 ..
             } => phase75_cases(production_shape, provider),
+            EvidenceMode::Phase84 { format, .. } => phase84_cases(format),
         };
         let mut cases = Vec::with_capacity(specs.len());
         for spec in specs {
@@ -2874,6 +3039,7 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         EvidenceMode::Phase70 { provider, .. } => Some(provider.kernel_id()),
         EvidenceMode::Phase74 { provider, .. } => Some(provider.kernel_id()),
         EvidenceMode::Phase75 { provider, .. } => Some(provider.kernel_id()),
+        EvidenceMode::Phase84 { .. } => None,
     };
     let candidate_case_count = cases
         .iter()
@@ -2950,6 +3116,7 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         EvidenceMode::Phase75 {
             production_shape, ..
         } => (Some(production_shape), None, Some(true)),
+        EvidenceMode::Phase84 { .. } => (Some(true), None, None),
     };
     Ok(Report {
         schema_version: mode.schema_version(),
@@ -3556,6 +3723,58 @@ fn main() -> ExitCode {
                 production_shape,
             })
         }
+        Some("phase84") => {
+            let mut repeats = 3_usize;
+            let mut repeat_seen = false;
+            let mut format = Format::Mxfp8;
+            let mut format_seen = false;
+            while let Some(argument) = arguments.next() {
+                match argument.as_str() {
+                    "--repeats" if !repeat_seen => {
+                        repeat_seen = true;
+                        let Some(value) = arguments.next() else {
+                            eprintln!("--repeats requires a value");
+                            return ExitCode::FAILURE;
+                        };
+                        repeats = match value.parse::<usize>() {
+                            Ok(value @ 2..=10) => value,
+                            Ok(_) => {
+                                eprintln!("Phase 84 repeats must be between 2 and 10");
+                                return ExitCode::FAILURE;
+                            }
+                            Err(error) => {
+                                eprintln!("invalid Phase 84 repeat count: {error}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    }
+                    "--format" if !format_seen => {
+                        format_seen = true;
+                        let Some(value) = arguments.next() else {
+                            eprintln!("--format requires mxfp8 or mxfp6");
+                            return ExitCode::FAILURE;
+                        };
+                        format = match value.as_str() {
+                            "mxfp8" | "mx8" => Format::Mxfp8,
+                            "mxfp6" | "mx6" => Format::Mxfp6,
+                            _ => {
+                                eprintln!(
+                                    "invalid Phase 84 format {value}; expected mxfp8 or mxfp6"
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    }
+                    _ => {
+                        eprintln!(
+                            "invalid Phase 84 argument {argument}; expected --format mxfp8|mxfp6 and optionally --repeats N"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            RequestedMode::Direct(EvidenceMode::Phase84 { repeats, format })
+        }
         Some("phase70-provider") => {
             let provider = match arguments.next().as_deref() {
                 Some("id45-gfx1201-pack4-n64-default") => Phase70Provider::Gfx1201Default,
@@ -3619,7 +3838,7 @@ fn main() -> ExitCode {
         }
         Some(value) => {
             eprintln!(
-                "invalid profile {value}; expected production, phase63, phase66, phase67-provider, phase69-provider, phase70-provider, phase74-provider, or phase75-provider"
+                "invalid profile {value}; expected production, phase63, phase66, phase67-provider, phase69-provider, phase70-provider, phase74-provider, phase75-provider, or phase84"
             );
             return ExitCode::FAILURE;
         }
@@ -4248,6 +4467,76 @@ mod tests {
                 invalid.normalized_size = (m * n) as u64;
                 invalid.target = target.to_owned();
                 assert!(validate_actual_dispatch(format, m, k, n, target, &invalid).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn phase84_case_matrix_covers_mtp_roles_and_selector_boundaries() {
+        for format in [Format::Mxfp8, Format::Mxfp6] {
+            let cases = phase84_cases(format);
+            assert_eq!(cases.len(), 15);
+            assert!(cases.iter().all(|case| case.format == format));
+            assert_eq!(
+                cases
+                    .iter()
+                    .filter(|case| case.m == 1)
+                    .map(|case| (case.k, case.n))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (10240, 5120),
+                    (5120, 12288),
+                    (5120, 1024),
+                    (5120, 1024),
+                    (6144, 5120),
+                    (5120, 17408),
+                    (17408, 5120),
+                    (32, 5),
+                    (96, 9),
+                ]
+            );
+            assert!(
+                cases[..7]
+                    .iter()
+                    .all(|case| matches!(case.oracle, OracleSelection::Full))
+            );
+            for m in [127, 128, 129] {
+                let case = cases
+                    .iter()
+                    .find(|case| case.m == m && case.n == 1024)
+                    .expect("prefix selector boundary case");
+                assert!(matches!(case.oracle, OracleSelection::BoundarySample));
+            }
+            assert!(cases.iter().any(|case| {
+                case.m == 128
+                    && case.k == 5120
+                    && case.n == 17408
+                    && matches!(case.oracle, OracleSelection::BoundarySample)
+            }));
+            let scale_case = cases
+                .iter()
+                .find(|case| case.case_id == Some("mtp-scale-boundary-m17-k96-n9"))
+                .expect("scale boundary case");
+            assert_eq!(
+                scale_case.phase,
+                if format == Format::Mxfp8 { 100 } else { 102 }
+            );
+        }
+    }
+
+    #[test]
+    fn phase84_m1_range_boundary_fixture_is_preserved_by_host_codecs() {
+        for format in [Format::Mxfp8, Format::Mxfp6] {
+            for (index, k) in [32_usize, 96].into_iter().enumerate() {
+                for (rows, phase) in [(1, 1840 + index), (5, 1851 + index)] {
+                    let source_words = matrix(rows, k, phase);
+                    let source: Vec<_> = source_words.iter().copied().map(from_bf16).collect();
+                    let quantized = format
+                        .quantize(&source, rows, k)
+                        .expect("range-boundary fixture quantizes");
+                    validate_phase84_m1_range_boundary(&source_words, &quantized, rows, k)
+                        .expect("activation and weight fixtures survive host codec");
+                }
             }
         }
     }

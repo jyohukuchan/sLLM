@@ -59,6 +59,7 @@ pub mod ministral3_semantics;
 mod ministral3_weights;
 mod model;
 mod moe;
+mod mtp_quantized_sidecar;
 mod mxfp;
 mod nvfp4;
 mod nvfp4_sidecar;
@@ -538,6 +539,11 @@ pub use moe::{
     SparseMoeRoutingContract, SparseMoeRoutingError, reference_gemma4_moe_route,
     reference_sparse_moe_route,
 };
+pub use mtp_quantized_sidecar::{
+    MtpQuantizedSidecarError, MtpQuantizedSidecarTensor, MtpWeightEncoding,
+    VerifiedQwen38MtpQuantizedSidecar, convert_qwen38_mtp_quantized_sidecar,
+    verify_qwen38_mtp_quantized_sidecar,
+};
 pub use mxfp::{
     MX_BLOCK_SIZE, MxElementFormat, MxError, QuantizedMx, decode_e3m2, decode_e8m0, decode_mxfp4,
     decode_mxfp6, decode_mxfp8, encode_e3m2, quantize_mxfp6_e3m2, quantize_mxfp8_e4m3,
@@ -635,7 +641,7 @@ pub use qwen_graph::{
     build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
     build_qwen35_nvfp4_graph, build_qwen35_nvfp4_graph_with_kv_cache_encoding,
     build_qwen35_unsloth_qwen38_nvfp4_graph, build_qwen38_nvfp4_mtp_graph,
-    build_qwen38_nvfp4_mtp_graph_with_token_count,
+    build_qwen38_nvfp4_mtp_graph_with_companion, build_qwen38_nvfp4_mtp_graph_with_token_count,
 };
 pub use qwen_mtp::{
     QWEN35_MTP_DRAFT_WIDTH, QWEN35_MTP_HIDDEN_SIZE, QWEN35_MTP_INTERMEDIATE_SIZE,

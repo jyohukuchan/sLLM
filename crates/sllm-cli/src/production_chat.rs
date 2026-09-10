@@ -161,6 +161,7 @@ impl SigintListenerV1 {
 struct ProductionChatConfigV1 {
     gguf: std::path::PathBuf,
     qwen38_artifact: Option<std::path::PathBuf>,
+    mtp_weights: Option<std::path::PathBuf>,
     derived_lock: Option<std::path::PathBuf>,
     device_index: u32,
     target: String,
@@ -224,6 +225,7 @@ fn is_production_flag(flag: &str) -> bool {
         flag,
         "--gguf"
             | "--qwen38-nvfp4"
+            | "--mtp-weights"
             | "--derived-lock"
             | "--device-index"
             | "--target"
@@ -249,6 +251,7 @@ fn split_args(
     }
     let mut gguf = None;
     let mut qwen38_artifact = None;
+    let mut mtp_weights = None;
     let mut derived_lock = None;
     let mut device_index = None;
     let mut target = None;
@@ -272,6 +275,9 @@ fn split_args(
                 "--gguf" if gguf.is_none() => gguf = Some(std::path::PathBuf::from(value)),
                 "--qwen38-nvfp4" if qwen38_artifact.is_none() => {
                     qwen38_artifact = Some(std::path::PathBuf::from(value))
+                }
+                "--mtp-weights" if mtp_weights.is_none() => {
+                    mtp_weights = Some(std::path::PathBuf::from(value))
                 }
                 "--derived-lock" if derived_lock.is_none() => {
                     derived_lock = Some(std::path::PathBuf::from(value))
@@ -332,9 +338,18 @@ fn split_args(
     if qwen38_artifact.is_none() && gguf.is_none() {
         return Err("chat requires --gguf or --qwen38-nvfp4".to_owned());
     }
+    if qwen38_artifact.is_none() && mtp_weights.is_some() {
+        return Err("--mtp-weights is supported only for --qwen38-nvfp4 chat".to_owned());
+    }
     if let Some(path) = qwen38_artifact.as_deref() {
         if !path.is_absolute() {
             return Err("--qwen38-nvfp4 artifact path must be absolute".to_owned());
+        }
+        if mtp_weights
+            .as_deref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return Err("--mtp-weights path must be absolute".to_owned());
         }
         if device_index != Some(0) || !matches!(target.as_deref(), Some("gfx1030" | "gfx1201")) {
             return Err(
@@ -351,6 +366,11 @@ fn split_args(
             .is_some_and(|width| width != 0 && width != sllm_core::QWEN38_MTP_DRAFT_WIDTH as u8)
         {
             return Err("Qwen3.8 MTP uses fixed draft width 2 (or 0 for target-only)".to_owned());
+        }
+        if mtp_weights.is_some() && mtp_draft_width == Some(0) {
+            return Err(
+                "--mtp-weights requires MTP draft execution; remove --mtp-draft-width 0".to_owned(),
+            );
         }
     } else if mtp_draft_width.is_some() {
         return Err("--mtp-draft-width is supported only for Qwen3.8 NVFP4 chat".to_owned());
@@ -405,6 +425,7 @@ fn split_args(
         ProductionChatConfigV1 {
             gguf,
             qwen38_artifact,
+            mtp_weights,
             derived_lock,
             device_index,
             target,
@@ -666,6 +687,7 @@ impl Qwen38CliChatBackend {
         let kv_cache_encoding = config.kv_cache_encoding.unwrap_or(KvCacheEncoding::Mxfp8E4);
         let backend = QwenChatBackendV1::open_unsloth_qwen38_nvfp4(Qwen38Nvfp4BackendConfigV1 {
             artifact_root: artifact_root.clone(),
+            mtp_weights: config.mtp_weights.clone(),
             device_index: config.device_index,
             target: config.target.clone(),
             completion_timeout: Duration::from_secs(config.completion_timeout_seconds),
@@ -1264,6 +1286,21 @@ mod tests {
             config.context_length,
             u32::try_from(QWEN35_RECOMMENDED_CONTEXT_TOKENS).unwrap()
         );
+        let args = [
+            "--qwen38-nvfp4",
+            "/models/qwen38",
+            "--mtp-weights",
+            "/models/qwen38-mtp-mxfp8",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx1030",
+        ];
+        let (config, _) = split_args(args.into_iter().map(str::to_owned)).unwrap();
+        assert_eq!(
+            config.mtp_weights,
+            Some(std::path::PathBuf::from("/models/qwen38-mtp-mxfp8"))
+        );
     }
 
     #[test]
@@ -1302,6 +1339,34 @@ mod tests {
         ];
         let error = split_args(args.into_iter().map(str::to_owned)).unwrap_err();
         assert!(error.contains("fixed draft width 2"));
+        let args = [
+            "--gguf",
+            "/models/qwen.gguf",
+            "--derived-lock",
+            "/models/qwen.lock",
+            "--mtp-weights",
+            "/models/qwen38-mtp-mxfp8",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx942",
+        ];
+        let error = split_args(args.into_iter().map(str::to_owned)).unwrap_err();
+        assert!(error.contains("only for --qwen38-nvfp4"));
+        let args = [
+            "--qwen38-nvfp4",
+            "/models/qwen38",
+            "--mtp-weights",
+            "/models/qwen38-mtp-mxfp8",
+            "--mtp-draft-width",
+            "0",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx1030",
+        ];
+        let error = split_args(args.into_iter().map(str::to_owned)).unwrap_err();
+        assert!(error.contains("requires MTP draft execution"));
     }
 
     #[test]

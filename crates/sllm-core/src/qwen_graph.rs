@@ -2183,6 +2183,31 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_token_count(
     kv_cache_encoding: crate::KvCacheEncoding,
     token_count: u64,
 ) -> Result<QwenGraph, QwenGraphError> {
+    build_qwen38_nvfp4_mtp_graph_with_companion(
+        lock,
+        plan,
+        artifact,
+        state_capacity,
+        kv_cache_encoding,
+        token_count,
+        None,
+    )
+}
+
+/// Build the one-layer Qwen3.8 companion graph, optionally replacing the
+/// eight matrix weights with a verified MXFP8/MXFP6 sidecar.  The shared
+/// embedding and output projection remain bound to the reviewed artifact;
+/// companion quantization is limited to the eight two-dimensional MTP
+/// matrices and never changes norm or KV encodings.
+pub fn build_qwen38_nvfp4_mtp_graph_with_companion(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    artifact: &VerifiedUnslothQwen38Nvfp4,
+    state_capacity: u64,
+    kv_cache_encoding: crate::KvCacheEncoding,
+    token_count: u64,
+    companion: Option<&crate::VerifiedQwen38MtpQuantizedSidecar>,
+) -> Result<QwenGraph, QwenGraphError> {
     if token_count == 0 {
         return Err(QwenGraphError::ZeroTokenCount);
     }
@@ -2228,6 +2253,87 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_token_count(
             qwen38_fp8_projection_encoding(),
         );
     }
+    if let Some(companion) = companion {
+        const MTP_MATRIX_NAMES: [&str; 8] = [
+            "mtp.fc.weight",
+            "mtp.layers.0.mlp.down_proj.weight",
+            "mtp.layers.0.mlp.gate_proj.weight",
+            "mtp.layers.0.mlp.up_proj.weight",
+            "mtp.layers.0.self_attn.k_proj.weight",
+            "mtp.layers.0.self_attn.o_proj.weight",
+            "mtp.layers.0.self_attn.q_proj.weight",
+            "mtp.layers.0.self_attn.v_proj.weight",
+        ];
+        if companion.source_lock_fingerprint() != lock.fingerprint()
+            || companion.base_recipe_digest() != artifact.recipe_digest()
+        {
+            return Err(QwenGraphError::InvalidPlan(
+                "Qwen3.8 MTP companion source or base recipe identity differs".to_owned(),
+            ));
+        }
+        let expected_names = MTP_MATRIX_NAMES.into_iter().collect::<BTreeSet<_>>();
+        let observed_names = companion
+            .tensors()
+            .map(|tensor| tensor.name.as_str())
+            .collect::<BTreeSet<_>>();
+        if observed_names != expected_names {
+            return Err(QwenGraphError::InvalidPlan(
+                "Qwen3.8 MTP companion matrix name set differs".to_owned(),
+            ));
+        }
+        let encoding = match companion.encoding() {
+            crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => Encoding::Mxfp8W8A8 {
+                block_size: 32,
+                scale_dtype: DType::U8,
+            },
+            crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => Encoding::Mxfp6W6A6 {
+                block_size: 32,
+                scale_dtype: DType::U8,
+            },
+            crate::MtpWeightEncoding::Bf16 => {
+                return Err(QwenGraphError::InvalidPlan(
+                    "Qwen3.8 MTP companion encoding must be MXFP8 or MXFP6".to_owned(),
+                ));
+            }
+        };
+        for name in MTP_MATRIX_NAMES {
+            let sidecar_tensor = companion.tensor(name).ok_or_else(|| {
+                QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 MTP companion tensor is absent: {name}"
+                ))
+            })?;
+            let artifact_tensor = artifact.tensor(name).ok_or_else(|| {
+                QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 MTP artifact tensor is absent: {name}"
+                ))
+            })?;
+            if artifact_tensor.encoding != crate::QuantizedTensorEncoding::UnquantizedBf16
+                || artifact_tensor.logical_shape.as_slice()
+                    != sidecar_tensor.logical_shape.as_slice()
+                || sidecar_tensor.logical_shape[1] % 32 != 0
+            {
+                return Err(QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 MTP companion tensor shape or source differs: {name}"
+                )));
+            }
+            fp8_tensor_names.insert(name.to_owned());
+            quantized_weight_encodings.insert(name.to_owned(), encoding);
+        }
+    }
+    let fp8_dtype = if companion.is_some_and(|sidecar| {
+        matches!(
+            sidecar.encoding(),
+            crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0
+        )
+    }) || (!dimensions.tied_embeddings && !fp8_tensor_names.is_empty())
+    {
+        Some(DType::F8E4M3Fn)
+    } else {
+        None
+    };
+    let fp8_sidecar_fingerprint = companion
+        .map(|sidecar| sidecar.combined_recipe_digest(artifact.recipe_digest()))
+        .or_else(|| Some(artifact.recipe_digest().to_owned()));
     GraphBuilder::new(GraphBuilderConfig {
         layer_types: lock.model.architecture.text_config.layer_types.clone(),
         dimensions,
@@ -2238,10 +2344,10 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_token_count(
         model_fingerprint: lock.fingerprint().to_owned(),
         plan_digest: *plan.digest(),
         fp8_tensor_names,
-        fp8_dtype: (!dimensions.tied_embeddings).then_some(DType::F8E4M3Fn),
+        fp8_dtype,
         quantized_weight_encoding: None,
         quantized_weight_encodings,
-        fp8_sidecar_fingerprint: Some(artifact.recipe_digest().to_owned()),
+        fp8_sidecar_fingerprint,
         kv_cache_encoding,
         mtp: true,
         multimodal: false,

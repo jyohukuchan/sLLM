@@ -26,8 +26,9 @@ use sllm_core::{
     QwenResidentModel, SamplerChainConfigV1, SamplerChainV1, SamplingParametersV1,
     UNSLOTH_QWEN38_NVFP4_MODEL_SHA256, UNSLOTH_QWEN38_NVFP4_MODEL_SIZE,
     UNSLOTH_QWEN38_NVFP4_REPOSITORY, UNSLOTH_QWEN38_NVFP4_REVISION,
-    build_qwen35_unsloth_qwen38_nvfp4_graph, build_qwen38_nvfp4_mtp_graph,
-    build_qwen38_nvfp4_mtp_weight_load_plan, build_qwen38_nvfp4_weight_load_plan, read_model_lock,
+    VerifiedQwen38MtpQuantizedSidecar, build_qwen35_unsloth_qwen38_nvfp4_graph,
+    build_qwen38_nvfp4_mtp_graph_with_companion, build_qwen38_nvfp4_mtp_weight_load_plan,
+    build_qwen38_nvfp4_weight_load_plan, read_model_lock, verify_qwen38_mtp_quantized_sidecar,
     verify_unsloth_qwen38_nvfp4,
 };
 use sllm_frontend::{
@@ -54,6 +55,7 @@ const PHASE83_REPLAY_ENV: &str = "SLLM_PHASE83_REPLAY";
 const PHASE83_FIXTURE_ONLY: &str = "SLLM_PHASE83_FIXTURE_ONLY";
 const PHASE83_MTP_ENV: &str = "SLLM_PHASE83_MTP";
 const PHASE83_MTP_WIDTH_ENV: &str = "SLLM_PHASE83_MTP_WIDTH";
+const PHASE84_MTP_COMPANION_PATH_ENV: &str = "SLLM_PHASE84_MTP_COMPANION_PATH";
 
 const DEFAULT_WARMUPS: usize = 3;
 const DEFAULT_MEASURED: usize = 10;
@@ -245,7 +247,15 @@ impl MtpConfig {
         parse_mtp_config(mode.as_deref(), width.as_deref())
     }
 
-    fn report(self) -> MtpReport {
+    fn report(
+        self,
+        companion: Option<&VerifiedQwen38MtpQuantizedSidecar>,
+        base_recipe_digest: &str,
+    ) -> MtpReport {
+        let companion_encoding =
+            companion.map(|sidecar| sidecar.encoding().manifest_name().to_owned());
+        let companion_digest =
+            companion.map(|sidecar| sidecar.combined_recipe_digest(base_recipe_digest));
         if self.enabled {
             MtpReport {
                 requested: true,
@@ -254,6 +264,8 @@ impl MtpConfig {
                 execution: "fixed_gpu_sampler_speculative",
                 contract: "Qwen3.8 companion resident and fixed GPU-selector speculative executor are active",
                 timing_contract: "prefill_ns must include target prefill and MTP prefix draft priming; decode_ns includes proposal, verify, sampling, accept/reject, replay, and commit",
+                companion_encoding,
+                companion_digest,
             }
         } else {
             MtpReport {
@@ -263,6 +275,8 @@ impl MtpConfig {
                 execution: "disabled",
                 contract: "no MTP plan, graph, resident, or executor is constructed",
                 timing_contract: "MTP timing fields are absent while the baseline path is disabled",
+                companion_encoding,
+                companion_digest,
             }
         }
     }
@@ -372,6 +386,8 @@ fn build_mtp_run_report(
         draft_bf16_row_concat_count: 0,
         draft_fallback_used: false,
         draft_all_dispatches_hip: true,
+        mtp_prefix_priming_wall_ns: 0,
+        mtp_decode_proposal_wall_ns: 0,
     })
 }
 
@@ -391,6 +407,7 @@ struct Config {
     fixture_kind: PromptFixtureKind,
     kv_cache: KvCacheEncoding,
     mtp: MtpConfig,
+    mtp_companion_path: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -424,6 +441,8 @@ struct MtpReport {
     execution: &'static str,
     contract: &'static str,
     timing_contract: &'static str,
+    companion_encoding: Option<String>,
+    companion_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -447,6 +466,12 @@ struct MtpRunReport {
     draft_bf16_row_concat_count: u64,
     draft_fallback_used: bool,
     draft_all_dispatches_hip: bool,
+    /// Host elapsed wall time around MTP prefix priming; this is not a sum of
+    /// device kernel timestamps.
+    mtp_prefix_priming_wall_ns: u64,
+    /// Host elapsed wall time around MTP draft forward and sampling proposals;
+    /// target verification, replay, and waiting are excluded.
+    mtp_decode_proposal_wall_ns: u64,
 }
 
 #[derive(Serialize)]
@@ -628,6 +653,13 @@ fn process_cpu_ticks(enabled: bool) -> Option<u64> {
     parse_process_cpu_ticks(&fs::read_to_string("/proc/self/stat").ok()?)
 }
 
+/// Convert a host wall-clock duration to the bounded JSON representation used
+/// by benchmark reports. This is elapsed host time, never a kernel timestamp
+/// sum.
+fn duration_nanos_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
 fn parse_process_cpu_ticks(stat: &str) -> Option<u64> {
     // comm can contain spaces and parentheses; fields following its last ')'
     // start at state (field 3). utime/stime are fields 14/15.
@@ -780,7 +812,8 @@ impl Config {
                 || env::var_os(PHASE83_SAMPLING_ENV).is_some()
                 || env::var_os(PHASE83_REPLAY_ENV).is_some()
                 || env::var_os(PHASE83_MTP_ENV).is_some()
-                || env::var_os(PHASE83_MTP_WIDTH_ENV).is_some())
+                || env::var_os(PHASE83_MTP_WIDTH_ENV).is_some()
+                || env::var_os(PHASE84_MTP_COMPANION_PATH_ENV).is_some())
         {
             return Err(format!(
                 "{PHASE83_MODE_ENV} must enable coding8192 before Phase83 settings are used"
@@ -852,6 +885,23 @@ impl Config {
         } else {
             MtpConfig::disabled()
         };
+        let mtp_companion_path = match env::var_os(PHASE84_MTP_COMPANION_PATH_ENV) {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                if !path.is_absolute() {
+                    return Err(format!(
+                        "{PHASE84_MTP_COMPANION_PATH_ENV} must be an absolute sidecar directory"
+                    ));
+                }
+                if !mtp.enabled {
+                    return Err(format!(
+                        "{PHASE84_MTP_COMPANION_PATH_ENV} requires {PHASE83_MTP_ENV}=on"
+                    ));
+                }
+                Some(path)
+            }
+            None => None,
+        };
         let sampling = if phase83 {
             SamplingBench::from_phase83_env()?
         } else {
@@ -881,6 +931,7 @@ impl Config {
             },
             kv_cache,
             mtp,
+            mtp_companion_path,
         })
     }
 
@@ -929,6 +980,20 @@ fn run(config: Config) -> Result<Report, String> {
     let lock_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/models/locks/qwen3.5-27b-bf16.json");
     let lock = read_model_lock(&lock_path).map_err(|error| error.to_string())?;
+    let mtp_companion = config
+        .mtp_companion_path
+        .as_ref()
+        .map(|directory| {
+            verify_qwen38_mtp_quantized_sidecar(
+                &lock,
+                &artifact,
+                &directory.join("manifest.json"),
+                &directory.join("payload.safetensors"),
+            )
+            .map(Arc::new)
+            .map_err(|error| format!("Qwen3.8 MTP companion verification failed: {error}"))
+        })
+        .transpose()?;
     let plan =
         build_qwen38_nvfp4_weight_load_plan(&lock, &artifact).map_err(|error| error.to_string())?;
     let plan_digest = plan.digest_hex();
@@ -955,12 +1020,14 @@ fn run(config: Config) -> Result<Report, String> {
     };
     let mtp_graph = if let Some(plan) = mtp_plan.as_ref() {
         Some(
-            build_qwen38_nvfp4_mtp_graph(
+            build_qwen38_nvfp4_mtp_graph_with_companion(
                 &lock,
                 plan,
                 &artifact,
                 config.state_capacity,
                 config.kv_cache,
+                1_024,
+                mtp_companion.as_deref(),
             )
             .map_err(|error| format!("Qwen3.8 MTP companion graph failed: {error}"))?,
         )
@@ -995,6 +1062,7 @@ fn run(config: Config) -> Result<Report, String> {
                 graph.clone(),
                 plan.clone(),
                 Arc::clone(&artifact),
+                mtp_companion.clone(),
             )?),
             (None, None) => None,
             _ => return Err("MTP companion plan/graph are only partially initialized".to_owned()),
@@ -1089,7 +1157,9 @@ fn run(config: Config) -> Result<Report, String> {
             model_sha256: UNSLOTH_QWEN38_NVFP4_MODEL_SHA256,
         },
         sampling: config.sampling,
-        mtp: config.mtp.report(),
+        mtp: config
+            .mtp
+            .report(mtp_companion.as_deref(), artifact.recipe_digest()),
         protocol: ProtocolReport {
             active_requests: 1,
             parallel_requests: 1,
@@ -1169,12 +1239,14 @@ fn provision_qwen38_mtp_resident(
     graph: sllm_core::QwenGraph,
     plan: sllm_core::WeightLoadPlan,
     artifact: Arc<sllm_core::VerifiedUnslothQwen38Nvfp4>,
+    companion: Option<Arc<VerifiedQwen38MtpQuantizedSidecar>>,
 ) -> Result<QwenResidentModel, String> {
-    QwenResidentModel::new_unsloth_qwen38_nvfp4_mtp_shared(
+    QwenResidentModel::new_unsloth_qwen38_nvfp4_mtp_shared_with_companion(
         target,
         graph,
         plan,
         artifact,
+        companion,
         COMPLETION_TIMEOUT,
     )
     .map_err(|error| format!("Qwen3.8 MTP resident construction failed: {error}"))
@@ -1770,6 +1842,10 @@ fn run_one_mtp(
     mtp_report.draft_bf16_row_concat_count = draft_audit.bf16_row_concat_count();
     mtp_report.draft_fallback_used = draft_audit.fallback_used();
     mtp_report.draft_all_dispatches_hip = draft_audit.all_dispatches_hip();
+    mtp_report.mtp_prefix_priming_wall_ns =
+        duration_nanos_u64(executor.mtp_prefix_priming_wall_time());
+    mtp_report.mtp_decode_proposal_wall_ns =
+        duration_nanos_u64(executor.mtp_decode_proposal_wall_time());
     let audit = audit_report(&target_audit);
     let request_memory = request_memory_report(
         &executor
@@ -2492,7 +2568,7 @@ where
 }
 
 fn selector_environment() -> BTreeMap<String, Option<String>> {
-    const NAMES: [&str; 72] = [
+    const NAMES: [&str; 73] = [
         "SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8",
         "SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED",
         "SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED",
@@ -2512,6 +2588,7 @@ fn selector_environment() -> BTreeMap<String, Option<String>> {
         PHASE83_FIXTURE_ONLY,
         PHASE83_MTP_ENV,
         PHASE83_MTP_WIDTH_ENV,
+        PHASE84_MTP_COMPANION_PATH_ENV,
         "SLLM_MATMUL_FORCE_BASELINE",
         "SLLM_MATMUL_GFX1030_ROCBLAS_SOLUTION_445",
         "SLLM_MATMUL_GFX1030_SHORT_MIXED",
@@ -2679,7 +2756,7 @@ mod tests {
         assert_eq!(
             parse_mtp_config(Some("on"), Some("3"))
                 .unwrap()
-                .report()
+                .report(None, "test")
                 .supported_draft_widths,
             [1, 2, 3]
         );
