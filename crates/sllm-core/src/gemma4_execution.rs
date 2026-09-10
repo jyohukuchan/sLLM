@@ -25,8 +25,9 @@ use crate::prepared_execution::{
     ExecutionAuditAccumulator, ExecutionBoundaryKind, ExecutionSegment,
     PREPARED_DEFERRED_COMPLETION_ENV, PREPARED_PROJECTION_SHARING_ENV, PreparedCachePolicy,
     PreparedCompletionMode, PreparedDynamicIdentity, PreparedExecutionAudit, PreparedSemanticCache,
-    prepared_deferred_completion_scope_enabled, prepared_projection_pair_compatible,
-    prepared_projection_sharing_enabled, require_terminal_success,
+    prepared_deferred_completion_scope_enabled, prepared_nvfp4_shared_activation_rows,
+    prepared_projection_pair_compatible, prepared_projection_sharing_enabled,
+    require_terminal_success,
 };
 use crate::session_checkpoint::{
     CheckpointIdentity, CheckpointPayload, OpaqueStatePlane, SessionCheckpoint,
@@ -4604,7 +4605,7 @@ impl Gemma4ProvisionedBuffers {
                 } else {
                     node.descriptor.kind() == expected_kind
                 };
-                let semantic_label = if projection_pack_first.is_some() {
+                let mut semantic_label = if projection_pack_first.is_some() {
                     format!("{}.qwen38_projection_pack2", graph_node.label())
                 } else {
                     graph_node.label().to_owned()
@@ -4753,7 +4754,6 @@ impl Gemma4ProvisionedBuffers {
                         .retain_semantic(format!("{}.kv_append", graph_node.label()), submission);
                 }
 
-                let operation = self.bind_node(layout, node)?;
                 let cache_policy = if node.descriptor.kind() == SemanticOpKind::CausalAttention {
                     PreparedCachePolicy::Transient
                 } else {
@@ -4762,15 +4762,37 @@ impl Gemma4ProvisionedBuffers {
                         0,
                     ))
                 };
-                let mut submission =
-                    self.submit_bound(operation, queue, cache_policy)
-                        .map_err(|error| {
-                            Gemma4ExecutionLayoutError::invalid(format!(
-                                "{} submit failed: {error}",
-                                graph_node.label()
-                            ))
-                        })?;
+                let (mut submission, projection_pack_used) =
+                    if let Some(second) = projection_pack_first {
+                        self.submit_projection_pack_with_fallback(
+                            layout,
+                            node,
+                            second,
+                            queue,
+                            cache_policy,
+                            &mut pending,
+                            graph_node.label(),
+                        )?
+                    } else {
+                        let operation = self.bind_node(layout, node)?;
+                        (
+                            self.submit_bound(operation, queue, cache_policy)
+                                .map_err(|error| {
+                                    Gemma4ExecutionLayoutError::invalid(format!(
+                                        "{} submit failed: {error}",
+                                        graph_node.label()
+                                    ))
+                                })?,
+                            false,
+                        )
+                    };
                 if let Some(second) = projection_pack_first {
+                    if !projection_pack_used {
+                        semantic_label = format!(
+                            "{}.qwen38_projection_pack2.decomposed.up",
+                            graph_node.label()
+                        );
+                    }
                     projection_pack_skip = Some(second);
                 }
                 let boundary = planned.boundary_after();
@@ -5268,6 +5290,69 @@ impl Gemma4ProvisionedBuffers {
         Ok(values)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn submit_projection_pack_with_fallback(
+        &self,
+        layout: &Gemma4ExecutionLayout,
+        pack_node: &Gemma4ExecutionNode,
+        up_node_id: usize,
+        queue: &ExecutionQueue,
+        cache_policy: PreparedCachePolicy,
+        pending: &mut ExecutionSegment,
+        label: &str,
+    ) -> Result<(crate::Submission, bool), Gemma4ExecutionLayoutError> {
+        let pack_operation = self.bind_node(layout, pack_node)?;
+        if let Some(submission) =
+            self.submit_bound_with_prepare_fallback(pack_operation, queue, cache_policy)?
+        {
+            return Ok((submission, true));
+        }
+
+        if pack_node.inputs.len() != 3 || pack_node.outputs.len() != 2 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "projection-pack fallback has invalid arity",
+            ));
+        }
+        let gate_descriptor = SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            vec![
+                pack_node.descriptor.inputs()[0].clone(),
+                pack_node.descriptor.inputs()[1].clone(),
+            ],
+            vec![pack_node.descriptor.outputs()[0].clone()],
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let gate_operation = BoundSemanticOp::new(
+            Arc::new(gate_descriptor),
+            vec![
+                self.bind(layout, pack_node.inputs[0], AccessMode::Read)?,
+                self.bind(layout, pack_node.inputs[1], AccessMode::Read)?,
+            ],
+            vec![self.bind(layout, pack_node.outputs[0], AccessMode::Write)?],
+        )
+        .map(Arc::new)
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let gate_submission = self.submit_bound(gate_operation, queue, cache_policy)?;
+        pending.retain_semantic(
+            format!("{label}.qwen38_projection_pack2.decomposed.gate"),
+            gate_submission,
+        );
+
+        let up_node = layout.nodes.get(up_node_id).ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("projection-pack fallback up node is absent")
+        })?;
+        if up_node.graph_node_id != up_node_id
+            || up_node.descriptor.kind() != SemanticOpKind::Matmul
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "projection-pack fallback up node is not an ordinary matmul",
+            ));
+        }
+        let up_operation = self.bind_node(layout, up_node)?;
+        let up_submission = self.submit_bound(up_operation, queue, cache_policy)?;
+        Ok((up_submission, false))
+    }
+
     fn submit_bound(
         &self,
         operation: Arc<BoundSemanticOp>,
@@ -5295,6 +5380,35 @@ impl Gemma4ProvisionedBuffers {
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         self.session
             .submit(&prepared, queue)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
+    }
+
+    fn submit_bound_with_prepare_fallback(
+        &self,
+        operation: Arc<BoundSemanticOp>,
+        queue: &ExecutionQueue,
+        cache_policy: PreparedCachePolicy,
+    ) -> Result<Option<crate::Submission>, Gemma4ExecutionLayoutError> {
+        match self.session.supports(operation.descriptor()) {
+            PrepareSupport::Supported => {}
+            PrepareSupport::Unsupported { .. } => return Ok(None),
+        }
+        let prepared = match self.prepared_semantics.prepare(
+            self.session.as_ref(),
+            operation.descriptor().as_ref().clone(),
+            operation.inputs().to_vec(),
+            operation.outputs().to_vec(),
+            cache_policy,
+        ) {
+            Ok(prepared) => prepared,
+            Err(crate::PreparedExecutionError::Execution(crate::ExecutionError::Unsupported {
+                ..
+            })) => return Ok(None),
+            Err(error) => return Err(Gemma4ExecutionLayoutError::invalid(error.to_string())),
+        };
+        self.session
+            .submit(&prepared, queue)
+            .map(Some)
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
     }
 }
@@ -5836,6 +5950,41 @@ fn validate_gemma_projection_share_pairs(
         }
     }
     Ok(())
+}
+
+/// The existing NVFP4 ProjectionPack provider accepts these runtime row
+/// counts. Keep this check at the adapter boundary so unsupported rows use
+/// the ordinary gate/up matmuls without changing the native ABI or kernel
+/// selection. K is the only alignment requirement in the provider contract;
+/// N is required to be non-zero and both extents must fit the current dynamic
+/// contract fields.
+fn gemma_projection_pack_shape_supported(m: usize, k: usize, n: usize) -> bool {
+    u64::try_from(m)
+        .ok()
+        .is_some_and(prepared_nvfp4_shared_activation_rows)
+        && k != 0
+        && k % 16 == 0
+        && n != 0
+        && k <= u32::MAX as usize
+        && n <= u32::MAX as usize
+}
+
+fn gemma_projection_pack_candidate_enabled(
+    first_source: usize,
+    second_source: usize,
+    first: &SemanticOpDescriptor,
+    second: &SemanticOpDescriptor,
+) -> bool {
+    if first_source != second_source || !prepared_projection_pair_compatible(first, second) {
+        return false;
+    }
+    let activation = &first.inputs()[0];
+    let weight = &first.inputs()[1];
+    gemma_projection_pack_shape_supported(
+        activation.shape()[0],
+        activation.shape()[1],
+        weight.shape()[0],
+    )
 }
 
 fn gemma_projection_pack_target_enabled(backend_name: &str, expected_target: Option<&str>) -> bool {
@@ -6437,7 +6586,7 @@ impl<'a> LayoutBuilder<'a> {
         node_id: usize,
         up_id: usize,
     ) -> Result<Option<(usize, usize)>, Gemma4ExecutionLayoutError> {
-        if !self.allow_projection_pack || self.graph.token_count() != 1 {
+        if !self.allow_projection_pack {
             return Ok(None);
         }
         let (gate_name, up_name) = match (
@@ -6469,7 +6618,8 @@ impl<'a> LayoutBuilder<'a> {
             return Ok(None);
         }
         let source = self.predecessor_output(node_id, 0, 0)?;
-        if self.predecessor_output(up_id, 0, 0)? != source {
+        let up_source = self.predecessor_output(up_id, 0, 0)?;
+        if up_source != source {
             return Ok(None);
         }
         let gate_weight = self.weight(gate_name)?;
@@ -6515,6 +6665,9 @@ impl<'a> LayoutBuilder<'a> {
         let n = gate_view.shape()[0];
         let input = self.projection_input(node_id, source, k)?;
         let m = self.tensor(input)?.view.shape()[0];
+        if !gemma_projection_pack_shape_supported(m, k, n) {
+            return Ok(None);
+        }
         let gate_output = self.workspace(
             format!("{}.output", self.graph.nodes()[node_id].label()),
             contiguous_usize(DType::Bf16, &[m, n])?,
@@ -6535,7 +6688,7 @@ impl<'a> LayoutBuilder<'a> {
             self.views(&[up_output])?,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        if !prepared_projection_pair_compatible(&gate_matmul, &up_matmul) {
+        if !gemma_projection_pack_candidate_enabled(source, up_source, &gate_matmul, &up_matmul) {
             return Ok(None);
         }
         let contract = crate::Qwen38ProjectionPackContractV1::nvfp4_mlp_gate_up_with_shape(
@@ -7032,8 +7185,282 @@ fn f32_to_bf16_rne(value: f32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{build_gemma4_graph, build_gemma4_weight_load_plan, parse_gemma4_model_lock};
+    use crate::{
+        BufferRange, DispatchEvidence, PreparedOperation, build_gemma4_graph,
+        build_gemma4_weight_load_plan, parse_gemma4_model_lock,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[derive(Clone, Copy)]
+    enum ProjectionFallbackMode {
+        SupportUnsupported,
+        PrepareUnsupported,
+        SubmitFailure,
+    }
+
+    struct ProjectionFallbackSubmission;
+
+    impl crate::ExecutionSubmissionAdapter for ProjectionFallbackSubmission {
+        fn query(&mut self) -> Result<ExecutionState, crate::ExecutionError> {
+            Ok(ExecutionState::Success)
+        }
+
+        fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, crate::ExecutionError> {
+            Ok(ExecutionState::Success)
+        }
+
+        fn start_output_readback(
+            &mut self,
+            _access: &crate::ExecutionAdapterAccess<'_>,
+            _output: &OwnedTensorBinding,
+        ) -> Result<Box<dyn crate::ExecutionReadbackAdapter>, crate::ExecutionError> {
+            Err(crate::ExecutionError::Unsupported {
+                reason: "projection fallback test does not read output".to_owned(),
+            })
+        }
+    }
+
+    struct ProjectionFallbackTransfer;
+
+    impl crate::ExecutionTransferAdapter for ProjectionFallbackTransfer {
+        fn query(&mut self) -> Result<ExecutionState, crate::ExecutionError> {
+            Ok(ExecutionState::Success)
+        }
+
+        fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, crate::ExecutionError> {
+            Ok(ExecutionState::Success)
+        }
+    }
+
+    struct ProjectionFallbackReadback;
+
+    impl crate::ExecutionReadbackAdapter for ProjectionFallbackReadback {
+        fn query(&mut self) -> Result<ExecutionState, crate::ExecutionError> {
+            Ok(ExecutionState::Success)
+        }
+
+        fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, crate::ExecutionError> {
+            Ok(ExecutionState::Success)
+        }
+
+        fn read_into(&mut self, destination: &mut [u8]) -> Result<u64, crate::ExecutionError> {
+            destination.fill(0);
+            Ok(u64::try_from(destination.len()).unwrap())
+        }
+    }
+
+    struct ProjectionFallbackAdapter {
+        mode: ProjectionFallbackMode,
+        prepare_count: AtomicUsize,
+        submit_count: AtomicUsize,
+    }
+
+    impl ProjectionFallbackAdapter {
+        fn new(mode: ProjectionFallbackMode) -> Self {
+            Self {
+                mode,
+                prepare_count: AtomicUsize::new(0),
+                submit_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl crate::ExecutionSessionAdapter for ProjectionFallbackAdapter {
+        fn max_transfer_bytes(&self) -> u64 {
+            4096
+        }
+
+        fn supports(&self, descriptor: &SemanticOpDescriptor) -> PrepareSupport {
+            if matches!(self.mode, ProjectionFallbackMode::SupportUnsupported)
+                && descriptor.kind() == SemanticOpKind::Qwen38ProjectionPack2
+            {
+                PrepareSupport::Unsupported {
+                    reason: "projection fallback test support rejection".to_owned(),
+                }
+            } else {
+                PrepareSupport::Supported
+            }
+        }
+
+        fn create_queue(
+            &self,
+            _access: &crate::ExecutionAdapterAccess<'_>,
+        ) -> Result<crate::AdapterResource, crate::ExecutionError> {
+            Ok(crate::AdapterResource::new(()))
+        }
+
+        fn allocate(
+            &self,
+            _access: &crate::ExecutionAdapterAccess<'_>,
+            _size_bytes: u64,
+        ) -> Result<crate::AdapterResource, crate::ExecutionError> {
+            Ok(crate::AdapterResource::new(()))
+        }
+
+        fn prepare(
+            &self,
+            _access: &crate::ExecutionAdapterAccess<'_>,
+            operation: &BoundSemanticOp,
+        ) -> Result<crate::AdapterResource, crate::ExecutionError> {
+            self.prepare_count.fetch_add(1, Ordering::Relaxed);
+            if operation.descriptor().kind() == SemanticOpKind::Qwen38ProjectionPack2
+                && matches!(self.mode, ProjectionFallbackMode::PrepareUnsupported)
+            {
+                return Err(crate::ExecutionError::Unsupported {
+                    reason: "projection fallback test prepare rejection".to_owned(),
+                });
+            }
+            Ok(crate::AdapterResource::new(()))
+        }
+
+        fn submit(
+            &self,
+            _access: &crate::ExecutionAdapterAccess<'_>,
+            prepared: &PreparedOperation,
+            _queue: &ExecutionQueue,
+        ) -> Result<
+            (Box<dyn crate::ExecutionSubmissionAdapter>, DispatchEvidence),
+            crate::ExecutionError,
+        > {
+            self.submit_count.fetch_add(1, Ordering::Relaxed);
+            if prepared.operation().descriptor().kind() == SemanticOpKind::Qwen38ProjectionPack2
+                && matches!(self.mode, ProjectionFallbackMode::SubmitFailure)
+            {
+                return Err(crate::ExecutionError::BackendStatus {
+                    status: 91,
+                    diagnostic: "projection fallback test submit failure".to_owned(),
+                });
+            }
+            Ok((
+                Box::new(ProjectionFallbackSubmission),
+                DispatchEvidence {
+                    abi_version: 1,
+                    info_version: 1,
+                    dispatch_id: 1,
+                    dispatch_count: 1,
+                    kernel_id: 1,
+                    workgroup_size_x: 1,
+                    grid_size_x: 1,
+                    row_count: 1,
+                    normalized_size: 1,
+                    backend: 1,
+                    fallback_allowed: false,
+                    fallback_used: false,
+                    kernel_symbol: "projection_fallback_test".to_owned(),
+                    device_symbol: "projection_fallback_test".to_owned(),
+                    target: "projection-fallback-test".to_owned(),
+                },
+            ))
+        }
+
+        fn upload(
+            &self,
+            _access: &crate::ExecutionAdapterAccess<'_>,
+            _queue: &ExecutionQueue,
+            _destination: &BufferRange,
+            _bytes: Arc<[u8]>,
+        ) -> Result<Box<dyn crate::ExecutionTransferAdapter>, crate::ExecutionError> {
+            Ok(Box::new(ProjectionFallbackTransfer))
+        }
+
+        fn readback(
+            &self,
+            _access: &crate::ExecutionAdapterAccess<'_>,
+            _queue: &ExecutionQueue,
+            _source: &BufferRange,
+        ) -> Result<Box<dyn crate::ExecutionReadbackAdapter>, crate::ExecutionError> {
+            Ok(Box::new(ProjectionFallbackReadback))
+        }
+
+        fn shutdown(
+            &self,
+            _access: &crate::ExecutionAdapterAccess<'_>,
+            _deadline: Duration,
+        ) -> Result<crate::ShutdownReport, crate::ExecutionError> {
+            Ok(crate::ShutdownReport {
+                retryable_cleanup: 0,
+                durable_quarantine: 0,
+            })
+        }
+    }
+
+    fn projection_pack_probe(
+        mode: ProjectionFallbackMode,
+    ) -> (
+        Arc<ProjectionFallbackAdapter>,
+        Gemma4ProvisionedBuffers,
+        Arc<BoundSemanticOp>,
+        ExecutionQueue,
+    ) {
+        let adapter = Arc::new(ProjectionFallbackAdapter::new(mode));
+        let session = Arc::new(ExecutionSession::new(
+            "projection-fallback-test",
+            adapter.clone(),
+        ));
+        let activation = TensorView::contiguous(DType::Bf16, &[2, 16]).unwrap();
+        let gate_weight = TensorView::with_encoding(
+            DType::U8,
+            Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            },
+            &[32, 16],
+        )
+        .unwrap();
+        let up_weight = gate_weight.clone();
+        let gate_output = TensorView::contiguous(DType::Bf16, &[2, 32]).unwrap();
+        let up_output = gate_output.clone();
+        let contract = crate::Qwen38ProjectionPackContractV1::nvfp4_mlp_gate_up_with_shape(
+            16,
+            32,
+            1.0_f32.to_bits(),
+        )
+        .unwrap();
+        let descriptor = Arc::new(
+            SemanticOpDescriptor::new_qwen38_projection_pack2(
+                vec![activation.clone(), gate_weight.clone(), up_weight.clone()],
+                vec![gate_output.clone(), up_output.clone()],
+                contract,
+            )
+            .unwrap(),
+        );
+        let views = [activation, gate_weight, up_weight, gate_output, up_output];
+        let buffers = views
+            .iter()
+            .map(|view| session.allocate(view.end_offset()).unwrap())
+            .collect::<Vec<_>>();
+        let operation = BoundSemanticOp::new(
+            descriptor,
+            vec![
+                session
+                    .bind(&buffers[0], views[0].clone(), AccessMode::Read)
+                    .unwrap(),
+                session
+                    .bind(&buffers[1], views[1].clone(), AccessMode::Read)
+                    .unwrap(),
+                session
+                    .bind(&buffers[2], views[2].clone(), AccessMode::Read)
+                    .unwrap(),
+            ],
+            vec![
+                session
+                    .bind(&buffers[3], views[3].clone(), AccessMode::Write)
+                    .unwrap(),
+                session
+                    .bind(&buffers[4], views[4].clone(), AccessMode::Write)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let queue = session.create_queue().unwrap();
+        let provisioned = Gemma4ProvisionedBuffers {
+            session,
+            buffers,
+            prepared_semantics: Arc::new(PreparedSemanticCache::default()),
+            device_sampling: Arc::new(Mutex::new(None)),
+        };
+        (adapter, provisioned, Arc::new(operation), queue)
+    }
     fn fixture(
         token_count: u64,
         start_position: u64,
@@ -7178,6 +7605,124 @@ mod tests {
                 "backend={backend} target={target:?}"
             );
         }
+    }
+
+    #[test]
+    fn projection_pack_candidate_accepts_gemma_source_and_native_rows() {
+        let activation = TensorView::contiguous(DType::Bf16, &[2, 3_840]).unwrap();
+        let weight = TensorView::with_encoding(
+            DType::U8,
+            Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            },
+            &[15_360, 3_840],
+        )
+        .unwrap();
+        let output = TensorView::contiguous(DType::Bf16, &[2, 15_360]).unwrap();
+        let gate = SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            vec![activation.clone(), weight.clone()],
+            vec![output.clone()],
+        )
+        .unwrap();
+        let up = SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            vec![activation, weight],
+            vec![output],
+        )
+        .unwrap();
+
+        // Gemma's K/N pair is intentionally different from the Qwen3.8
+        // convenience shape. The source IDs model the graph's shared
+        // predecessor and are part of the candidate contract.
+        assert!(gemma_projection_pack_candidate_enabled(17, 17, &gate, &up));
+        assert!(!gemma_projection_pack_candidate_enabled(17, 18, &gate, &up));
+        for rows in [1, 2, 3, 4, 64, 65] {
+            assert!(gemma_projection_pack_shape_supported(rows, 3_840, 15_360));
+        }
+        let contract = crate::Qwen38ProjectionPackContractV1::nvfp4_mlp_gate_up_with_shape(
+            3_840,
+            15_360,
+            1.25_f32.to_bits(),
+        )
+        .unwrap();
+        assert_eq!(contract.hidden_size(), 3_840);
+        assert_eq!(contract.intermediate_size(), 15_360);
+    }
+
+    #[test]
+    fn projection_pack_candidate_falls_back_for_unsupported_rows_or_shape() {
+        for (m, k, n) in [(5, 3_840, 15_360), (63, 3_840, 15_360), (2, 3_839, 15_360)] {
+            let activation = TensorView::contiguous(DType::Bf16, &[m, k]).unwrap();
+            let weight = TensorView::with_encoding(
+                DType::U8,
+                Encoding::Nvfp4W4A4 {
+                    block_size: 16,
+                    scale_dtype: DType::F8E4M3Fn,
+                },
+                &[n, k],
+            )
+            .unwrap();
+            let output = TensorView::contiguous(DType::Bf16, &[m, n]).unwrap();
+            let gate = SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![activation.clone(), weight.clone()],
+                vec![output.clone()],
+            )
+            .unwrap();
+            let up = SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![activation, weight],
+                vec![output],
+            )
+            .unwrap();
+            // A false candidate leaves the already validated pair as two
+            // ordinary matmuls; no pack descriptor is constructed.
+            assert!(!gemma_projection_pack_candidate_enabled(17, 17, &gate, &up));
+        }
+    }
+
+    #[test]
+    fn projection_pack_support_or_prepare_rejection_returns_fallback_signal() {
+        for mode in [
+            ProjectionFallbackMode::SupportUnsupported,
+            ProjectionFallbackMode::PrepareUnsupported,
+        ] {
+            let (adapter, provisioned, operation, queue) = projection_pack_probe(mode);
+            let result = provisioned
+                .submit_bound_with_prepare_fallback(
+                    operation,
+                    &queue,
+                    PreparedCachePolicy::Reusable(PreparedDynamicIdentity::stateless(2, 0)),
+                )
+                .unwrap();
+            assert!(result.is_none());
+            assert_eq!(adapter.submit_count.load(Ordering::Relaxed), 0);
+            match mode {
+                ProjectionFallbackMode::SupportUnsupported => {
+                    assert_eq!(adapter.prepare_count.load(Ordering::Relaxed), 0);
+                }
+                ProjectionFallbackMode::PrepareUnsupported => {
+                    assert_eq!(adapter.prepare_count.load(Ordering::Relaxed), 1);
+                }
+                ProjectionFallbackMode::SubmitFailure => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn projection_pack_submit_failure_does_not_return_fallback_signal() {
+        let (adapter, provisioned, operation, queue) =
+            projection_pack_probe(ProjectionFallbackMode::SubmitFailure);
+        let result = provisioned.submit_bound_with_prepare_fallback(
+            operation,
+            &queue,
+            PreparedCachePolicy::Reusable(PreparedDynamicIdentity::stateless(2, 0)),
+        );
+        assert!(result.is_err());
+        assert_eq!(adapter.prepare_count.load(Ordering::Relaxed), 1);
+        assert_eq!(adapter.submit_count.load(Ordering::Relaxed), 1);
     }
 
     #[test]

@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use crate::semantic_graph::ResidualRmsNormGraphNode;
 use crate::{
     DType, ExecutionBoundaryKind, OpError, RmsNormScaleMode, SemanticOpDescriptor, SemanticOpKind,
     TensorError, TensorView, WeightConsumer, WeightConsumerKey, WindowedCausalAttentionContract,
@@ -404,6 +405,12 @@ pub enum Ministral3GraphNodeKind {
     CausalGqa(WindowedCausalAttentionContract),
     SiluMul,
     Add,
+    ResidualRmsNorm {
+        role: Ministral3NormRole,
+        weight: WeightConsumerKey,
+        epsilon_bits: u32,
+        scale_mode: RmsNormScaleMode,
+    },
     Argmax,
 }
 
@@ -415,6 +422,7 @@ impl Ministral3GraphNodeKind {
             Self::Matmul { .. } => Some(SemanticOpKind::Matmul),
             Self::SiluMul => Some(SemanticOpKind::SiluMul),
             Self::Add => Some(SemanticOpKind::Add),
+            Self::ResidualRmsNorm { .. } => Some(SemanticOpKind::ResidualRmsNorm),
             Self::Argmax => Some(SemanticOpKind::Argmax),
             Self::View
             | Self::Reshape
@@ -426,9 +434,10 @@ impl Ministral3GraphNodeKind {
 
     pub const fn weight(&self) -> Option<WeightConsumerKey> {
         match self {
-            Self::Embedding { weight } | Self::RmsNorm { weight, .. } | Self::Matmul { weight } => {
-                Some(*weight)
-            }
+            Self::Embedding { weight }
+            | Self::RmsNorm { weight, .. }
+            | Self::ResidualRmsNorm { weight, .. }
+            | Self::Matmul { weight } => Some(*weight),
             _ => None,
         }
     }
@@ -485,6 +494,28 @@ impl Ministral3GraphNode {
     }
 }
 
+impl ResidualRmsNormGraphNode for Ministral3GraphNode {
+    fn semantic_operation(&self) -> Option<&SemanticOpDescriptor> {
+        self.operation.as_ref()
+    }
+
+    fn semantic_inputs(&self) -> &[usize] {
+        &self.inputs
+    }
+
+    fn semantic_outputs(&self) -> &[usize] {
+        &self.outputs
+    }
+
+    fn semantic_dependencies(&self) -> &[usize] {
+        &self.dependencies
+    }
+
+    fn semantic_boundary_after(&self) -> Option<ExecutionBoundaryKind> {
+        self.boundary_after
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Ministral3TextGraph {
     token_count: u64,
@@ -534,6 +565,130 @@ impl Ministral3TextGraph {
     /// This remains separate from per-target full-model GPU evidence.
     pub const fn has_production_executor(&self) -> bool {
         true
+    }
+
+    /// Fuse every safe semantic Add -> RMSNorm pair while retaining tensor
+    /// identities and model-specific state/boundary metadata.  Backend
+    /// support is checked by the normal execution entry before this graph is
+    /// adopted.
+    pub fn with_residual_rmsnorm_fusion(
+        &self,
+        enabled: bool,
+    ) -> Result<Self, Ministral3GraphError> {
+        if !enabled {
+            return Ok(self.clone());
+        }
+        let tensor_views = self
+            .tensors
+            .iter()
+            .map(|tensor| tensor.view.clone())
+            .collect::<Vec<_>>();
+        let plan = crate::semantic_graph::plan_residual_rmsnorm_rewrite(&self.nodes, &tensor_views);
+        if plan.is_empty() {
+            return Ok(self.clone());
+        }
+
+        let mut fused = Vec::with_capacity(self.nodes.len() - plan.pairs().count());
+        let mut old_to_new = vec![None; self.nodes.len()];
+        let mut cursor = 0usize;
+        while cursor < self.nodes.len() {
+            if let Some(pair) = plan.pair_for_add(cursor) {
+                let add = &self.nodes[pair.add_index()];
+                let norm = &self.nodes[pair.norm_index()];
+                let Ministral3GraphNodeKind::RmsNorm {
+                    role,
+                    weight,
+                    epsilon_bits,
+                    scale_mode,
+                } = &norm.kind
+                else {
+                    return Ok(self.clone());
+                };
+                let label = if norm.label == "final_norm" {
+                    norm.label.clone()
+                } else {
+                    format!("{}.fused", add.label)
+                };
+                old_to_new[pair.add_index()] = Some(fused.len());
+                old_to_new[pair.norm_index()] = Some(fused.len());
+                fused.push(Ministral3GraphNode {
+                    id: fused.len(),
+                    label,
+                    layer: add.layer.or(norm.layer),
+                    kind: Ministral3GraphNodeKind::ResidualRmsNorm {
+                        role: *role,
+                        weight: *weight,
+                        epsilon_bits: *epsilon_bits,
+                        scale_mode: *scale_mode,
+                    },
+                    operation: Some(pair.operation().clone()),
+                    inputs: pair.fused_inputs().to_vec(),
+                    outputs: pair.fused_outputs().to_vec(),
+                    dependencies: pair.dependencies().to_vec(),
+                    boundary_after: pair.boundary_after(),
+                });
+            } else if plan.is_norm_removed(cursor) {
+                cursor += 1;
+                continue;
+            } else {
+                old_to_new[cursor] = Some(fused.len());
+                let mut node = self.nodes[cursor].clone();
+                node.id = fused.len();
+                fused.push(node);
+            }
+            cursor += 1;
+        }
+
+        for (new_index, node) in fused.iter_mut().enumerate() {
+            for dependency in &mut node.dependencies {
+                let old = *dependency;
+                *dependency = old_to_new
+                    .get(old)
+                    .and_then(|mapped| *mapped)
+                    .ok_or(Ministral3GraphError::InvalidOrder)?;
+            }
+            node.dependencies.sort_unstable();
+            node.dependencies.dedup();
+            if node
+                .dependencies
+                .iter()
+                .any(|dependency| *dependency >= new_index)
+            {
+                return Err(Ministral3GraphError::InvalidOrder);
+            }
+        }
+
+        let mut tensors = self.tensors.clone();
+        for tensor in &mut tensors {
+            if tensor.class == Ministral3TensorClass::Activation {
+                tensor.writer = None;
+            }
+        }
+        for (node_id, node) in fused.iter().enumerate() {
+            for &output in &node.outputs {
+                let tensor =
+                    tensors
+                        .get_mut(output)
+                        .ok_or(Ministral3GraphError::InvalidTopology(
+                            "fused graph output tensor is absent",
+                        ))?;
+                if tensor.class != Ministral3TensorClass::Activation || tensor.writer.is_some() {
+                    return Err(Ministral3GraphError::InvalidTensorWriter);
+                }
+                tensor.writer = Some(node_id);
+            }
+        }
+        let graph = Self {
+            token_count: self.token_count,
+            start_position: self.start_position,
+            expected_length: self.expected_length,
+            state_capacity: self.state_capacity,
+            tensors,
+            nodes: fused,
+            kv_contracts: self.kv_contracts.clone(),
+        };
+        validate_graph(&graph)?;
+        Ok(graph)
     }
 }
 
@@ -1443,7 +1598,12 @@ fn expected_weight_shapes() -> BTreeMap<WeightConsumerKey, Vec<usize>> {
 }
 
 fn validate_graph(graph: &Ministral3TextGraph) -> Result<(), Ministral3GraphError> {
-    if graph.nodes.len() != 499 {
+    let fused_count = graph
+        .nodes
+        .iter()
+        .filter(|node| matches!(&node.kind, Ministral3GraphNodeKind::ResidualRmsNorm { .. }))
+        .count();
+    if graph.nodes.len().checked_add(fused_count) != Some(499) {
         return Err(Ministral3GraphError::InvalidTopology("node count"));
     }
     let node_labels = graph
@@ -1622,6 +1782,11 @@ fn validate_weights(graph: &Ministral3TextGraph) -> Result<(), Ministral3GraphEr
             *uses.entry(weight).or_default() += 1;
         }
         if let Ministral3GraphNodeKind::RmsNorm {
+            epsilon_bits,
+            scale_mode,
+            ..
+        }
+        | Ministral3GraphNodeKind::ResidualRmsNorm {
             epsilon_bits,
             scale_mode,
             ..
@@ -1944,7 +2109,10 @@ fn validate_boundaries(graph: &Ministral3TextGraph) -> Result<(), Ministral3Grap
     if state.len() != 1
         || terminal.len() != 1
         || state[0].layer != Some(MINISTRAL3_GRAPH_LAYER_COUNT - 1)
-        || !matches!(state[0].kind, Ministral3GraphNodeKind::Add)
+        || !matches!(
+            state[0].kind,
+            Ministral3GraphNodeKind::Add | Ministral3GraphNodeKind::ResidualRmsNorm { .. }
+        )
         || !matches!(terminal[0].kind, Ministral3GraphNodeKind::Argmax)
         || state[0].id >= terminal[0].id
     {
@@ -2059,6 +2227,89 @@ mod tests {
         assert_eq!(graph.tensors()[q.outputs()[0]].view().shape(), [3, 4_096]);
         assert_eq!(graph.tensors()[k.outputs()[0]].view().shape(), [3, 1_024]);
         assert_eq!(graph.tensors()[v.outputs()[0]].view().shape(), [3, 1_024]);
+    }
+
+    #[test]
+    fn residual_rmsnorm_fusion_is_semantic_and_preserves_ministral_consumers() {
+        let graph = graph(3, 17);
+        let fused = graph
+            .with_residual_rmsnorm_fusion(true)
+            .expect("semantic residual pairs fuse");
+        assert_eq!(
+            fused.nodes().len(),
+            graph.nodes().len() - (2 * MINISTRAL3_GRAPH_LAYER_COUNT as usize - 1)
+        );
+        assert_eq!(
+            fused
+                .nodes()
+                .iter()
+                .filter(|node| matches!(
+                    node.kind(),
+                    Ministral3GraphNodeKind::ResidualRmsNorm { .. }
+                ))
+                .count(),
+            2 * MINISTRAL3_GRAPH_LAYER_COUNT as usize - 1
+        );
+        assert_eq!(
+            fused
+                .tensors()
+                .iter()
+                .filter(|tensor| tensor.is_zero_copy_alias())
+                .count(),
+            105
+        );
+
+        for node in fused
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.kind(), Ministral3GraphNodeKind::ResidualRmsNorm { .. }))
+        {
+            let operation = node.operation().expect("fused descriptor");
+            let contract = operation
+                .residual_rms_norm_contract()
+                .expect("fused RMSNorm contract");
+            assert_eq!(
+                contract.epsilon().bits(),
+                MINISTRAL3_GRAPH_RMS_EPSILON.to_bits()
+            );
+            assert_eq!(contract.scale_mode(), RmsNormScaleMode::Direct);
+            assert_eq!(operation.inputs().len(), 3);
+            assert_eq!(operation.outputs().len(), 2);
+        }
+
+        let first_mlp = fused
+            .nodes()
+            .iter()
+            .find(|node| node.label() == "layer.0.mlp_residual.fused")
+            .expect("first MLP residual fusion");
+        let next_projection = fused
+            .nodes()
+            .iter()
+            .find(|node| node.label() == "layer.1.q_proj")
+            .expect("next layer projection consumer");
+        assert_eq!(first_mlp.outputs()[1], next_projection.inputs()[0]);
+        assert!(next_projection.dependencies().contains(&first_mlp.id()));
+        let next_attention = fused
+            .nodes()
+            .iter()
+            .find(|node| node.label() == "layer.1.attention_residual.fused")
+            .expect("next layer attention residual consumer");
+        assert_eq!(first_mlp.outputs()[0], next_attention.inputs()[0]);
+        assert!(next_attention.dependencies().contains(&first_mlp.id()));
+
+        let published = fused
+            .nodes()
+            .iter()
+            .find(|node| node.boundary_after() == Some(ExecutionBoundaryKind::StatePublication))
+            .expect("published residual remains before final norm");
+        assert_eq!(published.operation().unwrap().kind(), SemanticOpKind::Add);
+        assert_eq!(published.outputs().len(), 1);
+        let final_norm = &fused.nodes()[published.id() + 1];
+        assert_eq!(
+            final_norm.operation().unwrap().kind(),
+            SemanticOpKind::RmsNorm
+        );
+        assert_eq!(final_norm.inputs()[0], published.outputs()[0]);
     }
 
     #[test]

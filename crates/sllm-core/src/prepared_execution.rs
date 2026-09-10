@@ -320,6 +320,12 @@ pub(crate) enum PreparedCompletionMode {
 /// measurement opts the shared policy in.
 pub(crate) const PREPARED_DEFERRED_COMPLETION_ENV: &str = "SLLM_PREPARED_DEFERRED_COMPLETION";
 
+/// Existing native NVFP4 shared-activation row admission. Shape/encoding,
+/// source scale equality, and backend provider support are checked separately.
+pub(crate) const fn prepared_nvfp4_shared_activation_rows(rows: u64) -> bool {
+    rows == 1 || (rows >= 2 && rows <= 4) || rows >= 64
+}
+
 /// Common rollback for adapter projection sharing/lowering.
 ///
 /// Unset and the literal value `1` keep the reviewed default enabled.  The

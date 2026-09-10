@@ -12,7 +12,7 @@
 
 use sllm_core::{
     DraftProposalV1, DraftProviderKindV1, DraftProviderV1, Gemma4ExecutionOutput,
-    Gemma4ExecutionRequest, Gemma4MtpExecutionRequest, SpeculativeError,
+    Gemma4ExecutionRequest, Gemma4MtpExecutionRequest, SpeculativeError, verify_target_selected,
 };
 
 use crate::generation::{
@@ -197,7 +197,7 @@ impl Gemma4MtpGenerationExecutorV1 {
                 "previous Gemma MTP target block is still pending".to_owned(),
             ));
         }
-        if proposal.provider() != DraftProviderKindV1::Gemma4Mtp {
+        if !proposal.is_mtp() || proposal.provider() != DraftProviderKindV1::Gemma4Mtp {
             return Err(GenerationServiceError::Speculative(
                 "Gemma 4 MTP cannot verify a foreign draft provider".to_owned(),
             ));
@@ -222,12 +222,15 @@ impl Gemma4MtpGenerationExecutorV1 {
                 "Gemma 4 target verify row count differs from draft width".to_owned(),
             ));
         }
-        let accepted = accepted_draft_prefix_len(proposal.token_ids(), block.token_ids())?;
-        let committed_rows = if accepted == Self::MAX_DRAFT_WIDTH {
-            Self::MAX_DRAFT_WIDTH + 1
-        } else {
-            accepted + 1
-        };
+        let target_tokens = block
+            .token_ids()
+            .iter()
+            .copied()
+            .map(|token| u32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let decision = verify_target_selected(proposal.token_ids(), &target_tokens)
+            .map_err(GenerationServiceError::from)?;
+        let committed_rows = decision.committed_input_rows();
         let steps = (0..committed_rows)
             .map(|row| Self::step_from_output(&block, row))
             .collect::<Result<Vec<_>, _>>()?;
@@ -416,21 +419,24 @@ impl DraftProviderV1 for Gemma4MtpGenerationExecutorV1 {
 /// GPU request and keeps acceptance semantics in one place.  The target rows
 /// include the replacement/final row, hence `target_tokens` may contain one
 /// more item than `draft_tokens`.
+#[cfg(test)]
 fn accepted_draft_prefix_len(
     draft_tokens: &[u32],
     target_tokens: &[i32],
 ) -> Result<usize, GenerationServiceError> {
-    if draft_tokens.is_empty()
-        || draft_tokens.len() != 1
-        || target_tokens.len() != draft_tokens.len() + 1
-    {
+    if draft_tokens.len() != Gemma4MtpGenerationExecutorV1::MAX_DRAFT_WIDTH {
         return Err(GenerationServiceError::Speculative(
             SpeculativeError::InvalidDecision.to_string(),
         ));
     }
-    let target =
-        u32::try_from(target_tokens[0]).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
-    Ok(usize::from(draft_tokens[0] == target))
+    let target_tokens = target_tokens
+        .iter()
+        .copied()
+        .map(|token| u32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+        .collect::<Result<Vec<_>, _>>()?;
+    verify_target_selected(draft_tokens, &target_tokens)
+        .map(|decision| decision.accepted_draft_tokens())
+        .map_err(GenerationServiceError::from)
 }
 
 #[cfg(test)]

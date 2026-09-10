@@ -11,6 +11,19 @@ pub const MAX_SPECULATIVE_DRAFT_WIDTH_V1: usize = 8;
 pub const MAX_NGRAM_ORDER_V1: usize = 16;
 pub const MAX_SPECULATIVE_HISTORY_TOKENS_V1: usize = 1_048_576;
 
+/// Proposal method shared by all speculative-generation adapters.
+///
+/// `DraftProviderKindV1` deliberately remains more specific for accounting
+/// and compatibility checks.  This type identifies the algorithmic method so
+/// a model adapter can be selected independently from the model family which
+/// supplies its proposal state.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SpeculativeMethodV1 {
+    Mtp,
+    ExternalModel,
+    Ngram,
+}
+
 /// Stable provider identity used for accounting and compatibility checks.
 /// Model-specific state remains behind the provider implementation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -19,6 +32,23 @@ pub enum DraftProviderKindV1 {
     Gemma4Mtp,
     ExternalModel,
     Ngram,
+}
+
+impl DraftProviderKindV1 {
+    /// Returns the model-independent proposal method represented by this
+    /// provider.  Qwen and Gemma retain distinct provider identities while
+    /// sharing the MTP method contract.
+    pub const fn method(self) -> SpeculativeMethodV1 {
+        match self {
+            Self::QwenMtp | Self::Gemma4Mtp => SpeculativeMethodV1::Mtp,
+            Self::ExternalModel => SpeculativeMethodV1::ExternalModel,
+            Self::Ngram => SpeculativeMethodV1::Ngram,
+        }
+    }
+
+    pub const fn is_mtp(self) -> bool {
+        matches!(self.method(), SpeculativeMethodV1::Mtp)
+    }
 }
 
 /// One bounded proposal. Proposals never imply publication: the target model
@@ -48,6 +78,14 @@ impl DraftProposalV1 {
 
     pub const fn provider(&self) -> DraftProviderKindV1 {
         self.provider
+    }
+
+    pub const fn method(&self) -> SpeculativeMethodV1 {
+        self.provider.method()
+    }
+
+    pub const fn is_mtp(&self) -> bool {
+        self.provider.is_mtp()
     }
 
     pub fn token_ids(&self) -> &[u32] {
@@ -430,6 +468,14 @@ impl SpeculativeDecision {
     pub const fn random_draws(&self) -> usize {
         self.random_draws
     }
+
+    /// Number of target input rows that the common publication loop may
+    /// commit.  This is the accepted draft prefix plus its replacement/bonus
+    /// row and is shared by target adapters before model-specific state
+    /// reconciliation.
+    pub fn committed_input_rows(&self) -> usize {
+        self.emitted_tokens.len()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -782,18 +828,38 @@ mod tests {
     fn greedy_covers_all_accept_first_and_mid_reject() {
         let all = verify_greedy(&[1, 2, 3], &[1, 2, 3, 4]).unwrap();
         assert_eq!(all.accepted_draft_tokens(), 3);
+        assert_eq!(all.committed_input_rows(), 4);
         assert_eq!(all.emitted_tokens(), [1, 2, 3, 4]);
         assert_eq!(all.rejected_at(), None);
 
         let first = verify_greedy(&[1, 2, 3], &[9, 2, 3, 4]).unwrap();
         assert_eq!(first.accepted_draft_tokens(), 0);
+        assert_eq!(first.committed_input_rows(), 1);
         assert_eq!(first.emitted_tokens(), [9]);
         assert_eq!(first.rejected_at(), Some(0));
 
         let mid = verify_greedy(&[1, 2, 3], &[1, 8, 3, 4]).unwrap();
         assert_eq!(mid.accepted_draft_tokens(), 1);
+        assert_eq!(mid.committed_input_rows(), 2);
         assert_eq!(mid.emitted_tokens(), [1, 8]);
         assert_eq!(mid.rejected_at(), Some(1));
+    }
+
+    #[test]
+    fn provider_identity_maps_to_a_model_independent_speculative_method() {
+        assert_eq!(
+            DraftProviderKindV1::QwenMtp.method(),
+            SpeculativeMethodV1::Mtp
+        );
+        assert_eq!(
+            DraftProviderKindV1::Gemma4Mtp.method(),
+            SpeculativeMethodV1::Mtp
+        );
+        assert!(DraftProviderKindV1::QwenMtp.is_mtp());
+        assert!(!DraftProviderKindV1::Ngram.is_mtp());
+        let proposal = DraftProposalV1::new(DraftProviderKindV1::Ngram, vec![1]).unwrap();
+        assert_eq!(proposal.method(), SpeculativeMethodV1::Ngram);
+        assert!(!proposal.is_mtp());
     }
 
     #[test]

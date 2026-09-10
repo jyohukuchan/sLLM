@@ -418,6 +418,8 @@ gfx1201のVMM growによる別live KV破損は通常stateのresident選択で回
 
 ### 最適化の共通化と既定採用の方針
 
+2026-09-10の追加指示により、Phase83・83.5の採用済み変更をモデル方向へ共通化し、MTPをモデルアーキテクチャではなく投機的デコーディングの提案方式として整理する。モデル固有のhead・hidden・状態処理はadapterへ残し、適用判断と実行制御を演算契約・能力に基づく共通経路へ接続する。次のPhase84に先立つ[追加共通化](archive/2026/09/1-10/phase83-common-speculation.md)は実装・検証を完了した。Qwen/Ministralの残差融合、Gemma NVFP4 decode共有、MTP方式とmodel adapterの分離を通常経路へ接続した。形状・状態に必要な制限と非適用範囲は対応履歴に記録する。
+
 2026-09-07のユーザー指示によるPhase 79の共通化は完了した。同日の追加指示でPhase 80にCI修復を挿入し、
 その後の同日の指示でPhase 81に固定GPU samplingを挿入した。2026-09-08の指示でPhase 82に最適化整理を追加し、
 後続はPhase 83〜85とする。以下の共通化方針は継続する。
@@ -617,9 +619,10 @@ Phase 79の共通化内容は[Phase 79計画](archive/2026/09/1-10/phase79-commo
 | 完了・公開CI成功 | 81 | 固定sampling profileの共通GPU実装・API統合。代表条件でprefill／decodeへの追加負担がほぼないことを確認 |
 | 完了 | 82 | 不採用最適化の削除・試行と失敗理由の記録、データ不足候補の条件付き既定採用 |
 | 完了・実装検証済み | 83 | MXFP8 E4 KV・固定sampling／MTP・CLI/API統合、両GPU長文・対話・lifecycleを確認。速度改善は83.5 |
-| 実装中 | 83.5 | llama.cppを参考に共通経路とMTPを最適化し、8,192入力／128出力の速度目標を達成 |
-| 計画済み | 84 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了（旧83） |
-| 計画済み | 85 | NVFP4のGPU batching最適化（旧84） |
+| 完了・公開CI成功 | 83.5 | 共通演算とMTPを最適化。速度条件緩和を記録し、最終反復値は旧目標も達成。モデル方向の追加共通化も実装・検証完了 |
+| 計画済み・次 | 84 | MTP重みの量子化・通常CLI/API統合・BF16 companionとの比較 |
+| 計画済み | 85 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了（旧84） |
+| 計画済み | 86 | NVFP4のGPU batching最適化（旧85） |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
 

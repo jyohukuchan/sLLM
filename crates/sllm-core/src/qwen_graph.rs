@@ -20,6 +20,7 @@ use crate::qwen35_moe::{
     QWEN35_MOE_LAYER_BLOB_BYTES, QWEN35_MOE_MODEL_FINGERPRINT, VerifiedGgufQwen35Moe,
     VerifiedQwen35Moe,
 };
+use crate::semantic_graph::ResidualRmsNormGraphNode;
 use crate::weights::{
     QWEN35_MTP_CONSUMER_LAYER, QwenComponentSelection, WeightClassification, WeightConsumer,
     WeightConsumerKey, WeightLoadPlan, build_qwen_component_weight_load_plan,
@@ -355,6 +356,28 @@ impl QwenGraphNode {
 
     pub fn weight_consumers(&self) -> &[WeightConsumerKey] {
         &self.weights
+    }
+}
+
+impl ResidualRmsNormGraphNode for QwenGraphNode {
+    fn semantic_operation(&self) -> Option<&SemanticOpDescriptor> {
+        self.operation.as_ref()
+    }
+
+    fn semantic_inputs(&self) -> &[usize] {
+        &self.inputs
+    }
+
+    fn semantic_outputs(&self) -> &[usize] {
+        &self.outputs
+    }
+
+    fn semantic_dependencies(&self) -> &[usize] {
+        &self.dependencies
+    }
+
+    fn semantic_boundary_after(&self) -> Option<crate::ExecutionBoundaryKind> {
+        None
     }
 }
 
@@ -1003,8 +1026,7 @@ impl QwenGraph {
         plan: &Qwen38ProjectionPackReusePlan,
         scope: Qwen38ProjectionPackLoweringScope,
     ) -> Result<Self, QwenGraphError> {
-        if self.model_fingerprint != crate::model::QWEN35_27B_FINGERPRINT
-            || self.fp8_sidecar_fingerprint.as_deref() != Some(plan.recipe_digest())
+        if self.fp8_sidecar_fingerprint.as_deref() != Some(plan.recipe_digest())
             || self.mtp
             || self.multimodal
         {
@@ -1033,52 +1055,25 @@ impl QwenGraph {
                 )
             })
             .collect::<Vec<_>>();
-        let expected_counts = match scope {
-            Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpOnly => {
-                BTreeMap::from([(Qwen38ProjectionPackKind::Nvfp4MlpGateUp, 56_usize)])
-            }
-            Qwen38ProjectionPackLoweringScope::Fp8GdnQkvZOnly => {
-                BTreeMap::from([(Qwen38ProjectionPackKind::Fp8GdnQkvZ, 48_usize)])
-            }
-            Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpAndFp8GdnQkvZ => BTreeMap::from([
-                (Qwen38ProjectionPackKind::Nvfp4MlpGateUp, 56_usize),
-                (Qwen38ProjectionPackKind::Fp8GdnQkvZ, 48_usize),
-            ]),
-        };
-        let actual_counts = selected.iter().fold(BTreeMap::new(), |mut counts, pack| {
-            *counts.entry(pack.kind()).or_insert(0_usize) += 1;
-            counts
-        });
-        if actual_counts != expected_counts {
-            return Err(QwenGraphError::InvalidPlan(format!(
-                "Qwen3.8 projection-pack lowering counts differ: expected {expected_counts:?}, got {actual_counts:?}"
-            )));
-        }
-        for (kind, expected_count) in expected_counts {
-            let expected_layers = match kind {
-                Qwen38ProjectionPackKind::Nvfp4MlpGateUp => (0..56_u32).collect::<BTreeSet<_>>(),
-                Qwen38ProjectionPackKind::Fp8GdnQkvZ => (0..64_u32)
-                    .filter(|layer| (layer + 1) % 4 != 0)
-                    .collect::<BTreeSet<_>>(),
-                _ => unreachable!("only pair scopes are lowerable"),
-            };
-            let actual_layers = selected
-                .iter()
-                .filter(|pack| pack.kind() == kind)
-                .map(|pack| pack.layer())
-                .collect::<BTreeSet<_>>();
-            if actual_layers != expected_layers || actual_layers.len() != expected_count {
-                return Err(QwenGraphError::InvalidPlan(format!(
-                    "Qwen3.8 projection-pack lowering expected {expected_count} unique {kind:?} layers, got {}",
-                    actual_layers.len()
-                )));
-            }
-        }
 
         let mut packs_by_first_node = BTreeMap::new();
         let mut selected_nodes = BTreeSet::new();
         for pack in selected {
             let members = pack.members();
+            let activation = self
+                .tensors
+                .get(pack.activation_tensor_id())
+                .ok_or_else(|| {
+                    QwenGraphError::InvalidPlan(
+                        "Qwen3.8 projection-pack activation tensor is absent".to_owned(),
+                    )
+                })?;
+            if activation.view != *pack.activation_view() {
+                return Err(QwenGraphError::InvalidPlan(
+                    "Qwen3.8 projection-pack activation view differs from the verified plan"
+                        .to_owned(),
+                ));
+            }
             let expected_roles = match pack.kind() {
                 Qwen38ProjectionPackKind::Nvfp4MlpGateUp => {
                     [WeightConsumer::MlpGate, WeightConsumer::MlpUp]
@@ -1120,19 +1115,38 @@ impl QwenGraph {
             let gate = &self.nodes[first];
             let up = &self.nodes[second];
             for (node, member) in [(gate, &members[0]), (up, &members[1])] {
+                let (validated_index, _) = self.qwen38_projection_node(member.consumer())?;
+                if validated_index != member.node_index() {
+                    return Err(QwenGraphError::InvalidPlan(format!(
+                        "Qwen3.8 projection-pack member role is bound to a different node: {:?}",
+                        member.consumer()
+                    )));
+                }
                 let operation = node.operation.as_ref().ok_or_else(|| {
                     QwenGraphError::InvalidPlan(
                         "Qwen3.8 NVFP4 projection-pack member operation is absent".to_owned(),
                     )
                 })?;
+                let weight = self.tensors.get(member.weight_tensor_id()).ok_or_else(|| {
+                    QwenGraphError::InvalidPlan(
+                        "Qwen3.8 projection-pack member weight tensor is absent".to_owned(),
+                    )
+                })?;
+                let output = self.tensors.get(member.output_tensor_id()).ok_or_else(|| {
+                    QwenGraphError::InvalidPlan(
+                        "Qwen3.8 projection-pack member output tensor is absent".to_owned(),
+                    )
+                })?;
                 if node.kind != QwenGraphNodeKind::Semantic(SemanticOpKind::Matmul)
                     || operation.kind() != SemanticOpKind::Matmul
+                    || operation.inputs().len() != 2
+                    || operation.outputs().len() != 1
                     || node.inputs.as_slice()
                         != [pack.activation_tensor_id(), member.weight_tensor_id()]
                     || node.outputs.as_slice() != [member.output_tensor_id()]
                     || operation.inputs()[0] != pack.activation_view().clone()
-                    || operation.inputs()[1] != self.tensors[member.weight_tensor_id()].view
-                    || operation.outputs()[0] != self.tensors[member.output_tensor_id()].view
+                    || operation.inputs()[1] != weight.view
+                    || operation.outputs()[0] != output.view
                 {
                     return Err(QwenGraphError::InvalidPlan(format!(
                         "Qwen3.8 NVFP4 projection-pack member differs from the verified plan: layer {}",
@@ -1159,13 +1173,42 @@ impl QwenGraph {
                 };
                 let contract = match pack.kind() {
                     Qwen38ProjectionPackKind::Nvfp4MlpGateUp => {
-                        Qwen38ProjectionPackContractV1::nvfp4_mlp_gate_up(nvfp4_bits.ok_or_else(
-                            || {
+                        let weight =
+                            self.tensors
+                                .get(members[0].weight_tensor_id())
+                                .ok_or_else(|| {
+                                    QwenGraphError::InvalidPlan(
+                                        "Qwen3.8 NVFP4 projection-pack weight tensor is absent"
+                                            .to_owned(),
+                                    )
+                                })?;
+                        let [intermediate_size, hidden_size] = match weight.view.shape() {
+                            [intermediate_size, hidden_size] => [*intermediate_size, *hidden_size],
+                            _ => {
+                                return Err(QwenGraphError::InvalidPlan(
+                                    "Qwen3.8 NVFP4 projection-pack weight shape differs".to_owned(),
+                                ));
+                            }
+                        };
+                        let hidden_size = u32::try_from(hidden_size).map_err(|_| {
+                            QwenGraphError::InvalidPlan(
+                                "Qwen3.8 NVFP4 projection hidden size exceeds u32".to_owned(),
+                            )
+                        })?;
+                        let intermediate_size = u32::try_from(intermediate_size).map_err(|_| {
+                            QwenGraphError::InvalidPlan(
+                                "Qwen3.8 NVFP4 projection intermediate size exceeds u32".to_owned(),
+                            )
+                        })?;
+                        Qwen38ProjectionPackContractV1::nvfp4_mlp_gate_up_with_shape(
+                            hidden_size,
+                            intermediate_size,
+                            nvfp4_bits.ok_or_else(|| {
                                 QwenGraphError::InvalidPlan(
                                     "Qwen3.8 NVFP4 projection-pack variant differs".to_owned(),
                                 )
-                            },
-                        )?)?
+                            })?,
+                        )?
                     }
                     Qwen38ProjectionPackKind::Fp8GdnQkvZ => Qwen38ProjectionPackContractV1::fp8(
                         crate::Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ,
@@ -1273,212 +1316,55 @@ impl QwenGraph {
         Ok(graph)
     }
 
-    /// Returns a request-local graph with the 32 attention residual-add and
-    /// post-attention RMSNorm pairs represented by one semantic operation.
-    /// The method only rewrites node metadata: tensor IDs, views, allocations,
-    /// state descriptors, and completion boundaries remain unchanged. Callers
-    /// must gate it on the exact backend/target and adapter policy; `enabled`
-    /// is deliberately explicit so graph construction itself never opts in.
+    /// Returns a request-local graph with every safe semantic Add -> RMSNorm
+    /// pair represented by one residual/RMSNorm operation. The method only
+    /// rewrites node metadata; tensor IDs, views, allocations, state
+    /// descriptors, and consumers remain unchanged. Backend and target
+    /// admission belongs to the execution adapter.
     pub fn with_residual_rmsnorm_fusion(&self, enabled: bool) -> Result<Self, QwenGraphError> {
         if !enabled {
             return Ok(self.clone());
         }
-        if self.model_fingerprint != crate::model::QWEN35_4B_FINGERPRINT
-            || self.fp8_sidecar_fingerprint.is_some()
-            || self.mtp
-            || self.multimodal
-            || self.layer_types.len() != QWEN35_LAYER_COUNT
-            || self.layer_types != QWEN35_LAYER_TYPES
-        {
+        let tensor_views = self
+            .tensors
+            .iter()
+            .map(|tensor| tensor.view.clone())
+            .collect::<Vec<_>>();
+        let plan = crate::semantic_graph::plan_residual_rmsnorm_rewrite(&self.nodes, &tensor_views);
+        if plan.is_empty() {
             return Ok(self.clone());
         }
-        self.rewrite_residual_rmsnorm_pairs(QWEN35_LAYER_COUNT, 0)
-    }
-
-    /// Returns whether this graph and verified artifact are the exact
-    /// Qwen3.8 target scope admitted for residual/RMSNorm fusion.  Keeping the
-    /// artifact check here lets request selection and rewriting share one
-    /// fail-closed identity predicate.
-    pub(crate) fn qwen38_residual_rmsnorm_fusion_eligible(
-        &self,
-        artifact: &VerifiedUnslothQwen38Nvfp4,
-    ) -> bool {
-        self.qwen38_residual_rmsnorm_identity_matches(
-            artifact.repository(),
-            artifact.resolved_revision(),
-            artifact.recipe().schema_version,
-            artifact.recipe_digest(),
-        )
-    }
-
-    /// Reuses the existing fused numerical operator for the exact verified
-    /// Qwen3.8 target graph.  The MTP companion and structurally different
-    /// sidecar graphs pass through unchanged.
-    pub(crate) fn with_qwen38_residual_rmsnorm_fusion(
-        &self,
-        artifact: &VerifiedUnslothQwen38Nvfp4,
-    ) -> Result<Self, QwenGraphError> {
-        self.with_qwen38_residual_rmsnorm_fusion_identity(
-            artifact.repository(),
-            artifact.resolved_revision(),
-            artifact.recipe().schema_version,
-            artifact.recipe_digest(),
-        )
-    }
-
-    fn with_qwen38_residual_rmsnorm_fusion_identity(
-        &self,
-        repository: &str,
-        resolved_revision: &str,
-        recipe_schema_version: &str,
-        recipe_digest: &str,
-    ) -> Result<Self, QwenGraphError> {
-        if !self.qwen38_residual_rmsnorm_identity_matches(
-            repository,
-            resolved_revision,
-            recipe_schema_version,
-            recipe_digest,
-        ) {
-            return Ok(self.clone());
-        }
-        self.rewrite_residual_rmsnorm_pairs(QWEN38_TARGET_LAYER_COUNT, QWEN38_TARGET_LAYER_COUNT)
-    }
-
-    fn qwen38_residual_rmsnorm_identity_matches(
-        &self,
-        repository: &str,
-        resolved_revision: &str,
-        recipe_schema_version: &str,
-        recipe_digest: &str,
-    ) -> bool {
-        repository == crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY
-            && resolved_revision == crate::UNSLOTH_QWEN38_NVFP4_REVISION
-            && recipe_schema_version == "sllm-qwen38-mixed-precision-recipe-v1"
-            && !recipe_digest.is_empty()
-            && self.model_fingerprint == crate::model::QWEN35_27B_FINGERPRINT
-            && self.fp8_sidecar_fingerprint.as_deref() == Some(recipe_digest)
-            && !self.mtp
-            && !self.multimodal
-            && qwen38_target_layer_schedule_matches(&self.layer_types)
-            && self.weight_bindings.len() == 851
-    }
-
-    fn rewrite_residual_rmsnorm_pairs(
-        &self,
-        expected_attention_pairs: usize,
-        expected_mlp_pairs: usize,
-    ) -> Result<Self, QwenGraphError> {
-        #[derive(Clone, Copy)]
-        enum PairFamily {
-            Attention,
-            Mlp { final_norm: bool },
-        }
-
-        let mut fused = Vec::with_capacity(self.nodes.len());
+        let mut fused = Vec::with_capacity(self.nodes.len() - plan.pairs().count());
         let mut old_to_new = vec![None; self.nodes.len()];
-        let mut index = 0usize;
-        let mut attention_pairs = 0usize;
-        let mut mlp_pairs = 0usize;
         let mut cursor = 0usize;
         while cursor < self.nodes.len() {
-            let node = &self.nodes[cursor];
-            let post = self.nodes.get(cursor + 1);
-            let pair_family = post.and_then(|post| {
-                if node.label.ends_with("attention_residual_add")
-                    && post.label.ends_with("post_attention_rmsnorm")
-                {
-                    return Some(PairFamily::Attention);
-                }
-                if expected_mlp_pairs == 0 {
-                    return None;
-                }
-                let layer = node
-                    .label
-                    .strip_prefix("layer.")?
-                    .strip_suffix(".mlp_residual_add")?
-                    .parse::<usize>()
-                    .ok()?;
-                let next_layer = layer.checked_add(1)?;
-                if next_layer == expected_mlp_pairs && post.label == "final_rmsnorm" {
-                    Some(PairFamily::Mlp { final_norm: true })
-                } else if next_layer < expected_mlp_pairs
-                    && post.label == format!("layer.{next_layer}.input_rmsnorm")
-                {
-                    Some(PairFamily::Mlp { final_norm: false })
+            if let Some(pair) = plan.pair_for_add(cursor) {
+                let add = &self.nodes[pair.add_index()];
+                let norm = &self.nodes[pair.norm_index()];
+                let label = if norm.label == "final_rmsnorm" {
+                    norm.label.clone()
                 } else {
-                    None
-                }
-            });
-            let is_pair = pair_family.is_some()
-                && node
-                    .operation
-                    .as_ref()
-                    .is_some_and(|op| op.kind() == SemanticOpKind::Add)
-                && post
-                    .and_then(|post| post.operation.as_ref())
-                    .is_some_and(|op| op.kind() == SemanticOpKind::RmsNorm)
-                && node.inputs.len() == 2
-                && node.outputs.len() == 1
-                && post.is_some_and(|post| {
-                    post.inputs.len() == 2
-                        && post.outputs.len() == 1
-                        && post.inputs[0] == node.outputs[0]
+                    format!("{}.fused", add.label)
+                };
+                old_to_new[pair.add_index()] = Some(fused.len());
+                old_to_new[pair.norm_index()] = Some(fused.len());
+                fused.push(QwenGraphNode {
+                    label,
+                    kind: QwenGraphNodeKind::Semantic(SemanticOpKind::ResidualRmsNorm),
+                    operation: Some(pair.operation().clone()),
+                    inputs: pair.fused_inputs().to_vec(),
+                    outputs: pair.fused_outputs().to_vec(),
+                    dependencies: pair.dependencies().to_vec(),
+                    weights: norm.weights.clone(),
                 });
-            if !is_pair {
-                old_to_new[cursor] = Some(index);
-                fused.push(node.clone());
-                index += 1;
+            } else if plan.is_norm_removed(cursor) {
                 cursor += 1;
                 continue;
+            } else {
+                old_to_new[cursor] = Some(fused.len());
+                fused.push(self.nodes[cursor].clone());
             }
-            let pair_family = pair_family.expect("validated residual RMSNorm pair family");
-            let post = post.expect("validated residual RMSNorm successor");
-            let rms = post
-                .operation
-                .as_ref()
-                .expect("validated RMSNorm operation");
-            let contract = rms.rms_norm_contract().ok_or_else(|| {
-                QwenGraphError::InvalidPlan("paired RMSNorm contract is absent".to_owned())
-            })?;
-            let operation = SemanticOpDescriptor::new_residual_rms_norm_with_contract(
-                vec![
-                    self.tensors[node.inputs[0]].view.clone(),
-                    self.tensors[node.inputs[1]].view.clone(),
-                    self.tensors[post.inputs[1]].view.clone(),
-                ],
-                vec![
-                    self.tensors[node.outputs[0]].view.clone(),
-                    self.tensors[post.outputs[0]].view.clone(),
-                ],
-                crate::op::ResidualRmsNormContract::from_rms_norm(contract),
-            )?;
-            old_to_new[cursor] = Some(index);
-            old_to_new[cursor + 1] = Some(index);
-            fused.push(QwenGraphNode {
-                label: match pair_family {
-                    PairFamily::Mlp { final_norm: true } => "final_rmsnorm".to_owned(),
-                    PairFamily::Attention | PairFamily::Mlp { final_norm: false } => {
-                        format!("{}.fused", node.label)
-                    }
-                },
-                kind: QwenGraphNodeKind::Semantic(SemanticOpKind::ResidualRmsNorm),
-                operation: Some(operation),
-                inputs: vec![node.inputs[0], node.inputs[1], post.inputs[1]],
-                outputs: vec![node.outputs[0], post.outputs[0]],
-                dependencies: node.dependencies.clone(),
-                weights: post.weights.clone(),
-            });
-            match pair_family {
-                PairFamily::Attention => attention_pairs += 1,
-                PairFamily::Mlp { .. } => mlp_pairs += 1,
-            }
-            index += 1;
-            cursor += 2;
-        }
-        if attention_pairs != expected_attention_pairs || mlp_pairs != expected_mlp_pairs {
-            return Err(QwenGraphError::InvalidPlan(format!(
-                "residual RMSNorm fusion expected attention={expected_attention_pairs} and MLP={expected_mlp_pairs} pairs, got attention={attention_pairs} and MLP={mlp_pairs}"
-            )));
+            cursor += 1;
         }
         for (new_index, node) in fused.iter_mut().enumerate() {
             for dependency in &mut node.dependencies {
@@ -6422,12 +6308,7 @@ mod tests {
     ) -> (QwenGraph, WeightLoadPlan) {
         let (graph, plan) = projection_pack_execution_fixture(token_count);
         let graph = graph
-            .with_qwen38_residual_rmsnorm_fusion_identity(
-                crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY,
-                crate::UNSLOTH_QWEN38_NVFP4_REVISION,
-                "sllm-qwen38-mixed-precision-recipe-v1",
-                "qwen38-projection-pack-fixture",
-            )
+            .with_residual_rmsnorm_fusion(true)
             .expect("exact Qwen3.8 target residual pairs fuse");
         (graph, plan)
     }
@@ -6864,6 +6745,89 @@ mod tests {
     }
 
     #[test]
+    fn qwen38_projection_pack_lowering_accepts_different_fingerprint_and_partial_plan() {
+        let (graph, input_scale_bits) = qwen38_projection_pack_fixture();
+        let plan = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .unwrap()
+            .unwrap();
+        let mut different_model = graph.clone();
+        different_model.model_fingerprint = "another-verified-model".to_owned();
+        let mut partial = plan.clone();
+        partial.packs.truncate(1);
+
+        let lowered = different_model
+            .with_qwen38_projection_pack_reuse(
+                &partial,
+                Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpOnly,
+            )
+            .expect("lowering is driven by the selected verified member");
+        assert_eq!(lowered.nodes().len(), graph.nodes().len() - 1);
+        assert_eq!(
+            lowered
+                .nodes()
+                .iter()
+                .filter(|node| {
+                    node.kind()
+                        == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+                })
+                .count(),
+            1
+        );
+        let pack = &partial.packs()[0];
+        let weight = &graph.tensor_metadata()[pack.members()[0].weight_tensor_id()].view;
+        let lowered_pack = lowered
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+            })
+            .expect("partial pack lowering");
+        let contract = lowered_pack
+            .operation()
+            .and_then(|operation| operation.qwen38_projection_pack_contract())
+            .expect("NVFP4 contract");
+        assert_eq!(contract.hidden_size(), weight.shape()[1] as u32);
+        assert_eq!(contract.intermediate_size(), weight.shape()[0] as u32);
+    }
+
+    #[test]
+    fn qwen38_projection_pack_lowering_rejects_mismatched_recipe_and_duplicate_members() {
+        let (graph, input_scale_bits) = qwen38_projection_pack_fixture();
+        let plan = graph
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .unwrap()
+            .unwrap();
+
+        let mut mismatched_recipe = plan.clone();
+        mismatched_recipe.recipe_digest = "different-recipe".to_owned();
+        let error = graph
+            .with_qwen38_projection_pack_reuse(
+                &mismatched_recipe,
+                Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpOnly,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("plan identity"), "{error}");
+
+        let mut duplicate = plan.clone();
+        let first = duplicate.packs()[0].clone();
+        duplicate.packs.push(first);
+        let error = graph
+            .with_qwen38_projection_pack_reuse(
+                &duplicate,
+                Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpOnly,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("overlap"), "{error}");
+    }
+
+    #[test]
     fn qwen38_projection_pack_planner_rejects_scale_and_encoding_mismatch() {
         let (graph, mut input_scale_bits) = qwen38_projection_pack_fixture();
         let up = &graph.nodes()[node_id(&graph, "layer.0.mlp_up_matmul")];
@@ -6960,7 +6924,7 @@ mod tests {
             .expect("exact dense graph fuses");
         assert_eq!(
             fused.nodes().len(),
-            graph.nodes().len() - QWEN35_LAYER_COUNT
+            graph.nodes().len() - QWEN35_LAYER_COUNT * 2
         );
         let fused_nodes = fused
             .nodes()
@@ -6969,28 +6933,22 @@ mod tests {
                 node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::ResidualRmsNorm)
             })
             .collect::<Vec<_>>();
-        assert_eq!(fused_nodes.len(), QWEN35_LAYER_COUNT);
+        assert_eq!(fused_nodes.len(), QWEN35_LAYER_COUNT * 2);
         for node in fused_nodes {
             assert_eq!(node.inputs().len(), 3);
             assert_eq!(node.outputs().len(), 2);
-            assert!(node.label().ends_with("attention_residual_add.fused"));
+            assert!(node.label().ends_with(".fused") || node.label() == "final_rmsnorm");
             assert_eq!(
                 node.operation().unwrap().kind(),
                 SemanticOpKind::ResidualRmsNorm
             );
         }
-        assert!(
-            fused
-                .nodes()
-                .iter()
-                .all(|node| !node.label().ends_with("mlp_residual_add.fused"))
-        );
         let final_norm = &fused.nodes()[node_id(&fused, "final_rmsnorm")];
         assert_eq!(
             final_norm.kind(),
-            QwenGraphNodeKind::Semantic(SemanticOpKind::RmsNorm)
+            QwenGraphNodeKind::Semantic(SemanticOpKind::ResidualRmsNorm)
         );
-        assert_eq!(final_norm.outputs().len(), 1);
+        assert_eq!(final_norm.outputs().len(), 2);
         assert_eq!(fused.nodes().last().unwrap().label(), "argmax");
     }
 
@@ -7002,12 +6960,7 @@ mod tests {
         let final_mlp_residual = tensor_id(&graph, "layer.63.mlp.residual.output");
         let final_normalized = tensor_id(&graph, "final_rmsnorm.output");
         let fused = graph
-            .with_qwen38_residual_rmsnorm_fusion_identity(
-                crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY,
-                crate::UNSLOTH_QWEN38_NVFP4_REVISION,
-                "sllm-qwen38-mixed-precision-recipe-v1",
-                "qwen38-projection-pack-fixture",
-            )
+            .with_residual_rmsnorm_fusion(true)
             .expect("exact Qwen3.8 target residual pairs fuse");
         assert_eq!(
             fused.nodes().len(),
@@ -7107,76 +7060,27 @@ mod tests {
     }
 
     #[test]
-    fn qwen38_residual_rmsnorm_fusion_rejects_an_incomplete_mlp_pair_family() {
+    fn qwen38_residual_rmsnorm_fusion_keeps_an_incomplete_pair_decomposed() {
         let (mut graph, _) = qwen38_projection_pack_fixture();
         let embedding = tensor_id(&graph, "embedding.output");
         let layer1_norm = node_id(&graph, "layer.1.input_rmsnorm");
         graph.nodes[layer1_norm].inputs[0] = embedding;
-        let error = graph
-            .with_qwen38_residual_rmsnorm_fusion_identity(
-                crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY,
-                crate::UNSLOTH_QWEN38_NVFP4_REVISION,
-                "sllm-qwen38-mixed-precision-recipe-v1",
-                "qwen38-projection-pack-fixture",
-            )
-            .expect_err("an incomplete MLP pair family is rejected")
-            .to_string();
-        assert!(error.contains("got attention=64 and MLP=63"), "{error}");
+        let fused = graph
+            .with_residual_rmsnorm_fusion(true)
+            .expect("an incomplete pair leaves the original Add and RMSNorm");
+        let residual_nodes = fused
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::ResidualRmsNorm)
+            })
+            .count();
+        assert_eq!(residual_nodes, QWEN38_TARGET_LAYER_COUNT * 2 - 1);
     }
 
     #[test]
-    fn qwen38_residual_rmsnorm_fusion_rejects_non_target_identity_and_graphs() {
+    fn qwen38_residual_rmsnorm_fusion_ignores_model_admission_metadata() {
         let (graph, _) = qwen38_projection_pack_fixture();
-        let unchanged_for = |candidate: &QwenGraph,
-                             repository: &str,
-                             revision: &str,
-                             schema: &str,
-                             digest: &str| {
-            candidate
-                .with_qwen38_residual_rmsnorm_fusion_identity(repository, revision, schema, digest)
-                .expect("out-of-scope graph passes through")
-        };
-        assert_eq!(
-            unchanged_for(
-                &graph,
-                "other/repository",
-                crate::UNSLOTH_QWEN38_NVFP4_REVISION,
-                "sllm-qwen38-mixed-precision-recipe-v1",
-                "qwen38-projection-pack-fixture",
-            ),
-            graph
-        );
-        assert_eq!(
-            unchanged_for(
-                &graph,
-                crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY,
-                "other-revision",
-                "sllm-qwen38-mixed-precision-recipe-v1",
-                "qwen38-projection-pack-fixture",
-            ),
-            graph
-        );
-        assert_eq!(
-            unchanged_for(
-                &graph,
-                crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY,
-                crate::UNSLOTH_QWEN38_NVFP4_REVISION,
-                "other-schema",
-                "qwen38-projection-pack-fixture",
-            ),
-            graph
-        );
-        assert_eq!(
-            unchanged_for(
-                &graph,
-                crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY,
-                crate::UNSLOTH_QWEN38_NVFP4_REVISION,
-                "sllm-qwen38-mixed-precision-recipe-v1",
-                "other-digest",
-            ),
-            graph
-        );
-
         let mut wrong_schedule = graph.clone();
         wrong_schedule.layer_types[0] = LayerType::FullAttention;
         let mut companion = graph.clone();
@@ -7197,15 +7101,18 @@ mod tests {
             missing_sidecar,
             incomplete_weights,
         ] {
+            let fused = candidate
+                .with_residual_rmsnorm_fusion(true)
+                .expect("provenance and admission metadata are outside the semantic matcher");
             assert_eq!(
-                unchanged_for(
-                    &candidate,
-                    crate::UNSLOTH_QWEN38_NVFP4_REPOSITORY,
-                    crate::UNSLOTH_QWEN38_NVFP4_REVISION,
-                    "sllm-qwen38-mixed-precision-recipe-v1",
-                    "qwen38-projection-pack-fixture",
-                ),
-                candidate
+                fused
+                    .nodes()
+                    .iter()
+                    .filter(|node| {
+                        node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::ResidualRmsNorm)
+                    })
+                    .count(),
+                QWEN38_TARGET_LAYER_COUNT * 2
             );
         }
     }

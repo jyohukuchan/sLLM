@@ -922,22 +922,6 @@ impl<E: SpeculativeGenerationExecutorV1> SpeculativeGenerationAdapterV1<E> {
             .iter()
             .map(GenerationStepV1::device_argmax)
             .collect::<Vec<_>>();
-        let accepted = proposal
-            .token_ids()
-            .iter()
-            .zip(&target_tokens)
-            .take_while(|(draft, target)| draft == target)
-            .count();
-        let expected_steps = if accepted == proposal.token_ids().len() {
-            proposal.token_ids().len() + 1
-        } else {
-            accepted + 1
-        };
-        if steps.len() != expected_steps {
-            return Err(GenerationServiceError::Speculative(
-                SpeculativeError::InvalidDecision.to_string(),
-            ));
-        }
         // A rejecting target commits only the accepted prefix and its
         // replacement row.  verify_target_selected intentionally stops at
         // that first mismatch, so padding the unavailable tail is safe.
@@ -950,6 +934,11 @@ impl<E: SpeculativeGenerationExecutorV1> SpeculativeGenerationAdapterV1<E> {
         }
         let decision = verify_target_selected(proposal.token_ids(), &verification_tokens)
             .map_err(GenerationServiceError::from)?;
+        if steps.len() != decision.committed_input_rows() {
+            return Err(GenerationServiceError::Speculative(
+                SpeculativeError::InvalidDecision.to_string(),
+            ));
+        }
         self.accounting
             .record(proposal, &decision)
             .map_err(GenerationServiceError::from)
@@ -1092,17 +1081,117 @@ struct PendingQwenDeviceBlockV1 {
     consumed_input_rows: usize,
 }
 
-struct QueuedQwenDeviceStepV1 {
+struct QueuedSpeculativeDeviceStepV1 {
     expected_input: u32,
     selector: DeviceTokenSelectorRequestV1,
     step: GenerationStepV1,
 }
 
+fn queue_speculative_device_steps(
+    steps: &[GenerationStepV1],
+    selectors: &[DeviceTokenSelectorRequestV1],
+    committed_rows: usize,
+) -> Result<VecDeque<QueuedSpeculativeDeviceStepV1>, GenerationServiceError> {
+    if committed_rows == 0 || steps.len() < committed_rows || selectors.len() < committed_rows {
+        return Err(GenerationServiceError::Speculative(
+            SpeculativeError::InvalidDecision.to_string(),
+        ));
+    }
+    Ok((1..committed_rows)
+        .map(|row| QueuedSpeculativeDeviceStepV1 {
+            expected_input: steps[row - 1].device_argmax(),
+            selector: selectors[row].clone(),
+            step: steps[row].clone(),
+        })
+        .collect())
+}
+
+/// Checked publication counters shared by ordinary and fixed-device
+/// speculative blocks.  Target/companion state reconciliation stays in the
+/// model adapter; this helper only commits the method-level accounting after
+/// that reconciliation succeeds.
+fn next_speculative_commit_accounting(
+    proposal_blocks: u64,
+    proposed_draft_tokens: u64,
+    accepted_draft_tokens: u64,
+    committed_target_rows: u64,
+    proposed: usize,
+    accepted: usize,
+    committed_rows: usize,
+) -> Result<(u64, u64, u64, u64), GenerationServiceError> {
+    let proposal_blocks = proposal_blocks
+        .checked_add(1)
+        .ok_or(GenerationServiceError::CountOverflow)?;
+    let proposed_draft_tokens = proposed_draft_tokens
+        .checked_add(u64::try_from(proposed).map_err(|_| GenerationServiceError::CountOverflow)?)
+        .ok_or(GenerationServiceError::CountOverflow)?;
+    let accepted_draft_tokens = accepted_draft_tokens
+        .checked_add(
+            u64::try_from(accepted.min(committed_rows))
+                .map_err(|_| GenerationServiceError::CountOverflow)?,
+        )
+        .ok_or(GenerationServiceError::CountOverflow)?;
+    let committed_target_rows = committed_target_rows
+        .checked_add(
+            u64::try_from(committed_rows).map_err(|_| GenerationServiceError::CountOverflow)?,
+        )
+        .ok_or(GenerationServiceError::CountOverflow)?;
+    Ok((
+        proposal_blocks,
+        proposed_draft_tokens,
+        accepted_draft_tokens,
+        committed_target_rows,
+    ))
+}
+
 const QWEN_MTP_DRAFT_DEVICE_SELECTOR_ENV: &str = "SLLM_PHASE83_MTP_DRAFT_DEVICE_SELECTOR";
+const SPECULATIVE_MTP_PROPOSAL_RNG_DOMAIN_V1: u64 = 0x5144_5241_4654_0001;
 
 fn mtp_device_draft_selector_enabled() -> bool {
     std::env::var_os(QWEN_MTP_DRAFT_DEVICE_SELECTOR_ENV)
         .is_some_and(|value| matches!(value.to_str(), Some("1" | "true" | "yes")))
+}
+
+/// Derive the sampler request for one ordinary MTP target/draft row.  The
+/// selector payload is preserved byte-for-byte; only its monotonic counter is
+/// advanced.  This helper is method-level control and deliberately knows
+/// nothing about a model's hidden state or target KV implementation.
+fn speculative_selector_for_draft_row(
+    selector: &DeviceTokenSelectorRequestV1,
+    row: usize,
+) -> Result<DeviceTokenSelectorRequestV1, GenerationServiceError> {
+    let row = u64::try_from(row).map_err(|_| {
+        GenerationServiceError::Execution(
+            "MTP selector row does not fit the sampler counter".to_owned(),
+        )
+    })?;
+    selector
+        .counter()
+        .checked_add(row)
+        .map(|counter| selector.with_counter(counter))
+        .ok_or_else(|| {
+            GenerationServiceError::Execution("MTP selector sampler counter overflowed".to_owned())
+        })
+}
+
+/// Derive the independent RNG domain used for MTP proposal rows.  The domain
+/// separation and nine-counter stride are part of the fixed GPU sampling
+/// contract, not of Qwen's hidden/KV layout.
+fn speculative_selector_for_proposal_row(
+    selector: &DeviceTokenSelectorRequestV1,
+    row: usize,
+) -> Result<DeviceTokenSelectorRequestV1, GenerationServiceError> {
+    let row = u64::try_from(row).map_err(|_| GenerationServiceError::CountOverflow)?;
+    let counter = selector
+        .counter()
+        .checked_mul(9)
+        .and_then(|counter| counter.checked_add(row))
+        .filter(|counter| row <= 8 && *counter != u64::MAX)
+        .ok_or(GenerationServiceError::CountOverflow)?;
+    Ok(selector.with_rng(
+        selector.seed() ^ SPECULATIVE_MTP_PROPOSAL_RNG_DOMAIN_V1,
+        counter,
+    ))
 }
 
 fn committed_hidden_row(
@@ -1144,7 +1233,7 @@ pub struct QwenMtpGenerationExecutorV1 {
     committed_target_rows: u64,
     pending_speculative_block: Option<PendingQwenSpeculativeBlockV1>,
     pending_device_block: Option<PendingQwenDeviceBlockV1>,
-    queued_device_steps: VecDeque<QueuedQwenDeviceStepV1>,
+    queued_device_steps: VecDeque<QueuedSpeculativeDeviceStepV1>,
 }
 
 impl QwenMtpGenerationExecutorV1 {
@@ -1250,41 +1339,6 @@ impl QwenMtpGenerationExecutorV1 {
             .min(mtp_remaining)
             .min(target_remaining.saturating_sub(1));
         Ok((width > 0).then_some(width))
-    }
-
-    fn selector_for_mtp_draft_row(
-        selector: &DeviceTokenSelectorRequestV1,
-        row: usize,
-    ) -> Result<DeviceTokenSelectorRequestV1, GenerationServiceError> {
-        let row = u64::try_from(row).map_err(|_| {
-            GenerationServiceError::Execution(
-                "MTP selector row does not fit the sampler counter".to_owned(),
-            )
-        })?;
-        selector
-            .counter()
-            .checked_add(row)
-            .map(|counter| selector.with_counter(counter))
-            .ok_or_else(|| {
-                GenerationServiceError::Execution(
-                    "MTP selector sampler counter overflowed".to_owned(),
-                )
-            })
-    }
-
-    fn selector_for_mtp_proposal_row(
-        selector: &DeviceTokenSelectorRequestV1,
-        row: usize,
-    ) -> Result<DeviceTokenSelectorRequestV1, GenerationServiceError> {
-        const Q_DRAFT_DOMAIN: u64 = 0x5144_5241_4654_0001;
-        let row = u64::try_from(row).map_err(|_| GenerationServiceError::CountOverflow)?;
-        let counter = selector
-            .counter()
-            .checked_mul(9)
-            .and_then(|counter| counter.checked_add(row))
-            .filter(|counter| row <= 8 && *counter != u64::MAX)
-            .ok_or(GenerationServiceError::CountOverflow)?;
-        Ok(selector.with_rng(selector.seed() ^ Q_DRAFT_DOMAIN, counter))
     }
 
     pub const fn draft_width(&self) -> usize {
@@ -1647,7 +1701,7 @@ impl QwenMtpGenerationExecutorV1 {
         // rows or requires a host-logit fallback.
         let device_draft = mtp_device_draft_selector_enabled();
         let draft = if device_draft {
-            let draft_selector = Self::selector_for_mtp_draft_row(selector, 0)?;
+            let draft_selector = speculative_selector_for_draft_row(selector, 0)?;
             self.mtp
                 .decode_mtp_with_device_selector(token, &previous_hidden, &draft_selector)
         } else {
@@ -1726,7 +1780,7 @@ impl QwenMtpGenerationExecutorV1 {
                 .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
         if use_pq {
             // Check the largest possible counter before either model advances.
-            Self::selector_for_mtp_proposal_row(selector, width)?;
+            speculative_selector_for_proposal_row(selector, width)?;
             self.target
                 .begin_fixed_k20_target_support_capture(width + 1)
                 .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
@@ -1762,7 +1816,7 @@ impl QwenMtpGenerationExecutorV1 {
                 .collect::<Result<Vec<_>, _>>()?,
         );
         let selectors = (0..=width)
-            .map(|row| Self::selector_for_mtp_draft_row(selector, row))
+            .map(|row| speculative_selector_for_draft_row(selector, row))
             .collect::<Result<Vec<_>, _>>()?;
         let block = match self
             .target
@@ -1813,11 +1867,13 @@ impl QwenMtpGenerationExecutorV1 {
                 .ok_or(GenerationServiceError::CountOverflow)?;
             decision.accepted_draft_tokens()
         } else {
-            let mut accepted = 0_usize;
-            while accepted < width && drafts[accepted] == selections[accepted].token_id {
-                accepted += 1;
-            }
-            accepted
+            let target_tokens = selections
+                .iter()
+                .map(|selection| selection.token_id)
+                .collect::<Vec<_>>();
+            verify_target_selected(drafts, &target_tokens)
+                .map_err(GenerationServiceError::from)?
+                .accepted_draft_tokens()
         };
         let committed_rows = if accepted == width {
             width + 1
@@ -1856,13 +1912,8 @@ impl QwenMtpGenerationExecutorV1 {
             proposed_draft_tokens: width,
             consumed_input_rows: 1,
         });
-        self.queued_device_steps = (1..committed_rows)
-            .map(|row| QueuedQwenDeviceStepV1 {
-                expected_input: steps[row - 1].device_argmax(),
-                selector: selectors[row].clone(),
-                step: steps[row].clone(),
-            })
-            .collect();
+        self.queued_device_steps =
+            queue_speculative_device_steps(&steps, &selectors, committed_rows)?;
         if committed_rows == 1 {
             self.finalize_device_block()?;
         }
@@ -1903,35 +1954,20 @@ impl QwenMtpGenerationExecutorV1 {
             pending.consumed_input_rows,
             self.hidden_width,
         )?;
-        self.proposal_blocks = self
-            .proposal_blocks
-            .checked_add(1)
-            .ok_or(GenerationServiceError::CountOverflow)?;
-        self.proposed_draft_tokens = self
-            .proposed_draft_tokens
-            .checked_add(
-                u64::try_from(pending.proposed_draft_tokens)
-                    .map_err(|_| GenerationServiceError::CountOverflow)?,
-            )
-            .ok_or(GenerationServiceError::CountOverflow)?;
-        self.accepted_draft_tokens = self
-            .accepted_draft_tokens
-            .checked_add(
-                u64::try_from(
-                    pending
-                        .target_accepted_draft_tokens
-                        .min(pending.consumed_input_rows),
-                )
-                .map_err(|_| GenerationServiceError::CountOverflow)?,
-            )
-            .ok_or(GenerationServiceError::CountOverflow)?;
-        self.committed_target_rows = self
-            .committed_target_rows
-            .checked_add(
-                u64::try_from(pending.consumed_input_rows)
-                    .map_err(|_| GenerationServiceError::CountOverflow)?,
-            )
-            .ok_or(GenerationServiceError::CountOverflow)?;
+        let (proposal_blocks, proposed_draft_tokens, accepted_draft_tokens, committed_target_rows) =
+            next_speculative_commit_accounting(
+                self.proposal_blocks,
+                self.proposed_draft_tokens,
+                self.accepted_draft_tokens,
+                self.committed_target_rows,
+                pending.proposed_draft_tokens,
+                pending.target_accepted_draft_tokens,
+                pending.consumed_input_rows,
+            )?;
+        self.proposal_blocks = proposal_blocks;
+        self.proposed_draft_tokens = proposed_draft_tokens;
+        self.accepted_draft_tokens = accepted_draft_tokens;
+        self.committed_target_rows = committed_target_rows;
         self.queued_device_steps.clear();
         Ok(())
     }
@@ -1960,9 +1996,9 @@ impl QwenMtpGenerationExecutorV1 {
         let mut proposal_hidden = self.last_target_hidden_bf16.clone();
         for row in 0..width {
             let draft_selector = if independent_rng {
-                Self::selector_for_mtp_proposal_row(selector, row)?
+                speculative_selector_for_proposal_row(selector, row)?
             } else {
-                Self::selector_for_mtp_draft_row(selector, row)?
+                speculative_selector_for_draft_row(selector, row)?
             };
             let proposal = self
                 .mtp
@@ -2042,6 +2078,11 @@ impl QwenMtpGenerationExecutorV1 {
                 SpeculativeError::DraftWidthExceeded.to_string(),
             ));
         }
+        if proposal.is_mtp() && proposal.provider() != sllm_core::DraftProviderKindV1::QwenMtp {
+            return Err(GenerationServiceError::Speculative(
+                "Qwen MTP cannot verify a foreign MTP provider".to_owned(),
+            ));
+        }
         let pending =
             i32::try_from(pending_token).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
         let mut block_inputs = Vec::with_capacity(self.draft_width + 1);
@@ -2070,21 +2111,16 @@ impl QwenMtpGenerationExecutorV1 {
                 "target verify row count differs from draft width".to_owned(),
             ));
         }
-        let mut accepted = 0_usize;
-        while accepted < draft_width {
-            let draft = drafts[accepted];
-            let target = u32::try_from(block.token_ids()[accepted])
-                .map_err(|_| GenerationServiceError::TokenIdOverflow)?;
-            if draft != target {
-                break;
-            }
-            accepted += 1;
-        }
-        let committed_rows = if accepted == draft_width {
-            draft_width + 1
-        } else {
-            accepted + 1
-        };
+        let target_tokens = block
+            .token_ids()
+            .iter()
+            .copied()
+            .map(|token| u32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let decision =
+            verify_target_selected(drafts, &target_tokens).map_err(GenerationServiceError::from)?;
+        let accepted = decision.accepted_draft_tokens();
+        let committed_rows = decision.committed_input_rows();
         let steps = (0..committed_rows)
             .map(|row| Self::step_from_output(&block, row))
             .collect::<Result<Vec<_>, _>>()?;
@@ -2149,34 +2185,16 @@ impl QwenMtpGenerationExecutorV1 {
             ));
         }
 
-        let proposal_blocks = self
-            .proposal_blocks
-            .checked_add(1)
-            .ok_or(GenerationServiceError::CountOverflow)?;
-        let proposed_draft_tokens = self
-            .proposed_draft_tokens
-            .checked_add(
-                u64::try_from(pending.proposed_draft_tokens)
-                    .map_err(|_| GenerationServiceError::CountOverflow)?,
-            )
-            .ok_or(GenerationServiceError::CountOverflow)?;
-        let committed_accepted = pending
-            .target_accepted_draft_tokens
-            .min(committed_input_rows);
-        let accepted_draft_tokens = self
-            .accepted_draft_tokens
-            .checked_add(
-                u64::try_from(committed_accepted)
-                    .map_err(|_| GenerationServiceError::CountOverflow)?,
-            )
-            .ok_or(GenerationServiceError::CountOverflow)?;
-        let committed_target_rows = self
-            .committed_target_rows
-            .checked_add(
-                u64::try_from(committed_input_rows)
-                    .map_err(|_| GenerationServiceError::CountOverflow)?,
-            )
-            .ok_or(GenerationServiceError::CountOverflow)?;
+        let (proposal_blocks, proposed_draft_tokens, accepted_draft_tokens, committed_target_rows) =
+            next_speculative_commit_accounting(
+                self.proposal_blocks,
+                self.proposed_draft_tokens,
+                self.accepted_draft_tokens,
+                self.committed_target_rows,
+                pending.proposed_draft_tokens,
+                pending.target_accepted_draft_tokens,
+                committed_input_rows,
+            )?;
 
         for _ in committed_input_rows..pending.target_input_rows {
             self.mtp
@@ -3924,7 +3942,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen_mtp_draft_selector_rows_preserve_seed_counter_and_constraints() {
+    fn speculative_draft_selector_rows_preserve_seed_counter_and_constraints() {
         let config = SamplerChainConfigV1::new(
             SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).expect("sampling parameters"),
         )
@@ -3934,8 +3952,7 @@ mod tests {
         let selector = chain
             .prepare_device_selector(4, Some(&[true, false, true, true]), 123, 77)
             .expect("device selector");
-        let row = QwenMtpGenerationExecutorV1::selector_for_mtp_draft_row(&selector, 2)
-            .expect("draft row selector");
+        let row = speculative_selector_for_draft_row(&selector, 2).expect("draft row selector");
         assert_eq!(row.seed(), selector.seed());
         assert_eq!(row.counter(), 79);
         assert_eq!(row.valid_mask(), selector.valid_mask());
@@ -3945,7 +3962,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen_mtp_proposal_rng_separates_domains_and_checks_counter_boundaries() {
+    fn speculative_proposal_rng_separates_domains_and_checks_counter_boundaries() {
         let config = SamplerChainConfigV1::new(
             SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).expect("parameters"),
         )
@@ -3955,8 +3972,8 @@ mod tests {
         let selector = chain
             .prepare_device_selector(4, Some(&[true, false, true, true]), 123, 77)
             .expect("selector");
-        let proposal = QwenMtpGenerationExecutorV1::selector_for_mtp_proposal_row(&selector, 2)
-            .expect("proposal selector");
+        let proposal =
+            speculative_selector_for_proposal_row(&selector, 2).expect("proposal selector");
         assert_eq!(proposal.counter(), 695);
         assert_eq!(proposal.seed(), 123 ^ 0x5144_5241_4654_0001);
         assert_ne!(proposal.seed(), selector.seed());
@@ -3964,20 +3981,26 @@ mod tests {
         assert_eq!(proposal.additive_logits(), selector.additive_logits());
         assert_eq!(proposal.top_k(), 20);
         assert_eq!(proposal.top_p(), 0.95);
-        assert!(QwenMtpGenerationExecutorV1::selector_for_mtp_proposal_row(&selector, 9).is_err());
+        assert!(speculative_selector_for_proposal_row(&selector, 9).is_err());
         let boundary = selector.with_counter(u64::MAX / 9);
-        let last = QwenMtpGenerationExecutorV1::selector_for_mtp_proposal_row(&boundary, 5)
-            .expect("last representable draw");
+        let last =
+            speculative_selector_for_proposal_row(&boundary, 5).expect("last representable draw");
         assert_eq!(last.counter(), u64::MAX - 1);
-        assert!(QwenMtpGenerationExecutorV1::selector_for_mtp_proposal_row(&boundary, 6).is_err());
-        assert!(QwenMtpGenerationExecutorV1::selector_for_mtp_proposal_row(&boundary, 7).is_err());
+        assert!(speculative_selector_for_proposal_row(&boundary, 6).is_err());
+        assert!(speculative_selector_for_proposal_row(&boundary, 7).is_err());
         assert!(
-            QwenMtpGenerationExecutorV1::selector_for_mtp_proposal_row(
-                &selector.with_counter(u64::MAX),
-                0,
-            )
-            .is_err()
+            speculative_selector_for_proposal_row(&selector.with_counter(u64::MAX), 0,).is_err()
         );
+    }
+
+    #[test]
+    fn speculative_commit_accounting_clamps_partial_acceptance_to_published_rows() {
+        assert_eq!(
+            next_speculative_commit_accounting(2, 5, 3, 7, 4, 3, 2).unwrap(),
+            (3, 9, 5, 9)
+        );
+        assert!(next_speculative_commit_accounting(u64::MAX, 0, 0, 0, 1, 0, 1).is_err());
+        assert!(next_speculative_commit_accounting(0, u64::MAX, 0, 0, 1, 0, 1).is_err());
     }
 
     #[test]

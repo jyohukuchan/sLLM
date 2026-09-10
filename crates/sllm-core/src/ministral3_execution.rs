@@ -31,6 +31,7 @@ use crate::ministral3_weights::{
     MINISTRAL3_WEIGHT_RESIDENT_BYTES, MINISTRAL3_WEIGHT_TENSOR_COUNT,
     VerifiedMinistral3WeightSource,
 };
+use crate::semantic_graph::residual_rmsnorm_fusion_enabled_from_env;
 use crate::tensor::{TensorError, TensorView};
 use crate::weights::{
     WeightClassification, WeightLoadPlan, WeightUploadError, upload_weight_from_source,
@@ -89,6 +90,41 @@ impl From<WeightUploadError> for Ministral3ExecutionError {
     fn from(error: WeightUploadError) -> Self {
         Self::Weight(error)
     }
+}
+
+fn maybe_fuse_residual_rmsnorm(
+    session: &ExecutionSession,
+    graph: Ministral3TextGraph,
+) -> Result<Ministral3TextGraph, Ministral3ExecutionError> {
+    if !residual_rmsnorm_fusion_enabled_from_env()
+        || session.backend_name() != "hip"
+        || !matches!(
+            session.expected_target().as_deref(),
+            Some("gfx1030" | "gfx1201")
+        )
+    {
+        return Ok(graph);
+    }
+    let Ok(fused) = graph.with_residual_rmsnorm_fusion(true) else {
+        return Ok(graph);
+    };
+    let fused_operations = fused
+        .nodes()
+        .iter()
+        .filter_map(|node| node.operation())
+        .filter(|operation| operation.kind() == crate::SemanticOpKind::ResidualRmsNorm)
+        .collect::<Vec<_>>();
+    if fused_operations.is_empty()
+        || fused_operations.iter().any(|operation| {
+            matches!(
+                session.supports(operation),
+                crate::PrepareSupport::Unsupported { .. }
+            )
+        })
+    {
+        return Ok(graph);
+    }
+    Ok(fused)
 }
 
 /// Redacted, deterministic dispatch evidence for one completed transition.
@@ -433,6 +469,7 @@ impl Ministral3ResidentModel {
         let initial_rows = prefill_token_count.max(1);
         validate_request_admission(initial_rows, state_capacity)?;
         let graph = build_ministral3_text_graph(initial_rows, 0, state_capacity)?;
+        let graph = maybe_fuse_residual_rmsnorm(self.inner.session.as_ref(), graph)?;
         validate_graph_contract(&graph, &self.inner.plan)?;
         let workspace_bytes = graph_workspace_bytes(&graph)?;
         let kv_descriptor = KvStateDescriptor::new_with_storage(
@@ -750,6 +787,7 @@ impl Ministral3ExecutionRequest {
             ));
         }
         let graph = build_ministral3_text_graph(token_count, start, self.state_capacity)?;
+        let graph = maybe_fuse_residual_rmsnorm(self.resident.session.as_ref(), graph)?;
         validate_graph_contract(&graph, &self.resident.plan)?;
         self.upload_runtime_inputs(&graph, token_ids, start)?;
         let result = self.execute_graph(&graph, selector);
@@ -1419,7 +1457,12 @@ fn validate_graph_contract(
             "graph weight tensor count differs from 236",
         ));
     }
-    if graph.nodes().len() != 499 {
+    let fused_count = graph
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.kind(), Ministral3GraphNodeKind::ResidualRmsNorm { .. }))
+        .count();
+    if graph.nodes().len().checked_add(fused_count) != Some(499) {
         return Err(Ministral3ExecutionError::invalid(
             "graph node count differs from the reviewed topology",
         ));
@@ -1511,51 +1554,6 @@ fn validate_graph_contract(
                     "graph node references an absent tensor",
                 ));
             }
-        }
-        let expected_label = if index == 0 {
-            "embedding".to_owned()
-        } else if index == 499 - 3 {
-            "final_norm.terminal".to_owned()
-        } else if index == 499 - 2 {
-            "tied_logits".to_owned()
-        } else if index == 499 - 1 {
-            "argmax".to_owned()
-        } else if index == 1 + 26 * 19 {
-            "final_norm".to_owned()
-        } else {
-            let layer_index = (index - 1) / 19;
-            let layer_node = (index - 1) % 19;
-            let stage = [
-                "input_norm",
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "q_proj.reshape",
-                "k_proj.reshape",
-                "v_proj.reshape",
-                "yarn_rope_query_scale",
-                "kv_append",
-                "causal_gqa",
-                "attention.output.view",
-                "o_proj",
-                "attention_residual",
-                "post_attention_norm",
-                "mlp_gate",
-                "mlp_up",
-                "mlp_silu_mul",
-                "mlp_down",
-                "mlp_residual",
-            ]
-            .get(layer_node)
-            .ok_or_else(|| {
-                Ministral3ExecutionError::invalid("graph layer node index is invalid")
-            })?;
-            format!("layer.{layer_index}.{stage}")
-        };
-        if node.label() != expected_label {
-            return Err(Ministral3ExecutionError::invalid(
-                "graph node label differs from the reviewed topology",
-            ));
         }
         match node.kind() {
             Ministral3GraphNodeKind::View | Ministral3GraphNodeKind::Reshape => {

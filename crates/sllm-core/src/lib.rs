@@ -80,8 +80,13 @@ mod qwen_vision;
 mod qwen_vision_execution;
 mod registry;
 mod sampling;
+mod semantic_graph;
 mod session_checkpoint;
 mod speculative;
+mod speculative_device;
+pub use speculative_device::{
+    FixedK20SpeculativeDecisionV1, decode_fixed_k20_speculative_decision,
+};
 mod tensor;
 mod weights;
 
@@ -687,7 +692,7 @@ pub use speculative::{
     ExternalDraftCompatibilityV1, ExternalDraftModelV1, ExternalDraftProviderV1,
     MAX_NGRAM_ORDER_V1, MAX_SPECULATIVE_DRAFT_WIDTH_V1, MAX_SPECULATIVE_HISTORY_TOKENS_V1,
     NgramDraftProviderV1, OpaqueStateCheckpoint, SpeculativeAccountingV1, SpeculativeDecision,
-    SpeculativeError, SpeculativeTransaction, TokenDistribution,
+    SpeculativeError, SpeculativeMethodV1, SpeculativeTransaction, TokenDistribution,
     validate_external_draft_compatibility_v1, verify_greedy, verify_stochastic,
     verify_target_selected,
 };

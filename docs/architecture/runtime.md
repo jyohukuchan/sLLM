@@ -256,11 +256,21 @@ chainは全KV stateがFP16の場合だけであり、他KV形式へ拡張しな�
 Gemmaや他adapterの共通deferredの省略時動作は、このQwen3.8の既定変更から独立している。
 NVFP4量子化wave8、NVFP4／FP8 decode LUT、GDN row32のtarget／shape条件、明示overrideの優先順位、
 保留したprefill／attention候補は[Phase82 selector一覧](../history/2026/09/1-10/phase82-default-adoption-scope.md)を参照する。
-GemmaのW4A4 gate/up packはdecodeの`M=1`で、verified GGUFまたは同等のfirst-class quantized source、U8 W4A4 weight、同じ
+GemmaのW4A4 gate/up packは既存providerが対応する`M=1`、`M=2..4`、`M>=64`で、verified GGUFまたは同等のfirst-class quantized source、U8 W4A4 weight、同じ
 BF16 activation view、同じ`[N,K]` shape、`K % 16 == 0`、非zero `N`、両weightのverified input-global scale bits一致を全て満たした
-場合だけlowerする。direct NVFP4 sidecar、prefill `M>1`、scale欠落／不一致、shape／layout／artifact不一致は普通のMatmulへ戻る。
+場合だけlowerする。K/Nは既存dynamic契約に従い、Qwenの寸法へ固定しない。direct NVFP4 sidecar、`M=5..63`、scale欠落／不一致、shape／layout／artifact不一致は普通のMatmulへ戻る。
+M>1の実行にはnativeの既存採用variant・shape条件も必要であり、行数条件だけでは共有実行を保証しない。今回測定したGemma shapeではM1の共有が使われ、prefillは通常経路へ戻る。
+backendのsupportまたはprepareがUnsupportedなら、実行開始前に通常gate/upへ分解する。submit後の失敗は再実行せずrequestの失敗として扱い、分解実行をpack成功回数へ加算しない。
 layoutはcandidate数、selected prepared pack submission数、scale不一致数、共通override状態を`Gemma4ExecutionAudit`へ転記するため、
 実modelのscale不一致でpackされなかった場合もGPU collectorから区別できる。
+
+Residual Add→RMSNormは`semantic_graph`の共通passで候補を求め、QwenとMinistralの通常request構築・transitionへ接続する。
+適用判断は演算descriptor、tensor ID/view、epsilon/scale、依存関係と完了境界による。モデル名、layer数、binding数やnode labelを候補選択の条件にしない。
+加算後のBF16中間tensorと正規化出力を両方保持し、既存consumerとモデル状態が参照する値を変えない。
+既定のGPU範囲はHIP gfx1030／gfx1201で、backendが融合を非対応と判定すれば元graphを使う。
+共通rollback `SLLM_PREPARED_RESIDUAL_RMSNORM_FUSION`は未設定／`1`で有効、`0`／不正値で無効とし、Qwenの既存個別rollbackも維持する。
+Gemmaはsemantic descriptorが後段のlayoutで確定するため、このgraph passの接続先には含まない。上記のprojection共有とは別の適用範囲である。
+この追加変更は[Phase83・83.5共通化](../plans/archive/2026/09/1-10/phase83-common-speculation.md)で実装・検証した。
 
 | 実行条件 | FP16 | MXFP8 |
 | --- | --- | --- |
@@ -611,8 +621,31 @@ sampler/RNGとgrammarは将来の明示session ownerが利用できるversioned 
 sectionはcanonical emptyである。
 
 assistant prefillはrender/tokenize後のprepared prompt stateとしてdecoder、grammar、stop matcherをprimeし、visible completionへ
-再公開しない。MTP、external、ngramはmodel-neutralなbounded proposal/verification/publication/accountingを共有し、target samplerだけが
-visible tokenとRNGを所有する。external executorがprovisionされていないproduction configは実行可能providerへfallbackせず拒否する。
+再公開しない。MTP、external、ngramはmodel-neutralなbounded proposal/verification/publication/accountingを共有し、
+targetの検証結果に基づいてvisible tokenを確定する。proposal用RNGはtarget側と分離する。external executorがprovisionされていない
+production configは実行可能providerへfallbackせず拒否する。
+
+### 投機的デコーディングの方式とモデル実装
+
+MTPはモデルアーキテクチャの分類ではなく、投機的デコーディングで候補を提案する方式として扱う。
+`SpeculativeMethodV1`はMTP・外部draftモデル・ngramを区別し、`DraftProviderKindV1`はQwen/Gemmaなどの実装identityを別に保持する。
+同じMTP方式でも、互換性を確認していない別headや別モデルの状態を交換してはならない。
+GGUF等にある`qwen35mtp`・`gemma4mtp`の識別子は重み・graphを読み込むためのadapter情報であり、生成制御の方式を定義しない。
+
+共通層はbounded proposal、targetによる検証、accepted prefixと確定input行数、公開待ちtoken、採否の集計と
+停止/cancelに伴う確定範囲を扱う。Qwen/Gemmaの通常MTPは共通の`verify_target_selected`を利用する。
+モデルadapterはheadのgraphと重み、hiddenの形式・接続、KV/GDNのcheckpoint/rewind/replay、companionのprefix準備を担当する。
+共通層はこれらを同じbyte列のstateとして相互交換しない。
+
+固定K20のGPU p/q経路は、device上のtarget/draft supportと小さいdecision recordを共通の
+`ExecutionSession::verify_fixed_k20_speculative_decision`で処理する。`speculative_device`はmodel名を参照せず、
+呼出側の語彙数、draft幅、accepted prefix、status、乱数消費数、target log probabilityを検査する。
+support全体をCPUへ戻さず、144-byte decisionだけを読み戻す。Qwenの既存型名は共通型への互換aliasである。
+提案側の乱数domainとcounter進行はtarget側と分離し、棄却時のresidual samplingもGPU側に維持する。
+旧target選択列との照合方式とp/q方式は同一のsampling手順ではなく、固定seedの出力一致を一般保証しない。
+K64/K0のMTP検証や、新しいhead/外部draftの実行能力は、この共通化だけで追加されない。
+
+詳細と検証範囲は[Phase83・83.5共通化](../plans/archive/2026/09/1-10/phase83-common-speculation.md)を参照する。
 
 ### Phase 44 template・reasoning・interactive boundary
 
@@ -757,7 +790,7 @@ request ownerはroute metadata、state、workspaceだけを持つ。auditはlaye
 3-token prefillの40/960、1-token decodeの40/320からの逸脱をfail closedにする。CLI/serverはmodel directoryから自動検出し、
 MoE用flag、low-bit opt-in、通常警告を追加しない。vision/MTP、batching、expert/tensor parallel、CPU offloadはこの経路の範囲外である。
 
-### Qwen3.5 MTPとvision
+### Qwen MTP adapterとvision
 
 Phase 17のMTPはQwen固有の15 tensor manifest/graphをmodel-neutralなspeculative decisionとopaque transactionへ接続する。
 Phase 18ではtarget candidate列をM=2..8のserial-equivalent blockへlowerし、各rowのlinear reduction/roundingを通常M=1と同じにした。
@@ -766,9 +799,10 @@ KVとlinear-attention stateはblock単位のopaque rewind後にaccepted input pr
 数値target blockはM=8まで保持するが、generation transactionのdraft widthはrecurrent stateが保持する一世代のrewind範囲に合わせて1/2、
 通常auto-selectionは性能確認済みのwidth 1だけとする。
 
-通常runtimeのprovider選択はwire modeではない。fixed Qwen3.5-4B BF16 text-only greedyのexact `gfx1201`だけ、反復性能tableに基づき
+Phase18時点のprovider選択はwire modeではない。fixed Qwen3.5-4B BF16 text-only greedyのexact `gfx1201`だけ、反復性能tableに基づき
 draft width 1を内部選択する。`gfx1030`、量子化target、vision、sampled request、未計測tupleは同じCLI/API操作のままtarget-onlyを選ぶ。
-sampled requestはpublic target sampler/RNGを唯一の選択経路として保持し、draft用RNGやresidual samplerを導入しない。
+この段落は旧自動選択の記録である。Phase83・83.5ではQwen3.8 NVFP4・MXFP8 KV・固定samplingと明示MTP幅2を通常CLI/APIへ接続し、
+GPU p/q判定、独立proposal RNG、部分採用checkpoint、state-only companion準備を追加した。現在の方式分離は上記共通契約を正とする。
 
 visionはtext residentと別のlazy `QwenVisionResidentModel`を持つ。text-only requestはvision 297 tensorをdeviceへloadしない。
 画像requestはbounded decoder/processorを一度実行し、patch projectionと24 vision block、merger/projectorのdense演算を既存HIP

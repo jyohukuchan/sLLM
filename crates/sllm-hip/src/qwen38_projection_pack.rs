@@ -1,5 +1,5 @@
-//! Exact Qwen3.8 projection-pack ABI wrapper for the bounded NVFP4 and FP8
-//! GDN roles.
+//! Projection-pack ABI wrapper for dynamic-shape NVFP4 gate/up pairs and
+//! the fixed-shape FP8 GDN role. The ABI name is retained for compatibility.
 
 use std::mem::size_of;
 use std::ptr::NonNull;
@@ -18,6 +18,18 @@ use crate::{HipBackend, TensorBinding};
 
 fn qwen38_nvfp4_projection_pack_rows_supported(rows: usize) -> bool {
     rows == 1 || (2..=4).contains(&rows) || rows >= 64
+}
+
+fn nvfp4_projection_pack_shape_supported(
+    shape: &[usize],
+    contract: Qwen38ProjectionPackContractV1,
+) -> bool {
+    matches!(shape, [rows, k]
+        if qwen38_nvfp4_projection_pack_rows_supported(*rows)
+            && *k != 0
+            && *k % 16 == 0
+            && *k == contract.hidden_size() as usize
+            && contract.intermediate_size() != 0)
 }
 
 #[derive(Clone)]
@@ -76,23 +88,14 @@ impl Qwen38ProjectionPack2Descriptor {
                 || activation_shape[1] != Qwen38ProjectionPackContractV1::HIDDEN_SIZE as usize
                 || contract.input_global_scale_f32_bits() != 0);
         let invalid_nvfp4_gate_up = role == Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp
-            && (activation_shape.len() != 2
-                || !activation_shape
-                    .first()
-                    .copied()
-                    .is_some_and(qwen38_nvfp4_projection_pack_rows_supported)
-                || activation_shape.get(1).copied()
-                    != Some(Qwen38ProjectionPackContractV1::HIDDEN_SIZE as usize)
-                || contract.hidden_size() != Qwen38ProjectionPackContractV1::HIDDEN_SIZE
-                || contract.intermediate_size()
-                    != Qwen38ProjectionPackContractV1::MLP_INTERMEDIATE_SIZE);
+            && !nvfp4_projection_pack_shape_supported(activation_shape, contract);
         if invalid_fp8_gdn || invalid_nvfp4_gate_up {
             return Err(RuntimeError::local(
                 RuntimeStatus::InvalidMatmulDescriptor,
                 if role == Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ {
                     "Qwen3.8 FP8 GDN projection-pack requires positive M, K=5120, and input scale 0"
                 } else {
-                    "Qwen3.8 NVFP4 projection-pack requires M=1, M=2..4, or M>=64 with K=5120"
+                    "NVFP4 projection-pack requires M=1, M=2..4, or M>=64 with matching block16 K"
                 },
             ));
         }
@@ -141,7 +144,35 @@ impl Qwen38ProjectionPack2Descriptor {
 
 #[cfg(test)]
 mod tests {
-    use super::qwen38_nvfp4_projection_pack_rows_supported;
+    use super::*;
+
+    #[test]
+    fn nvfp4_projection_pack_accepts_dynamic_dimensions_and_checks_contract() {
+        for (k, n) in [(3_840, 15_360), (2_560, 9_728), (5_120, 17_408)] {
+            let contract = Qwen38ProjectionPackContractV1::nvfp4_mlp_gate_up_with_shape(
+                k,
+                n,
+                1.0_f32.to_bits(),
+            )
+            .unwrap();
+            for rows in [1, 2, 3, 4, 64, 65] {
+                assert!(nvfp4_projection_pack_shape_supported(
+                    &[rows, k as usize],
+                    contract
+                ));
+            }
+            for shape in [
+                vec![0, k as usize],
+                vec![5, k as usize],
+                vec![63, k as usize],
+                vec![2, k as usize + 16],
+                vec![2, k as usize - 1],
+                vec![k as usize],
+            ] {
+                assert!(!nvfp4_projection_pack_shape_supported(&shape, contract));
+            }
+        }
+    }
 
     #[test]
     fn nvfp4_projection_pack_row_boundaries_match_native_scope() {

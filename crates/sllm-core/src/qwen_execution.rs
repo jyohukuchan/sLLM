@@ -24,9 +24,9 @@ use crate::device_sampling::{
     DeviceSamplingBuffers, FIXED_K20_DECISION_BYTES, decode_selected_record,
 };
 use crate::execution::{
-    ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, ExecutionState,
-    ExecutionStateImageV1, KvState, KvStateAppendSubmission, LinearAttentionBindings,
-    LinearAttentionState, OwnedTensorBinding, PrepareSupport, PreparedOperation, Submission,
+    ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, ExecutionStateImageV1,
+    KvState, KvStateAppendSubmission, LinearAttentionBindings, LinearAttentionState,
+    OwnedTensorBinding, PrepareSupport, PreparedOperation, Submission,
 };
 use crate::final_output::QWEN35_VOCAB_SIZE;
 #[cfg(feature = "phase54-research")]
@@ -102,29 +102,8 @@ pub struct QwenExecutionOutput {
     committed_length: u64,
 }
 
-/// Private fixed-K20 GPU verification result consumed by the MTP frontend.
-/// The record is converted to ordinary generation steps only after its
-/// version, status, counts, IDs, and target log probabilities are checked.
-#[derive(Clone, Debug, PartialEq)]
-pub struct QwenMtpPqDecisionV1 {
-    width: usize,
-    accepted_draft_tokens: usize,
-    selections: Vec<SamplingSelectionV1>,
-}
-
-impl QwenMtpPqDecisionV1 {
-    pub const fn width(&self) -> usize {
-        self.width
-    }
-
-    pub const fn accepted_draft_tokens(&self) -> usize {
-        self.accepted_draft_tokens
-    }
-
-    pub fn selections(&self) -> &[SamplingSelectionV1] {
-        &self.selections
-    }
-}
+/// Compatibility name for the model-independent speculative decision.
+pub type QwenMtpPqDecisionV1 = crate::FixedK20SpeculativeDecisionV1;
 
 /// Evidence-only `(layer, key bytes, value bytes)` semantic KV payload.
 pub type QwenKvPayloadEvidence = (u32, Vec<u8>, Vec<u8>);
@@ -761,8 +740,7 @@ fn target_candidate_env_value(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QwenResidualRmsNormFusionScope {
-    Qwen35FourB,
-    Qwen38Target,
+    SemanticGraph,
 }
 
 fn qwen_residual_rmsnorm_fusion_policy_scope(
@@ -784,22 +762,13 @@ fn qwen_residual_rmsnorm_fusion_policy_scope(
 
 fn qwen_residual_rmsnorm_graph_scope(
     graph: &QwenGraph,
-    artifact: Option<&crate::VerifiedUnslothQwen38Nvfp4>,
+    _artifact: Option<&crate::VerifiedUnslothQwen38Nvfp4>,
 ) -> Option<QwenResidualRmsNormFusionScope> {
-    if graph.model_fingerprint() == QWEN35_4B_FINGERPRINT
-        && graph.fp8_sidecar_fingerprint().is_none()
-        && !graph.is_multimodal()
-        && !graph.is_mtp()
-        && graph.layer_types() == QWEN35_LAYER_TYPES
-    {
-        Some(QwenResidualRmsNormFusionScope::Qwen35FourB)
-    } else if artifact
-        .is_some_and(|artifact| graph.qwen38_residual_rmsnorm_fusion_eligible(artifact))
-    {
-        Some(QwenResidualRmsNormFusionScope::Qwen38Target)
-    } else {
-        None
-    }
+    // Artifact/plan identity is checked by provisioning and request admission.
+    // Whether a pair can fuse is a property of its semantic dataflow, not of
+    // the model repository, layer count, or precision sidecar fingerprint.
+    (!graph.is_multimodal() && !graph.is_mtp())
+        .then_some(QwenResidualRmsNormFusionScope::SemanticGraph)
 }
 
 fn qwen_residual_rmsnorm_fusion_scope_with_env(
@@ -829,6 +798,9 @@ fn qwen_residual_rmsnorm_fusion_scope(
         QWEN_RESIDUAL_RMSNORM_FUSION_ENV,
         QWEN_RESIDUAL_RMSNORM_FUSION_GFX1201_ENV,
     );
+    if !crate::semantic_graph::residual_rmsnorm_fusion_enabled_from_env() {
+        return None;
+    }
     qwen_residual_rmsnorm_fusion_scope_with_env(
         session,
         graph,
@@ -1085,23 +1057,21 @@ fn qwen38_nvfp4_projection_pack2_enabled(
 }
 
 #[allow(clippy::too_many_arguments)] // Keep the request policy fields explicit and auditable.
-fn qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+fn nvfp4_shared_activation_scope_enabled(
     backend_name: &str,
     expected_target: Option<&str>,
-    has_fp8_sidecar: bool,
     is_multimodal: bool,
     is_mtp: bool,
     adapters_empty: bool,
     has_nvfp4_projection_pack: bool,
     env_value: Option<&OsStr>,
 ) -> bool {
-    // The reviewed exact target/artifact scope is now the default.  Keep an
-    // exact zero or malformed value as a fail-closed rollback to the
-    // decomposed pair, matching the graph lowering selector.
+    // A lowered pair already carries the verified weight/scale contract.
+    // Its sidecar format is not a shared-activation requirement. Keep the
+    // existing target policy and rollback to the decomposed pair.
     default_on_env(env_value)
         && backend_name == "hip"
         && matches!(expected_target, Some("gfx1030" | "gfx1201"))
-        && has_fp8_sidecar
         && !is_multimodal
         && !is_mtp
         && adapters_empty
@@ -1122,10 +1092,9 @@ fn qwen38_nvfp4_prefill_shared_activation_enabled(
                     contract.role() == crate::Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp
                 })
     });
-    qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+    nvfp4_shared_activation_scope_enabled(
         session.backend_name(),
         session.expected_target().as_deref(),
-        graph.fp8_sidecar_fingerprint().is_some(),
         graph.is_multimodal(),
         graph.is_mtp(),
         adapters.lora.is_empty() && adapters.controls.is_empty(),
@@ -1141,7 +1110,8 @@ fn qwen38_nvfp4_prefill_shared_activation_operation_enabled(
     // M2..M4 are the fixed-width MTP target-verification rows.  The existing
     // M>=64 prefill route remains unchanged; M5..M63 stay decomposed until a
     // matching native provider is deliberately adopted.
-    let supported_rows = (2..=4).contains(&token_count) || token_count >= 64;
+    let supported_rows = token_count != 1
+        && crate::prepared_execution::prepared_nvfp4_shared_activation_rows(token_count);
     if !supported_rows
         || operation.kind() != SemanticOpKind::Qwen38ProjectionPack2
         || operation.inputs().len() != 3
@@ -1152,11 +1122,7 @@ fn qwen38_nvfp4_prefill_shared_activation_operation_enabled(
     let Some(contract) = operation.qwen38_projection_pack_contract() else {
         return false;
     };
-    if contract.role() != crate::Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp
-        || contract.hidden_size() != crate::Qwen38ProjectionPackContractV1::HIDDEN_SIZE
-        || contract.intermediate_size()
-            != crate::Qwen38ProjectionPackContractV1::MLP_INTERMEDIATE_SIZE
-    {
+    if contract.role() != crate::Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp {
         return false;
     }
     let hidden = usize::try_from(contract.hidden_size()).ok();
@@ -1955,105 +1921,14 @@ impl From<ExecutionError> for QwenExecutionError {
     }
 }
 
+#[cfg(test)]
 fn parse_fixed_k20_decision(
     bytes: &[u8; FIXED_K20_DECISION_BYTES as usize],
     width: usize,
     draft_ids: &[u32],
 ) -> Result<QwenMtpPqDecisionV1, QwenExecutionError> {
-    const VERSION: u32 = 1;
-    const NO_REJECTION: u32 = u32::MAX;
-    if !(1..=8).contains(&width) || draft_ids.len() != width {
-        return Err(QwenExecutionError::InvalidRequest(
-            "fixed-K20 decision width is outside 1 through 8".to_owned(),
-        ));
-    }
-    let read_u32 = |offset: usize| -> u32 {
-        u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("decision u32"))
-    };
-    let read_f64 = |offset: usize| -> f64 {
-        f64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("decision f64"))
-    };
-    let version = read_u32(0);
-    let status = read_u32(4);
-    let accepted = usize::try_from(read_u32(8)).map_err(|_| {
-        QwenExecutionError::InvalidRequest("fixed-K20 accepted count overflowed usize".to_owned())
-    })?;
-    let emitted = usize::try_from(read_u32(12)).map_err(|_| {
-        QwenExecutionError::InvalidRequest("fixed-K20 emitted count overflowed usize".to_owned())
-    })?;
-    let rejected_at = read_u32(16);
-    let record_width = usize::try_from(read_u32(20)).map_err(|_| {
-        QwenExecutionError::InvalidRequest("fixed-K20 decision width overflowed usize".to_owned())
-    })?;
-    let draws_used = read_u32(24);
-    let reserved0 = read_u32(28);
-    let reserved1 = read_u32(68);
-    let expected_emitted = accepted.checked_add(1).ok_or_else(|| {
-        QwenExecutionError::InvalidRequest("fixed-K20 emitted count overflowed".to_owned())
-    })?;
-    if version != VERSION
-        || status != 0
-        || record_width != width
-        || accepted > width
-        || emitted != expected_emitted
-        || emitted > 9
-        || reserved0 != 0
-        || reserved1 != 0
-    {
-        return Err(QwenExecutionError::InvalidRequest(
-            "fixed-K20 decision header is invalid".to_owned(),
-        ));
-    }
-    let expected_draws = if accepted == width {
-        width + 1
-    } else {
-        accepted + 2
-    };
-    if usize::try_from(draws_used).ok() != Some(expected_draws) {
-        return Err(QwenExecutionError::InvalidRequest(
-            "fixed-K20 decision draw count is invalid".to_owned(),
-        ));
-    }
-    if (accepted == width && rejected_at != NO_REJECTION)
-        || (accepted < width && rejected_at != u32::try_from(accepted).expect("bounded count"))
-    {
-        return Err(QwenExecutionError::InvalidRequest(
-            "fixed-K20 decision rejection index is invalid".to_owned(),
-        ));
-    }
-    let mut selections = Vec::with_capacity(emitted);
-    for index in 0..emitted {
-        let token_offset = 32 + index * 4;
-        let token_id = read_u32(token_offset);
-        let logprob = read_f64(72 + index * 8);
-        if token_id >= QWEN35_VOCAB_SIZE as u32 || !logprob.is_finite() || logprob > 0.0 {
-            return Err(QwenExecutionError::InvalidRequest(
-                "fixed-K20 decision token or target log probability is invalid".to_owned(),
-            ));
-        }
-        if index < accepted && draft_ids.get(index).copied() != Some(token_id) {
-            return Err(QwenExecutionError::InvalidRequest(
-                "fixed-K20 decision accepted prefix differs from draft IDs".to_owned(),
-            ));
-        }
-        selections.push(SamplingSelectionV1 {
-            token_id,
-            logprob,
-            top_logprobs: Vec::new(),
-        });
-    }
-    for index in emitted..9 {
-        if read_u32(32 + index * 4) != 0 || read_f64(72 + index * 8) != 0.0 {
-            return Err(QwenExecutionError::InvalidRequest(
-                "fixed-K20 decision has nonzero unused entries".to_owned(),
-            ));
-        }
-    }
-    Ok(QwenMtpPqDecisionV1 {
-        width,
-        accepted_draft_tokens: accepted,
-        selections,
-    })
+    crate::decode_fixed_k20_speculative_decision(bytes, width, draft_ids, QWEN35_VOCAB_SIZE as u32)
+        .map_err(Into::into)
 }
 
 fn slice_qwen_output_rows(
@@ -5988,62 +5863,21 @@ impl QwenExecutionCore {
         let draft = companion.fixed_k20_support_range(width)?;
         let decision = self.fixed_k20_decision_buffer()?;
         let output = decision.range(0, FIXED_K20_DECISION_BYTES)?;
-        if let Err(error) = self.session.verify_fixed_k20_mtp(
-            &self.queue,
-            target,
-            draft,
-            draft_ids,
-            seed,
-            absolute_position,
-            output,
-        ) {
-            self.lifecycle.cancel();
-            companion.lifecycle.cancel();
-            return Err(error.into());
-        }
-        let mut readback = match self
+        match self
             .session
-            .readback(&self.queue, decision.range(0, FIXED_K20_DECISION_BYTES)?)
+            .verify_fixed_k20_speculative_decision(
+                &self.queue,
+                target,
+                draft,
+                draft_ids,
+                QWEN35_VOCAB_SIZE as u32,
+                seed,
+                absolute_position,
+                output,
+                self.completion_timeout,
+            )
+            .map_err(QwenExecutionError::from)
         {
-            Ok(readback) => readback,
-            Err(error) => {
-                self.lifecycle.cancel();
-                companion.lifecycle.cancel();
-                return Err(error.into());
-            }
-        };
-        let state = match readback.wait(self.completion_timeout) {
-            Ok(state) => state,
-            Err(error) => {
-                self.lifecycle.cancel();
-                companion.lifecycle.cancel();
-                return Err(error.into());
-            }
-        };
-        if state != ExecutionState::Success {
-            self.lifecycle.cancel();
-            companion.lifecycle.cancel();
-            return Err(QwenExecutionError::CompletionFailure {
-                stage: "fixed-K20 MTP decision readback".to_owned(),
-            });
-        }
-        let mut bytes = [0_u8; FIXED_K20_DECISION_BYTES as usize];
-        let copied = match readback.read_into(&mut bytes) {
-            Ok(copied) => copied,
-            Err(error) => {
-                self.lifecycle.cancel();
-                companion.lifecycle.cancel();
-                return Err(error.into());
-            }
-        };
-        if copied != FIXED_K20_DECISION_BYTES {
-            self.lifecycle.cancel();
-            companion.lifecycle.cancel();
-            return Err(QwenExecutionError::InvalidRequest(
-                "fixed-K20 decision readback returned an unexpected byte count".to_owned(),
-            ));
-        }
-        match parse_fixed_k20_decision(&bytes, width, draft_ids) {
             Ok(decision) => {
                 if let Err(error) = self.finish_fixed_k20_support_capture() {
                     self.lifecycle.cancel();
@@ -6346,21 +6180,21 @@ impl QwenExecutionCore {
             &adapters,
             resident.qwen38_artifact.as_deref(),
         );
-        let graph = match residual_rmsnorm_scope {
-            Some(QwenResidualRmsNormFusionScope::Qwen35FourB) => graph
+        let graph = if residual_rmsnorm_scope.is_some() {
+            let candidate = graph
                 .with_residual_rmsnorm_fusion(true)
-                .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?,
-            Some(QwenResidualRmsNormFusionScope::Qwen38Target) => {
-                let artifact = resident.qwen38_artifact.as_deref().ok_or_else(|| {
-                    QwenExecutionError::InvalidRequest(
-                        "Qwen3.8 residual RMSNorm fusion lacks its verified artifact".to_owned(),
-                    )
-                })?;
-                graph
-                    .with_qwen38_residual_rmsnorm_fusion(artifact)
-                    .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?
-            }
-            None => graph,
+                .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?;
+            // An unsupported fused shape must retain the independently
+            // supported Add + RMSNorm path, never break model admission.
+            let supported = candidate
+                .nodes()
+                .iter()
+                .filter_map(|node| node.operation())
+                .filter(|operation| operation.kind() == crate::SemanticOpKind::ResidualRmsNorm)
+                .all(|operation| resident.session.supports(operation) == PrepareSupport::Supported);
+            if supported { candidate } else { graph }
+        } else {
+            graph
         };
         let graph =
             if qwen_gdn_projection_bundle_enabled(resident.session.as_ref(), &graph, &adapters) {
@@ -6413,6 +6247,7 @@ impl QwenExecutionCore {
                     let lowered = graph
                         .with_qwen38_projection_pack_reuse(&reuse_plan, scope)
                         .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?;
+                    let mut supported = true;
                     for node in lowered.nodes().iter().filter(|node| {
                         node.kind()
                             == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
@@ -6423,16 +6258,17 @@ impl QwenExecutionCore {
                                 node.label()
                             ))
                         })?;
-                        if let PrepareSupport::Unsupported { reason } =
+                        if let PrepareSupport::Unsupported { .. } =
                             resident.session.supports(operation)
                         {
-                            return Err(QwenExecutionError::InvalidRequest(format!(
-                                "Qwen3.8 projection-pack node {} is unsupported at request construction: {reason}",
-                                node.label()
-                            )));
+                            supported = false;
+                            break;
                         }
                     }
-                    lowered
+                    // Artifact admission has already succeeded. A backend
+                    // without this optional fusion can execute the original
+                    // matmuls; lack of a pack provider is not a model error.
+                    if supported { lowered } else { graph }
                 }
                 None => {
                     // The selector is semantic and deliberately broader than
@@ -15794,10 +15630,9 @@ mod tests {
     #[test]
     fn qwen38_nvfp4_prefill_shared_activation_is_default_on_and_target_scoped() {
         let enabled = |env_value| {
-            qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+            nvfp4_shared_activation_scope_enabled(
                 "hip",
                 Some("gfx1030"),
-                true,
                 false,
                 false,
                 true,
@@ -15811,40 +15646,36 @@ mod tests {
         assert!(!enabled(Some(OsStr::new("true"))));
         assert!(!enabled(Some(OsStr::new("1 "))));
         assert!(enabled(Some(OsStr::new("1"))));
-        assert!(!qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+        assert!(!nvfp4_shared_activation_scope_enabled(
             "cpu",
             Some("gfx1030"),
-            true,
             false,
             false,
             true,
             true,
             None,
         ));
-        assert!(!qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+        assert!(!nvfp4_shared_activation_scope_enabled(
             "hip",
             Some("gfx942"),
-            true,
             false,
             false,
             true,
             true,
             Some(OsStr::new("1")),
         ));
-        assert!(!qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+        assert!(nvfp4_shared_activation_scope_enabled(
             "hip",
             Some("gfx1201"),
-            false,
             false,
             false,
             true,
             true,
             None,
         ));
-        assert!(!qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+        assert!(!nvfp4_shared_activation_scope_enabled(
             "hip",
             Some("gfx1030"),
-            true,
             false,
             false,
             true,
@@ -15906,6 +15737,46 @@ mod tests {
             fp8_operation,
             65,
         ));
+    }
+
+    #[test]
+    fn shared_activation_operation_accepts_non_qwen_dimensions() {
+        for (hidden, intermediate) in [(3840_usize, 15360_usize), (2560, 9728)] {
+            let weight = TensorView::with_encoding(
+                DType::U8,
+                crate::Encoding::Nvfp4W4A4 {
+                    block_size: 16,
+                    scale_dtype: DType::F8E4M3Fn,
+                },
+                &[intermediate, hidden],
+            )
+            .unwrap();
+            let operation = SemanticOpDescriptor::new_qwen38_projection_pack2(
+                vec![
+                    TensorView::contiguous(DType::Bf16, &[3, hidden]).unwrap(),
+                    weight.clone(),
+                    weight,
+                ],
+                vec![TensorView::contiguous(DType::Bf16, &[3, intermediate]).unwrap(); 2],
+                crate::Qwen38ProjectionPackContractV1::nvfp4_mlp_gate_up_with_shape(
+                    hidden as u32,
+                    intermediate as u32,
+                    1.0_f32.to_bits(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            for rows in [2, 3, 4, 64, 65] {
+                assert!(qwen38_nvfp4_prefill_shared_activation_operation_enabled(
+                    &operation, rows
+                ));
+            }
+            for rows in [0, 1, 5, 63] {
+                assert!(!qwen38_nvfp4_prefill_shared_activation_operation_enabled(
+                    &operation, rows
+                ));
+            }
+        }
     }
 
     #[test]
@@ -16000,18 +15871,18 @@ mod tests {
     }
 
     #[test]
-    fn residual_rmsnorm_fusion_policy_scopes_qwen38_target_and_rollback() {
+    fn residual_rmsnorm_fusion_policy_scopes_semantic_graph_and_rollback() {
         for target in ["gfx1030", "gfx1201"] {
             for env_value in [None, Some(OsStr::new("1"))] {
                 assert_eq!(
                     qwen_residual_rmsnorm_fusion_policy_scope(
                         "hip",
                         Some(target),
-                        Some(QwenResidualRmsNormFusionScope::Qwen38Target),
+                        Some(QwenResidualRmsNormFusionScope::SemanticGraph),
                         true,
                         env_value,
                     ),
-                    Some(QwenResidualRmsNormFusionScope::Qwen38Target)
+                    Some(QwenResidualRmsNormFusionScope::SemanticGraph)
                 );
             }
             for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
@@ -16019,7 +15890,7 @@ mod tests {
                     qwen_residual_rmsnorm_fusion_policy_scope(
                         "hip",
                         Some(target),
-                        Some(QwenResidualRmsNormFusionScope::Qwen38Target),
+                        Some(QwenResidualRmsNormFusionScope::SemanticGraph),
                         true,
                         env_value,
                     ),
@@ -16031,7 +15902,7 @@ mod tests {
             qwen_residual_rmsnorm_fusion_policy_scope(
                 "cpu",
                 Some("gfx1201"),
-                Some(QwenResidualRmsNormFusionScope::Qwen38Target),
+                Some(QwenResidualRmsNormFusionScope::SemanticGraph),
                 true,
                 Some(OsStr::new("1")),
             ),
@@ -16041,7 +15912,7 @@ mod tests {
             qwen_residual_rmsnorm_fusion_policy_scope(
                 "hip",
                 Some("gfx942"),
-                Some(QwenResidualRmsNormFusionScope::Qwen38Target),
+                Some(QwenResidualRmsNormFusionScope::SemanticGraph),
                 true,
                 Some(OsStr::new("1")),
             ),
@@ -16051,7 +15922,7 @@ mod tests {
             qwen_residual_rmsnorm_fusion_policy_scope(
                 "hip",
                 Some("gfx1201"),
-                Some(QwenResidualRmsNormFusionScope::Qwen38Target),
+                Some(QwenResidualRmsNormFusionScope::SemanticGraph),
                 false,
                 Some(OsStr::new("1")),
             ),
@@ -16066,6 +15937,45 @@ mod tests {
                 Some(OsStr::new("1")),
             ),
             None
+        );
+    }
+
+    #[test]
+    fn residual_rmsnorm_unsupported_backend_retains_normal_request_graph() {
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        recorder.set_unsupported(SemanticOpKind::ResidualRmsNorm);
+        recorder
+            .state
+            .lock()
+            .unwrap()
+            .argmax_sequences
+            .push_back(vec![7]);
+        let session = Arc::new(ExecutionSession::new("hip", recorder.clone()));
+        let resident = Arc::new(
+            QwenResidentInner::provision(
+                session,
+                graph.clone(),
+                plan,
+                Duration::from_millis(1),
+                &TestProvisionSource::default(),
+            )
+            .expect("ordinary graph provisions without fused provider"),
+        );
+        let mut core =
+            QwenExecutionCore::from_resident(resident, graph, AdapterRequestSetV1::disabled())
+                .expect("optional fusion does not reject the model");
+        assert!(!core.graph.nodes().iter().any(|node| {
+            node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::ResidualRmsNorm)
+        }));
+        core.prefill(&[1]).expect("ordinary residual path executes");
+        let events = recorder.events();
+        assert!(events.iter().any(|event| event == "submit:Add"));
+        assert!(events.iter().any(|event| event == "submit:RmsNorm"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event == "prepare:ResidualRmsNorm")
         );
     }
 
@@ -16117,7 +16027,7 @@ mod tests {
                 &AdapterRequestSetV1::disabled(),
                 None,
             ),
-            Some(QwenResidualRmsNormFusionScope::Qwen35FourB)
+            Some(QwenResidualRmsNormFusionScope::SemanticGraph)
         );
         let disabled_adapters = AdapterRequestSetV1::disabled();
         for env_value in [None, Some(OsStr::new("1"))] {
@@ -16129,7 +16039,7 @@ mod tests {
                     None,
                     env_value,
                 ),
-                Some(QwenResidualRmsNormFusionScope::Qwen35FourB)
+                Some(QwenResidualRmsNormFusionScope::SemanticGraph)
             );
         }
         for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
@@ -16154,7 +16064,7 @@ mod tests {
                 None,
                 None,
             ),
-            Some(QwenResidualRmsNormFusionScope::Qwen35FourB)
+            Some(QwenResidualRmsNormFusionScope::SemanticGraph)
         );
         assert_eq!(
             qwen_residual_rmsnorm_fusion_scope_with_env(
@@ -16164,7 +16074,7 @@ mod tests {
                 None,
                 Some(OsStr::new("1")),
             ),
-            Some(QwenResidualRmsNormFusionScope::Qwen35FourB)
+            Some(QwenResidualRmsNormFusionScope::SemanticGraph)
         );
         for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
             assert_eq!(
@@ -16205,7 +16115,8 @@ mod tests {
                 .iter()
                 .filter(|event| event.as_str() == "prepare:ResidualRmsNorm")
                 .count(),
-            crate::qwen_graph::QWEN35_LAYER_COUNT
+            // Attention residuals plus inter-layer/final MLP residuals.
+            crate::qwen_graph::QWEN35_LAYER_COUNT * 2
         );
     }
 
