@@ -20,11 +20,13 @@ use crate::adapter::{
     AdapterRequestSetV1, ControlVectorSelectionV1, LoraAdapterSelectionV1, VerifiedLoraTargetV1,
 };
 use crate::context_window::{ContextShiftDecisionV1, ContextWindowStateV1};
-use crate::device_sampling::{DeviceSamplingBuffers, decode_selected_record};
+use crate::device_sampling::{
+    DeviceSamplingBuffers, FIXED_K20_DECISION_BYTES, decode_selected_record,
+};
 use crate::execution::{
-    ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, ExecutionStateImageV1,
-    KvState, KvStateAppendSubmission, LinearAttentionBindings, LinearAttentionState,
-    OwnedTensorBinding, PrepareSupport, Submission,
+    ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, ExecutionState,
+    ExecutionStateImageV1, KvState, KvStateAppendSubmission, LinearAttentionBindings,
+    LinearAttentionState, OwnedTensorBinding, PrepareSupport, PreparedOperation, Submission,
 };
 use crate::final_output::QWEN35_VOCAB_SIZE;
 #[cfg(feature = "phase54-research")]
@@ -35,8 +37,8 @@ use crate::kv_state::{
 use crate::linear_attention::{LinearAttentionDescriptor, LinearAttentionStateDescriptor};
 use crate::model::{QWEN35_4B_FINGERPRINT, TensorDType, VerifiedCache};
 use crate::op::{
-    AttentionPreprocessContract, AttentionPreprocessPositionMode, OpError, SemanticOpDescriptor,
-    SemanticOpKind,
+    AttentionPreprocessContract, AttentionPreprocessPositionMode, OpError,
+    Qwen38ProjectionPackContractV1, SemanticOpDescriptor, SemanticOpKind,
 };
 #[cfg(feature = "phase54-research")]
 use crate::phase54_kq_transform::{
@@ -63,9 +65,9 @@ use crate::prepared_execution::{
     prepared_projection_sharing_enabled, require_terminal_success,
 };
 use crate::qwen_graph::{
-    QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES,
-    Qwen38ProjectionPackLoweringScope, QwenGraph, QwenGraphNode, QwenGraphNodeKind,
-    QwenGraphStateDescriptor, QwenGraphStateKind, QwenGraphTensorBacking, QwenGraphWeightBinding,
+    QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QWEN35_LAYER_TYPES, Qwen38ProjectionPackLoweringScope,
+    QwenGraph, QwenGraphNode, QwenGraphNodeKind, QwenGraphStateDescriptor, QwenGraphStateKind,
+    QwenGraphTensorBacking, QwenGraphWeightBinding,
 };
 use crate::session_checkpoint::{
     CheckpointIdentity, CheckpointPayload, SessionCheckpoint, StateOwnerKindV1, StatePlaneKindV1,
@@ -98,6 +100,30 @@ pub struct QwenExecutionOutput {
     /// rows above; callers must not confuse the two representations.
     embeddings_bf16: Option<Vec<u16>>,
     committed_length: u64,
+}
+
+/// Private fixed-K20 GPU verification result consumed by the MTP frontend.
+/// The record is converted to ordinary generation steps only after its
+/// version, status, counts, IDs, and target log probabilities are checked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QwenMtpPqDecisionV1 {
+    width: usize,
+    accepted_draft_tokens: usize,
+    selections: Vec<SamplingSelectionV1>,
+}
+
+impl QwenMtpPqDecisionV1 {
+    pub const fn width(&self) -> usize {
+        self.width
+    }
+
+    pub const fn accepted_draft_tokens(&self) -> usize {
+        self.accepted_draft_tokens
+    }
+
+    pub fn selections(&self) -> &[SamplingSelectionV1] {
+        &self.selections
+    }
 }
 
 /// Evidence-only `(layer, key bytes, value bytes)` semantic KV payload.
@@ -567,6 +593,9 @@ pub struct QwenGraphMemoryEstimate {
     workspace_arena_bytes: u64,
     request_state_bytes: u64,
     safety_reserve_bytes: u64,
+    prepared_plan_bytes: u64,
+    prepared_queue_bytes: u64,
+    prepared_context_bytes: u64,
     required_bytes: u64,
 }
 
@@ -593,6 +622,18 @@ impl QwenGraphMemoryEstimate {
 
     pub const fn required_bytes(self) -> u64 {
         self.required_bytes
+    }
+
+    pub const fn prepared_plan_bytes(self) -> u64 {
+        self.prepared_plan_bytes
+    }
+
+    pub const fn prepared_queue_bytes(self) -> u64 {
+        self.prepared_queue_bytes
+    }
+
+    pub const fn prepared_context_bytes(self) -> u64 {
+        self.prepared_context_bytes
     }
 }
 
@@ -679,6 +720,8 @@ const QWEN38_GFX1030_KV_APPEND_ATTENTION_CHAIN_ENV: &str =
 const QWEN38_GFX1201_KV_APPEND_ATTENTION_CHAIN_ENV: &str =
     "SLLM_QWEN38_GFX1201_KV_APPEND_ATTENTION_CHAIN";
 const QWEN38_NVFP4_PROJECTION_PACK2_ENV: &str = "SLLM_QWEN38_NVFP4_PROJECTION_PACK2";
+const QWEN38_NVFP4_PREFILL_SHARED_ACTIVATION_ENV: &str =
+    "SLLM_QWEN38_NVFP4_PREFILL_SHARED_ACTIVATION";
 const QWEN38_FP8_GDN_PROJECTION_PACK2_ENV: &str = "SLLM_QWEN38_FP8_GDN_PROJECTION_PACK2";
 const QWEN_RESIDUAL_RMSNORM_FUSION_ENV: &str = "SLLM_QWEN_GFX1030_RESIDUAL_RMSNORM_FUSION";
 const QWEN_RESIDUAL_RMSNORM_FUSION_GFX1201_ENV: &str = "SLLM_QWEN_GFX1201_RESIDUAL_RMSNORM_FUSION";
@@ -716,38 +759,83 @@ fn target_candidate_env_value(
     }
 }
 
-fn qwen_residual_rmsnorm_fusion_enabled_with_env(
-    session: &ExecutionSession,
-    graph: &QwenGraph,
-    adapters: &AdapterRequestSetV1,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QwenResidualRmsNormFusionScope {
+    Qwen35FourB,
+    Qwen38Target,
+}
+
+fn qwen_residual_rmsnorm_fusion_policy_scope(
+    backend_name: &str,
+    expected_target: Option<&str>,
+    graph_scope: Option<QwenResidualRmsNormFusionScope>,
+    adapters_empty: bool,
     env_value: Option<&OsStr>,
-) -> bool {
-    target_candidate_env_enabled(session.expected_target().as_deref(), env_value)
-        && session.backend_name() == "hip"
-        && matches!(
-            session.expected_target().as_deref(),
-            Some("gfx1030" | "gfx1201")
-        )
-        && graph.model_fingerprint() == QWEN35_4B_FINGERPRINT
+) -> Option<QwenResidualRmsNormFusionScope> {
+    if target_candidate_env_enabled(expected_target, env_value)
+        && backend_name == "hip"
+        && adapters_empty
+    {
+        graph_scope
+    } else {
+        None
+    }
+}
+
+fn qwen_residual_rmsnorm_graph_scope(
+    graph: &QwenGraph,
+    artifact: Option<&crate::VerifiedUnslothQwen38Nvfp4>,
+) -> Option<QwenResidualRmsNormFusionScope> {
+    if graph.model_fingerprint() == QWEN35_4B_FINGERPRINT
         && graph.fp8_sidecar_fingerprint().is_none()
         && !graph.is_multimodal()
         && !graph.is_mtp()
-        && graph.layer_types().len() == QWEN35_LAYER_COUNT
-        && adapters.adapters().is_empty()
-        && adapters.controls().is_empty()
+        && graph.layer_types() == QWEN35_LAYER_TYPES
+    {
+        Some(QwenResidualRmsNormFusionScope::Qwen35FourB)
+    } else if artifact
+        .is_some_and(|artifact| graph.qwen38_residual_rmsnorm_fusion_eligible(artifact))
+    {
+        Some(QwenResidualRmsNormFusionScope::Qwen38Target)
+    } else {
+        None
+    }
 }
 
-fn qwen_residual_rmsnorm_fusion_enabled(
+fn qwen_residual_rmsnorm_fusion_scope_with_env(
     session: &ExecutionSession,
     graph: &QwenGraph,
     adapters: &AdapterRequestSetV1,
-) -> bool {
+    artifact: Option<&crate::VerifiedUnslothQwen38Nvfp4>,
+    env_value: Option<&OsStr>,
+) -> Option<QwenResidualRmsNormFusionScope> {
+    qwen_residual_rmsnorm_fusion_policy_scope(
+        session.backend_name(),
+        session.expected_target().as_deref(),
+        qwen_residual_rmsnorm_graph_scope(graph, artifact),
+        adapters.adapters().is_empty() && adapters.controls().is_empty(),
+        env_value,
+    )
+}
+
+fn qwen_residual_rmsnorm_fusion_scope(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &AdapterRequestSetV1,
+    artifact: Option<&crate::VerifiedUnslothQwen38Nvfp4>,
+) -> Option<QwenResidualRmsNormFusionScope> {
     let env_value = target_candidate_env_value(
         session,
         QWEN_RESIDUAL_RMSNORM_FUSION_ENV,
         QWEN_RESIDUAL_RMSNORM_FUSION_GFX1201_ENV,
     );
-    qwen_residual_rmsnorm_fusion_enabled_with_env(session, graph, adapters, env_value.as_deref())
+    qwen_residual_rmsnorm_fusion_scope_with_env(
+        session,
+        graph,
+        adapters,
+        artifact,
+        env_value.as_deref(),
+    )
 }
 
 fn qwen_gdn_projection_bundle_enabled_with_env(
@@ -942,6 +1030,14 @@ fn qwen38_deferred_completion_env_name(expected_target: Option<&str>) -> Option<
     }
 }
 
+fn qwen38_graph_spans_env_name(expected_target: Option<&str>) -> Option<&'static str> {
+    match expected_target {
+        Some("gfx1030") => Some("SLLM_QWEN38_GFX1030_GRAPH_SPANS"),
+        Some("gfx1201") => Some("SLLM_QWEN38_GFX1201_GRAPH_SPANS"),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // Explicit fields keep the exact opt-in scope auditable.
 fn qwen38_nvfp4_projection_pack2_scope_enabled(
     backend_name: &str,
@@ -986,6 +1082,147 @@ fn qwen38_nvfp4_projection_pack2_enabled(
         artifact_matches,
         std::env::var_os(QWEN38_NVFP4_PROJECTION_PACK2_ENV).as_deref(),
     )
+}
+
+#[allow(clippy::too_many_arguments)] // Keep the request policy fields explicit and auditable.
+fn qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+    backend_name: &str,
+    expected_target: Option<&str>,
+    has_fp8_sidecar: bool,
+    is_multimodal: bool,
+    is_mtp: bool,
+    adapters_empty: bool,
+    has_nvfp4_projection_pack: bool,
+    env_value: Option<&OsStr>,
+) -> bool {
+    // The reviewed exact target/artifact scope is now the default.  Keep an
+    // exact zero or malformed value as a fail-closed rollback to the
+    // decomposed pair, matching the graph lowering selector.
+    default_on_env(env_value)
+        && backend_name == "hip"
+        && matches!(expected_target, Some("gfx1030" | "gfx1201"))
+        && has_fp8_sidecar
+        && !is_multimodal
+        && !is_mtp
+        && adapters_empty
+        && has_nvfp4_projection_pack
+}
+
+fn qwen38_nvfp4_prefill_shared_activation_enabled(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &QwenAdapterRuntime,
+) -> bool {
+    let has_nvfp4_projection_pack = graph.nodes().iter().any(|node| {
+        node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+            && node
+                .operation()
+                .and_then(SemanticOpDescriptor::qwen38_projection_pack_contract)
+                .is_some_and(|contract| {
+                    contract.role() == crate::Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp
+                })
+    });
+    qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+        session.backend_name(),
+        session.expected_target().as_deref(),
+        graph.fp8_sidecar_fingerprint().is_some(),
+        graph.is_multimodal(),
+        graph.is_mtp(),
+        adapters.lora.is_empty() && adapters.controls.is_empty(),
+        has_nvfp4_projection_pack,
+        std::env::var_os(QWEN38_NVFP4_PREFILL_SHARED_ACTIVATION_ENV).as_deref(),
+    )
+}
+
+fn qwen38_nvfp4_prefill_shared_activation_operation_enabled(
+    operation: &SemanticOpDescriptor,
+    token_count: u64,
+) -> bool {
+    // M2..M4 are the fixed-width MTP target-verification rows.  The existing
+    // M>=64 prefill route remains unchanged; M5..M63 stay decomposed until a
+    // matching native provider is deliberately adopted.
+    let supported_rows = (2..=4).contains(&token_count) || token_count >= 64;
+    if !supported_rows
+        || operation.kind() != SemanticOpKind::Qwen38ProjectionPack2
+        || operation.inputs().len() != 3
+        || operation.outputs().len() != 2
+    {
+        return false;
+    }
+    let Some(contract) = operation.qwen38_projection_pack_contract() else {
+        return false;
+    };
+    if contract.role() != crate::Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp
+        || contract.hidden_size() != crate::Qwen38ProjectionPackContractV1::HIDDEN_SIZE
+        || contract.intermediate_size()
+            != crate::Qwen38ProjectionPackContractV1::MLP_INTERMEDIATE_SIZE
+    {
+        return false;
+    }
+    let hidden = usize::try_from(contract.hidden_size()).ok();
+    let intermediate = usize::try_from(contract.intermediate_size()).ok();
+    let (Some(hidden), Some(intermediate)) = (hidden, intermediate) else {
+        return false;
+    };
+    let inputs = operation.inputs();
+    let outputs = operation.outputs();
+    inputs[0].shape().len() == 2
+        && inputs[0].shape()[1] == hidden
+        && inputs[1..]
+            .iter()
+            .all(|weight| weight.shape() == [intermediate, hidden])
+        && outputs
+            .iter()
+            .all(|output| output.shape().len() == 2 && output.shape()[1] == intermediate)
+}
+
+fn qwen38_fp8_gdn_projection_pack2_operation_enabled(
+    operation: &SemanticOpDescriptor,
+    token_count: u64,
+) -> bool {
+    if token_count <= 1
+        || operation.kind() != SemanticOpKind::Qwen38ProjectionPack2
+        || operation.inputs().len() != 3
+        || operation.outputs().len() != 2
+    {
+        return false;
+    }
+    let Some(contract) = operation.qwen38_projection_pack_contract() else {
+        return false;
+    };
+    if contract.role() != crate::Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ
+        || contract.hidden_size() != Qwen38ProjectionPackContractV1::HIDDEN_SIZE
+        || contract.input_global_scale_f32_bits() != 0
+    {
+        return false;
+    }
+    let hidden = Qwen38ProjectionPackContractV1::HIDDEN_SIZE as usize;
+    let qkv = Qwen38ProjectionPackContractV1::GDN_QKV_WIDTH as usize;
+    let z = Qwen38ProjectionPackContractV1::GDN_Z_WIDTH as usize;
+    let inputs = operation.inputs();
+    let outputs = operation.outputs();
+    inputs[0].shape().len() == 2
+        && inputs[0].shape()[1] == hidden
+        && inputs[1].shape() == [qkv, hidden]
+        && inputs[2].shape() == [z, hidden]
+        && outputs[0].shape().len() == 2
+        && outputs[0].shape()[1] == qkv
+        && outputs[1].shape().len() == 2
+        && outputs[1].shape()[1] == z
+        && inputs[0].dtype() == DType::Bf16
+        && inputs[0].encoding() == Encoding::Unquantized
+        && inputs[1..].iter().all(|weight| {
+            weight.dtype() == DType::F8E4M3Fn
+                && weight.encoding()
+                    == (Encoding::Fp8Scaled {
+                        granularity: Fp8ScaleGranularity::OuterDimension,
+                        scale_dtype: DType::F32,
+                        resident: Fp8ResidentRepresentation::PackedBytes,
+                    })
+        })
+        && outputs.iter().all(|output| {
+            output.dtype() == DType::Bf16 && output.encoding() == Encoding::Unquantized
+        })
 }
 
 fn qwen38_fp8_gdn_projection_pack2_enabled(
@@ -1321,6 +1558,7 @@ pub struct QwenExecutionAudit {
     projection_pack_submission_count: u64,
     projection_pack_member_count: u64,
     projection_pack_activation_quantize_count: u64,
+    bf16_row_concat_count: u64,
     request_local_deferred_completion: bool,
     kernel_dispatches_by_identity: BTreeMap<(u32, String), u64>,
     #[cfg(feature = "phase54-research")]
@@ -1408,6 +1646,13 @@ impl QwenExecutionAudit {
 
     pub const fn projection_pack_activation_quantize_count(&self) -> u64 {
         self.projection_pack_activation_quantize_count
+    }
+
+    /// Number of successful private BF16 row-concat operations in this
+    /// request. It is separate from semantic submission/kernel counts because
+    /// the synchronous private operation has no async submission.
+    pub const fn bf16_row_concat_count(&self) -> u64 {
+        self.bf16_row_concat_count
     }
 
     /// Whether this request froze the exact Qwen3.8 eventless completion
@@ -1708,6 +1953,167 @@ impl From<ExecutionError> for QwenExecutionError {
     fn from(error: ExecutionError) -> Self {
         Self::Execution(error)
     }
+}
+
+fn parse_fixed_k20_decision(
+    bytes: &[u8; FIXED_K20_DECISION_BYTES as usize],
+    width: usize,
+    draft_ids: &[u32],
+) -> Result<QwenMtpPqDecisionV1, QwenExecutionError> {
+    const VERSION: u32 = 1;
+    const NO_REJECTION: u32 = u32::MAX;
+    if !(1..=8).contains(&width) || draft_ids.len() != width {
+        return Err(QwenExecutionError::InvalidRequest(
+            "fixed-K20 decision width is outside 1 through 8".to_owned(),
+        ));
+    }
+    let read_u32 = |offset: usize| -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("decision u32"))
+    };
+    let read_f64 = |offset: usize| -> f64 {
+        f64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("decision f64"))
+    };
+    let version = read_u32(0);
+    let status = read_u32(4);
+    let accepted = usize::try_from(read_u32(8)).map_err(|_| {
+        QwenExecutionError::InvalidRequest("fixed-K20 accepted count overflowed usize".to_owned())
+    })?;
+    let emitted = usize::try_from(read_u32(12)).map_err(|_| {
+        QwenExecutionError::InvalidRequest("fixed-K20 emitted count overflowed usize".to_owned())
+    })?;
+    let rejected_at = read_u32(16);
+    let record_width = usize::try_from(read_u32(20)).map_err(|_| {
+        QwenExecutionError::InvalidRequest("fixed-K20 decision width overflowed usize".to_owned())
+    })?;
+    let draws_used = read_u32(24);
+    let reserved0 = read_u32(28);
+    let reserved1 = read_u32(68);
+    let expected_emitted = accepted.checked_add(1).ok_or_else(|| {
+        QwenExecutionError::InvalidRequest("fixed-K20 emitted count overflowed".to_owned())
+    })?;
+    if version != VERSION
+        || status != 0
+        || record_width != width
+        || accepted > width
+        || emitted != expected_emitted
+        || emitted > 9
+        || reserved0 != 0
+        || reserved1 != 0
+    {
+        return Err(QwenExecutionError::InvalidRequest(
+            "fixed-K20 decision header is invalid".to_owned(),
+        ));
+    }
+    let expected_draws = if accepted == width {
+        width + 1
+    } else {
+        accepted + 2
+    };
+    if usize::try_from(draws_used).ok() != Some(expected_draws) {
+        return Err(QwenExecutionError::InvalidRequest(
+            "fixed-K20 decision draw count is invalid".to_owned(),
+        ));
+    }
+    if (accepted == width && rejected_at != NO_REJECTION)
+        || (accepted < width && rejected_at != u32::try_from(accepted).expect("bounded count"))
+    {
+        return Err(QwenExecutionError::InvalidRequest(
+            "fixed-K20 decision rejection index is invalid".to_owned(),
+        ));
+    }
+    let mut selections = Vec::with_capacity(emitted);
+    for index in 0..emitted {
+        let token_offset = 32 + index * 4;
+        let token_id = read_u32(token_offset);
+        let logprob = read_f64(72 + index * 8);
+        if token_id >= QWEN35_VOCAB_SIZE as u32 || !logprob.is_finite() || logprob > 0.0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "fixed-K20 decision token or target log probability is invalid".to_owned(),
+            ));
+        }
+        if index < accepted && draft_ids.get(index).copied() != Some(token_id) {
+            return Err(QwenExecutionError::InvalidRequest(
+                "fixed-K20 decision accepted prefix differs from draft IDs".to_owned(),
+            ));
+        }
+        selections.push(SamplingSelectionV1 {
+            token_id,
+            logprob,
+            top_logprobs: Vec::new(),
+        });
+    }
+    for index in emitted..9 {
+        if read_u32(32 + index * 4) != 0 || read_f64(72 + index * 8) != 0.0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "fixed-K20 decision has nonzero unused entries".to_owned(),
+            ));
+        }
+    }
+    Ok(QwenMtpPqDecisionV1 {
+        width,
+        accepted_draft_tokens: accepted,
+        selections,
+    })
+}
+
+fn slice_qwen_output_rows(
+    output: &QwenExecutionOutput,
+    committed_rows: usize,
+    committed_length: u64,
+    total_rows: usize,
+) -> Result<QwenExecutionOutput, QwenExecutionError> {
+    if total_rows == 0 || committed_rows == 0 || committed_rows > total_rows {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "output prefix rows {committed_rows} are outside 1..={total_rows}"
+        )));
+    }
+    // Private support-only target selection intentionally leaves token_ids
+    // empty.  The speculative block owns the authoritative row count; a
+    // non-empty token vector still has to describe that same block.
+    if !output.token_ids.is_empty() && output.token_ids.len() != total_rows {
+        return Err(QwenExecutionError::InvalidRequest(
+            "output token rows differ from the speculative block row count".to_owned(),
+        ));
+    }
+    let mut sliced = output.clone();
+    sliced.token_ids.truncate(committed_rows);
+    if committed_rows != total_rows {
+        sliced.last_logits = None;
+        sliced.selection = None;
+    }
+    let truncate_rows = |values: &mut Option<Vec<u16>>, name: &str| {
+        let Some(values) = values else {
+            return Ok(());
+        };
+        if values.len() % total_rows != 0 {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{name} output length is not divisible by its row count"
+            )));
+        }
+        let row_width = values.len() / total_rows;
+        values.truncate(committed_rows.saturating_mul(row_width));
+        Ok(())
+    };
+    truncate_rows(&mut sliced.logits_bf16, "target logits")?;
+    truncate_rows(&mut sliced.hidden_states_bf16, "target hidden states")?;
+    truncate_rows(&mut sliced.embeddings_bf16, "target embeddings")?;
+    if let Some(selections) = &mut sliced.selections {
+        if selections.len() != total_rows {
+            return Err(QwenExecutionError::InvalidRequest(
+                "target selection rows differ from token rows".to_owned(),
+            ));
+        }
+        selections.truncate(committed_rows);
+    }
+    sliced.committed_length = committed_length;
+    Ok(sliced)
+}
+
+fn is_unsupported_execution_error(error: &QwenExecutionError) -> bool {
+    matches!(
+        error,
+        QwenExecutionError::Execution(ExecutionError::Unsupported { .. })
+    )
 }
 
 impl From<PreparedExecutionError> for QwenExecutionError {
@@ -2792,12 +3198,27 @@ impl QwenExecutionRequest {
             .prefill_mtp_state_only(token_id, target_hidden_bf16)
     }
 
+    /// Runs one MTP transition and publishes its full-vocabulary logits row.
+    /// Ordinary draft execution should use [`Self::decode_mtp_argmax`] so the
+    /// logits row is not read back when only the token and hidden row are
+    /// needed.
     pub fn decode_mtp(
         &mut self,
         token_id: i32,
         target_hidden_bf16: &[u16],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.core.decode_mtp(token_id, target_hidden_bf16)
+    }
+
+    /// Runs one MTP draft transition and publishes only the Argmax token and
+    /// hidden row. Callers that only advance the draft state must use this
+    /// entry point so the full-vocabulary logits row is not read back.
+    pub fn decode_mtp_argmax(
+        &mut self,
+        token_id: i32,
+        target_hidden_bf16: &[u16],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.decode_mtp_argmax(token_id, target_hidden_bf16)
     }
 
     /// Runs one MTP draft transition with the fixed device selector. The
@@ -2853,7 +3274,7 @@ impl QwenExecutionRequest {
     /// resident model. Synchronous callers use it between transitions when a
     /// transport cancellation or host-side sampling/decoding failure occurs.
     pub fn cancel(&mut self) {
-        self.core.lifecycle.cancel();
+        self.core.cancel();
     }
 
     pub fn model_fingerprint(&self) -> &str {
@@ -2885,6 +3306,61 @@ impl QwenExecutionRequest {
 
     pub fn session_id(&self) -> crate::ExecutionSessionId {
         self.core.session.id()
+    }
+
+    /// Returns whether this target and companion can use the private fixed-K20
+    /// MTP support path.  This is a preflight query only; it performs no
+    /// allocation and no state transition.
+    pub fn supports_fixed_k20_mtp_with(
+        &self,
+        companion: &QwenExecutionRequest,
+    ) -> Result<bool, QwenExecutionError> {
+        if self.core.session.id() != companion.core.session.id() {
+            return Ok(false);
+        }
+        Ok(
+            self.core.session.fixed_k20_support_scratch_version()? == Some(1)
+                && companion.core.session.fixed_k20_support_scratch_version()? == Some(1)
+                && self.core.session.fixed_k20_mtp_verifier_version()? == Some(1)
+                && companion.core.session.fixed_k20_mtp_verifier_version()? == Some(1),
+        )
+    }
+
+    /// Arms request-owned compact support capture for the next fixed-K20
+    /// companion selector rows. Calling it again starts a fresh capture.
+    pub fn begin_fixed_k20_support_capture(
+        &mut self,
+        rows: usize,
+    ) -> Result<(), QwenExecutionError> {
+        self.core
+            .begin_fixed_k20_support_capture(rows, FixedK20SupportCaptureRole::CompanionDraft)
+    }
+
+    /// Arms target-side fixed-K20 support capture for the private p/q route.
+    /// Target sampled records are intentionally omitted because p/q consumes
+    /// the compact support instead; the legacy selector route remains
+    /// unchanged.
+    pub fn begin_fixed_k20_target_support_capture(
+        &mut self,
+        rows: usize,
+    ) -> Result<(), QwenExecutionError> {
+        self.core
+            .begin_fixed_k20_support_capture(rows, FixedK20SupportCaptureRole::TargetVerify)
+    }
+
+    /// Runs the private fixed-K20 GPU p/q verifier over support rows captured
+    /// by this target and its companion.  The returned selections are already
+    /// validated target-p records and can be converted directly to frontend
+    /// generation steps.
+    pub fn verify_mtp_fixed_k20(
+        &mut self,
+        companion: &QwenExecutionRequest,
+        draft_ids: &[u32],
+        seed: u64,
+        absolute_position: u64,
+    ) -> Result<QwenMtpPqDecisionV1, QwenExecutionError> {
+        self.core
+            .verify_mtp_fixed_k20(&companion.core, draft_ids, seed, absolute_position)
     }
 
     pub fn adapter_identity(&self) -> &str {
@@ -3077,6 +3553,8 @@ struct QwenExecutionCore {
     // Graph payloads release before cached plans, buffers and the queue.
     graph_replay: Mutex<PreparedGraphReplayState>,
     device_sampling: Mutex<Option<DeviceSamplingBuffers>>,
+    fixed_k20_support_capture: Mutex<Option<FixedK20SupportCapture>>,
+    fixed_k20_decision: Mutex<Option<ExecutionBuffer>>,
     selector_batch: Option<Vec<DeviceTokenSelectorRequestV1>>,
     graph_collect_node: AtomicBool,
     qwen38_graph_spans_enabled: bool,
@@ -3102,6 +3580,8 @@ struct QwenExecutionCore {
     pending_speculative: Option<PendingSpeculativeBlock>,
     adapters: QwenAdapterRuntime,
     short_terminal_last_row: bool,
+    bf16_row_concat_count: AtomicU64,
+    qwen38_nvfp4_prefill_shared_activation: bool,
     qwen38_deferred_completion: bool,
     qwen38_kv_append_attention_chain: bool,
     // Set for the current graph execution only.  The resident selector is
@@ -3165,6 +3645,67 @@ impl QwenAdapterRuntime {
 struct PendingSpeculativeBlock {
     start_length: u64,
     token_ids: Vec<i32>,
+    /// Records whether the linear-state prefix checkpoint was armed for this block.
+    prefix_checkpoint_armed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FixedK20SupportCaptureRole {
+    CompanionDraft,
+    TargetVerify,
+}
+
+impl FixedK20SupportCaptureRole {
+    const fn suppresses_public_selection(self) -> bool {
+        matches!(self, Self::TargetVerify)
+    }
+}
+
+fn fixed_k20_batch_terminal_selection(
+    selections: Vec<SamplingSelectionV1>,
+    suppress_public_selection: bool,
+) -> TerminalSelection {
+    if suppress_public_selection {
+        TerminalSelection {
+            token_ids: Vec::new(),
+            selection: None,
+            selections: None,
+        }
+    } else {
+        let token_ids = selections
+            .iter()
+            .map(|selection| selection.token_id as i32)
+            .collect();
+        TerminalSelection {
+            token_ids,
+            selection: None,
+            selections: Some(selections),
+        }
+    }
+}
+
+fn fixed_k20_capture_suppresses_public_selection(capture: Option<&FixedK20SupportCapture>) -> bool {
+    capture.is_some_and(|state| {
+        state.captured_rows < state.expected_rows && state.role.suppresses_public_selection()
+    })
+}
+
+fn validate_fixed_k20_selection_capture(
+    publish_public_selection: bool,
+    capture_slot: Option<usize>,
+) -> Result<(), QwenExecutionError> {
+    if !publish_public_selection && capture_slot.is_none() {
+        return Err(QwenExecutionError::InvalidRequest(
+            "public selector suppression requires an armed support capture".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+struct FixedK20SupportCapture {
+    expected_rows: usize,
+    captured_rows: usize,
+    role: FixedK20SupportCaptureRole,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5284,6 +5825,246 @@ impl QwenResidentInner {
 }
 
 impl QwenExecutionCore {
+    fn cancel(&mut self) {
+        if let Some(pending) = self.pending_speculative.take() {
+            if pending.prefix_checkpoint_armed {
+                let states = self.linear_states.values().collect::<Vec<_>>();
+                let _ = self.discard_mtp_prefix_checkpoints(&states);
+            }
+        }
+        self.lifecycle.cancel();
+    }
+
+    fn begin_fixed_k20_support_capture(
+        &mut self,
+        rows: usize,
+        role: FixedK20SupportCaptureRole,
+    ) -> Result<(), QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if !(1..=9).contains(&rows) {
+            return Err(QwenExecutionError::InvalidRequest(
+                "fixed-K20 support capture requires 1 through 9 rows".to_owned(),
+            ));
+        }
+        if self.session.fixed_k20_support_scratch_version()? != Some(1) {
+            return Err(QwenExecutionError::Execution(ExecutionError::Unsupported {
+                reason: "fixed-K20 support capture is unavailable on this backend".to_owned(),
+            }));
+        }
+        let mut storage = self
+            .device_sampling
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        if storage.is_none() {
+            *storage = Some(DeviceSamplingBuffers::new(
+                self.session.as_ref(),
+                QWEN35_VOCAB_SIZE,
+            )?);
+        }
+        storage
+            .as_mut()
+            .expect("device sampling storage initialized")
+            .ensure_fixed_k20_support_slots(self.session.as_ref(), rows)?;
+        drop(storage);
+        let mut capture = self
+            .fixed_k20_support_capture
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        *capture = Some(FixedK20SupportCapture {
+            expected_rows: rows,
+            captured_rows: 0,
+            role,
+        });
+        Ok(())
+    }
+
+    fn fixed_k20_capture_suppresses_public_selection(&self) -> Result<bool, QwenExecutionError> {
+        let capture = self
+            .fixed_k20_support_capture
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        Ok(fixed_k20_capture_suppresses_public_selection(
+            capture.as_ref(),
+        ))
+    }
+
+    fn finish_fixed_k20_support_capture(&self) -> Result<(), QwenExecutionError> {
+        *self
+            .fixed_k20_support_capture
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)? = None;
+        Ok(())
+    }
+
+    fn fixed_k20_support_range(
+        &self,
+        rows: usize,
+    ) -> Result<crate::BufferRange, QwenExecutionError> {
+        let storage = self
+            .device_sampling
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        storage
+            .as_ref()
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "fixed-K20 support storage has not been initialized".to_owned(),
+                )
+            })?
+            .fixed_k20_support_range(rows)
+            .map_err(Into::into)
+    }
+
+    fn fixed_k20_capture_complete(&self, rows: usize) -> Result<(), QwenExecutionError> {
+        let capture = self
+            .fixed_k20_support_capture
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        match capture.as_ref() {
+            Some(state) if state.expected_rows == rows && state.captured_rows == rows => Ok(()),
+            Some(state) => Err(QwenExecutionError::InvalidRequest(format!(
+                "fixed-K20 support capture has {} of {} rows",
+                state.captured_rows, state.expected_rows
+            ))),
+            None => Err(QwenExecutionError::InvalidRequest(
+                "fixed-K20 support capture was not armed".to_owned(),
+            )),
+        }
+    }
+
+    fn fixed_k20_decision_buffer(&self) -> Result<ExecutionBuffer, QwenExecutionError> {
+        let mut decision = self
+            .fixed_k20_decision
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        if decision.is_none() {
+            *decision = Some(self.session.allocate_with_category(
+                FIXED_K20_DECISION_BYTES,
+                crate::AllocationCategory::RequestState,
+            )?);
+        }
+        Ok(decision
+            .as_ref()
+            .expect("fixed-K20 decision buffer initialized")
+            .clone())
+    }
+
+    fn verify_mtp_fixed_k20(
+        &mut self,
+        companion: &QwenExecutionCore,
+        draft_ids: &[u32],
+        seed: u64,
+        absolute_position: u64,
+    ) -> Result<QwenMtpPqDecisionV1, QwenExecutionError> {
+        let width = draft_ids.len();
+        if !(1..=8).contains(&width) {
+            return Err(QwenExecutionError::InvalidRequest(
+                "fixed-K20 MTP verification requires 1 through 8 drafts".to_owned(),
+            ));
+        }
+        if self.session.id() != companion.session.id() {
+            return Err(QwenExecutionError::Execution(
+                ExecutionError::WrongSession {
+                    expected: self.session.id(),
+                    actual: companion.session.id(),
+                },
+            ));
+        }
+        if self.session.fixed_k20_support_scratch_version()? != Some(1)
+            || companion.session.fixed_k20_support_scratch_version()? != Some(1)
+            || self.session.fixed_k20_mtp_verifier_version()? != Some(1)
+            || companion.session.fixed_k20_mtp_verifier_version()? != Some(1)
+        {
+            return Err(QwenExecutionError::Execution(ExecutionError::Unsupported {
+                reason: "fixed-K20 MTP verification is unavailable on one request backend"
+                    .to_owned(),
+            }));
+        }
+        self.fixed_k20_capture_complete(width + 1)?;
+        companion.fixed_k20_capture_complete(width)?;
+        let target = self.fixed_k20_support_range(width + 1)?;
+        let draft = companion.fixed_k20_support_range(width)?;
+        let decision = self.fixed_k20_decision_buffer()?;
+        let output = decision.range(0, FIXED_K20_DECISION_BYTES)?;
+        if let Err(error) = self.session.verify_fixed_k20_mtp(
+            &self.queue,
+            target,
+            draft,
+            draft_ids,
+            seed,
+            absolute_position,
+            output,
+        ) {
+            self.lifecycle.cancel();
+            companion.lifecycle.cancel();
+            return Err(error.into());
+        }
+        let mut readback = match self
+            .session
+            .readback(&self.queue, decision.range(0, FIXED_K20_DECISION_BYTES)?)
+        {
+            Ok(readback) => readback,
+            Err(error) => {
+                self.lifecycle.cancel();
+                companion.lifecycle.cancel();
+                return Err(error.into());
+            }
+        };
+        let state = match readback.wait(self.completion_timeout) {
+            Ok(state) => state,
+            Err(error) => {
+                self.lifecycle.cancel();
+                companion.lifecycle.cancel();
+                return Err(error.into());
+            }
+        };
+        if state != ExecutionState::Success {
+            self.lifecycle.cancel();
+            companion.lifecycle.cancel();
+            return Err(QwenExecutionError::CompletionFailure {
+                stage: "fixed-K20 MTP decision readback".to_owned(),
+            });
+        }
+        let mut bytes = [0_u8; FIXED_K20_DECISION_BYTES as usize];
+        let copied = match readback.read_into(&mut bytes) {
+            Ok(copied) => copied,
+            Err(error) => {
+                self.lifecycle.cancel();
+                companion.lifecycle.cancel();
+                return Err(error.into());
+            }
+        };
+        if copied != FIXED_K20_DECISION_BYTES {
+            self.lifecycle.cancel();
+            companion.lifecycle.cancel();
+            return Err(QwenExecutionError::InvalidRequest(
+                "fixed-K20 decision readback returned an unexpected byte count".to_owned(),
+            ));
+        }
+        match parse_fixed_k20_decision(&bytes, width, draft_ids) {
+            Ok(decision) => {
+                if let Err(error) = self.finish_fixed_k20_support_capture() {
+                    self.lifecycle.cancel();
+                    companion.lifecycle.cancel();
+                    return Err(error);
+                }
+                if let Err(error) = companion.finish_fixed_k20_support_capture() {
+                    self.lifecycle.cancel();
+                    companion.lifecycle.cancel();
+                    return Err(error);
+                }
+                Ok(decision)
+            }
+            Err(error) => {
+                self.lifecycle.cancel();
+                companion.lifecycle.cancel();
+                Err(error)
+            }
+        }
+    }
+
     #[cfg(feature = "phase54-research")]
     fn ensure_phase54_reuse_safe(&self, operation: &str) -> Result<(), QwenExecutionError> {
         if self.phase54_kv_attribution.mode().is_enabled() {
@@ -5559,14 +6340,28 @@ impl QwenExecutionCore {
     ) -> Result<Self, QwenExecutionError> {
         // The graph is already owned by this request. Disabled rewrites must
         // pass it through without the borrowed rewrite API's deep clone.
-        let graph =
-            if qwen_residual_rmsnorm_fusion_enabled(resident.session.as_ref(), &graph, &adapters) {
+        let residual_rmsnorm_scope = qwen_residual_rmsnorm_fusion_scope(
+            resident.session.as_ref(),
+            &graph,
+            &adapters,
+            resident.qwen38_artifact.as_deref(),
+        );
+        let graph = match residual_rmsnorm_scope {
+            Some(QwenResidualRmsNormFusionScope::Qwen35FourB) => graph
+                .with_residual_rmsnorm_fusion(true)
+                .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?,
+            Some(QwenResidualRmsNormFusionScope::Qwen38Target) => {
+                let artifact = resident.qwen38_artifact.as_deref().ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "Qwen3.8 residual RMSNorm fusion lacks its verified artifact".to_owned(),
+                    )
+                })?;
                 graph
-                    .with_residual_rmsnorm_fusion(true)
+                    .with_qwen38_residual_rmsnorm_fusion(artifact)
                     .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?
-            } else {
-                graph
-            };
+            }
+            None => graph,
+        };
         let graph =
             if qwen_gdn_projection_bundle_enabled(resident.session.as_ref(), &graph, &adapters) {
                 graph
@@ -5714,6 +6509,15 @@ impl QwenExecutionCore {
             adapters,
             resident.completion_timeout,
         )?;
+        // Freeze this target-scoped prefill policy with the request.  The
+        // lowered graph and adapter/target scope cannot change while rows
+        // are executing, and an explicit zero/invalid env value stays
+        // decomposed.
+        let qwen38_nvfp4_prefill_shared_activation = qwen38_nvfp4_prefill_shared_activation_enabled(
+            resident.session.as_ref(),
+            &graph,
+            &adapters,
+        );
         // Freeze the exact Qwen3.8 completion policy when the request is
         // created.  A selected request receives its own queue: changing an
         // environment variable between tokens cannot move a shared resident
@@ -5776,11 +6580,8 @@ impl QwenExecutionCore {
             phase54_vo_transform,
         )?;
         let execution_plan = qwen_prepared_execution_plan(&graph)?;
-        let graph_span_env = match resident.session.expected_target().as_deref() {
-            Some("gfx1030") => Some("SLLM_QWEN38_GFX1030_GRAPH_SPANS"),
-            Some("gfx1201") => Some("SLLM_QWEN38_GFX1201_GRAPH_SPANS"),
-            _ => None,
-        };
+        let graph_span_env =
+            qwen38_graph_spans_env_name(resident.session.expected_target().as_deref());
         let qwen38_graph_spans_enabled = qwen38_graph_spans_enabled_with_env(
             qwen38_deferred_completion,
             graph_span_env.and_then(std::env::var_os).as_deref(),
@@ -5788,6 +6589,8 @@ impl QwenExecutionCore {
         let core = Self {
             graph_replay: Mutex::new(PreparedGraphReplayState::default()),
             device_sampling: Mutex::new(None),
+            fixed_k20_support_capture: Mutex::new(None),
+            fixed_k20_decision: Mutex::new(None),
             selector_batch: None,
             graph_collect_node: AtomicBool::new(false),
             qwen38_graph_spans_enabled,
@@ -5813,6 +6616,8 @@ impl QwenExecutionCore {
             pending_speculative: None,
             adapters,
             short_terminal_last_row,
+            bf16_row_concat_count: AtomicU64::new(0),
+            qwen38_nvfp4_prefill_shared_activation,
             qwen38_deferred_completion,
             qwen38_kv_append_attention_chain,
             chain_active: AtomicBool::new(false),
@@ -6623,8 +7428,12 @@ impl QwenExecutionCore {
             pending_speculative: None,
             adapters: QwenAdapterRuntime::disabled(),
             short_terminal_last_row: false,
+            bf16_row_concat_count: AtomicU64::new(0),
+            qwen38_nvfp4_prefill_shared_activation: false,
             graph_replay: Mutex::new(PreparedGraphReplayState::default()),
             device_sampling: Mutex::new(None),
+            fixed_k20_support_capture: Mutex::new(None),
+            fixed_k20_decision: Mutex::new(None),
             selector_batch: None,
             graph_collect_node: AtomicBool::new(false),
             qwen38_graph_spans_enabled: false,
@@ -6677,6 +7486,7 @@ impl QwenExecutionCore {
             true,
             None,
             Some(positions),
+            false,
         )
     }
 
@@ -6884,20 +7694,12 @@ impl QwenExecutionCore {
                 target_hidden_bf16.len()
             )));
         }
-        // State-only priming must bypass the companion MTP head entirely. In
-        // particular, `prefill_impl(..., emit_terminal=true)` would still
-        // lower the projection and sampler even when logits are discarded.
-        let output = self.run_transition(
+        // State-only priming publishes companion KV state without lowering the
+        // dead attention/output tail or the companion head.
+        let output = self.run_state_only_transition(
             &[token_id],
             AttentionPreprocessPositionMode::Prefill,
-            false,
-            false,
-            false,
-            false,
-            Some(target_hidden_bf16),
-            None,
-            false,
-            None,
+            target_hidden_bf16,
         )?;
         self.prefill_chunk_count = 1;
         Ok(output)
@@ -7057,9 +7859,96 @@ impl QwenExecutionCore {
         self.decode_impl(token_id, false, false, true, None, Some(selector))
     }
 
-    fn decode_block_with_mtp_state(
+    fn prepare_mtp_prefix_checkpoint(
+        &self,
+        start_length: u64,
+        token_count: usize,
+    ) -> Result<bool, QwenExecutionError> {
+        if token_count != 3 || self.linear_states.is_empty() {
+            return Ok(false);
+        }
+        let token_count = u32::try_from(token_count).map_err(|_| {
+            QwenExecutionError::InvalidRequest(
+                "MTP checkpoint token count does not fit native metadata".to_owned(),
+            )
+        })?;
+        let mut prepared = Vec::with_capacity(self.linear_states.len());
+        for state in self.linear_states.values() {
+            match self.session.prepare_linear_attention_prefix_checkpoint(
+                state,
+                start_length,
+                token_count,
+                2,
+            ) {
+                Ok(()) => prepared.push(state),
+                Err(error) => {
+                    let primary = QwenExecutionError::from(error);
+                    let cleanup = self.discard_mtp_prefix_checkpoints(&prepared);
+                    if is_unsupported_execution_error(&primary) {
+                        return match cleanup {
+                            Ok(()) => Ok(false),
+                            Err(cleanup_error) => {
+                                self.lifecycle.cancel();
+                                Err(QwenExecutionError::CleanupFailure {
+                                    primary: Box::new(primary),
+                                    cleanup: Box::new(cleanup_error),
+                                })
+                            }
+                        };
+                    }
+                    return match cleanup {
+                        Ok(()) => Err(primary),
+                        Err(cleanup_error) => {
+                            self.lifecycle.cancel();
+                            Err(QwenExecutionError::CleanupFailure {
+                                primary: Box::new(primary),
+                                cleanup: Box::new(cleanup_error),
+                            })
+                        }
+                    };
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn discard_mtp_prefix_checkpoints(
+        &self,
+        states: &[&LinearAttentionState],
+    ) -> Result<(), QwenExecutionError> {
+        let mut first_error = None;
+        for state in states {
+            if let Err(error) = self
+                .session
+                .discard_linear_attention_prefix_checkpoint(state)
+            {
+                if first_error.is_none() {
+                    first_error = Some(QwenExecutionError::from(error));
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    fn abort_mtp_prefix_checkpoint(
+        &self,
+        states: &[&LinearAttentionState],
+        primary: QwenExecutionError,
+    ) -> QwenExecutionError {
+        self.lifecycle.cancel();
+        match self.discard_mtp_prefix_checkpoints(states) {
+            Ok(()) => primary,
+            Err(cleanup_error) => QwenExecutionError::CleanupFailure {
+                primary: Box::new(primary),
+                cleanup: Box::new(cleanup_error),
+            },
+        }
+    }
+
+    fn decode_block_with_mtp_state_impl(
         &mut self,
         token_ids: &[i32],
+        include_all_logits_bf16: bool,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
@@ -7079,23 +7968,53 @@ impl QwenExecutionCore {
             )));
         }
         let start_length = self.committed_length;
+        let prefix_checkpoint_armed =
+            self.prepare_mtp_prefix_checkpoint(start_length, token_ids.len())?;
         let output = self.run_transition(
             token_ids,
             AttentionPreprocessPositionMode::DecodeContinuation,
             false,
-            false,
+            include_all_logits_bf16,
             true,
             true,
             None,
             None,
             true,
             None,
-        )?;
+        );
+        let output = match output {
+            Ok(output) => output,
+            Err(primary) => {
+                if prefix_checkpoint_armed {
+                    let cleanup = self.discard_mtp_prefix_checkpoints(
+                        &self.linear_states.values().collect::<Vec<_>>(),
+                    );
+                    return match cleanup {
+                        Ok(()) => Err(primary),
+                        Err(cleanup_error) => {
+                            self.lifecycle.cancel();
+                            Err(QwenExecutionError::CleanupFailure {
+                                primary: Box::new(primary),
+                                cleanup: Box::new(cleanup_error),
+                            })
+                        }
+                    };
+                }
+                return Err(primary);
+            }
+        };
         self.pending_speculative = Some(PendingSpeculativeBlock {
             start_length,
             token_ids: token_ids.to_vec(),
+            prefix_checkpoint_armed,
         });
         Ok(output)
+    }
+    fn decode_block_with_mtp_state(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.decode_block_with_mtp_state_impl(token_ids, false)
     }
 
     fn decode_block_with_mtp_state_and_device_selectors(
@@ -7122,46 +8041,11 @@ impl QwenExecutionCore {
         self.selector_batch = None;
         result
     }
-
     fn decode_block_with_mtp_state_and_logits(
         &mut self,
         token_ids: &[i32],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        if self.lifecycle.is_poisoned() {
-            return Err(QwenExecutionError::Poisoned);
-        }
-        if self.committed_length == 0 {
-            return Err(QwenExecutionError::InvalidRequest(
-                "decode block requires a committed prefill".to_owned(),
-            ));
-        }
-        let maximum = usize::try_from(self.graph.token_count()).map_err(|_| {
-            QwenExecutionError::InvalidGraph("graph token count does not fit usize".to_owned())
-        })?;
-        if token_ids.is_empty() || token_ids.len() > maximum {
-            return Err(QwenExecutionError::InvalidRequest(format!(
-                "decode block token count is {}, graph capacity is {maximum}",
-                token_ids.len()
-            )));
-        }
-        let start_length = self.committed_length;
-        let output = self.run_transition(
-            token_ids,
-            AttentionPreprocessPositionMode::DecodeContinuation,
-            false,
-            true,
-            true,
-            true,
-            None,
-            None,
-            true,
-            None,
-        )?;
-        self.pending_speculative = Some(PendingSpeculativeBlock {
-            start_length,
-            token_ids: token_ids.to_vec(),
-        });
-        Ok(output)
+        self.decode_block_with_mtp_state_impl(token_ids, true)
     }
 
     fn resolve_decode_block(
@@ -7183,11 +8067,21 @@ impl QwenExecutionCore {
             )));
         }
         if committed_input_rows == pending.token_ids.len() {
+            if pending.prefix_checkpoint_armed {
+                let states = self.linear_states.values().collect::<Vec<_>>();
+                if let Err(error) = self.discard_mtp_prefix_checkpoints(&states) {
+                    self.lifecycle.cancel();
+                    return Err(error);
+                }
+            }
             return self.last_output.clone().ok_or_else(|| {
                 QwenExecutionError::InvalidRequest(
                     "resolved speculative block has no completed output".to_owned(),
                 )
             });
+        }
+        if pending.prefix_checkpoint_armed {
+            return self.resolve_decode_block_with_prefix_checkpoint(pending, committed_input_rows);
         }
         let expected_length = self.committed_length;
         if let Err(error) = self.rewind_last_transition(expected_length, pending.start_length) {
@@ -7208,6 +8102,129 @@ impl QwenExecutionCore {
             true,
             None,
         )
+    }
+
+    fn resolve_decode_block_with_prefix_checkpoint(
+        &mut self,
+        pending: PendingSpeculativeBlock,
+        committed_input_rows: usize,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        let expected_length = self.committed_length;
+        let states = self.linear_states.values().collect::<Vec<_>>();
+        let committed_rows_u64 = match u64::try_from(committed_input_rows) {
+            Ok(value) => value,
+            Err(_) => {
+                return Err(self.abort_mtp_prefix_checkpoint(
+                    &states,
+                    QwenExecutionError::InvalidRequest(
+                        "committed speculative rows do not fit u64".to_owned(),
+                    ),
+                ));
+            }
+        };
+        let prefix_end = match pending.start_length.checked_add(committed_rows_u64) {
+            Some(value) => value,
+            None => {
+                return Err(self.abort_mtp_prefix_checkpoint(
+                    &states,
+                    QwenExecutionError::InvalidRequest(
+                        "committed speculative prefix length overflowed u64".to_owned(),
+                    ),
+                ));
+            }
+        };
+        let output = match self.last_output.as_ref() {
+            Some(output) => slice_qwen_output_rows(
+                output,
+                committed_input_rows,
+                prefix_end,
+                pending.token_ids.len(),
+            ),
+            None => Err(QwenExecutionError::InvalidRequest(
+                "resolved speculative block has no completed output".to_owned(),
+            )),
+        };
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => return Err(self.abort_mtp_prefix_checkpoint(&states, error)),
+        };
+        for state in &states {
+            if let Err(error) = self.session.validate_linear_attention_prefix_checkpoint(
+                state,
+                pending.start_length,
+                expected_length,
+                2,
+            ) {
+                self.lifecycle.cancel();
+                let primary = QwenExecutionError::from(error);
+                let cleanup = self.discard_mtp_prefix_checkpoints(&states);
+                return match cleanup {
+                    Ok(()) => Err(primary),
+                    Err(cleanup_error) => Err(QwenExecutionError::CleanupFailure {
+                        primary: Box::new(primary),
+                        cleanup: Box::new(cleanup_error),
+                    }),
+                };
+            }
+        }
+        for state in self.kv_states.values() {
+            if let Err(error) =
+                self.session
+                    .rewind_last_kv_state_transition(state, expected_length, prefix_end)
+            {
+                self.lifecycle.cancel();
+                let primary = QwenExecutionError::from(error);
+                let cleanup = self.discard_mtp_prefix_checkpoints(&states);
+                return match cleanup {
+                    Ok(()) => Err(primary),
+                    Err(cleanup_error) => Err(QwenExecutionError::CleanupFailure {
+                        primary: Box::new(primary),
+                        cleanup: Box::new(cleanup_error),
+                    }),
+                };
+            }
+        }
+        let row_index = match u32::try_from(committed_input_rows - 1) {
+            Ok(value) => value,
+            Err(_) => {
+                return Err(self.abort_mtp_prefix_checkpoint(
+                    &states,
+                    QwenExecutionError::InvalidRequest(
+                        "committed speculative row index does not fit u32".to_owned(),
+                    ),
+                ));
+            }
+        };
+        if let Err(error) = self.session.commit_linear_attention_prefix_checkpoints(
+            &self.queue,
+            &states,
+            pending.start_length,
+            expected_length,
+            prefix_end,
+            row_index,
+        ) {
+            self.lifecycle.cancel();
+            let primary = QwenExecutionError::from(error);
+            let cleanup = self.discard_mtp_prefix_checkpoints(&states);
+            return match cleanup {
+                Ok(()) => Err(primary),
+                Err(cleanup_error) => Err(QwenExecutionError::CleanupFailure {
+                    primary: Box::new(primary),
+                    cleanup: Box::new(cleanup_error),
+                }),
+            };
+        }
+        if let Err(error) = self.discard_mtp_prefix_checkpoints(&states) {
+            self.lifecycle.cancel();
+            return Err(error);
+        }
+        if let Err(error) = self.ensure_state_lengths(prefix_end) {
+            self.lifecycle.cancel();
+            return Err(error);
+        }
+        self.committed_length = prefix_end;
+        self.last_output = Some(output.clone());
+        Ok(output)
     }
 
     fn rewind_last_decode_transition(&mut self) -> Result<(), QwenExecutionError> {
@@ -7280,6 +8297,14 @@ impl QwenExecutionCore {
         self.decode_impl(token_id, true, false, true, Some(target_hidden_bf16), None)
     }
 
+    fn decode_mtp_argmax(
+        &mut self,
+        token_id: i32,
+        target_hidden_bf16: &[u16],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.decode_impl(token_id, false, false, true, Some(target_hidden_bf16), None)
+    }
+
     fn decode_mtp_with_device_selector(
         &mut self,
         token_id: i32,
@@ -7345,17 +8370,10 @@ impl QwenExecutionCore {
                 "MTP state batch decode requires a committed prefill".to_owned(),
             ));
         }
-        self.run_transition(
+        self.run_state_only_transition(
             token_ids,
             AttentionPreprocessPositionMode::DecodeContinuation,
-            false,
-            false,
-            false,
-            false,
-            Some(target_hidden_bf16),
-            None,
-            false,
-            None,
+            target_hidden_bf16,
         )
     }
 
@@ -7429,6 +8447,30 @@ impl QwenExecutionCore {
             emit_terminal,
             device_selector,
             None,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_state_only_transition(
+        &mut self,
+        token_ids: &[i32],
+        position_mode: AttentionPreprocessPositionMode,
+        target_hidden_bf16: &[u16],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.run_transition_with_positions(
+            token_ids,
+            position_mode,
+            false,
+            false,
+            false,
+            false,
+            Some(target_hidden_bf16),
+            None,
+            false,
+            None,
+            None,
+            true,
         )
     }
 
@@ -7446,9 +8488,17 @@ impl QwenExecutionCore {
         emit_terminal: bool,
         device_selector: Option<&DeviceTokenSelectorRequestV1>,
         explicit_positions: Option<&[u64]>,
+        stop_after_kv_append: bool,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         if self.pending_speculative.is_some() {
             return Err(QwenExecutionError::Busy);
+        }
+        if stop_after_kv_append
+            && (!self.graph.is_mtp() || emit_terminal || device_selector.is_some())
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "KV-only state transition requires an MTP state-only route".to_owned(),
+            ));
         }
         let token_count = u64::try_from(token_ids.len()).map_err(|_| {
             QwenExecutionError::InvalidRequest("token count does not fit u64".to_owned())
@@ -7585,6 +8635,7 @@ impl QwenExecutionCore {
             terminal_rows,
             emit_terminal,
             device_selector,
+            stop_after_kv_append,
         )?;
         let last_logits = include_last_logits
             .then(|| self.read_last_logits(token_count, terminal_rows))
@@ -7647,6 +8698,7 @@ impl QwenExecutionCore {
         terminal_rows: TerminalOutputRows,
         emit_terminal: bool,
         device_selector: Option<&DeviceTokenSelectorRequestV1>,
+        stop_after_kv_append: bool,
     ) -> Result<TerminalSelection, QwenExecutionError> {
         let plan = self.execution_plan.clone();
         self.chain_active.store(false, Ordering::Release);
@@ -7662,6 +8714,7 @@ impl QwenExecutionCore {
         let chain_active = self.qwen38_kv_append_attention_chain
             && token_count == 1
             && emit_terminal
+            && !stop_after_kv_append
             && matches!(
                 position_mode,
                 AttentionPreprocessPositionMode::DecodeContinuation
@@ -7690,6 +8743,8 @@ impl QwenExecutionCore {
         };
         let mut replay_skip_through = None;
         let mut argmax: Option<TerminalSelection> = None;
+        let mut state_only_kv_published = false;
+        let mut mtp_row_concat_done = false;
         let deferred = qwen_deferred_completion_enabled_for_adapters(
             self.session.as_ref(),
             &self.graph,
@@ -7713,6 +8768,9 @@ impl QwenExecutionCore {
                 self.current_node_ordinal
                     .store(node_ordinal, Ordering::Release);
                 let node = planned.operation();
+                if state_only_kv_published {
+                    return Ok(());
+                }
                 if self.graph.is_mtp()
                     && !qwen_mtp_row_copy_is_active(node.label(), transition.token_count())
                 {
@@ -7720,6 +8778,33 @@ impl QwenExecutionCore {
                     // graph row. A short runtime transition owns only its
                     // prefix of the fusion workspace; inactive row copies
                     // would otherwise address rows beyond that view.
+                    return Ok(());
+                }
+                if mtp_row_concat_done
+                    && qwen_mtp_row_copy_is_active(node.label(), transition.token_count())
+                {
+                    // The grouped MTP concat has already populated every
+                    // active row. Keep inactive-row traversal and all later
+                    // non-copy nodes unchanged.
+                    if node.label().starts_with("mtp.concat.copy_") {
+                        return Ok(());
+                    }
+                }
+                if self.graph.is_mtp()
+                    && transition.token_count() > 1
+                    && node.label() == "mtp.concat.copy_embedding.0"
+                    && self.session.bf16_row_concat_version()? == Some(1)
+                {
+                    // Both RMSNorm producers are retained in `pending` at
+                    // this point. The existing prefill boundary flush gives
+                    // the synchronous private concat an ordered input.
+                    self.close_boundary(
+                        &mut pending,
+                        ExecutionBoundaryKind::PrefillChunkCompletion,
+                    )?;
+                    self.concat_mtp_rows(transition.token_count())?;
+                    self.bf16_row_concat_count.fetch_add(1, Ordering::Relaxed);
+                    mtp_row_concat_done = true;
                     return Ok(());
                 }
                 self.graph_collect_node.store(false, Ordering::Release);
@@ -7808,8 +8893,8 @@ impl QwenExecutionCore {
                                 position_mode,
                                 &mut pending,
                             )?,
-                        QwenGraphNodeKind::FullKvAppend { layer, state } => self
-                            .execute_kv_append(
+                        QwenGraphNodeKind::FullKvAppend { layer, state } => {
+                            self.execute_kv_append(
                                 node,
                                 layer,
                                 state,
@@ -7820,7 +8905,9 @@ impl QwenExecutionCore {
                                 },
                                 planned.boundary_after(),
                                 &mut pending,
-                            )?,
+                            )?;
+                            state_only_kv_published = stop_after_kv_append;
+                        }
                         QwenGraphNodeKind::FullCausalAttention { layer, state, .. } => self
                             .execute_causal_attention(
                                 node,
@@ -7876,6 +8963,38 @@ impl QwenExecutionCore {
             }
             let cleanup = pending.abort();
             return Err(preserve_primary_execution_error(error, cleanup));
+        }
+        if stop_after_kv_append {
+            if !state_only_kv_published {
+                return Err(QwenExecutionError::InvalidGraph(
+                    "MTP state-only graph has no KV append boundary".to_owned(),
+                ));
+            }
+            let dangling_append = self
+                .pending_kv_append
+                .lock()
+                .map_err(|_| QwenExecutionError::Poisoned)?
+                .take();
+            if dangling_append.is_some() {
+                drop(dangling_append);
+                return Err(QwenExecutionError::InvalidGraph(
+                    "MTP state-only graph left a pending KV append".to_owned(),
+                ));
+            }
+            if !pending.is_empty() {
+                let cleanup = pending.abort();
+                return Err(preserve_primary_execution_error(
+                    QwenExecutionError::InvalidGraph(
+                        "MTP state-only graph left pending work after KV publication".to_owned(),
+                    ),
+                    cleanup,
+                ));
+            }
+            return Ok(TerminalSelection {
+                token_ids: Vec::new(),
+                selection: None,
+                selections: None,
+            });
         }
         if !emit_terminal {
             if pending.is_empty() {
@@ -8095,18 +9214,39 @@ impl QwenExecutionCore {
             .collect())
     }
 
-    fn read_hidden_states(&self, token_count: u64) -> Result<Vec<u16>, QwenExecutionError> {
-        let final_norm = self
+    fn final_hidden_tensor_ids(&self) -> Result<(usize, usize), QwenExecutionError> {
+        let mut matches = self
             .graph
             .nodes()
             .iter()
-            .find(|node| node.label() == "final_rmsnorm")
-            .ok_or_else(|| {
-                QwenExecutionError::InvalidGraph("final RMSNorm node is absent".to_owned())
-            })?;
-        let hidden_id = *final_norm.inputs().first().ok_or_else(|| {
-            QwenExecutionError::InvalidGraph("final RMSNorm hidden input is absent".to_owned())
+            .filter(|node| node.label() == "final_rmsnorm");
+        let final_norm = matches.next().ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("final RMSNorm node is absent".to_owned())
         })?;
+        if matches.next().is_some() {
+            return Err(QwenExecutionError::InvalidGraph(
+                "final RMSNorm node identity is ambiguous".to_owned(),
+            ));
+        }
+        match (final_norm.kind(), final_norm.inputs(), final_norm.outputs()) {
+            (
+                QwenGraphNodeKind::Semantic(SemanticOpKind::RmsNorm),
+                [hidden, _scale],
+                [normalized],
+            ) => Ok((*hidden, *normalized)),
+            (
+                QwenGraphNodeKind::Semantic(SemanticOpKind::ResidualRmsNorm),
+                [_left, _right, _scale],
+                [hidden, normalized],
+            ) => Ok((*hidden, *normalized)),
+            _ => Err(QwenExecutionError::InvalidGraph(
+                "final RMSNorm node identity is invalid".to_owned(),
+            )),
+        }
+    }
+
+    fn read_hidden_states(&self, token_count: u64) -> Result<Vec<u16>, QwenExecutionError> {
+        let (hidden_id, _) = self.final_hidden_tensor_ids()?;
         let rows = usize::try_from(token_count).map_err(|_| {
             QwenExecutionError::InvalidRequest("hidden token count does not fit usize".to_owned())
         })?;
@@ -8140,28 +9280,7 @@ impl QwenExecutionCore {
                 "embedding readback requires at least one token".to_owned(),
             ));
         }
-        let mut matches = self
-            .graph
-            .nodes()
-            .iter()
-            .filter(|node| node.label() == "final_rmsnorm")
-            .collect::<Vec<_>>();
-        let final_norm = matches.pop().ok_or_else(|| {
-            QwenExecutionError::InvalidGraph("final RMSNorm node is absent".to_owned())
-        })?;
-        if !matches.is_empty()
-            || !matches!(
-                final_norm.kind(),
-                QwenGraphNodeKind::Semantic(SemanticOpKind::RmsNorm)
-            )
-            || final_norm.inputs().len() != 2
-            || final_norm.outputs().len() != 1
-        {
-            return Err(QwenExecutionError::InvalidGraph(
-                "embedding final RMSNorm node identity is invalid".to_owned(),
-            ));
-        }
-        let output_id = final_norm.outputs()[0];
+        let (_, output_id) = self.final_hidden_tensor_ids()?;
         let rows = usize::try_from(token_count).map_err(|_| {
             QwenExecutionError::InvalidRequest(
                 "embedding token count does not fit usize".to_owned(),
@@ -8350,9 +9469,72 @@ impl QwenExecutionCore {
         Ok(None)
     }
 
-    /// Prefill keeps the baseline numerical route.  Only M=1 reaches the
-    /// projection-pack semantic/native ABI; larger row counts are submitted
-    /// as the original gate then up NVFP4 matmuls with independent outputs.
+    /// Submit the default-on projection pair through the existing ProjectionPack
+    /// contract. Preparation can report an unsupported native provider before
+    /// any pair submission; in that case retain the exact decomposed route.
+    fn execute_qwen38_projection_pack2_shared_activation(
+        &self,
+        node: &QwenGraphNode,
+        operation: &SemanticOpDescriptor,
+        token_count: u64,
+        boundary_after: Option<ExecutionBoundaryKind>,
+        pending: &mut ExecutionSegment,
+    ) -> Result<Option<TerminalSelection>, QwenExecutionError> {
+        let nvfp4_enabled =
+            qwen38_nvfp4_prefill_shared_activation_operation_enabled(operation, token_count);
+        let fp8_enabled = qwen38_fp8_gdn_projection_pack2_operation_enabled(operation, token_count);
+        if boundary_after.is_some() || !(nvfp4_enabled || fp8_enabled) {
+            return Err(QwenExecutionError::InvalidGraph(format!(
+                "Qwen3.8 shared projection pack {} has an invalid row count, boundary, or contract",
+                node.label()
+            )));
+        }
+        let inputs = self.views(node.inputs(), token_count)?;
+        let outputs = self.views(node.outputs(), token_count)?;
+        let contract = operation.qwen38_projection_pack_contract().ok_or_else(|| {
+            QwenExecutionError::InvalidGraph(format!(
+                "Qwen3.8 shared projection pack {} has no projection-pack contract",
+                node.label()
+            ))
+        })?;
+        let descriptor =
+            SemanticOpDescriptor::new_qwen38_projection_pack2(inputs, outputs, contract)?;
+        let inputs = vec![
+            self.bind(node.inputs()[0], token_count, AccessMode::Read)?,
+            self.bind(node.inputs()[1], token_count, AccessMode::Read)?,
+            self.bind(node.inputs()[2], token_count, AccessMode::Read)?,
+        ];
+        let outputs = vec![
+            self.bind(node.outputs()[0], token_count, AccessMode::Write)?,
+            self.bind(node.outputs()[1], token_count, AccessMode::Write)?,
+        ];
+        let prepared = match self.prepare_semantic(
+            descriptor,
+            inputs,
+            outputs,
+            PreparedCachePolicy::Reusable(PreparedDynamicIdentity::stateless(token_count, 0)),
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) if is_unsupported_execution_error(&error) => {
+                return self.execute_qwen38_projection_pack2_decomposed(
+                    node,
+                    token_count,
+                    boundary_after,
+                    pending,
+                );
+            }
+            Err(error) => return Err(error),
+        };
+        let submission = self.submit_prepared_semantic(prepared)?;
+        pending.retain_semantic(
+            "qwen38_projection_pack2.prefill.shared_activation",
+            submission,
+        );
+        Ok(None)
+    }
+
+    /// Execution keeps the baseline numerical route when the shared owner is
+    /// disabled or cannot be prepared.
     fn execute_qwen38_projection_pack2_decomposed(
         &self,
         node: &QwenGraphNode,
@@ -8454,6 +9636,19 @@ impl QwenExecutionCore {
             );
         }
         if operation.kind() == SemanticOpKind::Qwen38ProjectionPack2 && token_count != 1 {
+            let nvfp4_enabled = self.qwen38_nvfp4_prefill_shared_activation
+                && qwen38_nvfp4_prefill_shared_activation_operation_enabled(operation, token_count);
+            let fp8_enabled =
+                qwen38_fp8_gdn_projection_pack2_operation_enabled(operation, token_count);
+            if nvfp4_enabled || fp8_enabled {
+                return self.execute_qwen38_projection_pack2_shared_activation(
+                    node,
+                    operation,
+                    token_count,
+                    boundary_after,
+                    pending,
+                );
+            }
             return self.execute_qwen38_projection_pack2_decomposed(
                 node,
                 token_count,
@@ -8680,8 +9875,14 @@ impl QwenExecutionCore {
             boundary_after,
             0,
             selector,
+            true,
             pending,
         )?;
+        let selection = selection.ok_or_else(|| {
+            QwenExecutionError::InvalidRequest(
+                "single device selector cannot omit its public selection".to_owned(),
+            )
+        })?;
         Ok(Some(TerminalSelection {
             token_ids: vec![selection.token_id as i32],
             selection: Some(selection),
@@ -8705,28 +9906,28 @@ impl QwenExecutionCore {
                 "selector count differs from target logits rows".to_owned(),
             ));
         }
+        let suppress_public_selection = self.fixed_k20_capture_suppresses_public_selection()?;
         let mut selections = Vec::with_capacity(rows);
         for (row, selector) in selectors.iter().enumerate() {
-            selections.push(self.execute_device_token_selector_row(
+            if let Some(selection) = self.execute_device_token_selector_row(
                 node,
                 token_count,
                 boundary_after,
                 row,
                 selector,
+                !suppress_public_selection,
                 pending,
-            )?);
+            )? {
+                selections.push(selection);
+            }
         }
-        let token_ids = selections
-            .iter()
-            .map(|selection| selection.token_id as i32)
-            .collect();
-        Ok(Some(TerminalSelection {
-            token_ids,
-            selection: None,
-            selections: Some(selections),
-        }))
+        Ok(Some(fixed_k20_batch_terminal_selection(
+            selections,
+            suppress_public_selection,
+        )))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_device_token_selector_row(
         &self,
         node: &QwenGraphNode,
@@ -8734,8 +9935,9 @@ impl QwenExecutionCore {
         boundary_after: Option<ExecutionBoundaryKind>,
         row: usize,
         selector: &DeviceTokenSelectorRequestV1,
+        publish_public_selection: bool,
         pending: &mut ExecutionSegment,
-    ) -> Result<SamplingSelectionV1, QwenExecutionError> {
+    ) -> Result<Option<SamplingSelectionV1>, QwenExecutionError> {
         if boundary_after != Some(ExecutionBoundaryKind::TerminalReadback)
             || node.inputs().len() != 1
             || node.outputs().len() != 1
@@ -8780,16 +9982,72 @@ impl QwenExecutionCore {
             &mut submission,
             ExecutionBoundaryKind::TerminalReadback,
         )?;
-        let mut readback = submission.start_output_readback(0)?;
-        require_terminal_success(node.label(), readback.wait(self.completion_timeout)?)?;
-        let mut bytes = [0_u8; 16];
-        let copied = readback.read_into(&mut bytes)?;
-        if copied != 16 {
-            return Err(QwenExecutionError::InvalidRequest(
-                "device selector record length differs from 16".to_owned(),
-            ));
+        let capture_slot = {
+            let capture = self
+                .fixed_k20_support_capture
+                .lock()
+                .map_err(|_| QwenExecutionError::Poisoned)?;
+            capture.as_ref().and_then(|state| {
+                (state.captured_rows < state.expected_rows).then_some(state.captured_rows)
+            })
+        };
+        if let Err(error) =
+            validate_fixed_k20_selection_capture(publish_public_selection, capture_slot)
+        {
+            self.lifecycle.cancel();
+            return Err(error);
         }
-        let selection = decode_selected_record(&bytes, selector)?;
+        let selection = if publish_public_selection {
+            let mut readback = submission.start_output_readback(0)?;
+            require_terminal_success(node.label(), readback.wait(self.completion_timeout)?)?;
+            let mut bytes = [0_u8; 16];
+            let copied = readback.read_into(&mut bytes)?;
+            if copied != 16 {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "device selector record length differs from 16".to_owned(),
+                ));
+            }
+            Some(decode_selected_record(&bytes, selector)?)
+        } else {
+            None
+        };
+        if let Some(slot) = capture_slot {
+            if selector.top_k() != 20 {
+                self.lifecycle.cancel();
+                return Err(QwenExecutionError::InvalidRequest(
+                    "fixed-K20 support capture requires a top-k 20 selector".to_owned(),
+                ));
+            }
+            if let Err(error) = storage
+                .as_mut()
+                .expect("device sampling storage")
+                .capture_fixed_k20_support_row(
+                    self.session.as_ref(),
+                    &self.queue,
+                    slot,
+                    self.completion_timeout,
+                )
+            {
+                self.lifecycle.cancel();
+                return Err(error.into());
+            }
+            let mut capture = self
+                .fixed_k20_support_capture
+                .lock()
+                .map_err(|_| QwenExecutionError::Poisoned)?;
+            let state = capture.as_mut().ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "fixed-K20 support capture disappeared during selector completion".to_owned(),
+                )
+            })?;
+            if state.captured_rows != slot {
+                self.lifecycle.cancel();
+                return Err(QwenExecutionError::InvalidRequest(
+                    "fixed-K20 support capture row order changed".to_owned(),
+                ));
+            }
+            state.captured_rows += 1;
+        }
         Ok(selection)
     }
 
@@ -9235,6 +10493,19 @@ impl QwenExecutionCore {
             );
         }
         if operation.kind() == SemanticOpKind::Qwen38ProjectionPack2 && token_count != 1 {
+            let nvfp4_enabled = self.qwen38_nvfp4_prefill_shared_activation
+                && qwen38_nvfp4_prefill_shared_activation_operation_enabled(operation, token_count);
+            let fp8_enabled =
+                qwen38_fp8_gdn_projection_pack2_operation_enabled(operation, token_count);
+            if nvfp4_enabled || fp8_enabled {
+                return self.execute_qwen38_projection_pack2_shared_activation(
+                    node,
+                    operation,
+                    token_count,
+                    boundary_after,
+                    pending,
+                );
+            }
             return self.execute_qwen38_projection_pack2_decomposed(
                 node,
                 token_count,
@@ -9751,6 +11022,7 @@ impl QwenExecutionCore {
             projection_pack_member_count: audit.projection_pack_member_count(),
             projection_pack_activation_quantize_count: audit
                 .projection_pack_activation_quantize_count(),
+            bf16_row_concat_count: self.bf16_row_concat_count.load(Ordering::Relaxed),
             request_local_deferred_completion: self.qwen38_deferred_completion
                 || self.qwen38_kv_append_attention_chain,
             kernel_dispatches_by_identity: audit.kernel_dispatches_by_identity().clone(),
@@ -9842,6 +11114,17 @@ impl QwenExecutionCore {
         outputs: Vec<OwnedTensorBinding>,
         cache_policy: PreparedCachePolicy,
     ) -> Result<Submission, QwenExecutionError> {
+        let prepared = self.prepare_semantic(descriptor, inputs, outputs, cache_policy)?;
+        self.submit_prepared_semantic(prepared)
+    }
+
+    fn prepare_semantic(
+        &self,
+        descriptor: SemanticOpDescriptor,
+        inputs: Vec<OwnedTensorBinding>,
+        outputs: Vec<OwnedTensorBinding>,
+        cache_policy: PreparedCachePolicy,
+    ) -> Result<PreparedOperation, QwenExecutionError> {
         match self.session.supports(&descriptor) {
             PrepareSupport::Supported => {}
             PrepareSupport::Unsupported { reason } => {
@@ -9856,13 +11139,19 @@ impl QwenExecutionCore {
                 dynamic.with_node_ordinal(self.current_node_ordinal.load(Ordering::Acquire)),
             ),
         };
-        let prepared = self.prepared_semantics.prepare(
+        Ok(self.prepared_semantics.prepare(
             self.session.as_ref(),
             descriptor,
             inputs,
             outputs,
             cache_policy,
-        )?;
+        )?)
+    }
+
+    fn submit_prepared_semantic(
+        &self,
+        prepared: PreparedOperation,
+    ) -> Result<Submission, QwenExecutionError> {
         let submission = self.session.submit(&prepared, &self.queue)?;
         if self.graph_collect_node.load(Ordering::Acquire) {
             let ordinal = self.current_node_ordinal.load(Ordering::Acquire);
@@ -10205,6 +11494,89 @@ impl QwenExecutionCore {
         Ok(self.session.bind(&allocation.buffer, view, access)?)
     }
 
+    fn concat_mtp_rows(&self, token_count: u64) -> Result<(), QwenExecutionError> {
+        let embedding_id = self.tensor_id("mtp.embedding_rmsnorm.output")?;
+        let hidden_id = self.tensor_id("mtp.hidden_rmsnorm.output")?;
+        let output_id = self.tensor_id("mtp.concat.output")?;
+        let embedding = self.view(embedding_id, token_count)?;
+        let hidden = self.view(hidden_id, token_count)?;
+        let output = self.view(output_id, token_count)?;
+        let token_count_usize = usize::try_from(token_count).map_err(|_| {
+            QwenExecutionError::InvalidRequest(
+                "MTP concat token count does not fit host usize".to_owned(),
+            )
+        })?;
+        let shape_error = |name: &str| {
+            QwenExecutionError::InvalidGraph(format!(
+                "MTP concat tensor {name} does not have the active contiguous BF16 row shape"
+            ))
+        };
+        let embedding_columns = embedding
+            .shape()
+            .get(1)
+            .copied()
+            .ok_or_else(|| shape_error("embedding RMSNorm"))?;
+        let hidden_columns = hidden
+            .shape()
+            .get(1)
+            .copied()
+            .ok_or_else(|| shape_error("hidden RMSNorm"))?;
+        if embedding.dtype() != DType::Bf16
+            || hidden.dtype() != DType::Bf16
+            || output.dtype() != DType::Bf16
+            || embedding.encoding() != Encoding::Unquantized
+            || hidden.encoding() != Encoding::Unquantized
+            || output.encoding() != Encoding::Unquantized
+            || embedding.shape() != [token_count_usize, embedding_columns]
+            || hidden.shape() != [token_count_usize, hidden_columns]
+            || output.shape()
+                != [
+                    token_count_usize,
+                    embedding_columns
+                        .checked_add(hidden_columns)
+                        .ok_or_else(|| shape_error("output"))?,
+                ]
+        {
+            return Err(shape_error("active rows"));
+        }
+        let embedding_strides = contiguous_strides(embedding.shape())?;
+        let hidden_strides = contiguous_strides(hidden.shape())?;
+        let output_strides = contiguous_strides(output.shape())?;
+        if embedding.strides() != embedding_strides.as_slice()
+            || hidden.strides() != hidden_strides.as_slice()
+            || output.strides() != output_strides.as_slice()
+        {
+            return Err(shape_error("active rows"));
+        }
+        let embedding_range = self.tensors[embedding_id]
+            .buffer
+            .range(embedding.byte_offset(), embedding.payload_bytes())?;
+        let hidden_range = self.tensors[hidden_id]
+            .buffer
+            .range(hidden.byte_offset(), hidden.payload_bytes())?;
+        let output_range = self.tensors[output_id]
+            .buffer
+            .range(output.byte_offset(), output.payload_bytes())?;
+        self.session.concat_bf16_rows(
+            &self.queue,
+            embedding_range,
+            hidden_range,
+            output_range,
+            token_count,
+            u64::try_from(embedding_columns).map_err(|_| {
+                QwenExecutionError::InvalidGraph(
+                    "MTP embedding column count does not fit u64".to_owned(),
+                )
+            })?,
+            u64::try_from(hidden_columns).map_err(|_| {
+                QwenExecutionError::InvalidGraph(
+                    "MTP hidden column count does not fit u64".to_owned(),
+                )
+            })?,
+        )?;
+        Ok(())
+    }
+
     fn ensure_terminal_output_capacity(
         &mut self,
         token_count: u64,
@@ -10325,6 +11697,9 @@ fn memory_estimate_from_layout(
         workspace_arena_bytes: layout.workspace.high_water_bytes,
         request_state_bytes: graph.total_state_bytes(),
         safety_reserve_bytes,
+        prepared_plan_bytes: 0,
+        prepared_queue_bytes: 0,
+        prepared_context_bytes: 0,
         required_bytes,
     })
 }
@@ -10336,6 +11711,90 @@ pub fn qwen_graph_memory_estimate(
 ) -> Result<QwenGraphMemoryEstimate, QwenExecutionError> {
     let layout = validate_graph_plan(graph, plan)?;
     memory_estimate_from_layout(graph, &layout, total_memory_bytes)
+}
+
+/// Adds native matmul storage for the distinct row counts a request may execute.
+/// The caller supplies prefill capacity/tail and decode/verification rows.
+/// Repeated positions with the same row count share the prepared cache entry.
+/// Terminal-row and projection-pack lowering can use less storage than this
+/// conservative estimate of the logical matmul nodes.
+pub fn qwen_graph_memory_estimate_with_prepared_workspace(
+    graph: &QwenGraph,
+    plan: &WeightLoadPlan,
+    total_memory_bytes: u64,
+    session: &ExecutionSession,
+    row_counts: &[u64],
+) -> Result<QwenGraphMemoryEstimate, QwenExecutionError> {
+    let layout = validate_graph_plan(graph, plan)?;
+    let mut estimate = memory_estimate_from_layout(graph, &layout, total_memory_bytes)?;
+    let mut rows = row_counts.to_vec();
+    rows.sort_unstable();
+    rows.dedup();
+    if rows.is_empty()
+        || rows
+            .iter()
+            .any(|&row| row == 0 || row > graph.token_count())
+    {
+        return Err(QwenExecutionError::InvalidRequest(
+            "prepared workspace rows must be nonzero and fit the graph capacity".to_owned(),
+        ));
+    }
+    let overflow = || {
+        QwenExecutionError::InvalidGraph(
+            "prepared matmul workspace byte count overflowed".to_owned(),
+        )
+    };
+    let mut queue_peak = 0_u64;
+    for node in graph.nodes() {
+        let Some(operation) = node.operation() else {
+            continue;
+        };
+        if operation.kind() != SemanticOpKind::Matmul {
+            continue;
+        }
+        for &row in &rows {
+            let descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![
+                    runtime_view(&operation.inputs()[0], graph.token_count(), row)?,
+                    operation.inputs()[1].clone(),
+                ],
+                vec![runtime_view(
+                    &operation.outputs()[0],
+                    graph.token_count(),
+                    row,
+                )?],
+            )?;
+            let footprint = session
+                .estimate_matmul_footprint(&descriptor)?
+                .ok_or_else(|| {
+                    QwenExecutionError::Execution(ExecutionError::Unsupported {
+                        reason: format!(
+                            "backend cannot estimate native matmul workspace for {} at {row} rows",
+                            node.label()
+                        ),
+                    })
+                })?;
+            estimate.prepared_plan_bytes = estimate
+                .prepared_plan_bytes
+                .checked_add(footprint.plan_persistent_bytes)
+                .ok_or_else(overflow)?;
+            queue_peak = queue_peak.max(footprint.queue_workspace_bytes);
+            estimate.prepared_context_bytes = estimate
+                .prepared_context_bytes
+                .max(footprint.context_workspace_bytes);
+        }
+    }
+    // Each growth at least doubles capacity. Retained slots sum to less than
+    // twice the last capacity, which is less than twice the maximum request.
+    estimate.prepared_queue_bytes = queue_peak.checked_mul(4).ok_or_else(overflow)?;
+    estimate.required_bytes = estimate
+        .required_bytes
+        .checked_add(estimate.prepared_plan_bytes)
+        .and_then(|bytes| bytes.checked_add(estimate.prepared_queue_bytes))
+        .and_then(|bytes| bytes.checked_add(estimate.prepared_context_bytes))
+        .ok_or_else(overflow)?;
+    Ok(estimate)
 }
 
 fn preflight_device_memory(
@@ -12408,7 +13867,8 @@ mod tests {
         ExecutionCausalAttentionSubmissionAdapter, ExecutionKvStateSubmissionAdapter,
         ExecutionLinearAttentionSubmissionAdapter, ExecutionReadbackAdapter,
         ExecutionSessionAdapter, ExecutionState, ExecutionSubmissionAdapter,
-        ExecutionTransferAdapter, PreparedOperation, QueueCompletionMode, ShutdownReport,
+        ExecutionTransferAdapter, PreparedMatmulFootprint, PreparedOperation, QueueCompletionMode,
+        ShutdownReport,
     };
     use crate::kv_state::{KvStateAppendRequest, KvStateSnapshot};
     use crate::linear_attention::{LinearAttentionRequest, LinearAttentionStateSnapshot};
@@ -12812,10 +14272,18 @@ mod tests {
         events: Vec<String>,
         kv_lengths: BTreeMap<u64, u64>,
         linear_lengths: BTreeMap<u64, u64>,
+        linear_checkpoints: BTreeMap<u64, u64>,
         argmax_sequences: VecDeque<Vec<i32>>,
         preprocess: Vec<(AttentionPreprocessPositionMode, u32, u32)>,
         uploads: Vec<Vec<u8>>,
         matmul_input_rows: Vec<usize>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum MatmulFootprintMode {
+        Unknown,
+        Fixed(PreparedMatmulFootprint),
+        Error,
     }
 
     #[derive(Clone)]
@@ -12825,11 +14293,20 @@ mod tests {
         completion_mode: Arc<Mutex<QueueCompletionMode>>,
         failure_kind: Arc<Mutex<Option<SemanticOpKind>>>,
         pending_kind: Arc<Mutex<Option<SemanticOpKind>>>,
+        unsupported_kind: Arc<Mutex<Option<SemanticOpKind>>>,
+        prepare_unsupported_kind: Arc<Mutex<Option<SemanticOpKind>>>,
+        prepare_failure_kind: Arc<Mutex<Option<SemanticOpKind>>>,
+        submit_unsupported_kind: Arc<Mutex<Option<SemanticOpKind>>>,
+        submit_failure_kind: Arc<Mutex<Option<SemanticOpKind>>>,
         shutdown_calls: Arc<AtomicUsize>,
         total_memory_bytes: Arc<AtomicU64>,
         available_memory_bytes: Arc<AtomicU64>,
         state_image_import_calls: Arc<AtomicUsize>,
         state_image_failure: Arc<AtomicBool>,
+        checkpoint_supported: Arc<AtomicBool>,
+        checkpoint_batch_calls: Arc<AtomicUsize>,
+        checkpoint_batch_failure: Arc<AtomicBool>,
+        matmul_footprint: Arc<Mutex<MatmulFootprintMode>>,
     }
 
     impl Default for ExecutionRecorder {
@@ -12840,11 +14317,20 @@ mod tests {
                 completion_mode: Arc::new(Mutex::new(QueueCompletionMode::Profiled)),
                 failure_kind: Arc::new(Mutex::new(None)),
                 pending_kind: Arc::new(Mutex::new(None)),
+                unsupported_kind: Arc::new(Mutex::new(None)),
+                prepare_unsupported_kind: Arc::new(Mutex::new(None)),
+                prepare_failure_kind: Arc::new(Mutex::new(None)),
+                submit_unsupported_kind: Arc::new(Mutex::new(None)),
+                submit_failure_kind: Arc::new(Mutex::new(None)),
                 shutdown_calls: Arc::new(AtomicUsize::new(0)),
                 total_memory_bytes: Arc::new(AtomicU64::new(u64::MAX)),
                 available_memory_bytes: Arc::new(AtomicU64::new(u64::MAX)),
                 state_image_import_calls: Arc::new(AtomicUsize::new(0)),
                 state_image_failure: Arc::new(AtomicBool::new(false)),
+                checkpoint_supported: Arc::new(AtomicBool::new(false)),
+                checkpoint_batch_calls: Arc::new(AtomicUsize::new(0)),
+                checkpoint_batch_failure: Arc::new(AtomicBool::new(false)),
+                matmul_footprint: Arc::new(Mutex::new(MatmulFootprintMode::Unknown)),
             }
         }
     }
@@ -12907,8 +14393,68 @@ mod tests {
             *self.pending_kind.lock().expect("pending lock") = Some(kind);
         }
 
+        fn set_unsupported(&self, kind: SemanticOpKind) {
+            *self.unsupported_kind.lock().expect("unsupported lock") = Some(kind);
+        }
+
+        fn set_prepare_unsupported(&self, kind: SemanticOpKind) {
+            *self
+                .prepare_unsupported_kind
+                .lock()
+                .expect("prepare unsupported lock") = Some(kind);
+        }
+
+        fn set_prepare_failure(&self, kind: SemanticOpKind) {
+            *self
+                .prepare_failure_kind
+                .lock()
+                .expect("prepare failure lock") = Some(kind);
+        }
+
+        fn set_submit_unsupported(&self, kind: SemanticOpKind) {
+            *self
+                .submit_unsupported_kind
+                .lock()
+                .expect("submit unsupported lock") = Some(kind);
+        }
+
+        fn set_submit_failure(&self, kind: SemanticOpKind) {
+            *self
+                .submit_failure_kind
+                .lock()
+                .expect("submit failure lock") = Some(kind);
+        }
+
         fn set_state_image_failure(&self, enabled: bool) {
             self.state_image_failure.store(enabled, Ordering::Relaxed);
+        }
+
+        fn set_checkpoint_supported(&self, enabled: bool) {
+            self.checkpoint_supported.store(enabled, Ordering::Relaxed);
+        }
+
+        fn set_checkpoint_batch_failure(&self, enabled: bool) {
+            self.checkpoint_batch_failure
+                .store(enabled, Ordering::Relaxed);
+        }
+
+        fn set_matmul_footprint(&self, footprint: PreparedMatmulFootprint) {
+            *self.matmul_footprint.lock().expect("matmul footprint lock") =
+                MatmulFootprintMode::Fixed(footprint);
+        }
+
+        fn set_matmul_footprint_unknown(&self) {
+            *self.matmul_footprint.lock().expect("matmul footprint lock") =
+                MatmulFootprintMode::Unknown;
+        }
+
+        fn set_matmul_footprint_error(&self) {
+            *self.matmul_footprint.lock().expect("matmul footprint lock") =
+                MatmulFootprintMode::Error;
+        }
+
+        fn checkpoint_batch_calls(&self) -> usize {
+            self.checkpoint_batch_calls.load(Ordering::Relaxed)
         }
 
         fn state_image_import_calls(&self) -> usize {
@@ -12953,8 +14499,28 @@ mod tests {
             Some(self.total_memory_bytes.load(Ordering::Relaxed))
         }
 
-        fn supports(&self, _descriptor: &SemanticOpDescriptor) -> PrepareSupport {
-            PrepareSupport::Supported
+        fn supports(&self, descriptor: &SemanticOpDescriptor) -> PrepareSupport {
+            if *self.unsupported_kind.lock().expect("unsupported lock") == Some(descriptor.kind()) {
+                PrepareSupport::Unsupported {
+                    reason: "recorder rejection for fail-closed routing test".to_owned(),
+                }
+            } else {
+                PrepareSupport::Supported
+            }
+        }
+
+        fn estimate_matmul_footprint(
+            &self,
+            _descriptor: &SemanticOpDescriptor,
+        ) -> Result<Option<PreparedMatmulFootprint>, ExecutionError> {
+            match *self.matmul_footprint.lock().expect("matmul footprint lock") {
+                MatmulFootprintMode::Unknown => Ok(None),
+                MatmulFootprintMode::Fixed(footprint) => Ok(Some(footprint)),
+                MatmulFootprintMode::Error => Err(ExecutionError::BackendStatus {
+                    status: 711,
+                    diagnostic: "recorder matmul footprint failure".to_owned(),
+                }),
+            }
         }
 
         fn create_queue(
@@ -12999,7 +14565,31 @@ mod tests {
             _access: &ExecutionAdapterAccess<'_>,
             operation: &BoundSemanticOp,
         ) -> Result<AdapterResource, ExecutionError> {
-            if operation.descriptor().kind() == SemanticOpKind::Matmul {
+            let kind = operation.descriptor().kind();
+            if *self
+                .prepare_unsupported_kind
+                .lock()
+                .expect("prepare unsupported lock")
+                == Some(kind)
+            {
+                self.event(format!("prepare-error:{kind:?}:unsupported"));
+                return Err(ExecutionError::Unsupported {
+                    reason: "recorder prepare rejection for fallback routing test".to_owned(),
+                });
+            }
+            if *self
+                .prepare_failure_kind
+                .lock()
+                .expect("prepare failure lock")
+                == Some(kind)
+            {
+                self.event(format!("prepare-error:{kind:?}:backend"));
+                return Err(ExecutionError::BackendStatus {
+                    status: 712,
+                    diagnostic: "recorder prepare backend failure".to_owned(),
+                });
+            }
+            if kind == SemanticOpKind::Matmul {
                 if let Some(input) = operation.descriptor().inputs().first() {
                     self.state
                         .lock()
@@ -13015,7 +14605,7 @@ mod tests {
                     contract.token_count(),
                 ));
             }
-            self.event(format!("prepare:{:?}", operation.descriptor().kind()));
+            self.event(format!("prepare:{kind:?}"));
             Ok(AdapterResource::new(()))
         }
 
@@ -13027,6 +14617,29 @@ mod tests {
         ) -> Result<(Box<dyn ExecutionSubmissionAdapter>, crate::DispatchEvidence), ExecutionError>
         {
             let kind = prepared.operation().descriptor().kind();
+            if *self
+                .submit_unsupported_kind
+                .lock()
+                .expect("submit unsupported lock")
+                == Some(kind)
+            {
+                self.event(format!("submit-error:{kind:?}:unsupported"));
+                return Err(ExecutionError::Unsupported {
+                    reason: "recorder submit rejection for no-fallback test".to_owned(),
+                });
+            }
+            if *self
+                .submit_failure_kind
+                .lock()
+                .expect("submit failure lock")
+                == Some(kind)
+            {
+                self.event(format!("submit-error:{kind:?}:backend"));
+                return Err(ExecutionError::BackendStatus {
+                    status: 713,
+                    diagnostic: "recorder submit backend failure".to_owned(),
+                });
+            }
             self.event(format!("submit:{kind:?}"));
             let mut dispatch = dispatch_evidence();
             dispatch.target = self.target();
@@ -13250,6 +14863,36 @@ mod tests {
             Ok(())
         }
 
+        fn rewind_last_kv_state_transition(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &KvState,
+            expected_length: u64,
+            rewind_length: u64,
+        ) -> Result<(), ExecutionError> {
+            let mut recorder = self.state.lock().expect("recorder lock");
+            let length = recorder
+                .kv_lengths
+                .get_mut(&state.id().raw())
+                .ok_or_else(|| ExecutionError::InvalidRequest {
+                    reason: "recorder KV state is absent".to_owned(),
+                })?;
+            if *length != expected_length || rewind_length >= expected_length {
+                return Err(ExecutionError::InvalidRequest {
+                    reason: "recorder KV rewind length is stale".to_owned(),
+                });
+            }
+            *length = rewind_length;
+            drop(recorder);
+            self.event(format!(
+                "rewind-kv:{}:{}:{}",
+                state.layer_id(),
+                expected_length,
+                rewind_length
+            ));
+            Ok(())
+        }
+
         fn append_kv_state(
             &self,
             _access: &ExecutionAdapterAccess<'_>,
@@ -13368,6 +15011,178 @@ mod tests {
             .map_err(|error| ExecutionError::InvalidRequest {
                 reason: error.to_string(),
             })
+        }
+
+        fn rewind_last_linear_attention_transition(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &LinearAttentionState,
+            expected_length: u64,
+            rewind_length: u64,
+        ) -> Result<(), ExecutionError> {
+            let mut recorder = self.state.lock().expect("recorder lock");
+            let length = recorder
+                .linear_lengths
+                .get_mut(&state.id().raw())
+                .ok_or_else(|| ExecutionError::InvalidRequest {
+                    reason: "recorder linear state is absent".to_owned(),
+                })?;
+            if *length != expected_length || rewind_length >= expected_length {
+                return Err(ExecutionError::InvalidRequest {
+                    reason: "recorder linear rewind length is stale".to_owned(),
+                });
+            }
+            *length = rewind_length;
+            drop(recorder);
+            self.event(format!(
+                "rewind-linear:{}:{}:{}",
+                state.layer_id(),
+                expected_length,
+                rewind_length
+            ));
+            Ok(())
+        }
+
+        fn prepare_linear_attention_prefix_checkpoint(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &LinearAttentionState,
+            expected_start: u64,
+            token_count: u32,
+            rows: u32,
+        ) -> Result<(), ExecutionError> {
+            if !self.checkpoint_supported.load(Ordering::Relaxed) || token_count != 3 || rows != 2 {
+                return Err(ExecutionError::Unsupported {
+                    reason: "recorder only supports the M3 checkpoint shape".to_owned(),
+                });
+            }
+            self.state
+                .lock()
+                .expect("recorder lock")
+                .linear_checkpoints
+                .insert(state.id().raw(), expected_start);
+            self.event(format!(
+                "checkpoint-prepare:{}:{}",
+                state.layer_id(),
+                expected_start
+            ));
+            Ok(())
+        }
+
+        fn validate_linear_attention_prefix_checkpoint(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &LinearAttentionState,
+            expected_start: u64,
+            expected_end: u64,
+            rows: u32,
+        ) -> Result<(), ExecutionError> {
+            let recorder = self.state.lock().expect("recorder lock");
+            if rows != 2
+                || recorder.linear_checkpoints.get(&state.id().raw()) != Some(&expected_start)
+                || recorder.linear_lengths.get(&state.id().raw()) != Some(&expected_end)
+            {
+                return Err(ExecutionError::InvalidRequest {
+                    reason: "recorder checkpoint validation failed".to_owned(),
+                });
+            }
+            drop(recorder);
+            self.event(format!(
+                "checkpoint-validate:{}:{}:{}",
+                state.layer_id(),
+                expected_start,
+                expected_end
+            ));
+            Ok(())
+        }
+
+        fn commit_linear_attention_prefix_checkpoint(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &LinearAttentionState,
+            _queue: &ExecutionQueue,
+            expected_start: u64,
+            expected_end: u64,
+            prefix_end: u64,
+            row_index: u32,
+        ) -> Result<(), ExecutionError> {
+            let mut recorder = self.state.lock().expect("recorder lock");
+            if row_index > 1
+                || recorder.linear_checkpoints.get(&state.id().raw()) != Some(&expected_start)
+                || recorder.linear_lengths.get(&state.id().raw()) != Some(&expected_end)
+            {
+                return Err(ExecutionError::InvalidRequest {
+                    reason: "recorder checkpoint commit failed".to_owned(),
+                });
+            }
+            recorder.linear_lengths.insert(state.id().raw(), prefix_end);
+            recorder.linear_checkpoints.remove(&state.id().raw());
+            drop(recorder);
+            self.event(format!(
+                "checkpoint-commit:{}:{}:{}",
+                state.layer_id(),
+                prefix_end,
+                row_index
+            ));
+            Ok(())
+        }
+
+        fn commit_linear_attention_prefix_checkpoints(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            _queue: &ExecutionQueue,
+            states: &[&LinearAttentionState],
+            expected_start: u64,
+            expected_end: u64,
+            prefix_end: u64,
+            row_index: u32,
+        ) -> Result<(), ExecutionError> {
+            self.checkpoint_batch_calls.fetch_add(1, Ordering::Relaxed);
+            let mut recorder = self.state.lock().expect("recorder lock");
+            for state in states {
+                if row_index > 1
+                    || recorder.linear_checkpoints.get(&state.id().raw()) != Some(&expected_start)
+                    || recorder.linear_lengths.get(&state.id().raw()) != Some(&expected_end)
+                {
+                    return Err(ExecutionError::InvalidRequest {
+                        reason: "recorder checkpoint batch validation failed".to_owned(),
+                    });
+                }
+            }
+            if self.checkpoint_batch_failure.load(Ordering::Relaxed) {
+                drop(recorder);
+                self.event(format!("checkpoint-commit-batch-failure:{}", states.len()));
+                return Err(ExecutionError::BackendStatus {
+                    status: 92,
+                    diagnostic: "recorder checkpoint batch commit failure".to_owned(),
+                });
+            }
+            for state in states {
+                recorder.linear_lengths.insert(state.id().raw(), prefix_end);
+                recorder.linear_checkpoints.remove(&state.id().raw());
+            }
+            drop(recorder);
+            self.event(format!(
+                "checkpoint-commit-batch:{}:{}:{}",
+                states.len(),
+                prefix_end,
+                row_index
+            ));
+            Ok(())
+        }
+
+        fn discard_linear_attention_prefix_checkpoint(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &LinearAttentionState,
+        ) -> Result<(), ExecutionError> {
+            self.state
+                .lock()
+                .expect("recorder lock")
+                .linear_checkpoints
+                .remove(&state.id().raw());
+            self.event(format!("checkpoint-discard:{}", state.layer_id()));
+            Ok(())
         }
 
         fn export_linear_attention_state_image(
@@ -13977,6 +15792,123 @@ mod tests {
     }
 
     #[test]
+    fn qwen38_nvfp4_prefill_shared_activation_is_default_on_and_target_scoped() {
+        let enabled = |env_value| {
+            qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+                "hip",
+                Some("gfx1030"),
+                true,
+                false,
+                false,
+                true,
+                true,
+                env_value,
+            )
+        };
+
+        assert!(enabled(None));
+        assert!(!enabled(Some(OsStr::new("0"))));
+        assert!(!enabled(Some(OsStr::new("true"))));
+        assert!(!enabled(Some(OsStr::new("1 "))));
+        assert!(enabled(Some(OsStr::new("1"))));
+        assert!(!qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+            "cpu",
+            Some("gfx1030"),
+            true,
+            false,
+            false,
+            true,
+            true,
+            None,
+        ));
+        assert!(!qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+            "hip",
+            Some("gfx942"),
+            true,
+            false,
+            false,
+            true,
+            true,
+            Some(OsStr::new("1")),
+        ));
+        assert!(!qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+            "hip",
+            Some("gfx1201"),
+            false,
+            false,
+            false,
+            true,
+            true,
+            None,
+        ));
+        assert!(!qwen38_nvfp4_prefill_shared_activation_scope_enabled(
+            "hip",
+            Some("gfx1030"),
+            true,
+            false,
+            false,
+            true,
+            false,
+            Some(OsStr::new("1")),
+        ));
+    }
+
+    #[test]
+    fn qwen38_nvfp4_prefill_shared_activation_scopes_rows_and_role() {
+        let (nvfp4_graph, _) = crate::qwen_graph::qwen38_projection_pack_execution_fixture(3);
+        let nvfp4_operation = nvfp4_graph
+            .nodes()
+            .iter()
+            .find_map(|node| {
+                node.operation().filter(|operation| {
+                    operation.kind() == SemanticOpKind::Qwen38ProjectionPack2
+                        && operation
+                            .qwen38_projection_pack_contract()
+                            .is_some_and(|contract| {
+                                contract.role() == crate::Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp
+                            })
+                })
+            })
+            .expect("NVFP4 projection-pack operation");
+        assert!(!qwen38_nvfp4_prefill_shared_activation_operation_enabled(
+            nvfp4_operation,
+            1,
+        ));
+        for rows in [2_u64, 3, 4, 64, 65] {
+            assert!(qwen38_nvfp4_prefill_shared_activation_operation_enabled(
+                nvfp4_operation,
+                rows
+            ));
+        }
+        for rows in [0_u64, 1, 5, 63] {
+            assert!(!qwen38_nvfp4_prefill_shared_activation_operation_enabled(
+                nvfp4_operation,
+                rows
+            ));
+        }
+
+        let (fp8_graph, _) = crate::qwen_graph::qwen38_fp8_gdn_projection_pack_execution_fixture(3);
+        let fp8_operation = fp8_graph
+            .nodes()
+            .iter()
+            .find_map(|node| {
+                node.operation().filter(|operation| {
+                    operation.kind() == SemanticOpKind::Qwen38ProjectionPack2
+                        && operation
+                            .qwen38_projection_pack_contract()
+                            .is_some_and(|contract| {
+                                contract.role() == crate::Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ
+                            })
+                })
+            })
+            .expect("FP8 GDN projection-pack operation");
+        assert!(!qwen38_nvfp4_prefill_shared_activation_operation_enabled(
+            fp8_operation,
+            65,
+        ));
+    }
+
+    #[test]
     fn phase50_candidate_env_selector_is_target_scoped() {
         let one = Some(OsStr::new("1"));
         let zero = Some(OsStr::new("0"));
@@ -14068,6 +16000,76 @@ mod tests {
     }
 
     #[test]
+    fn residual_rmsnorm_fusion_policy_scopes_qwen38_target_and_rollback() {
+        for target in ["gfx1030", "gfx1201"] {
+            for env_value in [None, Some(OsStr::new("1"))] {
+                assert_eq!(
+                    qwen_residual_rmsnorm_fusion_policy_scope(
+                        "hip",
+                        Some(target),
+                        Some(QwenResidualRmsNormFusionScope::Qwen38Target),
+                        true,
+                        env_value,
+                    ),
+                    Some(QwenResidualRmsNormFusionScope::Qwen38Target)
+                );
+            }
+            for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
+                assert_eq!(
+                    qwen_residual_rmsnorm_fusion_policy_scope(
+                        "hip",
+                        Some(target),
+                        Some(QwenResidualRmsNormFusionScope::Qwen38Target),
+                        true,
+                        env_value,
+                    ),
+                    None
+                );
+            }
+        }
+        assert_eq!(
+            qwen_residual_rmsnorm_fusion_policy_scope(
+                "cpu",
+                Some("gfx1201"),
+                Some(QwenResidualRmsNormFusionScope::Qwen38Target),
+                true,
+                Some(OsStr::new("1")),
+            ),
+            None
+        );
+        assert_eq!(
+            qwen_residual_rmsnorm_fusion_policy_scope(
+                "hip",
+                Some("gfx942"),
+                Some(QwenResidualRmsNormFusionScope::Qwen38Target),
+                true,
+                Some(OsStr::new("1")),
+            ),
+            None
+        );
+        assert_eq!(
+            qwen_residual_rmsnorm_fusion_policy_scope(
+                "hip",
+                Some("gfx1201"),
+                Some(QwenResidualRmsNormFusionScope::Qwen38Target),
+                false,
+                Some(OsStr::new("1")),
+            ),
+            None
+        );
+        assert_eq!(
+            qwen_residual_rmsnorm_fusion_policy_scope(
+                "hip",
+                Some("gfx1201"),
+                None,
+                true,
+                Some(OsStr::new("1")),
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn residual_rmsnorm_fusion_lowers_with_contract_and_executes() {
         struct FusionEnvGuard(Option<std::ffi::OsString>);
         impl Drop for FusionEnvGuard {
@@ -14099,55 +16101,82 @@ mod tests {
         let recorder = Arc::new(recorder);
         let session = Arc::new(ExecutionSession::new("hip", recorder.clone()));
         assert_eq!(graph.model_fingerprint(), QWEN35_4B_FINGERPRINT);
-        assert_eq!(graph.layer_types().len(), QWEN35_LAYER_COUNT);
+        assert_eq!(
+            graph.layer_types().len(),
+            crate::qwen_graph::QWEN35_LAYER_COUNT
+        );
         assert_eq!(session.backend_name(), "hip");
         assert_eq!(session.expected_target().as_deref(), Some("gfx1030"));
         assert!(graph.fp8_sidecar_fingerprint().is_none());
         assert!(!graph.is_multimodal());
         assert!(!graph.is_mtp());
-        assert!(qwen_residual_rmsnorm_fusion_enabled(
-            &session,
-            &graph,
-            &AdapterRequestSetV1::disabled()
-        ));
+        assert_eq!(
+            qwen_residual_rmsnorm_fusion_scope(
+                &session,
+                &graph,
+                &AdapterRequestSetV1::disabled(),
+                None,
+            ),
+            Some(QwenResidualRmsNormFusionScope::Qwen35FourB)
+        );
         let disabled_adapters = AdapterRequestSetV1::disabled();
         for env_value in [None, Some(OsStr::new("1"))] {
-            assert!(qwen_residual_rmsnorm_fusion_enabled_with_env(
-                &session,
-                &graph,
-                &disabled_adapters,
-                env_value,
-            ));
+            assert_eq!(
+                qwen_residual_rmsnorm_fusion_scope_with_env(
+                    &session,
+                    &graph,
+                    &disabled_adapters,
+                    None,
+                    env_value,
+                ),
+                Some(QwenResidualRmsNormFusionScope::Qwen35FourB)
+            );
         }
         for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
-            assert!(!qwen_residual_rmsnorm_fusion_enabled_with_env(
-                &session,
-                &graph,
-                &disabled_adapters,
-                env_value,
-            ));
+            assert_eq!(
+                qwen_residual_rmsnorm_fusion_scope_with_env(
+                    &session,
+                    &graph,
+                    &disabled_adapters,
+                    None,
+                    env_value,
+                ),
+                None
+            );
         }
-        let wrong_target_recorder = Arc::new(ExecutionRecorder::with_target("gfx1201"));
-        let wrong_target_session = ExecutionSession::new("hip", wrong_target_recorder);
-        assert!(qwen_residual_rmsnorm_fusion_enabled_with_env(
-            &wrong_target_session,
-            &graph,
-            &disabled_adapters,
-            None,
-        ));
-        assert!(qwen_residual_rmsnorm_fusion_enabled_with_env(
-            &wrong_target_session,
-            &graph,
-            &disabled_adapters,
-            Some(OsStr::new("1")),
-        ));
-        for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
-            assert!(!qwen_residual_rmsnorm_fusion_enabled_with_env(
-                &wrong_target_session,
+        let second_target_recorder = Arc::new(ExecutionRecorder::with_target("gfx1201"));
+        let second_target_session = ExecutionSession::new("hip", second_target_recorder);
+        assert_eq!(
+            qwen_residual_rmsnorm_fusion_scope_with_env(
+                &second_target_session,
                 &graph,
                 &disabled_adapters,
-                env_value,
-            ));
+                None,
+                None,
+            ),
+            Some(QwenResidualRmsNormFusionScope::Qwen35FourB)
+        );
+        assert_eq!(
+            qwen_residual_rmsnorm_fusion_scope_with_env(
+                &second_target_session,
+                &graph,
+                &disabled_adapters,
+                None,
+                Some(OsStr::new("1")),
+            ),
+            Some(QwenResidualRmsNormFusionScope::Qwen35FourB)
+        );
+        for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
+            assert_eq!(
+                qwen_residual_rmsnorm_fusion_scope_with_env(
+                    &second_target_session,
+                    &graph,
+                    &disabled_adapters,
+                    None,
+                    env_value,
+                ),
+                None
+            );
         }
         let source = TestProvisionSource::default();
         let resident = Arc::new(
@@ -14515,12 +16544,15 @@ mod tests {
     }
 
     #[test]
-    fn qwen38_projection_pack2_decomposes_m3_and_uses_one_m1_semantic_owner() {
-        let (graph, plan) = crate::qwen_graph::qwen38_projection_pack_execution_fixture(3);
+    fn qwen38_projection_pack2_shares_m2_to_m4_and_decomposes_m5() {
+        // Keep graph capacity separate from the runtime row count.  This is
+        // the shape used by target verification: a capacity-sized graph is
+        // rebound to M2/M3/M4 rows for each MTP proposal.
+        let (graph, plan) = crate::qwen_graph::qwen38_projection_pack_execution_fixture(2048);
         let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
         let adapter: Arc<dyn ExecutionSessionAdapter> = recorder.clone();
         let session = Arc::new(ExecutionSession::new("hip", adapter));
-        let core = QwenExecutionCore::provision(
+        let mut core = QwenExecutionCore::provision(
             session,
             graph,
             plan,
@@ -14528,6 +16560,7 @@ mod tests {
             &ProjectionPackTestProvisionSource,
         )
         .expect("Qwen3.8 projection-pack fixture provisions");
+        core.qwen38_nvfp4_prefill_shared_activation = true;
         let pack_node = core
             .graph
             .nodes()
@@ -14537,32 +16570,57 @@ mod tests {
             })
             .expect("projection-pack node");
 
-        let before_prefill = recorder.events().len();
-        let mut prefill = ExecutionSegment::profiled(Duration::from_millis(1));
+        for rows in [2_u64, 3, 4] {
+            let before = recorder.events().len();
+            let mut pending = ExecutionSegment::profiled(Duration::from_millis(1));
+            core.execute_semantic(
+                pack_node,
+                rows,
+                None,
+                TerminalOutputRows::Last,
+                None,
+                &mut pending,
+            )
+            .unwrap_or_else(|error| panic!("M={rows} projection pack shares: {error}"));
+            let events = recorder.events();
+            let events = &events[before..];
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.as_str() == "submit:Qwen38ProjectionPack2")
+                    .count(),
+                1
+            );
+            assert!(!events.iter().any(|event| event == "submit:Matmul"));
+            pending.abort().expect("shared-owner cleanup");
+        }
+
+        let before_m5 = recorder.events().len();
+        let mut decomposed = ExecutionSegment::profiled(Duration::from_millis(1));
         core.execute_semantic(
             pack_node,
-            3,
+            5,
             None,
             TerminalOutputRows::Last,
             None,
-            &mut prefill,
+            &mut decomposed,
         )
-        .expect("M=3 projection pack decomposes");
-        let events = recorder.events();
-        let prefill_events = &events[before_prefill..];
+        .expect("M=5 projection pack remains decomposed");
+        let m5_events = recorder.events();
+        let m5_events = &m5_events[before_m5..];
         assert_eq!(
-            prefill_events
+            m5_events
                 .iter()
                 .filter(|event| event.as_str() == "submit:Matmul")
                 .count(),
             2
         );
         assert!(
-            !prefill_events
+            !m5_events
                 .iter()
                 .any(|event| event == "submit:Qwen38ProjectionPack2")
         );
-        prefill.abort().expect("decomposed-owner cleanup");
+        decomposed.abort().expect("M=5 decomposed cleanup");
 
         let before_decode = recorder.events().len();
         let mut decode = ExecutionSegment::profiled(Duration::from_millis(1));
@@ -14596,9 +16654,299 @@ mod tests {
         assert_eq!(snapshot.kernel_dispatch_count(), 3);
     }
 
+    fn qwen38_shared_projection_pack_core(recorder: Arc<ExecutionRecorder>) -> QwenExecutionCore {
+        let (graph, plan) = crate::qwen_graph::qwen38_projection_pack_execution_fixture(64);
+        let adapter: Arc<dyn ExecutionSessionAdapter> = recorder.clone();
+        let session = Arc::new(ExecutionSession::new("hip", adapter));
+        let mut core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &ProjectionPackTestProvisionSource,
+        )
+        .expect("Qwen3.8 projection-pack fixture provisions");
+        core.qwen38_nvfp4_prefill_shared_activation = true;
+        core
+    }
+
+    fn qwen38_shared_projection_pack_node(core: &QwenExecutionCore) -> &QwenGraphNode {
+        core.graph
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+                    && node
+                        .operation()
+                        .and_then(SemanticOpDescriptor::qwen38_projection_pack_contract)
+                        .is_some_and(|contract| {
+                            contract.role() == crate::Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp
+                        })
+            })
+            .expect("NVFP4 projection-pack node")
+    }
+
     #[test]
-    fn qwen38_fp8_gdn_projection_pack2_keeps_prefill_decomposed_and_lowers_m1() {
-        let (graph, plan) = crate::qwen_graph::qwen38_fp8_gdn_projection_pack_execution_fixture(3);
+    fn qwen38_nvfp4_prefill_shared_activation_falls_back_on_support_rejection() {
+        let (graph, plan) = crate::qwen_graph::qwen38_projection_pack_execution_fixture(64);
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        recorder.set_unsupported(SemanticOpKind::Qwen38ProjectionPack2);
+        let adapter: Arc<dyn ExecutionSessionAdapter> = recorder.clone();
+        let session = Arc::new(ExecutionSession::new("hip", adapter));
+        let mut core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &ProjectionPackTestProvisionSource,
+        )
+        .expect("Qwen3.8 projection-pack fixture provisions");
+        core.qwen38_nvfp4_prefill_shared_activation = true;
+        let pack_node = core
+            .graph
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::Qwen38ProjectionPack2)
+                    && node
+                        .operation()
+                        .and_then(SemanticOpDescriptor::qwen38_projection_pack_contract)
+                        .is_some_and(|contract| {
+                            contract.role() == crate::Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp
+                        })
+            })
+            .expect("NVFP4 projection-pack node");
+        let before = recorder.events().len();
+        let mut pending = ExecutionSegment::profiled(Duration::from_millis(1));
+        let result = core.execute_semantic(
+            pack_node,
+            64,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut pending,
+        );
+        result.expect("unsupported shared owner falls back to two matmuls");
+        let events = recorder.events();
+        assert_eq!(
+            events[before..]
+                .iter()
+                .filter(|event| event.as_str() == "prepare:Matmul")
+                .count(),
+            2
+        );
+        assert_eq!(
+            events[before..]
+                .iter()
+                .filter(|event| event.as_str() == "submit:Matmul")
+                .count(),
+            2
+        );
+        assert!(
+            events[before..]
+                .iter()
+                .all(|event| !event.starts_with("prepare:Qwen38ProjectionPack2"))
+        );
+        assert!(
+            events[before..]
+                .iter()
+                .all(|event| !event.starts_with("submit:Qwen38ProjectionPack2"))
+        );
+        pending.abort().expect("fallback cleanup");
+    }
+
+    #[test]
+    fn qwen38_nvfp4_prefill_shared_activation_falls_back_on_prepare_unsupported() {
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        recorder.set_prepare_unsupported(SemanticOpKind::Qwen38ProjectionPack2);
+        let core = qwen38_shared_projection_pack_core(Arc::clone(&recorder));
+        let pack_node = qwen38_shared_projection_pack_node(&core);
+        let before = recorder.events().len();
+        let mut pending = ExecutionSegment::profiled(Duration::from_millis(1));
+        core.execute_semantic(
+            pack_node,
+            64,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut pending,
+        )
+        .expect("prepare unsupported shared owner falls back to two matmuls");
+        let events = recorder.events();
+        assert!(
+            events[before..]
+                .iter()
+                .any(|event| event == "prepare-error:Qwen38ProjectionPack2:unsupported")
+        );
+        assert_eq!(
+            events[before..]
+                .iter()
+                .filter(|event| event.as_str() == "submit:Matmul")
+                .count(),
+            2
+        );
+        assert!(
+            !events[before..]
+                .iter()
+                .any(|event| event == "submit:Qwen38ProjectionPack2")
+        );
+        pending.abort().expect("prepare fallback cleanup");
+    }
+
+    #[test]
+    fn qwen38_nvfp4_prefill_shared_activation_does_not_fallback_after_prepare() {
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        recorder.set_prepare_failure(SemanticOpKind::Qwen38ProjectionPack2);
+        let core = qwen38_shared_projection_pack_core(Arc::clone(&recorder));
+        let pack_node = qwen38_shared_projection_pack_node(&core);
+        let before = recorder.events().len();
+        let mut pending = ExecutionSegment::profiled(Duration::from_millis(1));
+        let result = core.execute_semantic(
+            pack_node,
+            64,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut pending,
+        );
+        assert!(matches!(
+            result,
+            Err(QwenExecutionError::Execution(
+                ExecutionError::BackendStatus { status: 712, .. }
+            ))
+        ));
+        let events = recorder.events();
+        assert!(
+            events[before..]
+                .iter()
+                .any(|event| event == "prepare-error:Qwen38ProjectionPack2:backend")
+        );
+        assert!(
+            !events[before..]
+                .iter()
+                .any(|event| event == "submit:Matmul")
+        );
+        pending.abort().expect("prepare failure cleanup");
+
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        recorder.set_submit_unsupported(SemanticOpKind::Qwen38ProjectionPack2);
+        let core = qwen38_shared_projection_pack_core(Arc::clone(&recorder));
+        let pack_node = qwen38_shared_projection_pack_node(&core);
+        let before = recorder.events().len();
+        let mut pending = ExecutionSegment::profiled(Duration::from_millis(1));
+        let result = core.execute_semantic(
+            pack_node,
+            64,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut pending,
+        );
+        assert!(matches!(
+            result,
+            Err(QwenExecutionError::Execution(
+                ExecutionError::Unsupported { .. }
+            ))
+        ));
+        let events = recorder.events();
+        assert!(
+            events[before..]
+                .iter()
+                .any(|event| event == "submit-error:Qwen38ProjectionPack2:unsupported")
+        );
+        assert!(
+            !events[before..]
+                .iter()
+                .any(|event| event == "submit:Matmul")
+        );
+        pending.abort().expect("submit failure cleanup");
+
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        recorder.set_submit_failure(SemanticOpKind::Qwen38ProjectionPack2);
+        let core = qwen38_shared_projection_pack_core(Arc::clone(&recorder));
+        let pack_node = qwen38_shared_projection_pack_node(&core);
+        let before = recorder.events().len();
+        let mut pending = ExecutionSegment::profiled(Duration::from_millis(1));
+        let result = core.execute_semantic(
+            pack_node,
+            64,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut pending,
+        );
+        assert!(matches!(
+            result,
+            Err(QwenExecutionError::Execution(
+                ExecutionError::BackendStatus { status: 713, .. }
+            ))
+        ));
+        let events = recorder.events();
+        assert!(
+            events[before..]
+                .iter()
+                .any(|event| event == "submit-error:Qwen38ProjectionPack2:backend")
+        );
+        assert!(
+            !events[before..]
+                .iter()
+                .any(|event| event == "submit:Matmul")
+        );
+        pending.abort().expect("backend submit failure cleanup");
+    }
+
+    #[test]
+    fn qwen38_fp8_gdn_projection_pack2_scopes_dynamic_rows_and_lowers_m1() {
+        let (capacity_graph, _) =
+            crate::qwen_graph::qwen38_fp8_gdn_projection_pack_execution_fixture(2048);
+        let operation = capacity_graph
+            .nodes()
+            .iter()
+            .find_map(|node| {
+                node.operation().filter(|operation| {
+                    operation.kind() == SemanticOpKind::Qwen38ProjectionPack2
+                        && operation
+                            .qwen38_projection_pack_contract()
+                            .is_some_and(|contract| {
+                                contract.role() == crate::Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ
+                            })
+                })
+            })
+            .expect("FP8 GDN projection-pack operation");
+        // The descriptor retains graph capacity (2048); execution binds a
+        // dynamic first dimension for each runtime M. Keep the selector
+        // independent of that first dimension while preserving all widths.
+        for rows in [2_u64, 3, 5, 65] {
+            assert!(qwen38_fp8_gdn_projection_pack2_operation_enabled(
+                operation, rows
+            ));
+            assert!(!qwen38_fp8_gdn_projection_pack2_operation_enabled(
+                operation, 1
+            ));
+        }
+
+        let (nvfp4_graph, _) = crate::qwen_graph::qwen38_projection_pack_execution_fixture(64);
+        let nvfp4_operation = nvfp4_graph
+            .nodes()
+            .iter()
+            .find_map(|node| {
+                node.operation().filter(|operation| {
+                    operation.kind() == SemanticOpKind::Qwen38ProjectionPack2
+                        && operation
+                            .qwen38_projection_pack_contract()
+                            .is_some_and(|contract| {
+                                contract.role() == crate::Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp
+                            })
+                })
+            })
+            .expect("NVFP4 projection-pack operation");
+        assert!(!qwen38_fp8_gdn_projection_pack2_operation_enabled(
+            nvfp4_operation,
+            64,
+        ));
+
+        let (graph, plan) =
+            crate::qwen_graph::qwen38_fp8_gdn_projection_pack_execution_fixture(2048);
         let recorder = Arc::new(ExecutionRecorder::with_target("gfx1201"));
         let adapter: Arc<dyn ExecutionSessionAdapter> = recorder.clone();
         let session = Arc::new(ExecutionSession::new("hip", adapter));
@@ -14625,32 +16973,29 @@ mod tests {
             })
             .expect("FP8 GDN projection-pack node");
 
-        let before_prefill = recorder.events().len();
-        let mut prefill = ExecutionSegment::profiled(Duration::from_millis(1));
-        core.execute_semantic(
-            pack_node,
-            3,
-            None,
-            TerminalOutputRows::Last,
-            None,
-            &mut prefill,
-        )
-        .expect("M=3 FP8 GDN projection pack decomposes");
-        let events = recorder.events();
-        let prefill_events = &events[before_prefill..];
-        assert_eq!(
-            prefill_events
-                .iter()
-                .filter(|event| event.as_str() == "submit:Matmul")
-                .count(),
-            2
-        );
-        assert!(
-            !prefill_events
-                .iter()
-                .any(|event| event == "submit:Qwen38ProjectionPack2")
-        );
-        prefill.abort().expect("FP8 GDN prefill cleanup");
+        let assert_shared = |rows, terminal_rows| {
+            let before = recorder.events().len();
+            let mut segment = ExecutionSegment::profiled(Duration::from_millis(1));
+            core.execute_semantic(pack_node, rows, None, terminal_rows, None, &mut segment)
+                .unwrap_or_else(|error| {
+                    panic!("M={rows} FP8 GDN projection pack execution failed: {error}")
+                });
+            let events = recorder.events();
+            let events = &events[before..];
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.as_str() == "submit:Qwen38ProjectionPack2")
+                    .count(),
+                1
+            );
+            assert!(!events.iter().any(|event| event == "submit:Matmul"));
+            segment.abort().expect("FP8 GDN shared cleanup");
+        };
+        for rows in [2_u64, 3, 5] {
+            assert_shared(rows, TerminalOutputRows::Last);
+            assert_shared(rows, TerminalOutputRows::All);
+        }
 
         let before_decode = recorder.events().len();
         let mut decode = ExecutionSegment::profiled(Duration::from_millis(1));
@@ -15212,6 +17557,135 @@ mod tests {
     }
 
     #[test]
+    fn prepared_workspace_memory_estimate_deduplicates_rows_and_charges_peaks() {
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let matmul_nodes = graph
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.operation()
+                    .map(|operation| operation.kind() == SemanticOpKind::Matmul)
+                    .unwrap_or(false)
+            })
+            .count() as u64;
+        assert!(matmul_nodes > 0, "fixture must contain matmul nodes");
+
+        let recorder = Arc::new(ExecutionRecorder::default());
+        recorder.set_matmul_footprint(PreparedMatmulFootprint {
+            plan_persistent_bytes: 11,
+            queue_workspace_bytes: 23,
+            context_workspace_bytes: 17,
+        });
+        let session = ExecutionSession::new("recorder", recorder);
+        let total_memory = 32 * 1024 * 1024 * 1024;
+        let baseline = qwen_graph_memory_estimate(&graph, &plan, total_memory)
+            .expect("baseline fixture estimate");
+        let estimate = qwen_graph_memory_estimate_with_prepared_workspace(
+            &graph,
+            &plan,
+            total_memory,
+            &session,
+            &[1, 3, 3],
+        )
+        .expect("prepared fixture estimate");
+
+        assert_eq!(estimate.prepared_plan_bytes(), matmul_nodes * 2 * 11);
+        assert_eq!(estimate.prepared_queue_bytes(), 23 * 4);
+        assert_eq!(estimate.prepared_context_bytes(), 17);
+        assert_eq!(
+            estimate.required_bytes(),
+            baseline
+                .required_bytes()
+                .checked_add(estimate.prepared_plan_bytes())
+                .and_then(|bytes| bytes.checked_add(estimate.prepared_queue_bytes()))
+                .and_then(|bytes| bytes.checked_add(estimate.prepared_context_bytes()))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn prepared_workspace_memory_estimate_fails_closed_for_unknown_or_backend_error() {
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let total_memory = 32 * 1024 * 1024 * 1024;
+
+        let unknown_recorder = Arc::new(ExecutionRecorder::default());
+        unknown_recorder.set_matmul_footprint_unknown();
+        let unknown_session = ExecutionSession::new("recorder", unknown_recorder);
+        assert!(matches!(
+            qwen_graph_memory_estimate_with_prepared_workspace(
+                &graph,
+                &plan,
+                total_memory,
+                &unknown_session,
+                &[1],
+            ),
+            Err(QwenExecutionError::Execution(ExecutionError::Unsupported { reason }))
+                if reason.contains("cannot estimate native matmul workspace")
+        ));
+
+        let error_recorder = Arc::new(ExecutionRecorder::default());
+        error_recorder.set_matmul_footprint_error();
+        let error_session = ExecutionSession::new("recorder", error_recorder);
+        assert!(matches!(
+            qwen_graph_memory_estimate_with_prepared_workspace(
+                &graph,
+                &plan,
+                total_memory,
+                &error_session,
+                &[1],
+            ),
+            Err(QwenExecutionError::Execution(ExecutionError::BackendStatus {
+                status: 711,
+                diagnostic,
+            })) if diagnostic == "recorder matmul footprint failure"
+        ));
+    }
+
+    #[test]
+    fn prepared_workspace_memory_estimate_rejects_invalid_rows_and_overflow() {
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let total_memory = 32 * 1024 * 1024 * 1024;
+        let recorder = Arc::new(ExecutionRecorder::default());
+        recorder.set_matmul_footprint(PreparedMatmulFootprint {
+            plan_persistent_bytes: 1,
+            queue_workspace_bytes: 1,
+            context_workspace_bytes: 1,
+        });
+        let session = ExecutionSession::new("recorder", recorder.clone());
+
+        for rows in [Vec::new(), vec![0], vec![graph.token_count() + 1]] {
+            assert!(matches!(
+                qwen_graph_memory_estimate_with_prepared_workspace(
+                    &graph,
+                    &plan,
+                    total_memory,
+                    &session,
+                    &rows,
+                ),
+                Err(QwenExecutionError::InvalidRequest(reason))
+                    if reason.contains("rows must be nonzero")
+            ));
+        }
+
+        recorder.set_matmul_footprint(PreparedMatmulFootprint {
+            plan_persistent_bytes: 0,
+            queue_workspace_bytes: u64::MAX,
+            context_workspace_bytes: 0,
+        });
+        assert!(matches!(
+            qwen_graph_memory_estimate_with_prepared_workspace(
+                &graph,
+                &plan,
+                total_memory,
+                &session,
+                &[1],
+            ),
+            Err(QwenExecutionError::InvalidGraph(reason))
+                if reason.contains("prepared matmul workspace byte count overflowed")
+        ));
+    }
+
+    #[test]
     fn device_memory_preflight_accepts_exact_required_boundary() {
         let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
         let layout = validate_graph_plan(&graph, &plan).expect("fixture layout validates");
@@ -15352,6 +17826,186 @@ mod tests {
     }
 
     #[test]
+    fn mtp_partial_output_slice_keeps_row_major_payloads_aligned() {
+        let output = QwenExecutionOutput {
+            token_ids: vec![21, 22, 23],
+            last_logits: Some(vec![1.0, 2.0]),
+            selection: None,
+            selections: None,
+            logits_bf16: Some((0..12).collect()),
+            hidden_states_bf16: Some((0..15).collect()),
+            embeddings_bf16: Some((0..9).collect()),
+            committed_length: 17,
+        };
+        let sliced = slice_qwen_output_rows(&output, 2, 19, 3).expect("slice rows");
+        assert_eq!(sliced.token_ids(), &[21, 22]);
+        assert_eq!(sliced.committed_length(), 19);
+        assert_eq!(sliced.last_logits(), None);
+        assert_eq!(sliced.logits_bf16(), Some(&[0, 1, 2, 3, 4, 5, 6, 7][..]));
+        assert_eq!(
+            sliced.hidden_states_bf16(),
+            Some(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9][..])
+        );
+        assert_eq!(sliced.embeddings_bf16(), Some(&[0, 1, 2, 3, 4, 5][..]));
+    }
+
+    #[test]
+    fn mtp_partial_support_only_slice_uses_speculative_row_count() {
+        let output = QwenExecutionOutput {
+            token_ids: Vec::new(),
+            last_logits: None,
+            selection: None,
+            selections: None,
+            logits_bf16: None,
+            hidden_states_bf16: Some((0..15).collect()),
+            embeddings_bf16: None,
+            committed_length: 17,
+        };
+        let sliced = slice_qwen_output_rows(&output, 1, 18, 3)
+            .expect("support-only output can resolve a partial prefix");
+        assert!(sliced.token_ids().is_empty());
+        assert_eq!(sliced.hidden_states_bf16(), Some(&[0, 1, 2, 3, 4][..]));
+        assert_eq!(sliced.committed_length(), 18);
+
+        let full = slice_qwen_output_rows(&output, 3, 20, 3)
+            .expect("support-only output can resolve an all-accepted prefix");
+        assert!(full.token_ids().is_empty());
+        assert_eq!(
+            full.hidden_states_bf16(),
+            Some(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14][..])
+        );
+        assert_eq!(full.committed_length(), 20);
+    }
+
+    #[test]
+    fn mtp_partial_block_keeps_replay_fallback_when_checkpoint_is_unsupported() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+            vec![11],
+            vec![21, 22, 23],
+            vec![31],
+        ]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture_with_token_count(3);
+        let session = Arc::new(ExecutionSession::new("recorder", recorder));
+        let mut core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &TestProvisionSource::default(),
+        )
+        .expect("target fixture provisions");
+        core.prefill(&[1]).expect("prefill succeeds");
+        core.decode_block_with_mtp_state(&[2, 3, 4])
+            .expect("M3 block succeeds on the legacy backend");
+        let output = core
+            .resolve_decode_block(1)
+            .expect("partial block uses replay fallback");
+        assert_eq!(output.token_ids(), &[31]);
+        assert_eq!(output.committed_length(), 2);
+    }
+
+    #[test]
+    fn mtp_partial_block_restores_checkpoint_without_replay_when_supported() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+            vec![11],
+            vec![21, 22, 23],
+        ]));
+        recorder.set_checkpoint_supported(true);
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture_with_token_count(3);
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let mut core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &TestProvisionSource::default(),
+        )
+        .expect("target fixture provisions");
+        core.prefill(&[1]).expect("prefill succeeds");
+        let before_decode = recorder.events().len();
+        core.decode_block_with_mtp_state(&[2, 3, 4])
+            .expect("M3 block succeeds");
+        let output = core
+            .resolve_decode_block(1)
+            .expect("partial block restores row zero");
+        assert_eq!(output.token_ids(), &[21]);
+        assert_eq!(output.committed_length(), 2);
+        assert_eq!(recorder.checkpoint_batch_calls(), 1);
+        let events = recorder.events();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.starts_with("checkpoint-commit-batch:")),
+            "partial acceptance commits one checkpoint batch"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.starts_with("checkpoint-commit:")),
+            "partial acceptance does not fall back to per-state checkpoint commits"
+        );
+        assert!(
+            !events[before_decode..]
+                .iter()
+                .any(|event| event.starts_with("linear:") && event.ends_with(":1")),
+            "partial acceptance does not replay a one-row target transition"
+        );
+        let batch_size = events
+            .iter()
+            .find_map(|event| {
+                event
+                    .strip_prefix("checkpoint-commit-batch:")
+                    .and_then(|suffix| suffix.split(':').next())
+                    .and_then(|count| count.parse::<usize>().ok())
+            })
+            .expect("batch commit records its state count");
+        assert!(batch_size > 1, "batch commit covers multiple linear states");
+    }
+
+    #[test]
+    fn mtp_partial_block_checkpoint_batch_failure_poisoned_request() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+            vec![11],
+            vec![21, 22, 23],
+        ]));
+        recorder.set_checkpoint_supported(true);
+        recorder.set_checkpoint_batch_failure(true);
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture_with_token_count(3);
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let mut core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &TestProvisionSource::default(),
+        )
+        .expect("target fixture provisions");
+        core.prefill(&[1]).expect("prefill succeeds");
+        core.decode_block_with_mtp_state(&[2, 3, 4])
+            .expect("M3 block succeeds before commit");
+        let error = core
+            .resolve_decode_block(1)
+            .expect_err("batch commit failure is returned");
+        assert!(matches!(
+            error,
+            QwenExecutionError::Execution(ExecutionError::BackendStatus { status: 92, .. })
+        ));
+        assert!(core.lifecycle.is_poisoned());
+        assert_eq!(recorder.checkpoint_batch_calls(), 1);
+        assert!(
+            recorder
+                .events()
+                .iter()
+                .any(|event| event.starts_with("checkpoint-commit-batch-failure:")),
+            "batch failure is recorded"
+        );
+        assert!(matches!(
+            core.decode_block_with_mtp_state(&[5, 6, 7]),
+            Err(QwenExecutionError::Poisoned)
+        ));
+    }
+
+    #[test]
     fn mtp_target_prefill_preserves_every_argmax_and_hidden_row() {
         let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![11, 12, 13]]));
         let (mut core, _) = provisioned_core(recorder);
@@ -15367,6 +18021,62 @@ mod tests {
                 .len(),
             3 * 2_560
         );
+    }
+
+    #[test]
+    fn fused_final_norm_preserves_target_hidden_and_embedding_tensor_identity() {
+        for token_count in [1_u64, 3] {
+            let (original, _) =
+                crate::qwen_graph::qwen38_projection_pack_execution_fixture(token_count);
+            let original_final = original
+                .nodes()
+                .iter()
+                .find(|node| node.label() == "final_rmsnorm")
+                .unwrap();
+            let expected = (original_final.inputs()[0], original_final.outputs()[0]);
+            assert_ne!(expected.0, expected.1);
+
+            let (graph, plan) =
+                crate::qwen_graph::qwen38_residual_rmsnorm_execution_fixture(token_count);
+            let final_node = graph
+                .nodes()
+                .iter()
+                .find(|node| node.label() == "final_rmsnorm")
+                .unwrap();
+            assert_eq!(
+                final_node.kind(),
+                QwenGraphNodeKind::Semantic(SemanticOpKind::ResidualRmsNorm)
+            );
+            assert_eq!(final_node.outputs(), &[expected.0, expected.1]);
+            assert!(
+                !final_node.inputs().contains(&expected.0),
+                "MTP must read the rounded Add output, not an Add operand"
+            );
+            let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+                vec![31; usize::try_from(token_count).unwrap()],
+            ]));
+            let session = Arc::new(ExecutionSession::new("recorder", recorder));
+            let mut core = QwenExecutionCore::provision(
+                session,
+                graph,
+                plan,
+                Duration::from_millis(1),
+                &ProjectionPackTestProvisionSource,
+            )
+            .expect("fused target graph provisions");
+            assert_eq!(core.final_hidden_tensor_ids().unwrap(), expected);
+            let output = core
+                .prefill_with_mtp_state(&vec![1; usize::try_from(token_count).unwrap()])
+                .expect("fused target publishes pre-norm MTP hidden rows");
+            assert_eq!(
+                output.hidden_states_bf16().unwrap().len(),
+                usize::try_from(token_count).unwrap() * 5_120
+            );
+            assert_eq!(
+                core.read_final_hidden_states(token_count).unwrap().len(),
+                usize::try_from(token_count).unwrap() * 5_120
+            );
+        }
     }
 
     #[test]
@@ -15518,6 +18228,10 @@ mod tests {
         assert_eq!(first.hidden_states_bf16().unwrap().len(), 2_560);
         let second = core.decode_mtp(11, &[0; 2_560]).expect("MTP decode");
         assert_eq!(second.token_ids(), &[12]);
+        assert_eq!(
+            second.last_logits().map(<[f32]>::len),
+            Some(QWEN35_VOCAB_SIZE)
+        );
         assert_eq!(second.committed_length(), 2);
         assert!(
             recorder
@@ -15530,6 +18244,113 @@ mod tests {
                 .events()
                 .iter()
                 .any(|event| event == "kv-append:32:1:1")
+        );
+    }
+
+    #[test]
+    fn mtp_argmax_decode_skips_full_logits_readback() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![12]]));
+        let (graph, plan) = crate::qwen_graph::qwen35_mtp_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let mut core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &TestProvisionSource::default(),
+        )
+        .expect("MTP fixture provisions");
+        core.prefill_mtp_state_only(7, &[0; 2_560])
+            .expect("MTP state-only prefill");
+        let before_decode = recorder.events().len();
+        let output = core
+            .decode_mtp_argmax(11, &[0; 2_560])
+            .expect("MTP Argmax-only decode");
+        assert_eq!(output.token_ids(), &[12]);
+        assert_eq!(output.hidden_states_bf16().unwrap().len(), 2_560);
+        assert!(output.last_logits().is_none());
+        let decode_events = recorder.events();
+        let decode_events = &decode_events[before_decode..];
+        assert!(
+            decode_events
+                .iter()
+                .any(|event| event == "argmax-readback-start")
+        );
+        assert_eq!(
+            decode_events
+                .iter()
+                .filter(|event| event.as_str() == "readback-bytes")
+                .count(),
+            2,
+            "Argmax and hidden rows are read back; full logits are not"
+        );
+    }
+
+    #[test]
+    fn mtp_state_only_publishes_kv_without_attention_tail_and_next_argmax_is_full() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![12]]));
+        let (graph, plan) = crate::qwen_graph::qwen35_mtp_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let mut core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &TestProvisionSource::default(),
+        )
+        .expect("MTP fixture provisions");
+
+        let assert_state_only_tail_absent = |events: &[String]| {
+            let kv_index = events
+                .iter()
+                .position(|event| event.starts_with("kv-append:"))
+                .expect("state-only transition appends KV");
+            assert!(
+                events[kv_index + 1..]
+                    .iter()
+                    .all(|event| !event.starts_with("submit:") && !event.starts_with("causal:")),
+                "state-only transition submitted work after KV publication: {events:?}"
+            );
+        };
+
+        let before_prefill = recorder.events().len();
+        let prefill = core
+            .prefill_mtp_state_only(7, &[0; 2_560])
+            .expect("MTP state-only prefill");
+        assert_eq!(prefill.committed_length(), 1);
+        assert_state_only_tail_absent(&recorder.events()[before_prefill..]);
+
+        assert!(
+            core.decode_mtp_state_only_batch(&[11, 12], &[0; 2 * 2_560])
+                .is_err()
+        );
+        assert_eq!(core.committed_length, 1);
+
+        let before_batch = recorder.events().len();
+        let batch = core
+            .decode_mtp_state_only_batch(&[11], &[0; 2_560])
+            .expect("small MTP state-only batch");
+        assert_eq!(batch.committed_length(), 2);
+        assert_state_only_tail_absent(&recorder.events()[before_batch..]);
+
+        let before_argmax = recorder.events().len();
+        let output = core
+            .decode_mtp_argmax(13, &[0; 2_560])
+            .expect("subsequent MTP Argmax transition");
+        assert_eq!(output.token_ids(), &[12]);
+        assert_eq!(output.committed_length(), 3);
+        let argmax_events = &recorder.events()[before_argmax..];
+        assert!(
+            argmax_events
+                .iter()
+                .any(|event| event.starts_with("causal:")),
+            "regular MTP Argmax route must retain causal attention"
+        );
+        assert!(
+            argmax_events
+                .iter()
+                .any(|event| event == "argmax-readback-start"),
+            "regular MTP Argmax route must retain terminal output"
         );
     }
 
@@ -16791,5 +19612,120 @@ mod tests {
         assert_eq!(source.uploaded().len(), upload_count);
         drop(resident);
         assert_eq!(session.memory_snapshot().current_bytes(), 0);
+    }
+
+    #[test]
+    fn fixed_k20_decision_parser_accepts_checked_all_accept_record() {
+        let mut bytes = [0_u8; FIXED_K20_DECISION_BYTES as usize];
+        let put_u32 = |bytes: &mut [u8], offset: usize, value: u32| {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        let put_f64 = |bytes: &mut [u8], offset: usize, value: f64| {
+            bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        put_u32(&mut bytes, 0, 1);
+        put_u32(&mut bytes, 2 * 4, 2);
+        put_u32(&mut bytes, 3 * 4, 3);
+        put_u32(&mut bytes, 4 * 4, u32::MAX);
+        put_u32(&mut bytes, 5 * 4, 2);
+        put_u32(&mut bytes, 6 * 4, 3);
+        put_u32(&mut bytes, 8 * 4, 17);
+        put_u32(&mut bytes, 9 * 4, 23);
+        put_u32(&mut bytes, 10 * 4, 29);
+        put_f64(&mut bytes, 72, -0.25);
+        put_f64(&mut bytes, 80, -0.5);
+        put_f64(&mut bytes, 88, 0.0);
+        let decision = parse_fixed_k20_decision(&bytes, 2, &[17, 23]).expect("valid decision");
+        assert_eq!(decision.accepted_draft_tokens(), 2);
+        assert_eq!(decision.selections().len(), 3);
+        assert_eq!(decision.selections()[2].token_id, 29);
+    }
+
+    #[test]
+    fn fixed_k20_target_capture_omits_only_discarded_public_records() {
+        let selections = vec![
+            SamplingSelectionV1 {
+                token_id: 7,
+                logprob: -0.25,
+                top_logprobs: Vec::new(),
+            },
+            SamplingSelectionV1 {
+                token_id: 11,
+                logprob: -0.5,
+                top_logprobs: Vec::new(),
+            },
+        ];
+        let ordinary = fixed_k20_batch_terminal_selection(selections.clone(), false);
+        assert_eq!(ordinary.token_ids, [7, 11]);
+        assert_eq!(ordinary.selections.as_ref().map(Vec::len), Some(2));
+
+        let target = fixed_k20_batch_terminal_selection(selections, true);
+        assert!(target.token_ids.is_empty());
+        assert!(target.selection.is_none());
+        assert!(target.selections.is_none());
+        assert!(!FixedK20SupportCaptureRole::CompanionDraft.suppresses_public_selection());
+        assert!(FixedK20SupportCaptureRole::TargetVerify.suppresses_public_selection());
+
+        let active_target = FixedK20SupportCapture {
+            expected_rows: 2,
+            captured_rows: 1,
+            role: FixedK20SupportCaptureRole::TargetVerify,
+        };
+        let completed_target = FixedK20SupportCapture {
+            expected_rows: 2,
+            captured_rows: 2,
+            role: FixedK20SupportCaptureRole::TargetVerify,
+        };
+        let active_companion = FixedK20SupportCapture {
+            expected_rows: 2,
+            captured_rows: 1,
+            role: FixedK20SupportCaptureRole::CompanionDraft,
+        };
+        assert!(fixed_k20_capture_suppresses_public_selection(Some(
+            &active_target
+        )));
+        assert!(!fixed_k20_capture_suppresses_public_selection(Some(
+            &completed_target
+        )));
+        assert!(!fixed_k20_capture_suppresses_public_selection(Some(
+            &active_companion
+        )));
+        assert!(!fixed_k20_capture_suppresses_public_selection(None));
+    }
+
+    #[test]
+    fn fixed_k20_selection_suppression_fails_closed_without_capture() {
+        assert!(validate_fixed_k20_selection_capture(true, None).is_ok());
+        assert!(validate_fixed_k20_selection_capture(false, Some(0)).is_ok());
+        assert!(matches!(
+            validate_fixed_k20_selection_capture(false, None),
+            Err(QwenExecutionError::InvalidRequest(reason))
+                if reason.contains("armed support capture")
+        ));
+    }
+
+    #[test]
+    fn fixed_k20_decision_parser_rejects_draws_and_prefix_mismatch() {
+        let mut bytes = [0_u8; FIXED_K20_DECISION_BYTES as usize];
+        let put_u32 = |bytes: &mut [u8], offset: usize, value: u32| {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        let put_f64 = |bytes: &mut [u8], offset: usize, value: f64| {
+            bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        put_u32(&mut bytes, 0, 1);
+        put_u32(&mut bytes, 2 * 4, 1);
+        put_u32(&mut bytes, 3 * 4, 2);
+        put_u32(&mut bytes, 4 * 4, 0);
+        put_u32(&mut bytes, 5 * 4, 2);
+        put_u32(&mut bytes, 6 * 4, 4);
+        put_u32(&mut bytes, 8 * 4, 7);
+        put_u32(&mut bytes, 9 * 4, 11);
+        put_f64(&mut bytes, 72, -0.25);
+        put_f64(&mut bytes, 80, -1.0);
+        assert!(parse_fixed_k20_decision(&bytes, 2, &[7, 11]).is_err());
+        put_u32(&mut bytes, 6 * 4, 3);
+        put_u32(&mut bytes, 8 * 4, 13);
+        assert!(parse_fixed_k20_decision(&bytes, 2, &[7, 11]).is_err());
     }
 }

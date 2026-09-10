@@ -1,4 +1,5 @@
 #include "token_selector_kernel_internal.hpp"
+#include "token_selector_support_internal.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1126,17 +1127,31 @@ extern "C" __global__ __launch_bounds__(
   }
 }
 
-extern "C" __global__ __launch_bounds__(
-    SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE,
-    1) void sllm_token_selector_fixed_topk_final_v1(const uint32_t *const input,
-                                                    const uint64_t
-                                                        input_records,
-                                                    const uint32_t top_k,
-                                                    const float top_p,
-                                                    const uint64_t seed,
-                                                    const uint64_t counter,
-                                                    sllm_token_selector_record_t
-                                                        *const output) {
+__device__ void token_selector_support_store_u32(uint8_t *const base,
+                                                 const uint32_t offset,
+                                                 const uint32_t value) {
+  base[offset + 0U] = static_cast<uint8_t>(value);
+  base[offset + 1U] = static_cast<uint8_t>(value >> 8U);
+  base[offset + 2U] = static_cast<uint8_t>(value >> 16U);
+  base[offset + 3U] = static_cast<uint8_t>(value >> 24U);
+}
+
+__device__ void token_selector_support_store_f64(uint8_t *const base,
+                                                 const uint32_t offset,
+                                                 const double value) {
+  uint64_t bits = 0U;
+  __builtin_memcpy(&bits, &value, sizeof(bits));
+  for (uint32_t byte = 0U; byte != 8U; ++byte) {
+    base[offset + byte] = static_cast<uint8_t>(bits >> (byte * 8U));
+  }
+}
+
+template <bool CaptureSupport>
+__device__ __forceinline__ void token_selector_fixed_topk_final_impl(
+    const uint32_t *const input, const uint64_t input_records,
+    const uint32_t top_k, const float top_p, const uint64_t seed,
+    const uint64_t counter, sllm_token_selector_record_t *const output,
+    uint8_t *const support) {
   __shared__ float scores[SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE];
   __shared__ uint32_t ids[SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE];
   const uint32_t tid = threadIdx.x;
@@ -1163,6 +1178,18 @@ extern "C" __global__ __launch_bounds__(
   if (tid != 0U) {
     return;
   }
+  if constexpr (CaptureSupport) {
+    token_selector_support_store_u32(support, 0U,
+                                     sllm_token_selector_support::kVersionV1);
+    token_selector_support_store_u32(support, 4U, output->status);
+    token_selector_support_store_u32(support, 8U, 0U);
+    token_selector_support_store_u32(support, 12U, 0U);
+    for (uint32_t index = 0U; index != sllm_token_selector_support::kMaxCountV1;
+         ++index) {
+      token_selector_support_store_u32(support, 16U + index * 4U, 0U);
+      token_selector_support_store_f64(support, 96U + index * 8U, 0.0);
+    }
+  }
   if (output->status != SLLM_STATUS_OK) {
     output->token_id = -1;
     output->logprob = -INFINITY;
@@ -1171,6 +1198,9 @@ extern "C" __global__ __launch_bounds__(
   }
   if (ids[0] == UINT32_MAX) {
     output->status = SLLM_STATUS_TOKEN_SELECTOR_ALL_MASKED;
+    if constexpr (CaptureSupport) {
+      token_selector_support_store_u32(support, 4U, output->status);
+    }
     return;
   }
   const uint32_t count =
@@ -1190,6 +1220,15 @@ extern "C" __global__ __launch_bounds__(
     }
   }
   included = included == 0U ? 1U : included;
+  if constexpr (CaptureSupport) {
+    token_selector_support_store_u32(support, 8U, included);
+    for (uint32_t index = 0U; index != included; ++index) {
+      token_selector_support_store_u32(support, 16U + index * 4U, ids[index]);
+      token_selector_support_store_f64(
+          support, 96U + index * 8U,
+          exp(static_cast<double>(scores[index] - scores[0])) / cumulative);
+    }
+  }
   const uint64_t gamma = UINT64_C(0x9e3779b97f4a7c15);
   const uint64_t draw_state = seed + (counter + UINT64_C(1)) * gamma;
   const uint64_t random_bits = splitmix64(draw_state);
@@ -1208,6 +1247,41 @@ extern "C" __global__ __launch_bounds__(
       exp(static_cast<double>(scores[selected] - scores[0]));
   output->token_id = static_cast<int32_t>(ids[selected]);
   output->logprob = static_cast<float>(log(selected_weight / cumulative));
+}
+
+extern "C" __global__ __launch_bounds__(
+    SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE,
+    1) void sllm_token_selector_fixed_topk_final_v1(const uint32_t *const input,
+                                                    const uint64_t
+                                                        input_records,
+                                                    const uint32_t top_k,
+                                                    const float top_p,
+                                                    const uint64_t seed,
+                                                    const uint64_t counter,
+                                                    sllm_token_selector_record_t
+                                                        *const output) {
+  token_selector_fixed_topk_final_impl<false>(
+      input, input_records, top_k, top_p, seed, counter, output, nullptr);
+}
+
+extern "C" __global__ __launch_bounds__(
+    SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE,
+    1) void sllm_token_selector_fixed_topk_final_support_v1(const uint32_t
+                                                                *const input,
+                                                            const uint64_t
+                                                                input_records,
+                                                            const uint32_t
+                                                                top_k,
+                                                            const float top_p,
+                                                            const uint64_t seed,
+                                                            const uint64_t
+                                                                counter,
+                                                            sllm_token_selector_record_t
+                                                                *const output,
+                                                            uint8_t *const
+                                                                support) {
+  token_selector_fixed_topk_final_impl<true>(input, input_records, top_k, top_p,
+                                             seed, counter, output, support);
 }
 
 } // namespace
@@ -1266,10 +1340,18 @@ hipError_t launch(const uint16_t *const bf16_logits,
       output_offset = old_input_offset;
     }
     const dim3 final_grid(1U, 1U, 1U);
-    hipLaunchKernelGGL(
-        sllm_token_selector_fixed_topk_final_v1, final_grid, block, 0U, stream,
-        reinterpret_cast<const uint32_t *>(workspace + input_offset),
-        input_records, top_k, top_p, seed, counter, output);
+    if (top_k == sllm_token_selector_support::kMaxCountV1) {
+      hipLaunchKernelGGL(
+          sllm_token_selector_fixed_topk_final_support_v1, final_grid, block,
+          0U, stream,
+          reinterpret_cast<const uint32_t *>(workspace + input_offset),
+          input_records, top_k, top_p, seed, counter, output, workspace);
+    } else {
+      hipLaunchKernelGGL(
+          sllm_token_selector_fixed_topk_final_v1, final_grid, block, 0U,
+          stream, reinterpret_cast<const uint32_t *>(workspace + input_offset),
+          input_records, top_k, top_p, seed, counter, output);
+    }
     return hipGetLastError();
   }
   if (top_p != 1.0F) {

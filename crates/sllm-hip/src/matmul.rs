@@ -4,7 +4,7 @@ use std::mem::size_of;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use sllm_core::{SemanticOpDescriptor, SemanticOpKind};
+use sllm_core::{PreparedMatmulFootprint, SemanticOpDescriptor, SemanticOpKind, TensorView};
 use sllm_hip_sys as sys;
 
 use crate::runtime::{
@@ -12,6 +12,20 @@ use crate::runtime::{
     enqueue_matmul_cleanup, ensure_ok, release_matmul_plan_once, sink,
 };
 use crate::{HipBackend, TensorBinding};
+
+// This is a private Rust/HIP bridge ABI.  It deliberately does not enter the
+// installed C header: the query accepts null tensor buffers and is only valid
+// for metadata-only footprint estimation.
+unsafe extern "C" {
+    fn sllm_hip_matmul_workspace_footprint(
+        context: *const sys::sllm_context_t,
+        descriptor: *const sys::sllm_matmul_desc_t,
+        persistent_bytes: *mut u64,
+        queue_bytes: *mut u64,
+        context_bytes: *mut u64,
+        error_sink: *mut sys::sllm_error_sink_t,
+    ) -> sys::sllm_status_t;
+}
 
 #[derive(Clone, Debug)]
 pub struct MatmulDescriptor {
@@ -83,49 +97,39 @@ impl MatmulDescriptor {
     }
 
     fn op_version(&self) -> u32 {
-        if self.weight.view().encoding()
-            == (sllm_core::Encoding::Mxfp8W8A8 {
-                block_size: 32,
-                scale_dtype: sllm_core::DType::U8,
-            })
+        op_version_for_weight(self.weight.view())
+    }
+
+    pub(crate) fn raw_unbound(
+        semantic: &SemanticOpDescriptor,
+    ) -> Result<sys::sllm_matmul_desc_t, RuntimeError> {
+        semantic.validate().map_err(|error| {
+            RuntimeError::new(
+                RuntimeStatus::InvalidMatmulDescriptor,
+                format!("invalid semantic matmul descriptor: {error}"),
+            )
+        })?;
+        if semantic.kind() != SemanticOpKind::Matmul
+            || semantic.inputs().len() != 2
+            || semantic.outputs().len() != 1
         {
-            sys::SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION
-        } else if self.weight.view().encoding()
-            == (sllm_core::Encoding::Mxfp6W6A6 {
-                block_size: 32,
-                scale_dtype: sllm_core::DType::U8,
-            })
-        {
-            sys::SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION
-        } else if self.weight.view().encoding()
-            == (sllm_core::Encoding::Mxfp4W4A4 {
-                block_size: 32,
-                scale_dtype: sllm_core::DType::U8,
-            })
-        {
-            sys::SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION
-        } else if self.weight.view().encoding()
-            == (sllm_core::Encoding::Nvfp4W4A4 {
-                block_size: 16,
-                scale_dtype: sllm_core::DType::F8E4M3Fn,
-            })
-        {
-            sys::SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION
-        } else if self.weight.view().encoding()
-            == (sllm_core::Encoding::Nvfp4 {
-                block_size: 16,
-                scale_dtype: sllm_core::DType::F8E4M3Fn,
-            })
-        {
-            sys::SLLM_HIP_MATMUL_NVFP4_VERSION
-        } else if matches!(
-            self.weight.view().dtype(),
-            sllm_core::DType::F8E4M3Fn | sllm_core::DType::F8E4M3FnuZ
-        ) {
-            sys::SLLM_HIP_MATMUL_FP8_VERSION
-        } else {
-            sys::SLLM_HIP_MATMUL_VERSION
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidMatmulDescriptor,
+                "semantic descriptor is not a canonical matmul operation",
+            ));
         }
+        let activation = TensorBinding::raw_view(&semantic.inputs()[0], None)?;
+        let weight = TensorBinding::raw_view(&semantic.inputs()[1], None)?;
+        let output = TensorBinding::raw_view(&semantic.outputs()[0], None)?;
+        Ok(sys::sllm_matmul_desc_t {
+            struct_size: size_of::<sys::sllm_matmul_desc_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            op_version: op_version_for_weight(&semantic.inputs()[1]),
+            reserved: [0; 5],
+            activation,
+            weight,
+            output,
+        })
     }
 
     fn raw(&self) -> Result<sys::sllm_matmul_desc_t, RuntimeError> {
@@ -138,6 +142,52 @@ impl MatmulDescriptor {
             weight: self.weight.raw()?,
             output: self.output.raw()?,
         })
+    }
+}
+
+fn op_version_for_weight(weight: &TensorView) -> u32 {
+    if weight.encoding()
+        == (sllm_core::Encoding::Mxfp8W8A8 {
+            block_size: 32,
+            scale_dtype: sllm_core::DType::U8,
+        })
+    {
+        sys::SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION
+    } else if weight.encoding()
+        == (sllm_core::Encoding::Mxfp6W6A6 {
+            block_size: 32,
+            scale_dtype: sllm_core::DType::U8,
+        })
+    {
+        sys::SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION
+    } else if weight.encoding()
+        == (sllm_core::Encoding::Mxfp4W4A4 {
+            block_size: 32,
+            scale_dtype: sllm_core::DType::U8,
+        })
+    {
+        sys::SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION
+    } else if weight.encoding()
+        == (sllm_core::Encoding::Nvfp4W4A4 {
+            block_size: 16,
+            scale_dtype: sllm_core::DType::F8E4M3Fn,
+        })
+    {
+        sys::SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION
+    } else if weight.encoding()
+        == (sllm_core::Encoding::Nvfp4 {
+            block_size: 16,
+            scale_dtype: sllm_core::DType::F8E4M3Fn,
+        })
+    {
+        sys::SLLM_HIP_MATMUL_NVFP4_VERSION
+    } else if matches!(
+        weight.dtype(),
+        sllm_core::DType::F8E4M3Fn | sllm_core::DType::F8E4M3FnuZ
+    ) {
+        sys::SLLM_HIP_MATMUL_FP8_VERSION
+    } else {
+        sys::SLLM_HIP_MATMUL_VERSION
     }
 }
 
@@ -210,10 +260,16 @@ pub struct MatmulDispatchInfo {
 }
 
 const FP8_ID82_DEVICE_SYMBOL: &str = "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_wave4col32_v1";
-const FP8_ID82_TUPLE_K5120N17408_DEVICE_SYMBOL: &str =
-    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k5120n17408_v1";
-const FP8_ID82_TUPLE_K6144N5120_DEVICE_SYMBOL: &str =
-    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k6144n5120_v1";
+const FP8_ID82_M1_K5120N12288_DEVICE_SYMBOL: &str =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n12288_v1";
+const FP8_ID82_M1_K5120N1024_DEVICE_SYMBOL: &str =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n1024_v1";
+const FP8_ID82_M1_K5120N17408_DEVICE_SYMBOL: &str =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n17408_v1";
+const FP8_ID82_M1_K17408N5120_DEVICE_SYMBOL: &str =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k17408n5120_v1";
+const FP8_ID82_M1_K6144N5120_DEVICE_SYMBOL: &str =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k6144n5120_v1";
 const FP8_ID82_TUPLE_K5120N10240_DEVICE_SYMBOL: &str =
     "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k5120n10240_v1";
 const FP8_ID82_TUPLE_K5120N6144_DEVICE_SYMBOL: &str =
@@ -229,8 +285,11 @@ fn fp8_id82_expected_device_symbol(info: &MatmulDispatchInfo) -> &'static str {
         return FP8_ID82_DEVICE_SYMBOL;
     }
     match (info.k, info.n) {
-        (5120, 17408) => FP8_ID82_TUPLE_K5120N17408_DEVICE_SYMBOL,
-        (6144, 5120) => FP8_ID82_TUPLE_K6144N5120_DEVICE_SYMBOL,
+        (5120, 12288) => FP8_ID82_M1_K5120N12288_DEVICE_SYMBOL,
+        (5120, 1024) => FP8_ID82_M1_K5120N1024_DEVICE_SYMBOL,
+        (5120, 17408) => FP8_ID82_M1_K5120N17408_DEVICE_SYMBOL,
+        (17408, 5120) => FP8_ID82_M1_K17408N5120_DEVICE_SYMBOL,
+        (6144, 5120) => FP8_ID82_M1_K6144N5120_DEVICE_SYMBOL,
         (5120, 10240) => FP8_ID82_TUPLE_K5120N10240_DEVICE_SYMBOL,
         (5120, 6144) => FP8_ID82_TUPLE_K5120N6144_DEVICE_SYMBOL,
         _ => FP8_ID82_DEVICE_SYMBOL,
@@ -313,6 +372,41 @@ impl MatmulSubmission {
 }
 
 impl HipBackend {
+    pub(crate) fn estimate_matmul_footprint(
+        &self,
+        context: &Context,
+        semantic: &SemanticOpDescriptor,
+    ) -> Result<Option<PreparedMatmulFootprint>, RuntimeError> {
+        let raw_descriptor = MatmulDescriptor::raw_unbound(semantic)?;
+        let mut persistent_bytes = 0_u64;
+        let mut queue_bytes = 0_u64;
+        let mut context_bytes = 0_u64;
+        let mut error_buffer = [0_u8; 256];
+        let mut error_sink = sink(&mut error_buffer);
+        let status = unsafe {
+            sllm_hip_matmul_workspace_footprint(
+                context.raw_handle()?.as_ptr(),
+                &raw_descriptor,
+                &mut persistent_bytes,
+                &mut queue_bytes,
+                &mut context_bytes,
+                &mut error_sink,
+            )
+        };
+        match RuntimeStatus::from_raw(status) {
+            RuntimeStatus::Ok => Ok(Some(PreparedMatmulFootprint {
+                plan_persistent_bytes: persistent_bytes,
+                queue_workspace_bytes: queue_bytes,
+                context_workspace_bytes: context_bytes,
+            })),
+            RuntimeStatus::Unsupported | RuntimeStatus::HipUnavailable => Ok(None),
+            _ => {
+                ensure_ok(status, &error_buffer, error_sink.message_length)?;
+                unreachable!("ensure_ok only returns Err for non-OK status")
+            }
+        }
+    }
+
     pub fn prepare_matmul(
         &self,
         context: &Context,
@@ -454,6 +548,119 @@ mod tests {
         assert_eq!(size_of::<sys::sllm_matmul_desc_t>(), 584);
     }
 
+    fn unbound_descriptor_fixture(
+        weight_dtype: sllm_core::DType,
+        weight_encoding: sllm_core::Encoding,
+    ) -> SemanticOpDescriptor {
+        SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            vec![
+                TensorView::new(
+                    DType::Bf16,
+                    sllm_core::Encoding::Unquantized,
+                    &[3, 64],
+                    &[64, 1],
+                    2,
+                )
+                .unwrap(),
+                TensorView::new(weight_dtype, weight_encoding, &[7, 64], &[64, 1], 3).unwrap(),
+            ],
+            vec![
+                TensorView::new(
+                    DType::Bf16,
+                    sllm_core::Encoding::Unquantized,
+                    &[3, 7],
+                    &[7, 1],
+                    4,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn unbound_lowering_preserves_metadata_and_uses_null_buffers() {
+        let cases = [
+            (
+                DType::F8E4M3Fn,
+                sllm_core::Encoding::Fp8Scaled {
+                    granularity: sllm_core::Fp8ScaleGranularity::OuterDimension,
+                    scale_dtype: DType::F32,
+                    resident: sllm_core::Fp8ResidentRepresentation::PackedBytes,
+                },
+                sys::SLLM_HIP_MATMUL_FP8_VERSION,
+            ),
+            (
+                DType::U8,
+                sllm_core::Encoding::Nvfp4 {
+                    block_size: 16,
+                    scale_dtype: DType::F8E4M3Fn,
+                },
+                sys::SLLM_HIP_MATMUL_NVFP4_VERSION,
+            ),
+            (
+                DType::U8,
+                sllm_core::Encoding::Nvfp4W4A4 {
+                    block_size: 16,
+                    scale_dtype: DType::F8E4M3Fn,
+                },
+                sys::SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION,
+            ),
+            (
+                DType::F8E4M3Fn,
+                sllm_core::Encoding::Mxfp8W8A8 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                },
+                sys::SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION,
+            ),
+            (
+                DType::U8,
+                sllm_core::Encoding::Mxfp4W4A4 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                },
+                sys::SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION,
+            ),
+            (
+                DType::U8,
+                sllm_core::Encoding::Mxfp6W6A6 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                },
+                sys::SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION,
+            ),
+        ];
+        for (dtype, encoding, expected_version) in cases {
+            let semantic = unbound_descriptor_fixture(dtype, encoding);
+            let raw = MatmulDescriptor::raw_unbound(&semantic).unwrap();
+            assert_eq!(raw.op_version, expected_version);
+            assert!(raw.activation.buffer.is_null());
+            assert!(raw.weight.buffer.is_null());
+            assert!(raw.output.buffer.is_null());
+            assert_eq!(raw.activation.byte_offset, 2);
+            assert_eq!(raw.weight.byte_offset, 3);
+            assert_eq!(raw.output.byte_offset, 4);
+            assert_eq!(raw.activation.shape[..2], [3, 64]);
+            assert_eq!(raw.weight.shape[..2], [7, 64]);
+            assert_eq!(raw.output.shape[..2], [3, 7]);
+            assert_eq!(raw.activation.stride_elements[..2], [64, 1]);
+            assert_eq!(raw.weight.stride_elements[..2], [64, 1]);
+            assert_eq!(raw.output.stride_elements[..2], [7, 1]);
+        }
+    }
+
+    #[test]
+    fn bound_lowering_still_requires_a_real_buffer_handle() {
+        let (_context, descriptor) = descriptor_fixture();
+        let error = match descriptor.raw() {
+            Ok(_) => panic!("a test buffer without a native handle must not lower"),
+            Err(error) => error,
+        };
+        assert_eq!(error.status(), RuntimeStatus::InvalidHandle);
+    }
+
     #[test]
     fn descriptor_lowering_selects_ocp_mx_weight_activation_versions() {
         for (dtype, encoding, expected_version) in [
@@ -552,13 +759,45 @@ mod tests {
         {
             *slot = byte as core::ffi::c_char;
         }
-        let tuples = [
-            (5120, 17408, FP8_ID82_TUPLE_K5120N17408_DEVICE_SYMBOL),
-            (6144, 5120, FP8_ID82_TUPLE_K6144N5120_DEVICE_SYMBOL),
+        let adopted_m1_tuples = [
+            (5120, 12288, FP8_ID82_M1_K5120N12288_DEVICE_SYMBOL),
+            (5120, 1024, FP8_ID82_M1_K5120N1024_DEVICE_SYMBOL),
+            (5120, 17408, FP8_ID82_M1_K5120N17408_DEVICE_SYMBOL),
+            (17408, 5120, FP8_ID82_M1_K17408N5120_DEVICE_SYMBOL),
+            (6144, 5120, FP8_ID82_M1_K6144N5120_DEVICE_SYMBOL),
+        ];
+        for (k, n, symbol) in adopted_m1_tuples {
+            info.m = 1;
+            info.k = k;
+            info.n = n;
+            info.device_symbol = [0; 64];
+            for (slot, byte) in info
+                .device_symbol
+                .iter_mut()
+                .zip(symbol.as_bytes().iter().copied())
+            {
+                *slot = byte as core::ffi::c_char;
+            }
+            let exact = dispatch_info_from_raw(&info);
+            assert!(matmul_dispatch_symbol_is_valid(&exact));
+
+            info.device_symbol = [0; 64];
+            for (slot, byte) in info
+                .device_symbol
+                .iter_mut()
+                .zip(FP8_ID82_DEVICE_SYMBOL.as_bytes().iter().copied())
+            {
+                *slot = byte as core::ffi::c_char;
+            }
+            let stale_broad = dispatch_info_from_raw(&info);
+            assert!(!matmul_dispatch_symbol_is_valid(&stale_broad));
+        }
+
+        let retained_m1_tuples = [
             (5120, 10240, FP8_ID82_TUPLE_K5120N10240_DEVICE_SYMBOL),
             (5120, 6144, FP8_ID82_TUPLE_K5120N6144_DEVICE_SYMBOL),
         ];
-        for (k, n, symbol) in tuples {
+        for (k, n, symbol) in retained_m1_tuples {
             info.m = 1;
             info.k = k;
             info.n = n;
@@ -585,6 +824,33 @@ mod tests {
             assert!(!matmul_dispatch_symbol_is_valid(&stale_exact));
         }
 
+        for (k, n, stale_symbol) in [
+            (
+                5120,
+                17408,
+                "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k5120n17408_v1",
+            ),
+            (
+                6144,
+                5120,
+                "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k6144n5120_v1",
+            ),
+        ] {
+            info.m = 1;
+            info.k = k;
+            info.n = n;
+            info.device_symbol = [0; 64];
+            for (slot, byte) in info
+                .device_symbol
+                .iter_mut()
+                .zip(stale_symbol.as_bytes().iter().copied())
+            {
+                *slot = byte as core::ffi::c_char;
+            }
+            let stale_legacy = dispatch_info_from_raw(&info);
+            assert!(!matmul_dispatch_symbol_is_valid(&stale_legacy));
+        }
+
         for n in [6143, 6145] {
             let mut adjacent = dispatch_info_from_raw(&info);
             adjacent.k = 5120;
@@ -595,8 +861,25 @@ mod tests {
             assert!(!matmul_dispatch_symbol_is_valid(&adjacent));
         }
 
+        for (neighbor_k, neighbor_n, symbol) in [
+            (5120, 12287, FP8_ID82_M1_K5120N12288_DEVICE_SYMBOL),
+            (5120, 1023, FP8_ID82_M1_K5120N1024_DEVICE_SYMBOL),
+            (5120, 17409, FP8_ID82_M1_K5120N17408_DEVICE_SYMBOL),
+            (17407, 5120, FP8_ID82_M1_K17408N5120_DEVICE_SYMBOL),
+            (6143, 5120, FP8_ID82_M1_K6144N5120_DEVICE_SYMBOL),
+        ] {
+            let mut adjacent = dispatch_info_from_raw(&info);
+            adjacent.k = neighbor_k;
+            adjacent.n = neighbor_n;
+            adjacent.device_symbol = symbol.to_owned();
+            assert!(!matmul_dispatch_symbol_is_valid(&adjacent));
+            adjacent.device_symbol = FP8_ID82_DEVICE_SYMBOL.to_owned();
+            assert!(matmul_dispatch_symbol_is_valid(&adjacent));
+        }
+
         let mut featured = dispatch_info_from_raw(&info);
         featured.gcn_arch_name = "gfx1030:xnack-".to_owned();
+        featured.k = 5120;
         featured.n = 10240;
         featured.device_symbol = FP8_ID82_TUPLE_K5120N10240_DEVICE_SYMBOL.to_owned();
         assert!(matmul_dispatch_symbol_is_valid(&featured));
@@ -604,6 +887,16 @@ mod tests {
         assert!(!matmul_dispatch_symbol_is_valid(&featured));
 
         info.m = 2;
+        info.k = 5120;
+        info.n = 6144;
+        info.device_symbol = [0; 64];
+        for (slot, byte) in info
+            .device_symbol
+            .iter_mut()
+            .zip(FP8_ID82_DEVICE_SYMBOL.as_bytes().iter().copied())
+        {
+            *slot = byte as core::ffi::c_char;
+        }
         let broad = dispatch_info_from_raw(&info);
         assert!(matmul_dispatch_symbol_is_valid(&broad));
     }

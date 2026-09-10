@@ -1192,6 +1192,75 @@ std::size_t live_allocations() noexcept {
 
 } // namespace fake_hip
 
+namespace sllm_causal_attention_kernel {
+namespace {
+
+hipError_t fake_decode_wave_split_staged_launch(
+    const uint16_t *const, const void *const, const void *const,
+    const void *const, const void *const, const float *const,
+    const float *const, uint16_t *const output, const uint32_t query_count,
+    const uint64_t, const uint64_t, const uint32_t q_heads, const uint32_t,
+    const uint32_t head_dim, const uint32_t encoding, const float, const float,
+    void *, const uint64_t, const bool, const hipStream_t) noexcept {
+  if (output == nullptr || encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
+    return hipErrorInvalidValue;
+  }
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    ++state.causal_attention_launch_calls;
+    if (state.causal_attention_launch_status != hipSuccess) {
+      return state.causal_attention_launch_status;
+    }
+  }
+  const std::size_t element_count = static_cast<std::size_t>(query_count) *
+                                    static_cast<std::size_t>(q_heads) *
+                                    static_cast<std::size_t>(head_dim);
+  std::memset(output, 0, element_count * sizeof(uint16_t));
+  return hipSuccess;
+}
+
+} // namespace
+
+hipError_t launch_decode_wave_split_staged(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t start_position, const uint64_t committed_kv_length,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    const uint32_t encoding, const float static_key_scale,
+    const float static_value_scale, void *const workspace,
+    const uint64_t workspace_bytes, const bool use_query_preload,
+    const hipStream_t stream) noexcept {
+  return fake_decode_wave_split_staged_launch(
+      query, key, value, key_scales, value_scales, key_outer_scales,
+      value_outer_scales, output, query_count, start_position,
+      committed_kv_length, q_heads, kv_heads, head_dim, encoding,
+      static_key_scale, static_value_scale, workspace, workspace_bytes,
+      use_query_preload, stream);
+}
+
+hipError_t launch_decode_wave_split_staged32(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t start_position, const uint64_t committed_kv_length,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    const uint32_t encoding, const float static_key_scale,
+    const float static_value_scale, void *const workspace,
+    const uint64_t workspace_bytes, const bool use_query_preload,
+    const hipStream_t stream) noexcept {
+  return fake_decode_wave_split_staged_launch(
+      query, key, value, key_scales, value_scales, key_outer_scales,
+      value_outer_scales, output, query_count, start_position,
+      committed_kv_length, q_heads, kv_heads, head_dim, encoding,
+      static_key_scale, static_value_scale, workspace, workspace_bytes,
+      use_query_preload, stream);
+}
+
+} // namespace sllm_causal_attention_kernel
+
 const char *hipGetErrorString(const hipError_t error) noexcept {
   switch (error) {
   case hipSuccess:

@@ -1547,6 +1547,8 @@ enum class FaultPoint : uint8_t {
   ConstructionCandidateFailure,
   RegistryInsertionFailure,
   RegistryInsertionException,
+  LinearCheckpointCopyFailure,
+  LinearCheckpointFenceFailure,
   Count,
 };
 

@@ -1339,6 +1339,33 @@ sllm_embedding_execute(const sllm_embedding_plan_t *const plan,
   }
 }
 
+extern "C" sllm_status_t sllm_hip_matmul_workspace_footprint(
+    const sllm_context_t *const context,
+    const sllm_matmul_desc_t *const descriptor,
+    uint64_t *const persistent_bytes, uint64_t *const queue_bytes,
+    uint64_t *const context_bytes,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (context == nullptr || descriptor == nullptr ||
+      persistent_bytes == nullptr || queue_bytes == nullptr ||
+      context_bytes == nullptr) {
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "matmul footprint input or output is null");
+  }
+  sllm_matmul::DescriptorMetadata metadata{};
+  const sllm_status_t descriptor_status =
+      sllm_matmul::validate_and_copy_unbound_descriptor(descriptor, &metadata,
+                                                        error_sink);
+  if (descriptor_status != SLLM_STATUS_OK) {
+    return descriptor_status;
+  }
+  // No successful byte estimate exists without the selected HIP provider.
+  return unavailable(error_sink);
+}
+
 extern "C" sllm_status_t
 sllm_matmul_prepare(const sllm_context_t *const context,
                     const sllm_matmul_desc_t *const descriptor,
@@ -1584,6 +1611,78 @@ extern "C" sllm_status_t sllm_token_selector_execute(
   } catch (...) {
     return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
                        "unexpected exception in token selector execute stub");
+  }
+}
+
+struct sllm_token_selector_pq_draft_ids_v1_stub {
+  uint32_t ids[8];
+};
+
+extern "C" sllm_status_t sllm_concat_bf16_rows_v1(
+    const sllm_context_t *const context, const sllm_queue_t *const queue,
+    const sllm_buffer_t *const left_buffer, const uint64_t left_offset,
+    const sllm_buffer_t *const right_buffer, const uint64_t right_offset,
+    const sllm_buffer_t *const output_buffer, const uint64_t output_offset,
+    const uint64_t rows, const uint64_t left_columns,
+    const uint64_t right_columns,
+    sllm_error_sink_t *const error_sink) noexcept {
+  (void)left_offset;
+  (void)right_offset;
+  (void)output_offset;
+  (void)rows;
+  (void)left_columns;
+  (void)right_columns;
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (context == nullptr || queue == nullptr || left_buffer == nullptr ||
+        right_buffer == nullptr || output_buffer == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "BF16 row concat context, queue, or buffer is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in BF16 row concat stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_token_selector_verify_fixed_k20_mtp_v1(
+    const sllm_context_t *const context, const sllm_queue_t *const queue,
+    const sllm_buffer_t *const target_buffer, const uint64_t target_offset,
+    const uint32_t target_rows, const sllm_buffer_t *const draft_buffer,
+    const uint64_t draft_offset, const uint32_t draft_rows,
+    const sllm_token_selector_pq_draft_ids_v1_stub draft_ids,
+    const uint32_t draft_id_count, const uint32_t width, const uint64_t seed,
+    const uint64_t absolute_position,
+    const sllm_buffer_t *const decision_buffer, const uint64_t decision_offset,
+    sllm_error_sink_t *const error_sink) noexcept {
+  (void)target_offset;
+  (void)target_rows;
+  (void)draft_offset;
+  (void)draft_rows;
+  (void)draft_ids;
+  (void)draft_id_count;
+  (void)width;
+  (void)seed;
+  (void)absolute_position;
+  (void)decision_offset;
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (context == nullptr || queue == nullptr || target_buffer == nullptr ||
+        draft_buffer == nullptr || decision_buffer == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "p/q context, queue, or buffer handle is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in p/q verification stub");
   }
 }
 
@@ -2605,6 +2704,84 @@ extern "C" sllm_status_t sllm_linear_attention_state_rewind_last(
   if (state == nullptr) {
     return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
                        "linear attention rewind state handle is null");
+  }
+  return unavailable(error_sink);
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_prepare_checkpoint(
+    const sllm_linear_attention_state_t *const state, const uint64_t,
+    const uint32_t, const uint32_t,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (state == nullptr) {
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "linear attention checkpoint state handle is null");
+  }
+  return unavailable(error_sink);
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_validate_checkpoint(
+    const sllm_linear_attention_state_t *const state, const uint64_t,
+    const uint64_t, const uint32_t,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (state == nullptr) {
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "linear attention checkpoint state handle is null");
+  }
+  return unavailable(error_sink);
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_commit_checkpoint(
+    const sllm_context_t *const context, const sllm_queue_t *const queue,
+    const sllm_linear_attention_state_t *const state, const uint64_t,
+    const uint64_t, const uint64_t, const uint32_t,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (context == nullptr || queue == nullptr || state == nullptr) {
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "linear attention checkpoint commit input is null");
+  }
+  return unavailable(error_sink);
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_commit_checkpoint_batch(
+    const sllm_context_t *const context, const sllm_queue_t *const queue,
+    const sllm_linear_attention_state_t *const *const states,
+    const uint32_t state_count, const uint64_t, const uint64_t, const uint64_t,
+    const uint32_t, sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (context == nullptr || queue == nullptr || states == nullptr ||
+      state_count == 0U) {
+    return write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "linear attention checkpoint commit batch input is invalid");
+  }
+  return unavailable(error_sink);
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_discard_checkpoint(
+    const sllm_linear_attention_state_t *const state,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (state == nullptr) {
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "linear attention checkpoint state handle is null");
   }
   return unavailable(error_sink);
 }

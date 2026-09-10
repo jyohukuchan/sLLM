@@ -16,6 +16,10 @@ use crate::runtime::{
 };
 use crate::{HipBackend, TensorBinding};
 
+fn qwen38_nvfp4_projection_pack_rows_supported(rows: usize) -> bool {
+    rows == 1 || (2..=4).contains(&rows) || rows >= 64
+}
+
 #[derive(Clone)]
 pub struct Qwen38ProjectionPack2Descriptor {
     activation: TensorBinding,
@@ -65,17 +69,31 @@ impl Qwen38ProjectionPack2Descriptor {
                 "invalid Qwen3.8 projection-pack role or bindings",
             ));
         }
-        // The native FP8 GDN provider is deliberately decode-only.  Keep the
-        // semantic contract broad enough for graph planning, but fail closed
-        // at this ABI boundary for any shape outside its exact M=1 contract.
-        if role == Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ
-            && (activation.view().shape()
-                != [1, Qwen38ProjectionPackContractV1::HIDDEN_SIZE as usize]
-                || contract.input_global_scale_f32_bits() != 0)
-        {
+        let activation_shape = activation.view().shape();
+        let invalid_fp8_gdn = role == Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ
+            && (activation_shape.len() != 2
+                || activation_shape[0] == 0
+                || activation_shape[1] != Qwen38ProjectionPackContractV1::HIDDEN_SIZE as usize
+                || contract.input_global_scale_f32_bits() != 0);
+        let invalid_nvfp4_gate_up = role == Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp
+            && (activation_shape.len() != 2
+                || !activation_shape
+                    .first()
+                    .copied()
+                    .is_some_and(qwen38_nvfp4_projection_pack_rows_supported)
+                || activation_shape.get(1).copied()
+                    != Some(Qwen38ProjectionPackContractV1::HIDDEN_SIZE as usize)
+                || contract.hidden_size() != Qwen38ProjectionPackContractV1::HIDDEN_SIZE
+                || contract.intermediate_size()
+                    != Qwen38ProjectionPackContractV1::MLP_INTERMEDIATE_SIZE);
+        if invalid_fp8_gdn || invalid_nvfp4_gate_up {
             return Err(RuntimeError::local(
                 RuntimeStatus::InvalidMatmulDescriptor,
-                "Qwen3.8 FP8 GDN projection-pack requires M=1 and input scale 0",
+                if role == Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ {
+                    "Qwen3.8 FP8 GDN projection-pack requires positive M, K=5120, and input scale 0"
+                } else {
+                    "Qwen3.8 NVFP4 projection-pack requires M=1, M=2..4, or M>=64 with K=5120"
+                },
             ));
         }
         Ok(Self {
@@ -118,6 +136,21 @@ impl Qwen38ProjectionPack2Descriptor {
             gate_output: self.gate_output.raw()?,
             up_output: self.up_output.raw()?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::qwen38_nvfp4_projection_pack_rows_supported;
+
+    #[test]
+    fn nvfp4_projection_pack_row_boundaries_match_native_scope() {
+        for rows in [1, 2, 3, 4, 64, 65] {
+            assert!(qwen38_nvfp4_projection_pack_rows_supported(rows));
+        }
+        for rows in [0, 5, 63] {
+            assert!(!qwen38_nvfp4_projection_pack_rows_supported(rows));
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 #include "evidence_abi.h"
 #include "low_precision_matmul_provider.hpp"
+#include "matmul_api.hpp"
 #include "matmul_kernel_internal.hpp"
 #include "public_runtime_internal.hpp"
 #include "rmsnorm_kernel_internal.hpp"
@@ -18,6 +19,7 @@
 #include <limits>
 #include <string>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -41,6 +43,11 @@ extern "C" uint32_t sllm_test_select_causal_attention_providers_with_semantics(
     uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
     uint64_t sliding_window, uint32_t explicit_score_scale,
     const char *arch_name) noexcept;
+extern "C" uint32_t sllm_test_select_causal_attention_providers_with_position(
+    uint64_t expected_kv_length, uint32_t query_count, uint32_t query_heads,
+    uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
+    uint64_t start_position, uint64_t sliding_window,
+    uint32_t explicit_score_scale, const char *arch_name) noexcept;
 extern "C" uint32_t sllm_test_select_linear_attention_gfx942_wave64_column(
     uint64_t token_count, uint32_t qk_heads, uint32_t value_heads,
     uint32_t head_dim, const char *arch_name) noexcept;
@@ -64,7 +71,33 @@ extern "C" uint32_t sllm_test_select_fp8_lt_heuristic_rank_policy(
     const char *arch_name, uint32_t fp8_dtype, uint64_t m, uint64_t k,
     uint64_t n, const char *rank_environment, uint64_t *rank,
     uint32_t *ranked_query, uint32_t *explicit_override) noexcept;
-
+extern "C" uint64_t sllm_test_select_fp8_lt_algorithm_index_policy(
+    const char *arch_name, uint32_t fp8_dtype, uint64_t m, uint64_t k,
+    uint64_t n, const char *rank_environment) noexcept;
+extern "C" sllm_status_t sllm_linear_attention_state_prepare_checkpoint(
+    const sllm_linear_attention_state_t *state, uint64_t expected_start,
+    uint32_t token_count, uint32_t rows,
+    sllm_error_sink_t *error_sink) noexcept;
+extern "C" sllm_status_t sllm_linear_attention_state_commit_checkpoint(
+    const sllm_context_t *context, const sllm_queue_t *queue,
+    const sllm_linear_attention_state_t *state, uint64_t expected_start,
+    uint64_t expected_end, uint64_t prefix_end, uint32_t row_index,
+    sllm_error_sink_t *error_sink) noexcept;
+extern "C" sllm_status_t sllm_linear_attention_state_commit_checkpoint_batch(
+    const sllm_context_t *context, const sllm_queue_t *queue,
+    const sllm_linear_attention_state_t *const *states, uint32_t state_count,
+    uint64_t expected_start, uint64_t expected_end, uint64_t prefix_end,
+    uint32_t row_index, sllm_error_sink_t *error_sink) noexcept;
+extern "C" bool sllm_test_linear_attention_published_metadata(
+    const sllm_linear_attention_state_t *state, uint64_t *published_length,
+    uint64_t *generation, uint32_t *active_slot) noexcept;
+extern "C" uint32_t
+sllm_test_fp8_lt_pinned_identity(int32_t version,
+                                 const char *revision) noexcept;
+extern "C" uint32_t sllm_test_select_fp8_lt_heuristic_candidate(
+    const int32_t *algorithm_indices, const uint32_t *successful,
+    const uint64_t *workspace_sizes, uint64_t count,
+    uint64_t target_algorithm_index, uint64_t *selected_position) noexcept;
 namespace {
 
 struct Error final {
@@ -894,6 +927,7 @@ bool causal_attention_target_scoped_selector_contract() {
   constexpr uint32_t kPrefillGqa6QTile4K4Fp16 = 1U << 13U;
   constexpr uint32_t kPrefillGqa6QTile4K8Fp16 = 1U << 14U;
   constexpr uint32_t kPrefillGqa6QTile4K16Fp16 = 1U << 15U;
+  constexpr uint32_t kPrefillGqa6QTile8W16 = 1U << 25U;
   constexpr const char *const kForceBaseline =
       "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
   constexpr const char *const kGfx1201Gqa4SplitP32 =
@@ -907,7 +941,7 @@ bool causal_attention_target_scoped_selector_contract() {
       "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K16_FP16";
   constexpr const char *const kGqa6QTile4K32Fp16 =
       "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K32_FP16";
-  constexpr std::array<const char *const, 20> kCandidateVariables = {
+  constexpr std::array<const char *const, 22> kCandidateVariables = {
       "SLLM_CAUSAL_ATTENTION_GFX1030_Q_PRELOAD",
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT",
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT_Q_PRELOAD",
@@ -920,6 +954,8 @@ bool causal_attention_target_scoped_selector_contract() {
       "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1201",
       "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_Q8_GFX1201",
       "SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM",
+      "SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32",
+      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_STAGED",
       kGqa6QTile4,
       kGqa6QTile4K4Fp16,
       kGqa6QTile4K8Fp16,
@@ -970,6 +1006,14 @@ bool causal_attention_target_scoped_selector_contract() {
     return sllm_test_select_causal_attention_providers(
         expected_kv_length, query_count, query_heads, kv_heads, head_dim,
         encoding, arch_name);
+  };
+  const auto select_position = [](const uint64_t expected_kv_length,
+                                  const uint32_t query_count,
+                                  const uint64_t start_position,
+                                  const char *const arch_name) {
+    return sllm_test_select_causal_attention_providers_with_position(
+        expected_kv_length, query_count, 24U, 4U, 256U,
+        SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, start_position, 0U, 0U, arch_name);
   };
   const auto expect_gfx942_zero =
       [&](const uint64_t expected_kv_length, const uint32_t query_count = 1U,
@@ -1040,12 +1084,94 @@ bool causal_attention_target_scoped_selector_contract() {
       expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit, 8U, 4U,
                      256U) &&
       expect_gfx1201(4096U, 1U, kGfx1201Wave, 16U, 4U, 128U) &&
-      // Explicit OCP MXFP8 uses the packed-KV generic routes.  It must not
-      // select any FP16-only GQA4/specialized provider.
+      // Explicit OCP MXFP8 decode (M=1) uses the packed-KV generic routes.  It
+      // must not select any prefill-only GQA4/specialized provider.
       expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit, 16U, 4U, 256U,
                      SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) &&
       select(4096U, 1U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E5_V1,
              "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload);
+
+  // MXFP8 E4 GQA6 prefill uses the format-neutral qtile4 provider by default
+  // at the exact Qwen geometry.  The query-count boundary, E5/FP16 rollback,
+  // and explicit flag=0 rollback remain separate from the FP16-only opt-ins.
+  valid = valid &&
+          select(4096U, 127U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                 "gfx1030") == 0U &&
+          select(4096U, 128U, 12U, 2U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                 "gfx1030") == 0U &&
+          select(4096U, 128U, 48U, 8U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                 "gfx1030") == 0U &&
+          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                 "gfx1030") == kPrefillGqa4QTile4 &&
+          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                 "gfx1201") == (kGfx1201Wave | kPrefillGqa4QTile4) &&
+          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E5_V1,
+                 "gfx1030") == 0U &&
+          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx1030") == 0U;
+  setenv(kGqa6QTile4, "0", 1);
+  valid = valid &&
+          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                 "gfx1030") == 0U &&
+          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                 "gfx1201") == kGfx1201Wave;
+  clear_environment();
+
+  // The W16 candidate is exact gfx1030/gfx1201 + MXFP8 E4 + q24/kv4/d256 and
+  // starts only at the long-prefix boundary. Query and prefix boundaries
+  // retain the qtile4 control route.
+  valid =
+      valid && select_position(1151U, 127U, 1024U, "gfx1030") == 0U &&
+      select_position(1151U, 127U, 1023U, "gfx1030") == 0U &&
+      select_position(1152U, 128U, 1023U, "gfx1030") == kPrefillGqa4QTile4 &&
+      select_position(1152U, 128U, 1024U, "gfx1030") == kPrefillGqa6QTile8W16 &&
+      select_position(1153U, 129U, 1025U, "gfx1030") == kPrefillGqa6QTile8W16 &&
+      select_position(1151U, 127U, 1024U, "gfx1201") == kGfx1201Wave &&
+      select_position(1152U, 128U, 1023U, "gfx1201") ==
+          (kGfx1201Wave | kPrefillGqa4QTile4) &&
+      select_position(1152U, 128U, 1024U, "gfx1201") ==
+          (kGfx1201Wave | kPrefillGqa6QTile8W16) &&
+      select_position(1153U, 129U, 1025U, "gfx1201") ==
+          (kGfx1201Wave | kPrefillGqa6QTile8W16);
+  setenv(kGqa6QTile4, "1", 1);
+  valid =
+      valid &&
+      select_position(1152U, 128U, 1024U, "gfx1030") == kPrefillGqa4QTile4 &&
+      select_position(1152U, 128U, 1024U, "gfx1201") ==
+          (kGfx1201Wave | kPrefillGqa4QTile4);
+  setenv(kGqa6QTile4, "0", 1);
+  valid = valid && select_position(1152U, 128U, 1024U, "gfx1030") == 0U &&
+          select_position(1152U, 128U, 1024U, "gfx1201") == kGfx1201Wave;
+  setenv(kForceBaseline, "1", 1);
+  valid = valid && select_position(1152U, 128U, 1024U, "gfx1030") == 0U;
+  clear_environment();
+
+  // Staged32 is the MXFP8 default for the measured small-M geometry.
+  constexpr uint32_t kStaged32 = 1U << 24U;
+  constexpr const char *kStaged32Flag =
+      "SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32";
+  for (const auto target : {"gfx1030", "gfx1201"}) {
+    for (const auto length : {1023U, 1024U, 1025U}) {
+      for (const auto queries : {1U, 2U, 3U, 4U, 5U}) {
+        const auto mask = select(length, queries, 24U, 4U, 256U,
+                                 SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, target);
+        valid = valid && (((mask & kStaged32) != 0U) ==
+                          (length >= 1024U && queries <= 4U));
+      }
+    }
+    for (const auto value : {"0", "yes", ""}) {
+      setenv(kStaged32Flag, value, 1);
+      valid = valid && (select(1024U, 3U, 24U, 4U, 256U,
+                               SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, target) &
+                        kStaged32) == 0U;
+    }
+    unsetenv(kStaged32Flag);
+    setenv(kForceBaseline, "1", 1);
+    valid = valid && (select(1024U, 3U, 24U, 4U, 256U,
+                             SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, target) &
+                      kStaged32) == 0U;
+    unsetenv(kForceBaseline);
+  }
 
   // Every environment spelling must remain inert for gfx942.  Test each
   // candidate independently and then all candidates together.
@@ -1099,7 +1225,11 @@ bool causal_attention_target_scoped_selector_contract() {
   valid = valid && expect_gfx942_zero(4096U) &&
           expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit) &&
           expect_gfx1201(4096U, 64U, kGfx1201Wave | kPrefillGqa4) &&
-          expect_gfx1201(4096U, 128U, kGfx1201Wave | kPrefillGqa4);
+          expect_gfx1201(4096U, 128U, kGfx1201Wave | kPrefillGqa4) &&
+          expect_gfx1201(4096U, 128U, kGfx1201Wave, 24U, 4U, 256U,
+                         SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) &&
+          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                 "gfx1030") == 0U;
 
   setenv(kForceBaseline, "1", 1);
   valid = valid && expect_gfx1201(2048U, 128U, kGfx1201Wave | kPrefillGqa4);
@@ -3985,14 +4115,15 @@ sllm_qwen38_projection_pack2_desc_t qwen38_projection_pack2_nvfp4_descriptor(
     const sllm_buffer_t *const activation,
     const std::array<sllm_buffer_t *, 2> &weights,
     const std::array<sllm_buffer_t *, 2> &outputs, const uint64_t k,
-    const uint64_t gate_n, const uint64_t up_n) {
+    const uint64_t gate_n, const uint64_t up_n,
+    const uint64_t m = UINT64_C(1)) {
   sllm_qwen38_projection_pack2_desc_t descriptor{};
   descriptor.struct_size = sizeof(descriptor);
   descriptor.abi_version = SLLM_HIP_ABI_VERSION;
   descriptor.op_version = SLLM_HIP_QWEN38_PROJECTION_PACK2_VERSION;
   descriptor.role = SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_NVFP4_MLP_GATE_UP;
   descriptor.input_global_scale_f32_bits = UINT32_C(0x44000000); // 512.0F
-  descriptor.activation = matmul_binding(activation, 0U, 1U, k);
+  descriptor.activation = matmul_binding(activation, 0U, m, k);
   descriptor.gate_weight = matmul_binding(weights[0], 0U, gate_n, k);
   descriptor.up_weight = matmul_binding(weights[1], 0U, up_n, k);
   descriptor.gate_weight.dtype = SLLM_TENSOR_DTYPE_U8;
@@ -4001,8 +4132,8 @@ sllm_qwen38_projection_pack2_desc_t qwen38_projection_pack2_nvfp4_descriptor(
       SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
   descriptor.up_weight.encoding =
       SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
-  descriptor.gate_output = matmul_binding(outputs[0], 0U, 1U, gate_n);
-  descriptor.up_output = matmul_binding(outputs[1], 0U, 1U, up_n);
+  descriptor.gate_output = matmul_binding(outputs[0], 0U, m, gate_n);
+  descriptor.up_output = matmul_binding(outputs[1], 0U, m, up_n);
   return descriptor;
 }
 
@@ -4027,7 +4158,8 @@ qwen38_projection_pack2_dispatch_info() {
 sllm_qwen38_projection_pack2_desc_t qwen38_projection_pack2_fp8_gdn_descriptor(
     const sllm_buffer_t *const activation,
     const std::array<sllm_buffer_t *, 2> &weights,
-    const std::array<sllm_buffer_t *, 2> &outputs) {
+    const std::array<sllm_buffer_t *, 2> &outputs,
+    const uint64_t m = UINT64_C(1)) {
   constexpr uint64_t kHidden = 5120U;
   constexpr std::array<uint64_t, 2> kWidths = {10240U, 6144U};
   sllm_qwen38_projection_pack2_desc_t descriptor{};
@@ -4036,11 +4168,11 @@ sllm_qwen38_projection_pack2_desc_t qwen38_projection_pack2_fp8_gdn_descriptor(
   descriptor.op_version = SLLM_HIP_QWEN38_PROJECTION_PACK2_VERSION;
   descriptor.role = SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_FP8_GDN_QKV_Z;
   descriptor.input_global_scale_f32_bits = 0U;
-  descriptor.activation = matmul_binding(activation, 0U, 1U, kHidden);
+  descriptor.activation = matmul_binding(activation, 0U, m, kHidden);
   descriptor.gate_weight = matmul_binding(weights[0], 0U, kWidths[0], kHidden);
   descriptor.up_weight = matmul_binding(weights[1], 0U, kWidths[1], kHidden);
-  descriptor.gate_output = matmul_binding(outputs[0], 0U, 1U, kWidths[0]);
-  descriptor.up_output = matmul_binding(outputs[1], 0U, 1U, kWidths[1]);
+  descriptor.gate_output = matmul_binding(outputs[0], 0U, m, kWidths[0]);
+  descriptor.up_output = matmul_binding(outputs[1], 0U, m, kWidths[1]);
   descriptor.gate_weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
   descriptor.up_weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
   descriptor.gate_weight.encoding = SLLM_TENSOR_ENCODING_FP8_OUTER_F32;
@@ -4137,8 +4269,9 @@ bool qwen38_projection_pack2_public_contract() {
       valid = valid &&
               expect_status(sllm_qwen38_projection_pack2_prepare(
                                 context, &malformed, &plan, &error.sink),
-                            SLLM_STATUS_UNSUPPORTED,
-                            "Qwen3.8 projection-pack M>1 rejection", error) &&
+                            SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+                            "Qwen3.8 projection-pack binding bounds rejection",
+                            error) &&
               plan == nullptr;
 
       const std::size_t allocations_before_prepare =
@@ -4418,110 +4551,262 @@ bool qwen38_projection_pack2_nvfp4_generic_contract() {
   return valid;
 }
 
-bool qwen38_projection_pack2_fp8_gdn_public_contract() {
-  constexpr uint64_t kHidden = 5120U;
-  constexpr std::array<uint64_t, 2> kWidths = {10240U, 6144U};
-  constexpr uint64_t kActivationBytes = kHidden * sizeof(uint16_t);
-  std::array<uint64_t, 2> weight_bytes{};
-  std::array<uint64_t, 2> output_bytes{};
-  for (std::size_t index = 0U; index != kWidths.size(); ++index) {
-    weight_bytes[index] = kHidden * kWidths[index] + kWidths[index] * 4U;
-    output_bytes[index] = kWidths[index] * sizeof(uint16_t);
-  }
-  static_assert(SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES ==
-                UINT64_C(5124));
-
-  auto run_supported_target = [&](const char *const arch_name) {
+bool qwen38_projection_pack2_nvfp4_m64_queue_contract() {
+  constexpr uint64_t k = UINT64_C(5120);
+  constexpr uint64_t gate_n = UINT64_C(17408);
+  constexpr uint64_t up_n = UINT64_C(17408);
+  constexpr uint64_t packed_activation_per_row = UINT64_C(2560);
+  constexpr uint64_t activation_scales_per_row = UINT64_C(320);
+  constexpr uint64_t per_row_workspace = UINT64_C(2880);
+  static_assert(packed_activation_per_row + activation_scales_per_row ==
+                per_row_workspace);
+  constexpr std::array<uint64_t, 11> kRows = {
+      UINT64_C(2),   UINT64_C(3),   UINT64_C(4),  UINT64_C(5),
+      UINT64_C(63),  UINT64_C(64),  UINT64_C(65), UINT64_C(127),
+      UINT64_C(128), UINT64_C(129), UINT64_C(512)};
+  const auto weight_bytes = [](const uint64_t width) constexpr {
+    const uint64_t values = width * (k / UINT64_C(2));
+    const uint64_t scales = width * (k / UINT64_C(16));
+    return ((values + scales + UINT64_C(3)) & ~UINT64_C(3)) + UINT64_C(8);
+  };
+  const uint64_t weight_size = weight_bytes(gate_n);
+  const auto set_target_selector = [](const char *const target) {
+    unsetenv("SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED");
+    unsetenv("SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED");
+    if (std::strcmp(target, "gfx1030") == 0) {
+      setenv("SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED", "1", 1);
+    } else {
+      setenv("SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED", "1", 1);
+    }
+  };
+  const auto run_target = [&](const char *const target) {
     fake_hip::reset();
-    sllm_public_runtime::FaultInjector::reset();
-    fake_hip::set_gcn_arch_name(arch_name);
+    fake_hip::set_gcn_arch_name(target);
+    set_target_selector(target);
     sllm_context_t *context = nullptr;
     sllm_queue_t *queue = nullptr;
+    bool valid = create_context_for_arch(target, &context) &&
+                 create_queue(context, &queue);
+    Error error;
+    if (valid) {
+      sllm_buffer_t *overflow_activation = nullptr;
+      std::array<sllm_buffer_t *, 2> overflow_weights{};
+      std::array<sllm_buffer_t *, 2> overflow_outputs{};
+      valid = create_buffer_sized(context, 1U, &overflow_activation) &&
+              create_buffer_sized(context, 1U, &overflow_weights[0]) &&
+              create_buffer_sized(context, 1U, &overflow_weights[1]) &&
+              create_buffer_sized(context, 1U, &overflow_outputs[0]) &&
+              create_buffer_sized(context, 1U, &overflow_outputs[1]);
+      if (valid) {
+        auto overflow_descriptor = qwen38_projection_pack2_nvfp4_descriptor(
+            overflow_activation, overflow_weights, overflow_outputs, k, gate_n,
+            up_n, UINT64_MAX);
+        sllm_qwen38_projection_pack2_plan_t *overflow_plan = nullptr;
+        valid =
+            expect_status(
+                sllm_qwen38_projection_pack2_prepare(
+                    context, &overflow_descriptor, &overflow_plan, &error.sink),
+                SLLM_STATUS_METADATA_OVERFLOW,
+                "Qwen3.8 projection-pack M*K overflow rejection", error) &&
+            overflow_plan == nullptr;
+      }
+      for (sllm_buffer_t *&buffer : overflow_outputs)
+        valid = release_buffer(&buffer) && valid;
+      for (sllm_buffer_t *&buffer : overflow_weights)
+        valid = release_buffer(&buffer) && valid;
+      valid = release_buffer(&overflow_activation) && valid;
+    }
+    for (std::size_t row_index = 0U; row_index != kRows.size(); ++row_index) {
+      const uint64_t m = kRows[row_index];
+      if (!valid)
+        break;
+      sllm_buffer_t *activation = nullptr;
+      std::array<sllm_buffer_t *, 2> weights{};
+      std::array<sllm_buffer_t *, 2> outputs{};
+      sllm_qwen38_projection_pack2_plan_t *plan = nullptr;
+      sllm_completion_t *completion = nullptr;
+      valid =
+          create_buffer_sized(context, m * k * sizeof(uint16_t), &activation) &&
+          create_buffer_sized(context, weight_size, &weights[0]) &&
+          create_buffer_sized(context, weight_size, &weights[1]) &&
+          create_buffer_sized(context, m * gate_n * sizeof(uint16_t),
+                              &outputs[0]) &&
+          create_buffer_sized(context, m * up_n * sizeof(uint16_t),
+                              &outputs[1]);
+      if (valid) {
+        // Small-M target verification uses the default-adopted ID94 member
+        // selector.  Keep the existing forced ID87/ID89 controls for the
+        // M>=64 prefill rows in this same queue/workspace contract test.
+        if (m < UINT64_C(64)) {
+          unsetenv("SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED");
+          unsetenv("SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED");
+          unsetenv("SLLM_NVFP4_W4A4_FORCE_BASELINE");
+        } else {
+          set_target_selector(target);
+        }
+        const auto descriptor = qwen38_projection_pack2_nvfp4_descriptor(
+            activation, weights, outputs, k, gate_n, up_n, m);
+        const bool supported =
+            (m >= UINT64_C(2) && m <= UINT64_C(4)) || m >= UINT64_C(64);
+        const sllm_status_t expected =
+            supported ? SLLM_STATUS_OK : SLLM_STATUS_UNSUPPORTED;
+        valid =
+            expect_status(sllm_qwen38_projection_pack2_prepare(
+                              context, &descriptor, &plan, &error.sink),
+                          expected, "Qwen3.8 NVFP4 projection-pack prepare",
+                          error) &&
+            (expected != SLLM_STATUS_OK ? plan == nullptr : plan != nullptr);
+      }
+      if (valid &&
+          ((m >= UINT64_C(2) && m <= UINT64_C(4)) || m >= UINT64_C(64))) {
+        const std::size_t before_execute = fake_hip::live_allocations();
+        auto execute_once = [&]() {
+          auto info = qwen38_projection_pack2_dispatch_info();
+          completion = nullptr;
+          const bool executed =
+              expect_status(sllm_qwen38_projection_pack2_execute(
+                                plan, queue, &completion, &info, &error.sink),
+                            SLLM_STATUS_OK,
+                            "Qwen3.8 NVFP4 projection-pack execute", error) &&
+              completion != nullptr && info.m == m && info.k == k &&
+              info.n == gate_n &&
+              info.workspace_bytes ==
+                  m * (packed_activation_per_row + activation_scales_per_row) &&
+              info.workspace_bytes == m * per_row_workspace &&
+              info.dispatch_count == 3U && info.grid_size_x != 0U &&
+              query_completion(completion, SLLM_STATUS_OK) &&
+              release_completion(&completion);
+          return executed;
+        };
+        valid = execute_once();
+        const std::size_t after_first_execute = fake_hip::live_allocations();
+        // Queue scratch doubles its retained capacity on growth, so M4 fits
+        // the M3 allocation; the listed rows are the actual growth points.
+        const bool expected_growth = m == UINT64_C(2) || m == UINT64_C(3) ||
+                                     m == UINT64_C(64) || m == UINT64_C(65) ||
+                                     m == UINT64_C(129) || m == UINT64_C(512);
+        valid = valid &&
+                after_first_execute ==
+                    before_execute +
+                        (expected_growth ? std::size_t{1U} : std::size_t{0U});
+        valid = valid && execute_once();
+        valid = valid && fake_hip::live_allocations() == after_first_execute;
+      }
+      if (!valid)
+        std::cerr << "Qwen3.8 NVFP4 queue row failed target=" << target
+                  << " M=" << m
+                  << " live_allocations=" << fake_hip::live_allocations()
+                  << '\n';
+      if (completion != nullptr)
+        valid = release_completion(&completion) && valid;
+      if (plan != nullptr)
+        valid =
+            expect_status(
+                sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
+                SLLM_STATUS_OK, "Qwen3.8 NVFP4 projection-pack plan release",
+                error) &&
+            valid;
+      for (sllm_buffer_t *&output : outputs)
+        valid = release_buffer(&output) && valid;
+      for (sllm_buffer_t *&weight : weights)
+        valid = release_buffer(&weight) && valid;
+      valid = release_buffer(&activation) && valid;
+    }
+    if (queue != nullptr)
+      valid = release_queue(&queue) && valid;
+    if (context != nullptr)
+      valid = release_context(&context) && valid;
+    return valid && fake_hip::live_events() == 0U &&
+           fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+  };
+  const bool valid = run_target("gfx1030") && run_target("gfx1201");
+  unsetenv("SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED");
+  unsetenv("SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED");
+  fake_hip::set_gcn_arch_name("gfx1201");
+  return valid;
+}
+
+bool qwen38_projection_pack2_nvfp4_m64_baseline_fallback_contract() {
+  constexpr uint64_t k = UINT64_C(5120);
+  constexpr uint64_t gate_n = UINT64_C(17408);
+  constexpr uint64_t up_n = UINT64_C(17408);
+  constexpr uint64_t m = UINT64_C(64);
+  constexpr const char *const kBaseline = "SLLM_NVFP4_W4A4_FORCE_BASELINE";
+  constexpr const char *const kGfx1030Compensated =
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED";
+  constexpr const char *const kGfx1201Wmma =
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED";
+  constexpr std::array<const char *, 3> kEnvironmentNames = {
+      kBaseline, kGfx1030Compensated, kGfx1201Wmma};
+  constexpr uint64_t packed_weight_values = k * gate_n / UINT64_C(2);
+  constexpr uint64_t weight_block_scales = k * gate_n / UINT64_C(16);
+  constexpr uint64_t weight_size =
+      ((packed_weight_values + weight_block_scales + UINT64_C(3)) &
+       ~UINT64_C(3)) +
+      UINT64_C(8);
+
+  std::array<bool, kEnvironmentNames.size()> was_present{};
+  std::array<std::string, kEnvironmentNames.size()> old_values{};
+  for (std::size_t index = 0U; index != kEnvironmentNames.size(); ++index) {
+    const char *const value = std::getenv(kEnvironmentNames[index]);
+    was_present[index] = value != nullptr;
+    old_values[index] = value != nullptr ? value : "";
+  }
+  const auto restore_environment = [&]() {
+    for (std::size_t index = 0U; index != kEnvironmentNames.size(); ++index) {
+      if (was_present[index]) {
+        setenv(kEnvironmentNames[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(kEnvironmentNames[index]);
+      }
+    }
+  };
+
+  const auto run_target = [&](const char *const target) {
+    fake_hip::reset();
+    sllm_public_runtime::FaultInjector::reset();
+    fake_hip::set_gcn_arch_name(target);
+    setenv(kBaseline, "1", 1);
+    unsetenv(kGfx1030Compensated);
+    unsetenv(kGfx1201Wmma);
+
+    sllm_context_t *context = nullptr;
     sllm_buffer_t *activation = nullptr;
     std::array<sllm_buffer_t *, 2> weights{};
     std::array<sllm_buffer_t *, 2> outputs{};
     sllm_qwen38_projection_pack2_plan_t *plan = nullptr;
-    sllm_completion_t *completion = nullptr;
     Error error;
-    bool valid = create_context_for_arch(arch_name, &context) &&
-                 create_queue(context, &queue) &&
-                 create_buffer_sized(context, kActivationBytes, &activation) &&
-                 create_buffer_sized(context, weight_bytes[0], &weights[0]) &&
-                 create_buffer_sized(context, weight_bytes[1], &weights[1]) &&
-                 create_buffer_sized(context, output_bytes[0], &outputs[0]) &&
-                 create_buffer_sized(context, output_bytes[1], &outputs[1]);
+    bool valid =
+        create_context_for_arch(target, &context) &&
+        create_buffer_sized(context, m * k * sizeof(uint16_t), &activation) &&
+        create_buffer_sized(context, weight_size, &weights[0]) &&
+        create_buffer_sized(context, weight_size, &weights[1]) &&
+        create_buffer_sized(context, m * gate_n * sizeof(uint16_t),
+                            &outputs[0]) &&
+        create_buffer_sized(context, m * up_n * sizeof(uint16_t), &outputs[1]);
     if (valid) {
-      auto descriptor = qwen38_projection_pack2_fp8_gdn_descriptor(
-          activation, weights, outputs);
-      auto malformed = descriptor;
-      malformed.input_global_scale_f32_bits = UINT32_C(0x3f800000);
-      valid =
-          expect_status(sllm_qwen38_projection_pack2_prepare(
-                            context, &malformed, &plan, &error.sink),
-                        SLLM_STATUS_INVALID_ARGUMENT,
-                        "Qwen3.8 FP8 GDN nonzero input-global scale rejection",
-                        error) &&
-          plan == nullptr;
-      malformed = descriptor;
-      malformed.activation.shape[0] = 2U;
-      malformed.gate_output.shape[0] = 2U;
-      malformed.up_output.shape[0] = 2U;
-      valid = valid &&
-              expect_status(sllm_qwen38_projection_pack2_prepare(
-                                context, &malformed, &plan, &error.sink),
-                            SLLM_STATUS_UNSUPPORTED,
-                            "Qwen3.8 FP8 GDN M>1 rejection", error) &&
-              plan == nullptr;
-      valid = valid &&
-              expect_status(sllm_qwen38_projection_pack2_prepare(
+      const auto descriptor = qwen38_projection_pack2_nvfp4_descriptor(
+          activation, weights, outputs, k, gate_n, up_n, m);
+      const std::size_t allocations_before_prepare =
+          fake_hip::live_allocations();
+      const std::size_t launches_before_prepare =
+          fake_hip::matmul_launch_calls();
+      valid = expect_status(sllm_qwen38_projection_pack2_prepare(
                                 context, &descriptor, &plan, &error.sink),
-                            SLLM_STATUS_OK,
-                            "Qwen3.8 FP8 GDN projection-pack prepare", error) &&
-              plan != nullptr;
-    }
-    if (valid) {
-      auto info = qwen38_projection_pack2_dispatch_info();
-      valid =
-          expect_status(sllm_qwen38_projection_pack2_execute(
-                            plan, queue, &completion, &info, &error.sink),
-                        SLLM_STATUS_OK,
-                        "Qwen3.8 FP8 GDN projection-pack execute", error) &&
-          completion != nullptr && info.dispatch_count == 3U &&
-          info.kernel_id ==
-              SLLM_HIP_QWEN38_PROJECTION_PACK2_KERNEL_ID_FP8_GDN_SHARED_ACTIVATION_V1 &&
-          info.workspace_bytes ==
-              SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES &&
-          info.role == SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_FP8_GDN_QKV_Z &&
-          info.m == 1U && info.k == kHidden && info.n == kWidths[0] &&
-          info.output_elements == kWidths[0] + kWidths[1] &&
-          info.fallback_allowed == 0U && info.fallback_used == 0U;
-      sllm_completion_t *second_completion = nullptr;
-      auto second_info = qwen38_projection_pack2_dispatch_info();
-      valid =
-          valid &&
-          expect_status(
-              sllm_qwen38_projection_pack2_execute(
-                  plan, queue, &second_completion, &second_info, &error.sink),
-              SLLM_STATUS_PUBLIC_BUSY,
-              "Qwen3.8 FP8 GDN single in-flight submission", error) &&
-          second_completion == nullptr &&
-          expect_status(
-              sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
-              SLLM_STATUS_PUBLIC_BUSY, "Qwen3.8 FP8 GDN in-flight plan", error);
-    }
-    if (completion != nullptr) {
-      valid = query_completion(completion, SLLM_STATUS_OK) && valid;
-      valid = release_completion(&completion) && valid;
+                            SLLM_STATUS_UNSUPPORTED,
+                            "Qwen3.8 M64 baseline projection-pack fallback",
+                            error) &&
+              plan == nullptr &&
+              fake_hip::live_allocations() == allocations_before_prepare &&
+              fake_hip::matmul_launch_calls() == launches_before_prepare;
     }
     if (plan != nullptr) {
       valid = expect_status(
                   sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
-                  SLLM_STATUS_OK, "Qwen3.8 FP8 GDN projection-pack release",
-                  error) &&
+                  SLLM_STATUS_OK,
+                  "Qwen3.8 M64 baseline unexpected plan cleanup", error) &&
               valid;
     }
-    if (queue != nullptr)
-      valid = release_queue(&queue) && valid;
     for (sllm_buffer_t *&output : outputs) {
       if (output != nullptr)
         valid = release_buffer(&output) && valid;
@@ -4534,7 +4819,146 @@ bool qwen38_projection_pack2_fp8_gdn_public_contract() {
       valid = release_buffer(&activation) && valid;
     if (context != nullptr)
       valid = release_context(&context) && valid;
-    return valid && fake_hip::live_events() == 0U &&
+    return valid && fake_hip::matmul_launch_calls() == 0U &&
+           fake_hip::live_events() == 0U && fake_hip::live_streams() == 0U &&
+           fake_hip::live_allocations() == 0U;
+  };
+
+  bool valid = run_target("gfx1030") && run_target("gfx1201");
+  restore_environment();
+  fake_hip::set_gcn_arch_name("gfx1201");
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
+bool qwen38_projection_pack2_fp8_gdn_public_contract() {
+  constexpr uint64_t kHidden = 5120U;
+  constexpr std::array<uint64_t, 2> kWidths = {10240U, 6144U};
+  constexpr std::array<uint64_t, 6> kRows = {1U, 2U, 3U, 4U, 5U, 65U};
+  std::array<uint64_t, 2> weight_bytes{};
+  for (std::size_t index = 0U; index != kWidths.size(); ++index) {
+    weight_bytes[index] = kHidden * kWidths[index] + kWidths[index] * 4U;
+  }
+  static_assert(SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES ==
+                UINT64_C(5124));
+
+  auto run_supported_target = [&](const char *const arch_name) {
+    bool target_valid = true;
+    for (const uint64_t m : kRows) {
+      fake_hip::reset();
+      sllm_public_runtime::FaultInjector::reset();
+      fake_hip::set_gcn_arch_name(arch_name);
+      const uint64_t activation_bytes = m * kHidden * sizeof(uint16_t);
+      std::array<uint64_t, 2> output_bytes{};
+      for (std::size_t index = 0U; index != kWidths.size(); ++index)
+        output_bytes[index] = m * kWidths[index] * sizeof(uint16_t);
+      sllm_context_t *context = nullptr;
+      sllm_queue_t *queue = nullptr;
+      sllm_buffer_t *activation = nullptr;
+      std::array<sllm_buffer_t *, 2> weights{};
+      std::array<sllm_buffer_t *, 2> outputs{};
+      sllm_qwen38_projection_pack2_plan_t *plan = nullptr;
+      sllm_completion_t *completion = nullptr;
+      Error error;
+      bool valid =
+          create_context_for_arch(arch_name, &context) &&
+          create_queue(context, &queue) &&
+          create_buffer_sized(context, activation_bytes, &activation) &&
+          create_buffer_sized(context, weight_bytes[0], &weights[0]) &&
+          create_buffer_sized(context, weight_bytes[1], &weights[1]) &&
+          create_buffer_sized(context, output_bytes[0], &outputs[0]) &&
+          create_buffer_sized(context, output_bytes[1], &outputs[1]);
+      if (valid) {
+        const auto descriptor = qwen38_projection_pack2_fp8_gdn_descriptor(
+            activation, weights, outputs, m);
+        auto malformed = descriptor;
+        malformed.input_global_scale_f32_bits = UINT32_C(0x3f800000);
+        valid = expect_status(
+                    sllm_qwen38_projection_pack2_prepare(context, &malformed,
+                                                         &plan, &error.sink),
+                    SLLM_STATUS_INVALID_ARGUMENT,
+                    "Qwen3.8 FP8 GDN nonzero input-global scale rejection",
+                    error) &&
+                plan == nullptr;
+        malformed = descriptor;
+        malformed.gate_output.shape[0] = m + 1U;
+        valid = valid &&
+                expect_status(sllm_qwen38_projection_pack2_prepare(
+                                  context, &malformed, &plan, &error.sink),
+                              SLLM_STATUS_SHAPE_MISMATCH,
+                              "Qwen3.8 FP8 GDN unequal activation/output rows",
+                              error) &&
+                plan == nullptr;
+        valid =
+            valid &&
+            expect_status(sllm_qwen38_projection_pack2_prepare(
+                              context, &descriptor, &plan, &error.sink),
+                          SLLM_STATUS_OK,
+                          "Qwen3.8 FP8 GDN projection-pack prepare", error) &&
+            plan != nullptr;
+      }
+      if (valid) {
+        auto info = qwen38_projection_pack2_dispatch_info();
+        valid =
+            expect_status(sllm_qwen38_projection_pack2_execute(
+                              plan, queue, &completion, &info, &error.sink),
+                          SLLM_STATUS_OK,
+                          "Qwen3.8 FP8 GDN projection-pack execute", error) &&
+            completion != nullptr && info.dispatch_count == 3U &&
+            info.kernel_id ==
+                SLLM_HIP_QWEN38_PROJECTION_PACK2_KERNEL_ID_FP8_GDN_SHARED_ACTIVATION_V1 &&
+            info.workspace_bytes ==
+                m * SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES &&
+            info.role == SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_FP8_GDN_QKV_Z &&
+            info.m == m && info.k == kHidden && info.n == kWidths[0] &&
+            info.output_elements == m * (kWidths[0] + kWidths[1]) &&
+            info.fallback_allowed == 0U && info.fallback_used == 0U;
+        sllm_completion_t *second_completion = nullptr;
+        auto second_info = qwen38_projection_pack2_dispatch_info();
+        valid =
+            valid &&
+            expect_status(
+                sllm_qwen38_projection_pack2_execute(
+                    plan, queue, &second_completion, &second_info, &error.sink),
+                SLLM_STATUS_PUBLIC_BUSY,
+                "Qwen3.8 FP8 GDN single in-flight submission", error) &&
+            second_completion == nullptr &&
+            expect_status(
+                sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
+                SLLM_STATUS_PUBLIC_BUSY, "Qwen3.8 FP8 GDN in-flight plan",
+                error);
+      }
+      if (completion != nullptr) {
+        valid = query_completion(completion, SLLM_STATUS_OK) && valid;
+        valid = release_completion(&completion) && valid;
+      }
+      if (plan != nullptr) {
+        valid =
+            expect_status(
+                sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
+                SLLM_STATUS_OK, "Qwen3.8 FP8 GDN projection-pack release",
+                error) &&
+            valid;
+      }
+      if (queue != nullptr)
+        valid = release_queue(&queue) && valid;
+      for (sllm_buffer_t *&output : outputs) {
+        if (output != nullptr)
+          valid = release_buffer(&output) && valid;
+      }
+      for (sllm_buffer_t *&weight : weights) {
+        if (weight != nullptr)
+          valid = release_buffer(&weight) && valid;
+      }
+      if (activation != nullptr)
+        valid = release_buffer(&activation) && valid;
+      if (context != nullptr)
+        valid = release_context(&context) && valid;
+      target_valid = target_valid && valid && fake_hip::live_events() == 0U &&
+                     fake_hip::live_streams() == 0U &&
+                     fake_hip::live_allocations() == 0U;
+    }
+    return target_valid && fake_hip::live_events() == 0U &&
            fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
   };
 
@@ -6114,6 +6538,22 @@ bool matmul_fp8_outer_decode_selector_contract() {
   };
   bool valid =
       select(1U, 64U, 33U) == KernelVariant::Fp8Emulation &&
+      // ID82 M=1 default adoption is limited to the five measured tuples;
+      // adjacent K/N values retain their existing rollback providers.
+      select(1U, 5120U, 12288U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
+      select(1U, 5120U, 1024U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
+      select(1U, 5120U, 17408U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
+      select(1U, 17408U, 5120U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
+      select(1U, 6144U, 5120U) ==
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
+      select(1U, 5120U, 12287U) !=
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
+      select(1U, 17408U, 5121U) !=
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
       static_cast<uint32_t>(
           KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32) == 66U &&
       static_cast<uint32_t>(
@@ -6214,6 +6654,36 @@ bool matmul_fp8_outer_decode_selector_contract() {
           sllm_matmul_kernel::device_symbol(
               KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32),
           "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_wave4col32_v1") == 0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol_for_target(
+              KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32, "gfx1030",
+              1U, 5120U, 12288U),
+          "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n12288_v1") ==
+          0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol_for_target(
+              KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32, "gfx1030",
+              1U, 5120U, 1024U),
+          "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n1024_v1") ==
+          0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol_for_target(
+              KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32, "gfx1030",
+              1U, 5120U, 17408U),
+          "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n17408_v1") ==
+          0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol_for_target(
+              KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32, "gfx1030",
+              1U, 17408U, 5120U),
+          "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k17408n5120_v1") ==
+          0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol_for_target(
+              KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32, "gfx1030",
+              1U, 6144U, 5120U),
+          "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k6144n5120_v1") ==
+          0 &&
       sllm_matmul_kernel::workgroup_size_x(
           KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32) == 256U &&
       sllm_matmul_kernel::kFp8OuterDecodeGfx1030LdsLutStaticLdsBytes == 544U &&
@@ -6283,10 +6753,12 @@ bool matmul_fp8_outer_decode_selector_contract() {
       // half2 K-aligned decode shape; only adoption is gated by N >= 64.
       select(1U, 5120U, 12289U) ==
           KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32 &&
+      // ID92 is the adopted exact M=2..4 FP8 fusion set; this fourth positive
+      // tuple covers the long-N edge of the exact K5120 family.
       select(2U, 5120U, 17408U) ==
-          KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64 &&
-      // ID92 is the adopted exact M=2..4 FP8 fusion set. M=1 and every
-      // neighboring K/N tuple stay on the existing providers.
+          KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
+      // M=1 and every neighboring K/N tuple outside the exact set stay on
+      // the existing providers.
       select(2U, 5120U, 10240U) ==
           KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
       select(3U, 5120U, 6144U) ==
@@ -6387,12 +6859,20 @@ bool matmul_fp8_outer_decode_selector_contract() {
       sllm_lowp::ExactTarget::Gfx1030, 1U, 33U, 64U);
   constexpr auto provider_plan =
       sllm_lowp::prepare_provider_plan(provider_request);
+  constexpr auto exact_m1_provider_request = sllm_lowp::make_provider_request(
+      sllm_lowp::MatmulFormat::Fp8OuterE4M3W8A8,
+      sllm_lowp::ExactTarget::Gfx1030, 1U, 12288U, 5120U);
+  constexpr auto exact_m1_provider_plan =
+      sllm_lowp::prepare_provider_plan(exact_m1_provider_request);
   constexpr auto gfx1201_provider_request = sllm_lowp::make_provider_request(
       sllm_lowp::MatmulFormat::Fp8OuterE4M3W8A8,
       sllm_lowp::ExactTarget::Gfx1201, 1U, 33U, 64U);
   constexpr auto gfx1201_provider_plan =
       sllm_lowp::prepare_provider_plan(gfx1201_provider_request);
   valid = valid && provider_plan.supported() &&
+          exact_m1_provider_plan.supported() &&
+          exact_m1_provider_plan.provider ==
+              sllm_lowp::ProviderKind::Fp8OuterGfx1030Software &&
           provider_plan.provider ==
               sllm_lowp::ProviderKind::Fp8OuterGfx1030Software &&
           provider_plan.weight_layout == sllm_lowp::BlockLayout::RowMajor &&
@@ -6716,8 +7196,97 @@ bool matmul_fp8_gfx1201_decode_rank_table_contract() {
   return valid;
 }
 
+bool matmul_fp8_gfx1201_algorithm_index_policy_contract() {
+  constexpr uint32_t fn = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+  constexpr uint32_t fnuz = SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ;
+  constexpr uint64_t no_algorithm = UINT64_MAX;
+  const auto index = [](const char *const arch, const uint32_t dtype,
+                        const uint64_t m, const uint64_t k, const uint64_t n,
+                        const char *const override_value) {
+    return sllm_test_select_fp8_lt_algorithm_index_policy(arch, dtype, m, k, n,
+                                                          override_value);
+  };
+  bool valid = sllm_test_fp8_lt_pinned_identity(100401, "cd957402") == 1U &&
+               sllm_test_fp8_lt_pinned_identity(100400, "cd957402") == 0U &&
+               sllm_test_fp8_lt_pinned_identity(100401, "cd957403") == 0U &&
+               sllm_test_fp8_lt_pinned_identity(100401, nullptr) == 0U;
+  constexpr std::array<std::array<uint64_t, 3>, 7> shapes = {{
+      {5120U, 6144U, 123373U},
+      {5120U, 10240U, 123374U},
+      {5120U, 12288U, 123374U},
+      {5120U, 1024U, 123373U},
+      {5120U, 17408U, 123375U},
+      {6144U, 5120U, 123373U},
+      {17408U, 5120U, 123374U},
+  }};
+  for (const auto &shape : shapes) {
+    const uint64_t k = shape[0], n = shape[1], expected = shape[2];
+    for (const uint64_t m : {2U, 3U, 4U}) {
+      valid = valid && index("gfx1201", fn, m, k, n, nullptr) == expected &&
+              index("gfx1201", fn, m, k, n, "7") == expected &&
+              index("gfx1030", fn, m, k, n, nullptr) == no_algorithm &&
+              index("gfx1201", fnuz, m, k, n, nullptr) == no_algorithm;
+    }
+    for (const uint64_t m : {0U, 1U, 5U}) {
+      valid = valid && index("gfx1201", fn, m, k, n, nullptr) == no_algorithm;
+    }
+    for (const uint64_t adjacent_k : {k - 1U, k + 1U}) {
+      valid = valid &&
+              index("gfx1201", fn, 3U, adjacent_k, n, nullptr) == no_algorithm;
+    }
+    for (const uint64_t adjacent_n : {n - 1U, n + 1U}) {
+      valid = valid &&
+              index("gfx1201", fn, 3U, k, adjacent_n, nullptr) == no_algorithm;
+    }
+  }
+  valid = valid &&
+          index("gfx1201", fn, 1U, 5120U, 6144U, nullptr) == no_algorithm &&
+          index("gfx1201", fn, 5U, 5120U, 6144U, nullptr) == no_algorithm &&
+          index("gfx1201", fn, 3U, 5119U, 6144U, nullptr) == no_algorithm &&
+          index("gfx1201", fn, 3U, 5120U, 6143U, nullptr) == no_algorithm &&
+          index("gfx1201", fn, 3U, 5120U, 10241U, nullptr) == no_algorithm &&
+          index("gfx1030", fn, 3U, 5120U, 6144U, nullptr) == no_algorithm &&
+          index("gfx1201", fnuz, 3U, 5120U, 6144U, nullptr) == no_algorithm;
+
+  const auto expect_candidate =
+      [](const int32_t *const algorithm_indices,
+         const uint32_t *const successful, const uint64_t *const workspace,
+         const uint64_t count, const uint64_t target, const uint32_t expected,
+         const uint64_t expected_position) {
+        uint64_t position = UINT64_MAX;
+        const uint32_t found = sllm_test_select_fp8_lt_heuristic_candidate(
+            algorithm_indices, successful, workspace, count, target, &position);
+        return found == expected && position == expected_position;
+      };
+  constexpr int32_t reordered_indices[] = {123374, 123372, 123373, 123373};
+  constexpr uint32_t reordered_success[] = {1U, 1U, 1U, 0U};
+  constexpr uint64_t reordered_workspace[] = {0U, 0U, 0U, 0U};
+  valid = valid &&
+          expect_candidate(reordered_indices, reordered_success,
+                           reordered_workspace, 4U, 123373U, 1U, 2U) &&
+          expect_candidate(reordered_indices, reordered_success,
+                           reordered_workspace, 4U, 123374U, 1U, 0U);
+  constexpr int32_t neighbor_index[] = {123372};
+  constexpr uint32_t neighbor_success[] = {1U};
+  constexpr uint64_t neighbor_workspace[] = {0U};
+  constexpr int32_t workspace_index[] = {123373};
+  constexpr uint32_t workspace_success[] = {1U};
+  constexpr uint64_t nonzero_workspace[] = {1U};
+  constexpr uint32_t failed_success[] = {0U};
+  valid =
+      valid &&
+      expect_candidate(neighbor_index, neighbor_success, neighbor_workspace, 1U,
+                       123373U, 0U, UINT64_MAX) &&
+      expect_candidate(workspace_index, workspace_success, nonzero_workspace,
+                       1U, 123373U, 0U, UINT64_MAX) &&
+      expect_candidate(workspace_index, failed_success, neighbor_workspace, 1U,
+                       123373U, 0U, UINT64_MAX) &&
+      expect_candidate(nullptr, nullptr, nullptr, 0U, 123373U, 0U, UINT64_MAX);
+  return valid;
+}
+
 bool matmul_nvfp4_w4a4_selector_contract() {
-  constexpr std::array<const char *const, 9> variables = {
+  constexpr std::array<const char *const, 13> variables = {
       "SLLM_NVFP4_W4A4_FORCE_BASELINE",
       "SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8",
       "SLLM_NVFP4_W4A4_PREFILL_FORCE_COL8",
@@ -6727,6 +7296,10 @@ bool matmul_nvfp4_w4a4_selector_contract() {
       sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201F16StagingEnvironment,
       sllm_matmul_kernel::kNvfp4W4A4DecodeActivationSharedEnvironment,
       sllm_matmul_kernel::kNvfp4W4A4DecodeScaleLutEnvironment,
+      sllm_matmul_kernel::kNvfp4W4A4PrefillCompensatedEnvironment,
+      sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201WmmaKahanEnvironment,
+      "SLLM_NVFP4_W4A4_SMALL_M_ROWGRID",
+      sllm_matmul_kernel::kNvfp4W4A4SmallMGfx1201RowGridEnvironment,
   };
   std::array<bool, variables.size()> was_present{};
   std::array<std::string, variables.size()> old_values{};
@@ -6765,15 +7338,40 @@ bool matmul_nvfp4_w4a4_selector_contract() {
           KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
       select(1U, 17424U, "gfx1201", 1024U) == KernelVariant::Nvfp4W4A4Decode &&
       select(1U, 1024U, "gfx942", 1024U) == KernelVariant::Nvfp4W4A4Decode &&
-      select(2U, 5120U) == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
-      select(2U, 5120U, "gfx1201") ==
+      select(2U, 5120U) == KernelVariant::Nvfp4W4A4SmallMVgprReuse &&
+      select(2U, 5120U, "gfx1201") == KernelVariant::Nvfp4W4A4SmallMVgprReuse &&
+      select(2U, 5119U) == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      select(2U, 5120U, "gfx1030", 5120U) ==
           KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      select(64U, 5120U, "gfx1030") ==
+          KernelVariant::Nvfp4W4A4PrefillCompensated64x64 &&
+      select(63U, 5120U, "gfx1030") ==
+          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      select(64U, 5120U, "gfx1201") ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan &&
       static_cast<uint32_t>(KernelVariant::Nvfp4W4A4DecodeWave4Column32) ==
           67U &&
       static_cast<uint32_t>(KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging) ==
           72U &&
       static_cast<uint32_t>(KernelVariant::Nvfp4W4A4DecodeActivationShared) ==
           73U;
+
+  setenv(variables[9], "0", 1);
+  valid = valid && select(64U, 5120U, "gfx1030") !=
+                       KernelVariant::Nvfp4W4A4PrefillCompensated64x64;
+  unsetenv(variables[9]);
+  setenv(variables[10], "0", 1);
+  valid = valid && select(64U, 5120U, "gfx1201") !=
+                       KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan;
+  unsetenv(variables[10]);
+  setenv(variables[11], "0", 1);
+  valid = valid && select(2U, 5120U, "gfx1030") !=
+                       KernelVariant::Nvfp4W4A4SmallMVgprReuse;
+  unsetenv(variables[11]);
+  setenv(variables[12], "0", 1);
+  valid = valid && select(2U, 5120U, "gfx1201") !=
+                       KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid;
+  unsetenv(variables[12]);
 
   setenv(variables[5], "0", 1);
   valid = valid && select(1U, 5120U, "gfx1030", 17408U) ==
@@ -6898,7 +7496,7 @@ bool matmul_nvfp4_w4a4_selector_contract() {
       select(1U, 17408U, "gfx1030", 17408U) ==
           KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
       select(2U, 5120U, "gfx1030", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+          KernelVariant::Nvfp4W4A4SmallMVgprReuse &&
       select(1U, 5120U, "gfx1201", 17408U) ==
           KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
       std::strcmp(sllm_matmul_kernel::logical_kernel_id(
@@ -6950,7 +7548,7 @@ bool matmul_nvfp4_w4a4_selector_contract() {
       select(1U, 5120U, "gfx942:sramecc+:xnack-", 17408U) ==
           KernelVariant::Nvfp4W4A4Decode &&
       select(2U, 5120U, "gfx1201", 17408U) ==
-          KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+          KernelVariant::Nvfp4W4A4SmallMVgprReuse &&
       std::strcmp(
           sllm_matmul_kernel::logical_kernel_id(
               KernelVariant::Nvfp4W4A4DecodeScaleLut),
@@ -7139,7 +7737,7 @@ bool matmul_nvfp4_w4a4_selector_contract() {
 }
 
 bool matmul_selector_decision_contract() {
-  constexpr std::array<const char *const, 14> variables = {
+  constexpr std::array<const char *const, 18> variables = {
       sllm_matmul_kernel::kFp8OuterDecodeGfx1030Half2Environment,
       sllm_matmul_kernel::kFp8OuterDecodeGfx1030Dword8Environment,
       sllm_matmul_kernel::kFp8OuterDecodeGfx1030ActivationSharedEnvironment,
@@ -7153,7 +7751,11 @@ bool matmul_selector_decision_contract() {
       sllm_matmul_kernel::kFp8OuterDecodeBaselineEnvironment,
       sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201F16StagingEnvironment,
       "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA",
-      "SLLM_NVFP4_W4A4_FORCE_BASELINE"};
+      "SLLM_NVFP4_W4A4_FORCE_BASELINE",
+      sllm_matmul_kernel::kNvfp4W4A4PrefillCompensatedEnvironment,
+      sllm_matmul_kernel::kNvfp4W4A4PrefillGfx1201WmmaKahanEnvironment,
+      "SLLM_NVFP4_W4A4_SMALL_M_ROWGRID",
+      sllm_matmul_kernel::kNvfp4W4A4SmallMGfx1201RowGridEnvironment};
   std::array<bool, variables.size()> was_present{};
   std::array<std::string, variables.size()> old_values{};
   for (std::size_t index = 0U; index < variables.size(); ++index) {
@@ -7258,8 +7860,11 @@ bool matmul_selector_decision_contract() {
       sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx1201");
   const auto fp8_fused = sllm_matmul_kernel::select_fp8_outer_decision(
       2U, 5120U, 10240U, "gfx1030");
-  const auto fp8_fused_m1 = sllm_matmul_kernel::select_fp8_outer_decision(
-      1U, 5120U, 10240U, "gfx1030");
+  const auto fp8_lut_m1 = sllm_matmul_kernel::select_fp8_outer_decision(
+      1U, 5120U, 12288U, "gfx1030");
+  const auto fp8_lut_m1_neighbor =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 5120U, 12287U,
+                                                    "gfx1030");
   const auto fp8_fused_fnuz = sllm_matmul_kernel::select_fp8_outer_decision(
       2U, 5120U, 10240U, "gfx1030", true);
   const auto fp8_unknown =
@@ -7271,10 +7876,77 @@ bool matmul_selector_decision_contract() {
       fp8_fused.supported && fp8_fused.enabled && fp8_fused.adopted &&
       std::strcmp(fp8_fused.reason, "adopted default for target and shape") ==
           0 &&
-      fp8_fused_m1.variant != KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
+      fp8_lut_m1.variant ==
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
+      fp8_lut_m1.supported && fp8_lut_m1.enabled && fp8_lut_m1.adopted &&
+      std::strcmp(fp8_lut_m1.reason, "adopted default for target and shape") ==
+          0 &&
+      fp8_lut_m1_neighbor.variant !=
+          KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
       fp8_fused_fnuz.variant != KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
       fp8_unknown.variant == KernelVariant::Fp8Emulation &&
       !fp8_unknown.supported;
+
+  const auto nvfp4_id87_default =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(64U, 5120U, 17408U,
+                                                     "gfx1030");
+  const auto nvfp4_id87_m_boundary =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(63U, 5120U, 17408U,
+                                                     "gfx1030");
+  const auto nvfp4_id89_default =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(64U, 5120U, 17408U,
+                                                     "gfx1201");
+  const auto nvfp4_id94_default =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(3U, 5120U, 17408U,
+                                                     "gfx1030");
+  const auto nvfp4_id90_default =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(3U, 5120U, 17408U,
+                                                     "gfx1201");
+  valid =
+      valid &&
+      nvfp4_id87_default.variant ==
+          KernelVariant::Nvfp4W4A4PrefillCompensated64x64 &&
+      nvfp4_id87_default.supported && nvfp4_id87_default.enabled &&
+      nvfp4_id87_default.adopted &&
+      std::strcmp(nvfp4_id87_default.reason,
+                  "adopted default for target and shape") == 0 &&
+      nvfp4_id87_m_boundary.variant !=
+          KernelVariant::Nvfp4W4A4PrefillCompensated64x64 &&
+      nvfp4_id89_default.variant ==
+          KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan &&
+      nvfp4_id89_default.supported && nvfp4_id89_default.enabled &&
+      nvfp4_id89_default.adopted &&
+      nvfp4_id94_default.variant == KernelVariant::Nvfp4W4A4SmallMVgprReuse &&
+      nvfp4_id94_default.supported && nvfp4_id94_default.enabled &&
+      nvfp4_id94_default.adopted &&
+      nvfp4_id90_default.variant == KernelVariant::Nvfp4W4A4SmallMVgprReuse &&
+      nvfp4_id90_default.supported && nvfp4_id90_default.enabled &&
+      nvfp4_id90_default.adopted;
+
+  setenv(variables[14], "0", 1);
+  setenv(variables[15], "0", 1);
+  setenv(variables[16], "0", 1);
+  setenv(variables[17], "0", 1);
+  const auto nvfp4_id87_off = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+      64U, 5120U, 17408U, "gfx1030");
+  const auto nvfp4_id89_off = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+      64U, 5120U, 17408U, "gfx1201");
+  const auto nvfp4_id94_off = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+      3U, 5120U, 17408U, "gfx1030");
+  const auto nvfp4_id90_off = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+      3U, 5120U, 17408U, "gfx1201");
+  valid =
+      valid &&
+      nvfp4_id87_off.variant !=
+          KernelVariant::Nvfp4W4A4PrefillCompensated64x64 &&
+      nvfp4_id89_off.variant !=
+          KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan &&
+      nvfp4_id94_off.variant != KernelVariant::Nvfp4W4A4SmallMVgprReuse &&
+      nvfp4_id90_off.variant != KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid;
+  unsetenv(variables[14]);
+  unsetenv(variables[15]);
+  unsetenv(variables[16]);
+  unsetenv(variables[17]);
 
   const auto nvfp4_baseline =
       sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 16U, 33U, "gfx1030");
@@ -7775,6 +8447,357 @@ bool matmul_async_lifetime_and_cleanup() {
          release_queue(&queue) && release_buffer(&activation) &&
          release_buffer(&weight) && release_buffer(&output) &&
          release_context(&context) && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
+/* The low-precision M>1 activation scratch is queue-owned.  Keep this test
+ * at the public ABI: allocation counts are the only fake-HIP observation
+ * needed to distinguish reuse, growth-retention, and per-queue ownership.
+ * The fake runtime has no device execution, so this is a lifetime/accounting
+ * contract rather than numerical-kernel coverage. */
+bool matmul_queue_scratch_pool_contract() {
+  fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
+  fake_hip::set_gcn_arch_name("gfx1201");
+
+  constexpr uint64_t k = 5120U;
+  constexpr uint64_t n = 17408U;
+  constexpr uint64_t max_m = 8U;
+  constexpr uint64_t weight_values = n * k / UINT64_C(2);
+  constexpr uint64_t weight_scales = n * (k / UINT64_C(16));
+  constexpr uint64_t weight_bytes =
+      ((weight_values + weight_scales + UINT64_C(3)) & ~UINT64_C(3)) +
+      UINT64_C(8);
+  static_assert(weight_bytes == UINT64_C(50135048));
+
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue_a = nullptr;
+  sllm_queue_t *queue_b = nullptr;
+  sllm_buffer_t *activation = nullptr;
+  sllm_buffer_t *weight = nullptr;
+  sllm_buffer_t *output = nullptr;
+  std::array<sllm_matmul_plan_t *, 6> plans{};
+  std::array<sllm_completion_t *, 4> completions{};
+  Error error;
+
+  const auto cleanup = [&]() {
+    bool clean = true;
+    fake_hip::set_completion_pending(false);
+    sllm_public_runtime::FaultInjector::reset();
+    for (sllm_completion_t *&completion : completions) {
+      if (completion != nullptr) {
+        clean = query_completion(completion, SLLM_STATUS_OK) && clean;
+        clean = release_completion(&completion) && clean;
+      }
+    }
+    for (sllm_matmul_plan_t *&plan : plans) {
+      if (plan != nullptr) {
+        clean = expect_status(sllm_matmul_plan_release(&plan, &error.sink),
+                              SLLM_STATUS_OK, "queue scratch plan cleanup",
+                              error) &&
+                clean;
+      }
+    }
+    if (queue_b != nullptr)
+      clean = release_queue(&queue_b) && clean;
+    if (queue_a != nullptr)
+      clean = release_queue(&queue_a) && clean;
+    if (output != nullptr)
+      clean = release_buffer(&output) && clean;
+    if (weight != nullptr)
+      clean = release_buffer(&weight) && clean;
+    if (activation != nullptr)
+      clean = release_buffer(&activation) && clean;
+    if (context != nullptr)
+      clean = release_context(&context) && clean;
+    return clean;
+  };
+
+  bool valid =
+      create_context_for_arch("gfx1201", &context) &&
+      create_queue(context, &queue_a) && create_queue(context, &queue_b) &&
+      create_buffer_sized(context, max_m * k * sizeof(uint16_t), &activation) &&
+      create_buffer_sized(context, weight_bytes, &weight) &&
+      create_buffer_sized(context, max_m * n * sizeof(uint16_t), &output);
+  if (!valid) {
+    cleanup();
+    fake_hip::set_gcn_arch_name("gfx1201");
+    return false;
+  }
+
+  const auto lowp_descriptor = [&](const uint64_t m) {
+    auto descriptor =
+        matmul_descriptor(activation, 0U, weight, 0U, output, 0U, m, k, n);
+    descriptor.op_version = SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION;
+    descriptor.weight.dtype = SLLM_TENSOR_DTYPE_U8;
+    descriptor.weight.encoding =
+        SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
+    return descriptor;
+  };
+
+  const auto prepare = [&](const uint64_t m, sllm_matmul_plan_t **const plan,
+                           const char *const label) {
+    auto descriptor = lowp_descriptor(m);
+    return expect_status(
+               sllm_matmul_prepare(context, &descriptor, plan, &error.sink),
+               SLLM_STATUS_OK, label, error) &&
+           *plan != nullptr;
+  };
+
+  /* Two separately prepared M=2 plans exercise same-queue reuse.  The
+   * nonaligned M=3 shape is larger and must retain the M=2 slot while its
+   * submission is pending. */
+  const std::size_t before_prepare = fake_hip::live_allocations();
+  valid = valid && prepare(2U, &plans[0], "queue scratch M2 plan A") &&
+          prepare(2U, &plans[1], "queue scratch M2 plan B") &&
+          prepare(3U, &plans[2], "queue scratch M3 growth plan A") &&
+          prepare(4U, &plans[3], "queue scratch M4 plan B") &&
+          prepare(8U, &plans[4], "queue scratch M8 failure plan") &&
+          prepare(1U, &plans[5], "queue scratch M1 plan");
+  if (!valid) {
+    cleanup();
+    fake_hip::set_gcn_arch_name("gfx1201");
+    return false;
+  }
+
+  /* M=1 retains the old plan-owned workspace.  Exclude it from the pool
+   * observations by taking the baseline after all plans have been prepared. */
+  const std::size_t prepared_allocations = fake_hip::live_allocations();
+  valid = valid && prepared_allocations == before_prepare + 1U;
+  fake_hip::set_completion_pending(true);
+  auto execute = [&](const std::size_t plan_index,
+                     const std::size_t completion_index,
+                     sllm_queue_t *const queue, const char *const label) {
+    auto info = matmul_dispatch_info();
+    return expect_status(sllm_matmul_execute(plans[plan_index], queue,
+                                             &completions[completion_index],
+                                             &info, &error.sink),
+                         SLLM_STATUS_OK, label, error) &&
+           completions[completion_index] != nullptr;
+  };
+
+  valid = valid && execute(0U, 0U, queue_a, "queue scratch first M2 execute");
+  const std::size_t after_first = fake_hip::live_allocations();
+  valid = valid && after_first == prepared_allocations + 1U;
+
+  /* Same queue and capacity: the second prepared plan reuses the newest
+   * queue slot even while the first stream submission remains pending. */
+  valid = valid &&
+          execute(1U, 1U, queue_a, "queue scratch reused M2 execute") &&
+          fake_hip::live_allocations() == after_first;
+
+  valid = valid && execute(2U, 2U, queue_a, "queue scratch grown M3 execute") &&
+          fake_hip::live_allocations() == prepared_allocations + 2U;
+
+  /* A second queue has an independent newest slot for M=4.  The first queue's
+   * two retained slots stay live. */
+  valid = valid && execute(3U, 3U, queue_b, "queue scratch second queue M4") &&
+          fake_hip::live_allocations() == prepared_allocations + 3U;
+
+  /* The lifecycle seam turns this into a pre-enqueue allocation failure.  It
+   * must leave the queue's retained slots and public accounting unchanged. */
+  const std::size_t before_failure = fake_hip::live_allocations();
+  const std::size_t launches_before_failure = fake_hip::matmul_launch_calls();
+  sllm_public_runtime::FaultInjector::set(
+      sllm_public_runtime::FaultPoint::NativeCreationFailure, 1U);
+  auto failure_info = matmul_dispatch_info();
+  sllm_completion_t *failure_completion = nullptr;
+  const sllm_status_t failure_status = sllm_matmul_execute(
+      plans[4], queue_a, &failure_completion, &failure_info, &error.sink);
+  sllm_public_runtime::FaultInjector::reset();
+  valid = valid &&
+          expect_status(failure_status, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                        "queue scratch allocation failure", error) &&
+          failure_completion == nullptr &&
+          fake_hip::live_allocations() == before_failure &&
+          fake_hip::matmul_launch_calls() == launches_before_failure;
+
+  const bool cleaned = cleanup();
+  fake_hip::set_gcn_arch_name("gfx1201");
+  return valid && cleaned && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
+/* The metadata-only footprint query must use the same checked provider/layout
+ * arithmetic as prepare without creating a plan, HIP allocation, or launch.
+ * Keep the expected byte values explicit so this test also detects a drift
+ * between the admission query and the provider block contracts. */
+bool matmul_workspace_footprint_query_contract() {
+  fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
+  fake_hip::set_gcn_arch_name("gfx1201");
+
+  sllm_context_t *context = nullptr;
+  bool valid = create_context_for_arch("gfx1201", &context);
+  if (!valid) {
+    fake_hip::set_gcn_arch_name("gfx1201");
+    return false;
+  }
+
+  const auto unbound_descriptor =
+      [](const uint32_t version, const uint64_t m, const uint64_t k,
+         const uint64_t n, const uint32_t dtype, const uint32_t encoding) {
+        auto descriptor =
+            matmul_descriptor(nullptr, 0U, nullptr, 0U, nullptr, 0U, m, k, n);
+        descriptor.op_version = version;
+        descriptor.weight.dtype = dtype;
+        descriptor.weight.encoding = encoding;
+        return descriptor;
+      };
+
+  const auto query = [&](const sllm_matmul_desc_t &descriptor,
+                         const uint64_t expected_persistent,
+                         const uint64_t expected_queue,
+                         const uint64_t expected_context,
+                         const char *const label) {
+    uint64_t persistent = UINT64_C(0x1111111111111111);
+    uint64_t queue = UINT64_C(0x2222222222222222);
+    uint64_t context_bytes = UINT64_C(0x3333333333333333);
+    const std::size_t allocations_before = fake_hip::live_allocations();
+    const std::size_t launches_before = fake_hip::matmul_launch_calls();
+    const std::size_t properties_before = fake_hip::device_property_calls();
+    Error error;
+    const bool status_ok =
+        expect_status(sllm_hip_matmul_workspace_footprint(
+                          context, &descriptor, &persistent, &queue,
+                          &context_bytes, &error.sink),
+                      SLLM_STATUS_OK, label, error);
+    const bool values_ok = persistent == expected_persistent &&
+                           queue == expected_queue &&
+                           context_bytes == expected_context;
+    const bool side_effects_ok =
+        fake_hip::live_allocations() == allocations_before &&
+        fake_hip::matmul_launch_calls() == launches_before &&
+        fake_hip::device_property_calls() == properties_before;
+    if (!values_ok || !side_effects_ok) {
+      std::cerr << label << " mismatch: persistent=" << persistent
+                << " queue=" << queue << " context=" << context_bytes
+                << " allocations=" << fake_hip::live_allocations()
+                << " launches=" << fake_hip::matmul_launch_calls()
+                << " device_properties=" << fake_hip::device_property_calls()
+                << '\n';
+    }
+    return status_ok && values_ok && side_effects_ok;
+  };
+
+  const auto nvfp4 = [&](const uint64_t m) {
+    return unbound_descriptor(
+        SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION, m, UINT64_C(5120), UINT64_C(17408),
+        SLLM_TENSOR_DTYPE_U8,
+        SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32);
+  };
+  valid =
+      query(nvfp4(1U), UINT64_C(2880), 0U, 0U, "NVFP4 footprint M1") && valid;
+  valid =
+      query(nvfp4(2U), 0U, UINT64_C(5760), 0U, "NVFP4 footprint M2") && valid;
+  valid =
+      query(nvfp4(3U), 0U, UINT64_C(8640), 0U, "NVFP4 footprint M3") && valid;
+
+  valid =
+      query(unbound_descriptor(SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION, 3U, 64U, 7U,
+                               SLLM_TENSOR_DTYPE_U8,
+                               SLLM_TENSOR_ENCODING_MXFP4_W4A4_BLOCK32_E8M0),
+            0U, UINT64_C(102), 0U, "MXFP4 footprint") &&
+      valid;
+  valid = query(unbound_descriptor(SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION, 3U, 64U,
+                                   7U, SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                                   SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0),
+                0U, UINT64_C(198), 0U, "MXFP8 footprint") &&
+          valid;
+  valid =
+      query(unbound_descriptor(SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION, 3U, 64U, 7U,
+                               SLLM_TENSOR_DTYPE_U8,
+                               SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0),
+            0U, UINT64_C(150), 0U, "MXFP6 footprint") &&
+      valid;
+  valid = query(unbound_descriptor(SLLM_HIP_MATMUL_FP8_VERSION, 3U, 64U, 7U,
+                                   SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                                   SLLM_TENSOR_ENCODING_FP8_OUTER_F32),
+                UINT64_C(204), 0U, 0U, "FP8 outer footprint") &&
+          valid;
+
+  auto malformed_bound = nvfp4(1U);
+  malformed_bound.activation.buffer =
+      reinterpret_cast<const sllm_buffer_t *>(static_cast<uintptr_t>(1U));
+  {
+    uint64_t persistent = UINT64_C(0x4444444444444444);
+    uint64_t queue = UINT64_C(0x5555555555555555);
+    uint64_t context_bytes = UINT64_C(0x6666666666666666);
+    const std::size_t allocations_before = fake_hip::live_allocations();
+    const std::size_t launches_before = fake_hip::matmul_launch_calls();
+    Error error;
+    valid = expect_status(sllm_hip_matmul_workspace_footprint(
+                              context, &malformed_bound, &persistent, &queue,
+                              &context_bytes, &error.sink),
+                          SLLM_STATUS_INVALID_TENSOR_BINDING,
+                          "bound handle rejected by footprint query", error) &&
+            persistent == UINT64_C(0x4444444444444444) &&
+            queue == UINT64_C(0x5555555555555555) &&
+            context_bytes == UINT64_C(0x6666666666666666) &&
+            fake_hip::live_allocations() == allocations_before &&
+            fake_hip::matmul_launch_calls() == launches_before && valid;
+  }
+
+  auto overflow =
+      matmul_descriptor(nullptr, 0U, nullptr, 0U, nullptr, 0U,
+                        std::numeric_limits<uint64_t>::max(), 2U, 7U);
+  {
+    uint64_t persistent = UINT64_C(0x7777777777777777);
+    uint64_t queue = UINT64_C(0x8888888888888888);
+    uint64_t context_bytes = UINT64_C(0x9999999999999999);
+    Error error;
+    valid = expect_status(sllm_hip_matmul_workspace_footprint(
+                              context, &overflow, &persistent, &queue,
+                              &context_bytes, &error.sink),
+                          SLLM_STATUS_METADATA_OVERFLOW,
+                          "footprint shape overflow", error) &&
+            persistent == UINT64_C(0x7777777777777777) &&
+            queue == UINT64_C(0x8888888888888888) &&
+            context_bytes == UINT64_C(0x9999999999999999) && valid;
+  }
+
+  sllm_context_t *unsupported_context = nullptr;
+  constexpr const char *const force_gfx1201_wmma =
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA";
+  const char *const old_force_gfx1201_wmma = std::getenv(force_gfx1201_wmma);
+  const bool had_force_gfx1201_wmma = old_force_gfx1201_wmma != nullptr;
+  const std::string old_force_gfx1201_wmma_value =
+      had_force_gfx1201_wmma ? old_force_gfx1201_wmma : "";
+  fake_hip::set_gcn_arch_name("gfx942");
+  valid = create_context_for_arch("gfx942", &unsupported_context) && valid;
+  if (unsupported_context != nullptr) {
+    auto unsupported = nvfp4(2U);
+    uint64_t persistent = UINT64_C(0xaaaaaaaaaaaaaaaa);
+    uint64_t queue = UINT64_C(0xbbbbbbbbbbbbbbbb);
+    uint64_t context_bytes = UINT64_C(0xcccccccccccccccc);
+    const std::size_t allocations_before = fake_hip::live_allocations();
+    const std::size_t launches_before = fake_hip::matmul_launch_calls();
+    Error error;
+    setenv(force_gfx1201_wmma, "1", 1);
+    valid = expect_status(sllm_hip_matmul_workspace_footprint(
+                              unsupported_context, &unsupported, &persistent,
+                              &queue, &context_bytes, &error.sink),
+                          SLLM_STATUS_UNSUPPORTED,
+                          "unsupported footprint target", error) &&
+            persistent == UINT64_C(0xaaaaaaaaaaaaaaaa) &&
+            queue == UINT64_C(0xbbbbbbbbbbbbbbbb) &&
+            context_bytes == UINT64_C(0xcccccccccccccccc) &&
+            fake_hip::live_allocations() == allocations_before &&
+            fake_hip::matmul_launch_calls() == launches_before && valid;
+  }
+
+  if (had_force_gfx1201_wmma) {
+    setenv(force_gfx1201_wmma, old_force_gfx1201_wmma_value.c_str(), 1);
+  } else {
+    unsetenv(force_gfx1201_wmma);
+  }
+
+  if (unsupported_context != nullptr) {
+    valid = release_context(&unsupported_context) && valid;
+  }
+  fake_hip::set_gcn_arch_name("gfx1201");
+  valid = release_context(&context) && valid;
+  return valid && fake_hip::live_events() == 0U &&
          fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
 }
 
@@ -10994,6 +12017,360 @@ bool linear_attention_transaction_and_lifetime_contract() {
          release_context(&context);
 }
 
+bool linear_attention_checkpoint_batch_contract() {
+  fake_hip::reset();
+  constexpr uint32_t token_count = 3U;
+  constexpr uint64_t capacity = 7U;
+  const std::array<uint64_t, 9> sizes = {token_count * 8192U * 2U,
+                                         token_count * 4096U * 2U,
+                                         token_count * 32U * 2U,
+                                         token_count * 32U * 2U,
+                                         8192U * 4U * 2U,
+                                         32U * 4U,
+                                         32U * 2U,
+                                         128U * 4U,
+                                         token_count * 4096U * 2U};
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  std::array<sllm_buffer_t *, 9> buffers{};
+  std::array<sllm_linear_attention_state_t *, 2> states{};
+  Error error;
+  const char *failure_stage = "create";
+  const auto cleanup = [&]() {
+    bool valid = true;
+    for (auto &state : states) {
+      if (state != nullptr) {
+        valid = expect_status(
+                    sllm_linear_attention_state_release(&state, &error.sink),
+                    SLLM_STATUS_OK, "checkpoint batch state release", error) &&
+                valid;
+      }
+    }
+    for (auto &buffer : buffers) {
+      valid = release_buffer(&buffer) && valid;
+    }
+    valid = release_queue(&queue) && valid;
+    valid = release_context(&context) && valid;
+    return valid;
+  };
+  const auto fail = [&]() {
+    std::cerr << "linear checkpoint batch contract failure at " << failure_stage
+              << "\n";
+    (void)cleanup();
+    return false;
+  };
+  if (!create_context(&context) || !create_queue(context, &queue)) {
+    return fail();
+  }
+  for (std::size_t index = 0U; index != buffers.size(); ++index) {
+    failure_stage = "buffer creation";
+    if (!create_buffer_sized(context, sizes[index], &buffers[index])) {
+      return fail();
+    }
+  }
+  sllm_linear_attention_state_create_info_t create{};
+  create.struct_size = sizeof(create);
+  create.abi_version = SLLM_HIP_ABI_VERSION;
+  create.session_id = 0xb47cU;
+  create.capacity_tokens = capacity;
+  create.qk_heads = 16U;
+  create.value_heads = 32U;
+  create.head_dim = 128U;
+  create.conv_kernel_size = 4U;
+  for (std::size_t index = 0U; index != states.size(); ++index) {
+    failure_stage = "state creation";
+    create.layer_id = static_cast<uint32_t>(index + 21U);
+    if (!expect_status(sllm_linear_attention_state_create(
+                           context, &create, &states[index], &error.sink),
+                       SLLM_STATUS_OK, "checkpoint batch state create",
+                       error) ||
+        states[index] == nullptr) {
+      return fail();
+    }
+  }
+  const auto descriptor_for = [&](const std::size_t state_index,
+                                  const uint64_t start) {
+    const uint64_t qkv_shape[] = {token_count, 8192U};
+    const uint64_t output_shape[] = {token_count, 4096U};
+    const uint64_t scalar_shape[] = {token_count, 32U};
+    constexpr uint64_t conv_shape[] = {8192U, 1U, 4U};
+    constexpr uint64_t head_shape[] = {32U};
+    constexpr uint64_t norm_shape[] = {128U};
+    sllm_linear_attention_desc_t descriptor{};
+    descriptor.struct_size = sizeof(descriptor);
+    descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+    descriptor.op_version = SLLM_HIP_LINEAR_ATTENTION_VERSION;
+    descriptor.start_position = start;
+    descriptor.expected_length = start + token_count;
+    descriptor.state = states[state_index];
+    descriptor.qkv =
+        attention_binding(buffers[0], SLLM_TENSOR_DTYPE_BF16, 2U, qkv_shape);
+    descriptor.z =
+        attention_binding(buffers[1], SLLM_TENSOR_DTYPE_BF16, 2U, output_shape);
+    descriptor.b_input =
+        attention_binding(buffers[2], SLLM_TENSOR_DTYPE_BF16, 2U, scalar_shape);
+    descriptor.a_input =
+        attention_binding(buffers[3], SLLM_TENSOR_DTYPE_BF16, 2U, scalar_shape);
+    descriptor.conv_weight =
+        attention_binding(buffers[4], SLLM_TENSOR_DTYPE_BF16, 3U, conv_shape);
+    descriptor.a_log =
+        attention_binding(buffers[5], SLLM_TENSOR_DTYPE_F32, 1U, head_shape);
+    descriptor.dt_bias =
+        attention_binding(buffers[6], SLLM_TENSOR_DTYPE_BF16, 1U, head_shape);
+    descriptor.norm_weight =
+        attention_binding(buffers[7], SLLM_TENSOR_DTYPE_F32, 1U, norm_shape);
+    descriptor.output =
+        attention_binding(buffers[8], SLLM_TENSOR_DTYPE_BF16, 2U, output_shape);
+    return descriptor;
+  };
+  const auto query = [&](const std::size_t index, const uint64_t length,
+                         const uint64_t generation,
+                         const uint32_t active_slot = 1U) {
+    sllm_linear_attention_view_info_t view{};
+    view.struct_size = sizeof(view);
+    view.abi_version = SLLM_HIP_ABI_VERSION;
+    view.info_version = SLLM_HIP_LINEAR_ATTENTION_VIEW_INFO_VERSION;
+    Error query_error;
+    return expect_status(sllm_linear_attention_state_query(states[index], &view,
+                                                           &query_error.sink),
+                         SLLM_STATUS_OK, "checkpoint batch state query",
+                         query_error) &&
+           view.observed_length == length && view.generation == generation &&
+           view.active_slot == active_slot;
+  };
+  for (std::size_t index = 0U; index != states.size(); ++index) {
+    failure_stage = "checkpoint prepare";
+    if (!expect_status(sllm_linear_attention_state_prepare_checkpoint(
+                           states[index], 0U, token_count, 2U, &error.sink),
+                       SLLM_STATUS_OK, "checkpoint batch prepare", error)) {
+      return fail();
+    }
+    auto descriptor = descriptor_for(index, 0U);
+    failure_stage = "checkpoint execute";
+    sllm_linear_attention_dispatch_info_t dispatch{};
+    dispatch.struct_size = sizeof(dispatch);
+    dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+    dispatch.info_version = SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION;
+    sllm_completion_t *completion = nullptr;
+    if (!expect_status(sllm_linear_attention_execute(context, queue,
+                                                     &descriptor, &completion,
+                                                     &dispatch, &error.sink),
+                       SLLM_STATUS_OK, "checkpoint batch M3 execute", error) ||
+        completion == nullptr ||
+        !query_completion(completion, SLLM_STATUS_OK) ||
+        !release_completion(&completion)) {
+      return fail();
+    }
+  }
+  if (!query(0U, token_count, 1U) || !query(1U, token_count, 1U)) {
+    failure_stage = "first query";
+    return fail();
+  }
+  const sllm_linear_attention_state_t *duplicate_states[] = {states[0],
+                                                             states[0]};
+  if (!expect_status(sllm_linear_attention_state_commit_checkpoint_batch(
+                         context, queue, duplicate_states, 2U, 0U, token_count,
+                         1U, 0U, &error.sink),
+                     SLLM_STATUS_INVALID_ARGUMENT,
+                     "checkpoint batch duplicate preflight", error) ||
+      !query(0U, token_count, 1U) || !query(1U, token_count, 1U)) {
+    failure_stage = "duplicate preflight";
+    return fail();
+  }
+  const sllm_linear_attention_state_t *batch_states[] = {states[0], states[1]};
+  if (!expect_status(sllm_linear_attention_state_commit_checkpoint_batch(
+                         context, queue, batch_states, 2U, 0U, token_count, 1U,
+                         0U, &error.sink),
+                     SLLM_STATUS_OK, "checkpoint batch commit", error) ||
+      !query(0U, 1U, 2U) || !query(1U, 1U, 2U)) {
+    failure_stage = "batch commit";
+    return fail();
+  }
+  failure_stage = "single rearm";
+  if (!expect_status(sllm_linear_attention_state_prepare_checkpoint(
+                         states[0], 1U, token_count, 2U, &error.sink),
+                     SLLM_STATUS_OK, "checkpoint single-wrapper rearm",
+                     error)) {
+    return fail();
+  }
+  auto descriptor = descriptor_for(0U, 1U);
+  sllm_linear_attention_dispatch_info_t dispatch{};
+  dispatch.struct_size = sizeof(dispatch);
+  dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+  dispatch.info_version = SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION;
+  sllm_completion_t *completion = nullptr;
+  if (!expect_status(
+          sllm_linear_attention_execute(context, queue, &descriptor,
+                                        &completion, &dispatch, &error.sink),
+          SLLM_STATUS_OK, "checkpoint single-wrapper M3 execute", error) ||
+      completion == nullptr || !query_completion(completion, SLLM_STATUS_OK) ||
+      !release_completion(&completion) ||
+      !expect_status(
+          sllm_linear_attention_state_commit_checkpoint(
+              context, queue, states[0], 1U, 4U, 3U, 1U, &error.sink),
+          SLLM_STATUS_OK, "checkpoint single-wrapper commit", error) ||
+      !query(0U, 3U, 4U, 0U)) {
+    failure_stage = "single commit";
+    return fail();
+  }
+  failure_stage = "cleanup";
+  return cleanup();
+}
+
+bool linear_attention_checkpoint_batch_failure_contract() {
+  constexpr uint32_t token_count = 3U;
+  constexpr uint64_t capacity = 7U;
+  const std::array<uint64_t, 9> sizes = {token_count * 8192U * 2U,
+                                         token_count * 4096U * 2U,
+                                         token_count * 32U * 2U,
+                                         token_count * 32U * 2U,
+                                         8192U * 4U * 2U,
+                                         32U * 4U,
+                                         32U * 2U,
+                                         128U * 4U,
+                                         token_count * 4096U * 2U};
+  const auto run_case = [&](const sllm_public_runtime::FaultPoint fault,
+                            const char *const label) {
+    const pid_t child = fork();
+    if (child < 0) {
+      return false;
+    }
+    if (child == 0) {
+      fake_hip::reset();
+      sllm_public_runtime::FaultInjector::reset();
+      const auto child_fail = [&]() -> void {
+        std::cerr << "linear checkpoint " << label << " failure case failed\n";
+        _exit(1);
+      };
+      sllm_context_t *context = nullptr;
+      sllm_queue_t *queue = nullptr;
+      std::array<sllm_buffer_t *, 9> buffers{};
+      sllm_linear_attention_state_t *state = nullptr;
+      Error error;
+      if (!create_context(&context) || !create_queue(context, &queue)) {
+        child_fail();
+      }
+      for (std::size_t index = 0U; index != buffers.size(); ++index) {
+        if (!create_buffer_sized(context, sizes[index], &buffers[index])) {
+          child_fail();
+        }
+      }
+      sllm_linear_attention_state_create_info_t create{};
+      create.struct_size = sizeof(create);
+      create.abi_version = SLLM_HIP_ABI_VERSION;
+      create.session_id = 0xc83fU;
+      create.layer_id = 37U;
+      create.capacity_tokens = capacity;
+      create.qk_heads = 16U;
+      create.value_heads = 32U;
+      create.head_dim = 128U;
+      create.conv_kernel_size = 4U;
+      if (!expect_status(sllm_linear_attention_state_create(
+                             context, &create, &state, &error.sink),
+                         SLLM_STATUS_OK, "checkpoint failure state create",
+                         error) ||
+          state == nullptr) {
+        child_fail();
+      }
+      if (!expect_status(sllm_linear_attention_state_prepare_checkpoint(
+                             state, 0U, token_count, 2U, &error.sink),
+                         SLLM_STATUS_OK, "checkpoint failure prepare", error)) {
+        child_fail();
+      }
+      const uint64_t qkv_shape[] = {token_count, 8192U};
+      const uint64_t output_shape[] = {token_count, 4096U};
+      const uint64_t scalar_shape[] = {token_count, 32U};
+      constexpr uint64_t conv_shape[] = {8192U, 1U, 4U};
+      constexpr uint64_t head_shape[] = {32U};
+      constexpr uint64_t norm_shape[] = {128U};
+      sllm_linear_attention_desc_t descriptor{};
+      descriptor.struct_size = sizeof(descriptor);
+      descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+      descriptor.op_version = SLLM_HIP_LINEAR_ATTENTION_VERSION;
+      descriptor.start_position = 0U;
+      descriptor.expected_length = token_count;
+      descriptor.state = state;
+      descriptor.qkv =
+          attention_binding(buffers[0], SLLM_TENSOR_DTYPE_BF16, 2U, qkv_shape);
+      descriptor.z = attention_binding(buffers[1], SLLM_TENSOR_DTYPE_BF16, 2U,
+                                       output_shape);
+      descriptor.b_input = attention_binding(buffers[2], SLLM_TENSOR_DTYPE_BF16,
+                                             2U, scalar_shape);
+      descriptor.a_input = attention_binding(buffers[3], SLLM_TENSOR_DTYPE_BF16,
+                                             2U, scalar_shape);
+      descriptor.conv_weight =
+          attention_binding(buffers[4], SLLM_TENSOR_DTYPE_BF16, 3U, conv_shape);
+      descriptor.a_log =
+          attention_binding(buffers[5], SLLM_TENSOR_DTYPE_F32, 1U, head_shape);
+      descriptor.dt_bias =
+          attention_binding(buffers[6], SLLM_TENSOR_DTYPE_BF16, 1U, head_shape);
+      descriptor.norm_weight =
+          attention_binding(buffers[7], SLLM_TENSOR_DTYPE_F32, 1U, norm_shape);
+      descriptor.output = attention_binding(buffers[8], SLLM_TENSOR_DTYPE_BF16,
+                                            2U, output_shape);
+      sllm_linear_attention_dispatch_info_t dispatch{};
+      dispatch.struct_size = sizeof(dispatch);
+      dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+      dispatch.info_version = SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION;
+      sllm_completion_t *completion = nullptr;
+      if (!expect_status(sllm_linear_attention_execute(context, queue,
+                                                       &descriptor, &completion,
+                                                       &dispatch, &error.sink),
+                         SLLM_STATUS_OK, "checkpoint failure M3 execute",
+                         error) ||
+          completion == nullptr ||
+          !query_completion(completion, SLLM_STATUS_OK) ||
+          !release_completion(&completion)) {
+        child_fail();
+      }
+      uint64_t published_length = 0U;
+      uint64_t generation = 0U;
+      uint32_t active_slot = 0U;
+      if (!sllm_test_linear_attention_published_metadata(
+              state, &published_length, &generation, &active_slot) ||
+          published_length != token_count || generation != 1U ||
+          active_slot != 1U) {
+        child_fail();
+      }
+      const sllm_linear_attention_state_t *states[] = {state};
+      sllm_public_runtime::FaultInjector::set(fault, 1U);
+      const sllm_status_t commit_status =
+          sllm_linear_attention_state_commit_checkpoint_batch(
+              context, queue, states, 1U, 0U, token_count, 1U, 0U, &error.sink);
+      sllm_public_runtime::FaultInjector::reset();
+      if (!expect_status(commit_status, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                         "checkpoint injected post-copy/fence failure",
+                         error) ||
+          !sllm_test_linear_attention_published_metadata(
+              state, &published_length, &generation, &active_slot) ||
+          published_length != token_count || generation != 1U ||
+          active_slot != 1U) {
+        child_fail();
+      }
+      sllm_linear_attention_view_info_t poisoned_view{};
+      poisoned_view.struct_size = sizeof(poisoned_view);
+      poisoned_view.abi_version = SLLM_HIP_ABI_VERSION;
+      poisoned_view.info_version = SLLM_HIP_LINEAR_ATTENTION_VIEW_INFO_VERSION;
+      if (!expect_status(sllm_linear_attention_state_query(
+                             state, &poisoned_view, &error.sink),
+                         SLLM_STATUS_PUBLIC_BUSY,
+                         "checkpoint poisoned state query", error)) {
+        child_fail();
+      }
+      _exit(0);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) != child) {
+      return false;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+  };
+  return run_case(sllm_public_runtime::FaultPoint::LinearCheckpointCopyFailure,
+                  "copy") &&
+         run_case(sllm_public_runtime::FaultPoint::LinearCheckpointFenceFailure,
+                  "fence");
+}
+
 bool state_fork_vmm_and_linear_image_contract() {
   fake_hip::reset();
   constexpr uint64_t source_capacity = 2048U;
@@ -12820,6 +14197,15 @@ int main() {
     std::cerr << "Qwen3.8 generic NVFP4 projection-pack contract test failed\n";
     return 1;
   }
+  if (!qwen38_projection_pack2_nvfp4_m64_baseline_fallback_contract()) {
+    std::cerr << "Qwen3.8 M64 NVFP4 baseline fallback contract test failed\n";
+    return 1;
+  }
+  if (!qwen38_projection_pack2_nvfp4_m64_queue_contract()) {
+    std::cerr
+        << "Qwen3.8 M64 NVFP4 projection-pack queue contract test failed\n";
+    return 1;
+  }
   if (!qwen38_projection_pack2_fp8_gdn_public_contract()) {
     std::cerr
         << "Qwen3.8 FP8 GDN projection-pack public contract test failed\n";
@@ -12839,6 +14225,10 @@ int main() {
   }
   if (!matmul_fp8_gfx1201_decode_rank_table_contract()) {
     std::cerr << "matmul FP8 gfx1201 decode rank table test failed\n";
+    return 1;
+  }
+  if (!matmul_fp8_gfx1201_algorithm_index_policy_contract()) {
+    std::cerr << "matmul FP8 gfx1201 algorithm-index policy test failed\n";
     return 1;
   }
   if (!matmul_nvfp4_w4a4_selector_contract()) {
@@ -12863,6 +14253,14 @@ int main() {
   }
   if (!matmul_async_lifetime_and_cleanup()) {
     std::cerr << "matmul async lifetime/cleanup test failed\n";
+    return 1;
+  }
+  if (!matmul_queue_scratch_pool_contract()) {
+    std::cerr << "matmul queue scratch-pool contract test failed\n";
+    return 1;
+  }
+  if (!matmul_workspace_footprint_query_contract()) {
+    std::cerr << "matmul workspace-footprint query contract test failed\n";
     return 1;
   }
   if (!gdn_projection_bundle_launch_failure_rolls_back_accounting() ||
@@ -12991,6 +14389,7 @@ int main() {
   SLLM_RUN_KV_CONTRACT(causal_attention_numerical_gqa_and_lifetime_contract)
   SLLM_RUN_KV_CONTRACT(causal_attention_after_kv_append_chain_contract)
   SLLM_RUN_KV_CONTRACT(linear_attention_transaction_and_lifetime_contract)
+  SLLM_RUN_KV_CONTRACT(linear_attention_checkpoint_batch_contract)
   SLLM_RUN_KV_CONTRACT(kv_append_same_buffer_disjoint_lifecycle_contract)
   SLLM_RUN_KV_CONTRACT(kv_state_create_snapshot_contract)
   SLLM_RUN_KV_CONTRACT(kv_lowbit_create_query_and_recipe_contract)
@@ -13004,6 +14403,7 @@ int main() {
   SLLM_RUN_KV_CONTRACT(kv_append_lifetime_alias_and_quarantine_contract)
   SLLM_RUN_KV_CONTRACT(state_fork_vmm_and_linear_image_contract)
   SLLM_RUN_KV_CONTRACT(sliding_static_fp8_ring_image_fork_and_scale_contract)
+  SLLM_RUN_KV_CONTRACT(linear_attention_checkpoint_batch_failure_contract)
 #undef SLLM_RUN_KV_CONTRACT
   std::cout << "production public runtime host fault test: PASS\n";
   return 0;

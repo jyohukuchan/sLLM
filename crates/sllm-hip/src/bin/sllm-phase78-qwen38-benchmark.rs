@@ -45,6 +45,7 @@ const WARMUPS_ENV: &str = "SLLM_PHASE78_WARMUPS";
 const MEASURED_ENV: &str = "SLLM_PHASE78_MEASURED";
 const ROWS_ENV: &str = "SLLM_PHASE78_ROWS";
 const CHUNK_CAPACITY_ENV: &str = "SLLM_PHASE78_CHUNK_CAPACITY";
+const STATE_CAPACITY_ENV: &str = "SLLM_PHASE83_STATE_CAPACITY";
 const PHASE83_MODE_ENV: &str = "SLLM_PHASE83_MODE";
 const PHASE83_KV_ENV: &str = "SLLM_PHASE83_KV";
 const PHASE83_ROWS_ENV: &str = "SLLM_PHASE83_ROWS";
@@ -354,6 +355,7 @@ fn build_mtp_run_report(
     Ok(MtpRunReport {
         draft_width,
         proposal_blocks,
+        fixed_k20_pq_blocks: 0,
         proposed_draft_tokens,
         accepted_draft_tokens,
         rejected_draft_tokens: proposed_draft_tokens - accepted_draft_tokens,
@@ -364,6 +366,10 @@ fn build_mtp_run_report(
         prefix_draft_priming_included,
         target_kernel_dispatch_count: 0,
         draft_kernel_dispatch_count: 0,
+        draft_segment_count: 0,
+        draft_boundary_count: 0,
+        draft_physical_queue_fence_count: 0,
+        draft_bf16_row_concat_count: 0,
         draft_fallback_used: false,
         draft_all_dispatches_hip: true,
     })
@@ -378,6 +384,7 @@ struct Config {
     warmups: usize,
     measured: usize,
     chunk_capacity: u64,
+    state_capacity: u64,
     rows: Vec<RowSpec>,
     sampling: SamplingBench,
     phase83: bool,
@@ -423,6 +430,7 @@ struct MtpReport {
 struct MtpRunReport {
     draft_width: usize,
     proposal_blocks: u64,
+    fixed_k20_pq_blocks: u64,
     proposed_draft_tokens: u64,
     accepted_draft_tokens: u64,
     rejected_draft_tokens: u64,
@@ -433,6 +441,10 @@ struct MtpRunReport {
     prefix_draft_priming_included: bool,
     target_kernel_dispatch_count: u64,
     draft_kernel_dispatch_count: u64,
+    draft_segment_count: u64,
+    draft_boundary_count: u64,
+    draft_physical_queue_fence_count: u64,
+    draft_bf16_row_concat_count: u64,
     draft_fallback_used: bool,
     draft_all_dispatches_hip: bool,
 }
@@ -818,6 +830,18 @@ impl Config {
                 Err(error) => return Err(format!("cannot read {ROWS_ENV}: {error}")),
             }
         };
+        let state_capacity = parse_env_or(STATE_CAPACITY_ENV, Some(STATE_CAPACITY))?;
+        if state_capacity == 0
+            || rows.iter().any(|row| {
+                (row.prompt_tokens as u64)
+                    .checked_add(row.output_tokens as u64)
+                    .is_none_or(|required| required > state_capacity)
+            })
+        {
+            return Err(format!(
+                "{STATE_CAPACITY_ENV} must cover every selected prompt plus output"
+            ));
+        }
         let kv_cache = if phase83 {
             parse_phase83_kv()?
         } else {
@@ -846,6 +870,7 @@ impl Config {
             warmups,
             measured,
             chunk_capacity,
+            state_capacity,
             rows,
             sampling,
             phase83,
@@ -878,6 +903,7 @@ impl Config {
 
     fn is_phase78_final(&self) -> bool {
         !self.phase83
+            && self.state_capacity == STATE_CAPACITY
             && self.sampling.mode == SamplingMode::Greedy
             && !self.sampling.replay_inputs
             && self.warmups == DEFAULT_WARMUPS
@@ -911,7 +937,7 @@ fn run(config: Config) -> Result<Report, String> {
         &plan,
         &artifact,
         config.chunk_capacity,
-        STATE_CAPACITY,
+        config.state_capacity,
         config.kv_cache,
     )
     .map_err(|error| error.to_string())?;
@@ -929,8 +955,14 @@ fn run(config: Config) -> Result<Report, String> {
     };
     let mtp_graph = if let Some(plan) = mtp_plan.as_ref() {
         Some(
-            build_qwen38_nvfp4_mtp_graph(&lock, plan, &artifact, STATE_CAPACITY, config.kv_cache)
-                .map_err(|error| format!("Qwen3.8 MTP companion graph failed: {error}"))?,
+            build_qwen38_nvfp4_mtp_graph(
+                &lock,
+                plan,
+                &artifact,
+                config.state_capacity,
+                config.kv_cache,
+            )
+            .map_err(|error| format!("Qwen3.8 MTP companion graph failed: {error}"))?,
         )
     } else {
         None
@@ -1067,7 +1099,7 @@ fn run(config: Config) -> Result<Report, String> {
             } else {
                 "FP16"
             },
-            state_capacity_tokens: STATE_CAPACITY,
+            state_capacity_tokens: config.state_capacity,
             prefill_chunk_capacity_tokens: config.chunk_capacity,
             mtp: if config.mtp.enabled {
                 "enabled; Qwen3.8 companion resident and fixed GPU-selector speculative executor"
@@ -1729,8 +1761,13 @@ fn run_one_mtp(
         generated.len(),
         true,
     )?;
+    mtp_report.fixed_k20_pq_blocks = executor.fixed_k20_pq_blocks();
     mtp_report.target_kernel_dispatch_count = target_audit.kernel_dispatch_count();
     mtp_report.draft_kernel_dispatch_count = draft_audit.kernel_dispatch_count();
+    mtp_report.draft_segment_count = draft_audit.segment_count();
+    mtp_report.draft_boundary_count = draft_audit.boundary_count();
+    mtp_report.draft_physical_queue_fence_count = draft_audit.physical_queue_fence_count();
+    mtp_report.draft_bf16_row_concat_count = draft_audit.bf16_row_concat_count();
     mtp_report.draft_fallback_used = draft_audit.fallback_used();
     mtp_report.draft_all_dispatches_hip = draft_audit.all_dispatches_hip();
     let audit = audit_report(&target_audit);
@@ -1981,7 +2018,10 @@ fn request_memory_report(audit: &QwenRequestMemoryAudit) -> Result<RequestMemory
 }
 
 fn audit_report(audit: &QwenExecutionAudit) -> AuditReport {
-    const SELECTED_KERNELS: [(u32, &str); 32] = [
+    const SELECTED_KERNELS: [(u32, &str); 36] = [
+        (3, "causal_attention.online_softmax_gqa.packed_kv.v3"),
+        (3, "causal_attention.prefill.gqa6_qtile4.v1"),
+        (3, "causal_attention.prefill.gqa6_qtile8_w16.mxfp8.v1"),
         (5, "matmul.fp8.outer.hipblaslt.v1"),
         (6, "matmul.fp8.outer.emulation.v1"),
         (11, "matmul.nvfp4.w4a4.block16.packed.v1"),
@@ -2032,6 +2072,7 @@ fn audit_report(audit: &QwenExecutionAudit) -> AuditReport {
         ),
         (92, "matmul.fp8.outer.decode.gfx1030.fused.m2_4.v1"),
         (93, "causal_attention.decode.wave32_split.staged.v1"),
+        (94, "matmul.nvfp4.w4a4.small_m.vgpr_reuse.v1"),
     ];
     AuditReport {
         selected_backend: audit.selected_backend(),
@@ -2451,8 +2492,18 @@ where
 }
 
 fn selector_environment() -> BTreeMap<String, Option<String>> {
-    const NAMES: [&str; 62] = [
+    const NAMES: [&str; 72] = [
+        "SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8",
+        "SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED",
+        "SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED",
+        "SLLM_NVFP4_W4A4_SMALL_M_ROWGRID",
+        "SLLM_NVFP4_W4A4_SMALL_M_ROWGRID_GFX1201",
+        "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_STAGED",
+        "SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32",
+        "SLLM_PHASE83_MTP_DRAFT_DEVICE_SELECTOR",
         CHUNK_CAPACITY_ENV,
+        STATE_CAPACITY_ENV,
+        "SLLM_QWEN38_NVFP4_PREFILL_SHARED_ACTIVATION",
         PHASE83_MODE_ENV,
         PHASE83_KV_ENV,
         PHASE83_ROWS_ENV,

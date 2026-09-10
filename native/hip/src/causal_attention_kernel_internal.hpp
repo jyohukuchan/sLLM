@@ -79,6 +79,10 @@ constexpr const char *kPrefillGqa6QTile4LogicalKernelId =
     "causal_attention.prefill.gqa6_qtile4.v1";
 constexpr const char *kPrefillGqa6QTile4DeviceSymbol =
     "sllm_causal_attention_prefill_gqa6_qtile4_v1";
+constexpr const char *kPrefillGqa6QTile8W16LogicalKernelId =
+    "causal_attention.prefill.gqa6_qtile8_w16.mxfp8.v1";
+constexpr const char *kPrefillGqa6QTile8W16DeviceSymbol =
+    "sllm_causal_attention_prefill_gqa6_qtile8_w16_mxfp8_v1";
 constexpr const char *kPrefillGqa6QTile4K4Fp16LogicalKernelId =
     "causal_attention.prefill.gqa6_qtile4_k4.fp16.v1";
 constexpr const char *kPrefillGqa6QTile4K4Fp16DeviceSymbol =
@@ -131,6 +135,15 @@ launch(const uint16_t *query, const void *key, const void *value,
        bool use_decode_wave_split_q_preload, bool use_prefill_gqa4,
        bool use_prefill_gqa4_qtile4, bool use_prefill_gqa6_qtile4_k32_fp16,
        uint64_t sliding_window, float score_scale, hipStream_t stream) noexcept;
+
+hipError_t launch_gqa6_qtile8_w16(
+    const uint16_t *query, const void *key, const void *value,
+    const void *key_scales, const void *value_scales,
+    const float *key_outer_scales, const float *value_outer_scales,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
+    float static_key_scale, float static_value_scale, bool wave_local_kv,
+    hipStream_t stream) noexcept;
 
 hipError_t
 launch_gqa6_qtile4_fp16(const uint16_t *query, const void *key,

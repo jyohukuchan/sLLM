@@ -256,38 +256,40 @@ struct MatmulRunResult final {
   sllm_matmul_dispatch_info_t dispatch{};
 };
 
-sllm_matmul_desc_t nvfp4_matmul_descriptor(
-    const sllm_buffer_t *const activation, const sllm_buffer_t *const weight,
-    const sllm_buffer_t *const output, const uint64_t k, const uint64_t n) {
+sllm_matmul_desc_t
+nvfp4_matmul_descriptor(const sllm_buffer_t *const activation,
+                        const sllm_buffer_t *const weight,
+                        const sllm_buffer_t *const output, const uint64_t k,
+                        const uint64_t n, const uint64_t m = UINT64_C(1)) {
   sllm_matmul_desc_t descriptor{};
   descriptor.struct_size = sizeof(descriptor);
   descriptor.abi_version = SLLM_HIP_ABI_VERSION;
   descriptor.op_version = SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION;
-  descriptor.activation =
-      binding(activation, SLLM_TENSOR_DTYPE_BF16,
-              SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(1), k);
+  descriptor.activation = binding(activation, SLLM_TENSOR_DTYPE_BF16,
+                                  SLLM_TENSOR_ENCODING_UNQUANTIZED, m, k);
   descriptor.weight =
       binding(weight, SLLM_TENSOR_DTYPE_U8,
               SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32, n, k);
   descriptor.output = binding(output, SLLM_TENSOR_DTYPE_BF16,
-                              SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(1), n);
+                              SLLM_TENSOR_ENCODING_UNQUANTIZED, m, n);
   return descriptor;
 }
 
-sllm_matmul_desc_t fp8_outer_matmul_descriptor(
-    const sllm_buffer_t *const activation, const sllm_buffer_t *const weight,
-    const sllm_buffer_t *const output, const uint64_t k, const uint64_t n) {
+sllm_matmul_desc_t
+fp8_outer_matmul_descriptor(const sllm_buffer_t *const activation,
+                            const sllm_buffer_t *const weight,
+                            const sllm_buffer_t *const output, const uint64_t k,
+                            const uint64_t n, const uint64_t m = 1U) {
   sllm_matmul_desc_t descriptor{};
   descriptor.struct_size = sizeof(descriptor);
   descriptor.abi_version = SLLM_HIP_ABI_VERSION;
   descriptor.op_version = SLLM_HIP_MATMUL_FP8_VERSION;
-  descriptor.activation =
-      binding(activation, SLLM_TENSOR_DTYPE_BF16,
-              SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(1), k);
+  descriptor.activation = binding(activation, SLLM_TENSOR_DTYPE_BF16,
+                                  SLLM_TENSOR_ENCODING_UNQUANTIZED, m, k);
   descriptor.weight = binding(weight, SLLM_TENSOR_DTYPE_F8_E4M3_FN,
                               SLLM_TENSOR_ENCODING_FP8_OUTER_F32, n, k);
   descriptor.output = binding(output, SLLM_TENSOR_DTYPE_BF16,
-                              SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(1), n);
+                              SLLM_TENSOR_ENCODING_UNQUANTIZED, m, n);
   return descriptor;
 }
 
@@ -320,16 +322,6 @@ std::vector<uint16_t> fp8_gdn_expected_output(
   return expected;
 }
 
-std::vector<uint16_t> fp8_gdn_expected_output_alternating(
-    const uint64_t k, const uint64_t n, const uint8_t weight_value,
-    const float even_scale, const float odd_scale) {
-  /* The shared row quantizer sees max(abs(3), abs(1.5)) = 3.  OCP E4M3FN
-   * represents both values exactly after the 3/448 row scale, so the dot
-   * product is K/2 * (3 + 1.5). */
-  return fp8_gdn_expected_output(k, n, 2.25F, weight_value, even_scale,
-                                 odd_scale);
-}
-
 struct Fp8GdnMatmulRun final {
   bool valid = false;
   bool deterministic = true;
@@ -342,10 +334,11 @@ Fp8GdnMatmulRun run_fp8_gdn_matmul_plan(const sllm_matmul_plan_t *const plan,
                                         const sllm_queue_t *const queue,
                                         const sllm_buffer_t *const output,
                                         const uint64_t k, const uint64_t n,
-                                        const std::vector<uint16_t> &expected) {
+                                        const std::vector<uint16_t> &expected,
+                                        const uint64_t m = 1U) {
   constexpr std::size_t kRepeats = 3U;
-  std::vector<uint16_t> first(static_cast<std::size_t>(n));
-  std::vector<uint16_t> observed(static_cast<std::size_t>(n));
+  std::vector<uint16_t> first(static_cast<std::size_t>(m * n));
+  std::vector<uint16_t> observed(static_cast<std::size_t>(m * n));
   Fp8GdnMatmulRun result{};
   result.valid = true;
   for (std::size_t repeat = 0U; repeat != kRepeats && result.valid; ++repeat) {
@@ -363,15 +356,21 @@ Fp8GdnMatmulRun run_fp8_gdn_matmul_plan(const sllm_matmul_plan_t *const plan,
         wait_and_release(&completion, "FP8 GDN direct completion");
     result.valid =
         result.valid && dispatch.dispatch_count == 2U &&
-        dispatch.dispatch_id != 0U && dispatch.m == 1U && dispatch.k == k &&
-        dispatch.n == n && dispatch.output_elements == n &&
+        dispatch.dispatch_id != 0U && dispatch.m == m && dispatch.k == k &&
+        dispatch.n == n && dispatch.output_elements == m * n &&
         dispatch.fallback_allowed == 0U && dispatch.fallback_used == 0U &&
         std::strcmp(dispatch.gcn_arch_name, SLLM_TEST_EXPECTED_TARGET) == 0;
-    if (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0) {
-      result.valid = result.valid && dispatch.kernel_id == 82U;
-    }
-    if (!result.valid)
+    const bool gfx1030 = std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0;
+    // M1 uses the retained forced-LDS control; new rows use default selectors.
+    const uint32_t expected_provider =
+        gfx1030 ? (m == 1U ? 82U : (m <= 4U ? 92U : 71U)) : 5U;
+    result.valid = result.valid && dispatch.kernel_id == expected_provider;
+    if (!result.valid) {
+      std::cerr << "FP8 direct metadata failure M=" << m << " N=" << n
+                << " provider=" << dispatch.kernel_id << " rows=" << dispatch.m
+                << " count=" << dispatch.dispatch_count << '\n';
       break;
+    }
     result.valid = download(queue, output, &observed);
     for (std::size_t index = 0U; index != observed.size(); ++index) {
       const uint16_t value = observed[index];
@@ -381,6 +380,9 @@ Fp8GdnMatmulRun run_fp8_gdn_matmul_plan(const sllm_matmul_plan_t *const plan,
                                : static_cast<uint32_t>(expected_value - value);
       result.max_bf16_ulp = std::max(result.max_bf16_ulp, ulp);
       if (value != expected_value) {
+        std::cerr << "FP8 direct oracle mismatch M=" << m << " N=" << n
+                  << " index=" << index << " actual=" << value
+                  << " expected=" << expected_value << " ulp=" << ulp << '\n';
         result.valid = false;
         break;
       }
@@ -489,13 +491,13 @@ MatmulRunResult run_matmul_plan(
   return result;
 }
 
-bool run_fp8_gdn_shared_public_gpu_oracle() {
+bool run_fp8_gdn_shared_public_gpu_oracle(const uint64_t m = 1U) {
   constexpr const char *kLdsLutEnvironment =
       "SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_LDS_LUT";
   const char *const old_lds_lut = std::getenv(kLdsLutEnvironment);
   const std::string old_lds_lut_value =
       old_lds_lut != nullptr ? old_lds_lut : "";
-  if (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0)
+  if (m == 1U && std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0)
     setenv(kLdsLutEnvironment, "1", 1);
   else
     unsetenv(kLdsLutEnvironment);
@@ -504,14 +506,33 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
   std::array<uint64_t, 2> weight_bytes{};
   for (std::size_t index = 0U; index != kWidths.size(); ++index)
     weight_bytes[index] = kK * kWidths[index] + kWidths[index] * sizeof(float);
-  std::vector<uint16_t> activation(static_cast<std::size_t>(kK),
-                                   f32_to_bf16_rne(6.0F));
+  // Distinct row magnitudes/signs expose a stale or misplaced row-scale plane.
+  const auto row_factor = [](const uint64_t row) {
+    constexpr std::array<float, 4> factors = {1.0F, 0.5F, 0.25F, -1.0F};
+    return factors[row % factors.size()];
+  };
+  std::vector<uint16_t> activation(static_cast<std::size_t>(m * kK));
+  for (uint64_t row = 0U; row != m; ++row)
+    std::fill_n(activation.data() + row * kK, kK,
+                f32_to_bf16_rne(6.0F * row_factor(row)));
+  const auto expected_rows = [&](const uint64_t n, const float mean,
+                                 const uint8_t weight, const float even,
+                                 const float odd) {
+    std::vector<uint16_t> result;
+    result.reserve(static_cast<std::size_t>(m * n));
+    for (uint64_t row = 0U; row != m; ++row) {
+      const auto values = fp8_gdn_expected_output(kK, n, mean * row_factor(row),
+                                                  weight, even, odd);
+      result.insert(result.end(), values.begin(), values.end());
+    }
+    return result;
+  };
   std::array<std::vector<uint8_t>, 2> weights = {
       make_fp8_outer_weight(kK, kWidths[0], UINT8_C(0x38), 0.5F, 1.0F),
       make_fp8_outer_weight(kK, kWidths[1], UINT8_C(0xb8), 1.0F, 0.5F)};
   const std::array<std::vector<uint16_t>, 2> expected_initial = {
-      fp8_gdn_expected_output(kK, kWidths[0], 6.0F, UINT8_C(0x38), 0.5F, 1.0F),
-      fp8_gdn_expected_output(kK, kWidths[1], 6.0F, UINT8_C(0xb8), 1.0F, 0.5F)};
+      expected_rows(kWidths[0], 6.0F, UINT8_C(0x38), 0.5F, 1.0F),
+      expected_rows(kWidths[1], 6.0F, UINT8_C(0xb8), 1.0F, 0.5F)};
 
   sllm_context_t *context = nullptr;
   sllm_queue_t *queue = nullptr;
@@ -539,14 +560,16 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
                    SLLM_STATUS_OK, "FP8 GDN queue create", error);
   }
   valid = valid &&
-          create_buffer(context, kK * sizeof(uint16_t), &activation_buffer);
+          create_buffer(context, m * kK * sizeof(uint16_t), &activation_buffer);
   for (std::size_t index = 0U; index != kWidths.size(); ++index) {
     valid = valid &&
             create_buffer(context, weight_bytes[index], &weight_buffers[index]);
-    valid = valid && create_buffer(context, kWidths[index] * sizeof(uint16_t),
-                                   &direct_outputs[index]);
-    valid = valid && create_buffer(context, kWidths[index] * sizeof(uint16_t),
-                                   &shared_outputs[index]);
+    valid =
+        valid && create_buffer(context, m * kWidths[index] * sizeof(uint16_t),
+                               &direct_outputs[index]);
+    valid =
+        valid && create_buffer(context, m * kWidths[index] * sizeof(uint16_t),
+                               &shared_outputs[index]);
   }
   valid = valid &&
           upload(queue, activation_buffer, activation.data(),
@@ -559,7 +582,7 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
     for (std::size_t index = 0U; index != kWidths.size(); ++index) {
       const auto descriptor = fp8_outer_matmul_descriptor(
           activation_buffer, weight_buffers[index], direct_outputs[index], kK,
-          kWidths[index]);
+          kWidths[index], m);
       valid = expect(sllm_matmul_prepare(context, &descriptor,
                                          &direct_plans[index], &error.sink),
                      SLLM_STATUS_OK, "FP8 GDN direct matmul prepare", error) &&
@@ -572,7 +595,7 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
     descriptor.role = SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_FP8_GDN_QKV_Z;
     descriptor.input_global_scale_f32_bits = 0U;
     descriptor.activation = binding(activation_buffer, SLLM_TENSOR_DTYPE_BF16,
-                                    SLLM_TENSOR_ENCODING_UNQUANTIZED, kM, kK);
+                                    SLLM_TENSOR_ENCODING_UNQUANTIZED, m, kK);
     descriptor.gate_weight =
         binding(weight_buffers[0], SLLM_TENSOR_DTYPE_F8_E4M3_FN,
                 SLLM_TENSOR_ENCODING_FP8_OUTER_F32, kWidths[0], kK);
@@ -581,10 +604,10 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
                 SLLM_TENSOR_ENCODING_FP8_OUTER_F32, kWidths[1], kK);
     descriptor.gate_output =
         binding(shared_outputs[0], SLLM_TENSOR_DTYPE_BF16,
-                SLLM_TENSOR_ENCODING_UNQUANTIZED, kM, kWidths[0]);
+                SLLM_TENSOR_ENCODING_UNQUANTIZED, m, kWidths[0]);
     descriptor.up_output =
         binding(shared_outputs[1], SLLM_TENSOR_DTYPE_BF16,
-                SLLM_TENSOR_ENCODING_UNQUANTIZED, kM, kWidths[1]);
+                SLLM_TENSOR_ENCODING_UNQUANTIZED, m, kWidths[1]);
     valid = expect(sllm_qwen38_projection_pack2_prepare(
                        context, &descriptor, &shared_plan, &error.sink),
                    SLLM_STATUS_OK, "FP8 GDN shared prepare", error) &&
@@ -596,7 +619,7 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
     for (std::size_t index = 0U; index != kWidths.size(); ++index) {
       direct_runs[index] = run_fp8_gdn_matmul_plan(
           direct_plans[index], queue, direct_outputs[index], kK, kWidths[index],
-          expected_initial[index]);
+          expected_initial[index], m);
       valid = valid && direct_runs[index].valid &&
               direct_runs[index].deterministic &&
               direct_runs[index].max_bf16_ulp == 0U;
@@ -627,17 +650,17 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
           dispatch.kernel_id ==
               SLLM_HIP_QWEN38_PROJECTION_PACK2_KERNEL_ID_FP8_GDN_SHARED_ACTIVATION_V1 &&
           dispatch.workgroup_size_x == 256U && dispatch.grid_size_x != 0U &&
-          dispatch.m == kM && dispatch.k == kK && dispatch.n == kWidths[0] &&
-          dispatch.output_elements == kWidths[0] + kWidths[1] &&
+          dispatch.m == m && dispatch.k == kK && dispatch.n == kWidths[0] &&
+          dispatch.output_elements == m * (kWidths[0] + kWidths[1]) &&
           dispatch.workspace_bytes ==
-              SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES &&
+              m * SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES &&
           dispatch.role ==
               SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_FP8_GDN_QKV_Z &&
           dispatch.fallback_allowed == 0U && dispatch.fallback_used == 0U &&
           std::strcmp(dispatch.gcn_arch_name, SLLM_TEST_EXPECTED_TARGET) == 0;
       for (std::size_t index = 0U; index != kWidths.size() && valid; ++index) {
         std::vector<uint16_t> observed(
-            static_cast<std::size_t>(kWidths[index]));
+            static_cast<std::size_t>(m * kWidths[index]));
         valid = download(queue, shared_outputs[index], &observed) && valid;
         for (std::size_t output_index = 0U; output_index != observed.size();
              ++output_index) {
@@ -648,6 +671,10 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
                                    : static_cast<uint32_t>(expected - value);
           shared_max_ulp = std::max(shared_max_ulp, ulp);
           if (value != expected) {
+            std::cerr << "FP8 pair oracle mismatch M=" << m
+                      << " member=" << index << " index=" << output_index
+                      << " actual=" << value << " expected=" << expected
+                      << " ulp=" << ulp << '\n';
             valid = false;
             break;
           }
@@ -672,16 +699,15 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
   // bytes or row scale while preserving the same prepared plans/providers.
   if (valid) {
     for (std::size_t index = 0U; index != activation.size(); ++index) {
-      activation[index] = f32_to_bf16_rne((index & 1U) == 0U ? 3.0F : 1.5F);
+      activation[index] = f32_to_bf16_rne(((index & 1U) == 0U ? 3.0F : 1.5F) *
+                                          row_factor(index / kK));
     }
     valid = upload(queue, activation_buffer, activation.data(),
                    static_cast<uint64_t>(activation.size()) * sizeof(uint16_t));
     std::array<std::vector<uint16_t>, 2> changed_direct{};
     const std::array<std::vector<uint16_t>, 2> expected_changed = {
-        fp8_gdn_expected_output_alternating(kK, kWidths[0], UINT8_C(0x38), 0.5F,
-                                            1.0F),
-        fp8_gdn_expected_output_alternating(kK, kWidths[1], UINT8_C(0xb8), 1.0F,
-                                            0.5F)};
+        expected_rows(kWidths[0], 2.25F, UINT8_C(0x38), 0.5F, 1.0F),
+        expected_rows(kWidths[1], 2.25F, UINT8_C(0xb8), 1.0F, 0.5F)};
     for (std::size_t index = 0U; index != kWidths.size() && valid; ++index) {
       sllm_matmul_dispatch_info_t dispatch{};
       dispatch.struct_size = sizeof(dispatch);
@@ -694,7 +720,8 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
                  SLLM_STATUS_OK, "FP8 GDN changed direct execute", error) &&
           completion != nullptr &&
           wait_and_release(&completion, "FP8 GDN changed direct completion");
-      changed_direct[index].resize(static_cast<std::size_t>(kWidths[index]));
+      changed_direct[index].resize(
+          static_cast<std::size_t>(m * kWidths[index]));
       valid = download(queue, direct_outputs[index], &changed_direct[index]) &&
               valid;
       valid = changed_direct[index] == expected_changed[index] && valid;
@@ -713,7 +740,8 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
         wait_and_release(&completion, "FP8 GDN changed shared completion") &&
         valid;
     for (std::size_t index = 0U; index != kWidths.size() && valid; ++index) {
-      std::vector<uint16_t> observed(static_cast<std::size_t>(kWidths[index]));
+      std::vector<uint16_t> observed(
+          static_cast<std::size_t>(m * kWidths[index]));
       valid = download(queue, shared_outputs[index], &observed) && valid;
       valid = observed == changed_direct[index] &&
               observed != shared_first[index] &&
@@ -727,7 +755,7 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
   sllm_graph_span_t *graph = nullptr;
   uint64_t graph_node_count = 0U;
   bool graph_valid = true;
-  if (valid) {
+  if (valid && m == 1U) {
     graph_valid =
         expect(sllm_queue_set_completion_mode(
                    queue, SLLM_QUEUE_COMPLETION_MODE_DEFERRED, &error.sink),
@@ -813,7 +841,7 @@ bool run_fp8_gdn_shared_public_gpu_oracle() {
   if (!valid)
     return false;
   std::cout << "Qwen3.8 FP8 GDN shared projection-pack oracle: PASS target="
-            << last_shared_dispatch.gcn_arch_name
+            << last_shared_dispatch.gcn_arch_name << " M=" << m
             << " dispatch_count=" << last_shared_dispatch.dispatch_count
             << " direct_dispatch_count_total=4"
             << " deterministic=" << shared_deterministic
@@ -996,11 +1024,416 @@ bool run_activation_shared_matmul_oracle(const bool default_lut = false) {
   return valid;
 }
 
+bool run_nvfp4_projection_pack_queue_public_gpu_oracle() {
+  constexpr uint64_t k = UINT64_C(5120);
+  constexpr uint64_t n = UINT64_C(17408);
+  constexpr uint64_t max_m = UINT64_C(512);
+  constexpr uint64_t per_row_workspace = UINT64_C(2880);
+  constexpr std::array<uint64_t, 10> rows = {
+      UINT64_C(2),  UINT64_C(3),   UINT64_C(4),   UINT64_C(5),   UINT64_C(64),
+      UINT64_C(65), UINT64_C(127), UINT64_C(128), UINT64_C(129), UINT64_C(512)};
+  const char *const compensated_environment =
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED";
+  const char *const wmma_environment =
+      "SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED";
+  const char *const old_compensated = std::getenv(compensated_environment);
+  const char *const old_wmma = std::getenv(wmma_environment);
+  const std::string old_compensated_value =
+      old_compensated != nullptr ? old_compensated : "";
+  const std::string old_wmma_value = old_wmma != nullptr ? old_wmma : "";
+  const bool had_compensated = old_compensated != nullptr;
+  const bool had_wmma = old_wmma != nullptr;
+  const auto restore_environment = [&]() {
+    if (had_compensated)
+      setenv(compensated_environment, old_compensated_value.c_str(), 1);
+    else
+      unsetenv(compensated_environment);
+    if (had_wmma)
+      setenv(wmma_environment, old_wmma_value.c_str(), 1);
+    else
+      unsetenv(wmma_environment);
+  };
+  unsetenv(compensated_environment);
+  unsetenv(wmma_environment);
+  if (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0)
+    setenv(compensated_environment, "1", 1);
+  else
+    setenv(wmma_environment, "1", 1);
+
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_buffer_t *activation_buffer = nullptr;
+  std::array<sllm_buffer_t *, 2> weight_buffers{};
+  std::array<sllm_buffer_t *, 2> direct_outputs{};
+  std::array<sllm_buffer_t *, 2> shared_outputs{};
+  bool valid = true;
+  Error error;
+  sllm_context_create_info_t context_info{};
+  context_info.struct_size = sizeof(context_info);
+  context_info.abi_version = SLLM_HIP_ABI_VERSION;
+  context_info.device_index = 0U;
+  std::strncpy(context_info.expected_gcn_arch_name, SLLM_TEST_EXPECTED_TARGET,
+               sizeof(context_info.expected_gcn_arch_name) - 1U);
+  valid = expect(sllm_context_create(&context_info, &context, &error.sink),
+                 SLLM_STATUS_OK, "NVFP4 pair context create", error);
+  if (valid) {
+    sllm_queue_create_info_t queue_info{};
+    queue_info.struct_size = sizeof(queue_info);
+    queue_info.abi_version = SLLM_HIP_ABI_VERSION;
+    valid = expect(sllm_queue_create(context, &queue_info, &queue, &error.sink),
+                   SLLM_STATUS_OK, "NVFP4 pair queue create", error);
+  }
+  valid = valid && create_buffer(context, max_m * k * sizeof(uint16_t),
+                                 &activation_buffer);
+  valid = valid && create_buffer(context, kWeightBytes, &weight_buffers[0]);
+  valid = valid && create_buffer(context, kWeightBytes, &weight_buffers[1]);
+  valid = valid && create_buffer(context, max_m * n * sizeof(uint16_t),
+                                 &direct_outputs[0]);
+  valid = valid && create_buffer(context, max_m * n * sizeof(uint16_t),
+                                 &direct_outputs[1]);
+  valid = valid && create_buffer(context, max_m * n * sizeof(uint16_t),
+                                 &shared_outputs[0]);
+  valid = valid && create_buffer(context, max_m * n * sizeof(uint16_t),
+                                 &shared_outputs[1]);
+  std::vector<uint16_t> activation(static_cast<std::size_t>(max_m * k),
+                                   f32_to_bf16_rne(6.0F));
+  const std::array<std::vector<uint8_t>, 2> weights = {
+      make_weight(UINT8_C(0x2)), make_weight(UINT8_C(0x1))};
+  if (valid) {
+    valid =
+        upload(queue, activation_buffer, activation.data(),
+               static_cast<uint64_t>(activation.size()) * sizeof(uint16_t)) &&
+        upload(queue, weight_buffers[0], weights[0].data(),
+               weights[0].size()) &&
+        upload(queue, weight_buffers[1], weights[1].data(), weights[1].size());
+  }
+  if (!valid)
+    std::cerr << "NVFP4 pair setup/upload failed target="
+              << SLLM_TEST_EXPECTED_TARGET << '\n';
+
+  const auto make_pair_descriptor = [&](const uint64_t rows_value) {
+    sllm_qwen38_projection_pack2_desc_t descriptor{};
+    descriptor.struct_size = sizeof(descriptor);
+    descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+    descriptor.op_version = SLLM_HIP_QWEN38_PROJECTION_PACK2_VERSION;
+    descriptor.role = SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_NVFP4_MLP_GATE_UP;
+    descriptor.input_global_scale_f32_bits = UINT32_C(0x3f800000);
+    descriptor.activation =
+        binding(activation_buffer, SLLM_TENSOR_DTYPE_BF16,
+                SLLM_TENSOR_ENCODING_UNQUANTIZED, rows_value, k);
+    descriptor.gate_weight =
+        binding(weight_buffers[0], SLLM_TENSOR_DTYPE_U8,
+                SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32, n, k);
+    descriptor.up_weight =
+        binding(weight_buffers[1], SLLM_TENSOR_DTYPE_U8,
+                SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32, n, k);
+    descriptor.gate_output =
+        binding(shared_outputs[0], SLLM_TENSOR_DTYPE_BF16,
+                SLLM_TENSOR_ENCODING_UNQUANTIZED, rows_value, n);
+    descriptor.up_output =
+        binding(shared_outputs[1], SLLM_TENSOR_DTYPE_BF16,
+                SLLM_TENSOR_ENCODING_UNQUANTIZED, rows_value, n);
+    return descriptor;
+  };
+  const auto nvfp4_row_activation = [](const uint64_t rows_value,
+                                       const uint64_t row) {
+    constexpr std::array<float, 4> small_row_values = {6.0F, 3.0F, 1.5F, 0.0F};
+    return rows_value >= UINT64_C(2) && rows_value <= UINT64_C(4)
+               ? small_row_values[row]
+               : 6.0F;
+  };
+  const auto upload_nvfp4_activation = [&](const uint64_t rows_value) {
+    for (uint64_t row = 0U; row != rows_value; ++row)
+      std::fill_n(activation.data() + row * k, k,
+                  f32_to_bf16_rne(nvfp4_row_activation(rows_value, row)));
+    return upload(queue, activation_buffer, activation.data(),
+                  rows_value * k * sizeof(uint16_t));
+  };
+
+  for (const uint64_t m : rows) {
+    if (!valid)
+      break;
+    const bool small_m = m >= UINT64_C(2) && m <= UINT64_C(4);
+    /* M=2..4 use the adopted default ID94 provider.  Large rows retain the
+     * per-target adopted controls already covered by this queue oracle. */
+    if (small_m) {
+      unsetenv(compensated_environment);
+      unsetenv(wmma_environment);
+    } else if (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0) {
+      setenv(compensated_environment, "1", 1);
+      unsetenv(wmma_environment);
+    } else {
+      unsetenv(compensated_environment);
+      setenv(wmma_environment, "1", 1);
+    }
+
+    if (m == UINT64_C(5)) {
+      sllm_qwen38_projection_pack2_plan_t *unsupported_plan = nullptr;
+      const auto descriptor = make_pair_descriptor(m);
+      const sllm_status_t status = sllm_qwen38_projection_pack2_prepare(
+          context, &descriptor, &unsupported_plan, &error.sink);
+      if (status != SLLM_STATUS_UNSUPPORTED || unsupported_plan != nullptr) {
+        std::cerr << "NVFP4 pair M=5 prepare contract failed target="
+                  << SLLM_TEST_EXPECTED_TARGET << " status=" << status
+                  << " plan=" << (unsupported_plan != nullptr) << '\n';
+        if (unsupported_plan != nullptr)
+          (void)sllm_qwen38_projection_pack2_plan_release(&unsupported_plan,
+                                                          &error.sink);
+        valid = false;
+      } else {
+        std::cout << "NVFP4 pair prepare M=5: UNSUPPORTED target="
+                  << SLLM_TEST_EXPECTED_TARGET << '\n';
+      }
+      continue;
+    }
+    valid = upload_nvfp4_activation(m) && valid;
+    if (!valid)
+      break;
+
+    std::array<sllm_matmul_plan_t *, 2> direct_plans{};
+    sllm_qwen38_projection_pack2_plan_t *shared_plan = nullptr;
+    std::array<std::vector<uint16_t>, 2> direct_first{};
+    std::array<std::vector<uint16_t>, 2> expected_output{};
+    for (std::size_t member = 0U; member != expected_output.size(); ++member) {
+      expected_output[member].resize(static_cast<std::size_t>(m * n));
+      const float base = member == 0U ? 30720.0F : 15360.0F;
+      for (uint64_t row = 0U; row != m; ++row) {
+        const float row_scale = nvfp4_row_activation(m, row) / 6.0F;
+        std::fill_n(expected_output[member].data() + row * n, n,
+                    f32_to_bf16_rne(base * row_scale));
+      }
+    }
+    for (std::size_t member = 0U; member != direct_plans.size() && valid;
+         ++member) {
+      const auto descriptor =
+          nvfp4_matmul_descriptor(activation_buffer, weight_buffers[member],
+                                  direct_outputs[member], k, n, m);
+      valid = expect(sllm_matmul_prepare(context, &descriptor,
+                                         &direct_plans[member], &error.sink),
+                     SLLM_STATUS_OK, "NVFP4 pair direct matmul prepare", error);
+      if (!valid)
+        std::cerr << "NVFP4 pair direct prepare failed target="
+                  << SLLM_TEST_EXPECTED_TARGET << " row=" << m
+                  << " member=" << member << '\n';
+    }
+    if (valid) {
+      const auto descriptor = make_pair_descriptor(m);
+      valid = expect(sllm_qwen38_projection_pack2_prepare(
+                         context, &descriptor, &shared_plan, &error.sink),
+                     SLLM_STATUS_OK,
+                     "NVFP4 pair shared projection-pack prepare", error);
+      if (!valid)
+        std::cerr << "NVFP4 pair shared prepare failed target="
+                  << SLLM_TEST_EXPECTED_TARGET << " row=" << m << '\n';
+    }
+    for (std::size_t member = 0U; member != direct_plans.size() && valid;
+         ++member) {
+      for (std::size_t repeat = 0U; repeat != 2U && valid; ++repeat) {
+        sllm_matmul_dispatch_info_t dispatch{};
+        dispatch.struct_size = sizeof(dispatch);
+        dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+        dispatch.info_version = SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION;
+        sllm_completion_t *completion = nullptr;
+        valid =
+            expect(sllm_matmul_execute(direct_plans[member], queue, &completion,
+                                       &dispatch, &error.sink),
+                   SLLM_STATUS_OK, "NVFP4 pair direct matmul execute", error) &&
+            completion != nullptr &&
+            wait_and_release(&completion, "NVFP4 pair direct matmul wait") &&
+            dispatch.m == m && dispatch.k == k && dispatch.n == n &&
+            dispatch.output_elements == m * n &&
+            dispatch.workgroup_size_x == 256U &&
+            (small_m ? dispatch.grid_size_x == ((n + 31U) / 32U) : true) &&
+            (small_m
+                 ? dispatch.kernel_id == 94U
+                 : dispatch.kernel_id ==
+                       (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0
+                            ? 87U
+                            : 89U)) &&
+            dispatch.fallback_allowed == 0U && dispatch.fallback_used == 0U;
+        if (!valid)
+          std::cerr << "NVFP4 pair direct execute failed target="
+                    << SLLM_TEST_EXPECTED_TARGET << " row=" << m
+                    << " member=" << member << " repeat=" << repeat
+                    << " dispatch(id,m,k,n,out,fallback,used)="
+                    << dispatch.kernel_id << ',' << dispatch.m << ','
+                    << dispatch.k << ',' << dispatch.n << ','
+                    << dispatch.output_elements << ','
+                    << dispatch.fallback_allowed << ','
+                    << dispatch.fallback_used << '\n';
+        std::vector<uint16_t> observed(static_cast<std::size_t>(m * n));
+        if (valid && !download(queue, direct_outputs[member], &observed)) {
+          valid = false;
+          std::cerr << "NVFP4 pair direct download failed target="
+                    << SLLM_TEST_EXPECTED_TARGET << " row=" << m
+                    << " member=" << member << " repeat=" << repeat << '\n';
+        }
+        if (valid) {
+          for (std::size_t index = 0U; index != observed.size(); ++index) {
+            if (observed[index] != expected_output[member][index]) {
+              std::cerr << "NVFP4 pair direct oracle mismatch target="
+                        << SLLM_TEST_EXPECTED_TARGET << " row=" << m
+                        << " member=" << member << " repeat=" << repeat
+                        << " index=" << index << " actual=0x" << std::hex
+                        << observed[index] << " expected=0x"
+                        << expected_output[member][index] << std::dec << '\n';
+              valid = false;
+              break;
+            }
+          }
+        }
+        if (repeat == 0U)
+          direct_first[member] = std::move(observed);
+        else if (valid && direct_first[member] != observed) {
+          std::cerr << "NVFP4 pair direct repeat mismatch target="
+                    << SLLM_TEST_EXPECTED_TARGET << " row=" << m
+                    << " member=" << member << '\n';
+          valid = false;
+        }
+      }
+    }
+    for (std::size_t repeat = 0U; repeat != 2U && valid; ++repeat) {
+      sllm_qwen38_projection_pack2_dispatch_info_t dispatch{};
+      dispatch.struct_size = sizeof(dispatch);
+      dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+      dispatch.info_version =
+          SLLM_HIP_QWEN38_PROJECTION_PACK2_DISPATCH_INFO_VERSION;
+      sllm_completion_t *completion = nullptr;
+      valid =
+          expect(sllm_qwen38_projection_pack2_execute(
+                     shared_plan, queue, &completion, &dispatch, &error.sink),
+                 SLLM_STATUS_OK, "NVFP4 pair shared projection-pack execute",
+                 error) &&
+          completion != nullptr &&
+          wait_and_release(&completion,
+                           "NVFP4 pair shared projection-pack wait") &&
+          dispatch.dispatch_count == 3U && dispatch.m == m && dispatch.k == k &&
+          dispatch.n == n && dispatch.output_elements == 2U * m * n &&
+          dispatch.workspace_bytes == m * per_row_workspace &&
+          dispatch.fallback_allowed == 0U && dispatch.fallback_used == 0U;
+      const uint64_t quantize_grid = (m * (k / UINT64_C(16)) + 7U) / 8U;
+      const uint64_t row_tile =
+          std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0 &&
+                  m >= UINT64_C(512) && (m % UINT64_C(128)) == 0U
+              ? UINT64_C(128)
+              : (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0
+                     ? UINT64_C(64)
+                     : UINT64_C(128));
+      const uint64_t projection_grid =
+          small_m ? ((n + 31U) / 32U)
+                  : ((m + row_tile - 1U) / row_tile) * ((n + 63U) / 64U);
+      const uint64_t expected_grid = quantize_grid + 2U * projection_grid;
+      if (valid && (quantize_grid != m * UINT64_C(40) ||
+                    dispatch.grid_size_x != expected_grid)) {
+        std::cerr << "NVFP4 pair shared grid mismatch target="
+                  << SLLM_TEST_EXPECTED_TARGET << " row=" << m
+                  << " repeat=" << repeat << " actual=" << dispatch.grid_size_x
+                  << " expected=" << expected_grid
+                  << " quantize=" << quantize_grid
+                  << " projection=" << projection_grid << '\n';
+        valid = false;
+      }
+      if (!valid)
+        std::cerr << "NVFP4 pair shared execute failed target="
+                  << SLLM_TEST_EXPECTED_TARGET << " row=" << m
+                  << " repeat=" << repeat
+                  << " dispatch(count,m,k,n,out,w)=" << dispatch.dispatch_count
+                  << ',' << dispatch.m << ',' << dispatch.k << ',' << dispatch.n
+                  << ',' << dispatch.output_elements << ','
+                  << dispatch.workspace_bytes
+                  << " fallback=" << dispatch.fallback_allowed << ','
+                  << dispatch.fallback_used << '\n';
+      for (std::size_t member = 0U; member != shared_outputs.size() && valid;
+           ++member) {
+        std::vector<uint16_t> observed(static_cast<std::size_t>(m * n));
+        if (!download(queue, shared_outputs[member], &observed)) {
+          std::cerr << "NVFP4 pair shared download failed target="
+                    << SLLM_TEST_EXPECTED_TARGET << " row=" << m
+                    << " repeat=" << repeat << " member=" << member << '\n';
+          valid = false;
+          break;
+        }
+        if (observed != direct_first[member]) {
+          std::size_t mismatch = 0U;
+          while (mismatch != observed.size() &&
+                 observed[mismatch] == direct_first[member][mismatch])
+            ++mismatch;
+          std::cerr << "NVFP4 pair shared/control mismatch target="
+                    << SLLM_TEST_EXPECTED_TARGET << " row=" << m
+                    << " repeat=" << repeat << " member=" << member
+                    << " index=" << mismatch;
+          if (mismatch != observed.size())
+            std::cerr << " actual=0x" << std::hex << observed[mismatch]
+                      << " control=0x" << direct_first[member][mismatch]
+                      << std::dec;
+          std::cerr << '\n';
+          valid = false;
+        }
+        if (valid) {
+          for (std::size_t index = 0U; index != observed.size(); ++index) {
+            if (observed[index] != expected_output[member][index]) {
+              std::cerr << "NVFP4 pair shared oracle mismatch target="
+                        << SLLM_TEST_EXPECTED_TARGET << " row=" << m
+                        << " repeat=" << repeat << " member=" << member
+                        << " index=" << index << " actual=0x" << std::hex
+                        << observed[index] << " expected=0x"
+                        << expected_output[member][index] << std::dec << '\n';
+              valid = false;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (shared_plan != nullptr)
+      valid = expect(sllm_qwen38_projection_pack2_plan_release(&shared_plan,
+                                                               &error.sink),
+                     SLLM_STATUS_OK,
+                     "NVFP4 pair shared projection-pack release", error) &&
+              valid;
+    for (sllm_matmul_plan_t *&plan : direct_plans) {
+      if (plan != nullptr)
+        valid =
+            expect(sllm_matmul_plan_release(&plan, &error.sink), SLLM_STATUS_OK,
+                   "NVFP4 pair direct matmul release", error) &&
+            valid;
+    }
+  }
+
+  for (sllm_buffer_t *&buffer : shared_outputs)
+    valid = release_buffer(&buffer) && valid;
+  for (sllm_buffer_t *&buffer : direct_outputs)
+    valid = release_buffer(&buffer) && valid;
+  for (sllm_buffer_t *&buffer : weight_buffers)
+    valid = release_buffer(&buffer) && valid;
+  valid = release_buffer(&activation_buffer) && valid;
+  if (queue != nullptr)
+    valid = expect(sllm_queue_release(&queue, &error.sink), SLLM_STATUS_OK,
+                   "NVFP4 pair queue release", error) &&
+            valid;
+  if (context != nullptr)
+    valid = expect(sllm_context_release(&context, &error.sink), SLLM_STATUS_OK,
+                   "NVFP4 pair context release", error) &&
+            valid;
+  restore_environment();
+  if (!valid)
+    return false;
+  std::cout << "Qwen3.8 NVFP4 projection-pack queue oracle: PASS target="
+            << SLLM_TEST_EXPECTED_TARGET
+            << " rows=2,3,4,5,64,65,127,128,129,512"
+            << " shared_quantize=1 deterministic=PASS cleanup=0\n";
+  return true;
+}
+
 } // namespace
 
 int main() {
-  if (!run_fp8_gdn_shared_public_gpu_oracle())
-    return 1;
+  for (const uint64_t m : {1U, 2U, 3U, 4U, 5U, 65U, 2048U}) {
+    if (!run_fp8_gdn_shared_public_gpu_oracle(m)) {
+      std::cerr << "FP8 GDN pair failed M=" << m << '\n';
+      return 1;
+    }
+  }
   unsetenv("SLLM_NVFP4_W4A4_FORCE_BASELINE");
   setenv("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4", "1", 1);
   setenv("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_ACTIVATION_SHARED", "1", 1);
@@ -1169,6 +1602,7 @@ int main() {
                    "sllm_context_release", error) &&
             valid;
   }
+  valid = run_nvfp4_projection_pack_queue_public_gpu_oracle() && valid;
   valid = run_activation_shared_matmul_oracle() && valid;
   valid = run_activation_shared_matmul_oracle(true) && valid;
   if (!valid)

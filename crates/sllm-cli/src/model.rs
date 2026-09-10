@@ -31,10 +31,11 @@ use sllm_core::{
     build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
     build_verified_qwen_component_weight_load_plan, build_verified_qwen35_vision_manifest,
     builtin_reviewed_model_lock, open_and_verify_official_ministral3_gguf,
-    parse_gemma4_mtp_model_lock, parse_ministral3_model_lock, qwen_graph_memory_estimate,
-    qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy, read_derived_gguf_lock,
-    resolve_kv_cache_selection, verify_derived_gguf, verify_fp8_sidecar, verify_gguf_gemma4_moe,
-    verify_gguf_gemma4_mtp, verify_gguf_qwen35_moe, verify_nvfp4_sidecar,
+    parse_gemma4_mtp_model_lock, parse_ministral3_model_lock,
+    qwen_graph_memory_estimate_with_prepared_workspace, qwen_prefill_chunk_candidates,
+    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, resolve_kv_cache_selection,
+    verify_derived_gguf, verify_fp8_sidecar, verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp,
+    verify_gguf_qwen35_moe, verify_nvfp4_sidecar,
 };
 use sllm_frontend::{
     BoundedImageBytesV1, ChatTemplateRendererV1, DecodeModeV1, Gemma4MoeChatTemplateV1,
@@ -5416,12 +5417,24 @@ impl ModelFrontendBackend for ProductionBackend {
         };
         let mut rejected = Vec::new();
         let mut selected = None;
+        let max_verification_rows = mtp_plan
+            .effective_width
+            .map(|width| u64::from(width) + 1)
+            .unwrap_or(1);
         for chunk_rows in chunk_candidates {
             let graph = build_graph(chunk_rows).map_err(|error| {
                 format!("generation graph does not satisfy the fixed Qwen contract: {error}")
             })?;
-            let estimate = qwen_graph_memory_estimate(&graph, &plan, placement_total_memory_bytes)
-                .map_err(|error| error.to_string())?;
+            let row_counts =
+                cli_prepared_workspace_rows(graph.token_count(), input_len, max_verification_rows)?;
+            let estimate = qwen_graph_memory_estimate_with_prepared_workspace(
+                &graph,
+                &plan,
+                placement_total_memory_bytes,
+                &session,
+                &row_counts,
+            )
+            .map_err(|error| error.to_string())?;
             if estimate.required_bytes() <= placement_available_memory_bytes {
                 selected = Some((graph, estimate));
                 break;
@@ -5769,6 +5782,18 @@ impl ModelFrontendBackend for ProductionBackend {
                     Value::Null
                 },
             );
+            execution_object.insert(
+                "prepared_plan_bytes".to_owned(),
+                Value::from(placement.prepared_plan_bytes()),
+            );
+            execution_object.insert(
+                "prepared_queue_bytes".to_owned(),
+                Value::from(placement.prepared_queue_bytes()),
+            );
+            execution_object.insert(
+                "prepared_context_bytes".to_owned(),
+                Value::from(placement.prepared_context_bytes()),
+            );
             Ok(json!({
                 "kind": "generate",
                 "input_kind": input_kind,
@@ -6028,8 +6053,15 @@ impl ModelFrontendBackend for ProductionBackend {
             let graph = build_graph(graph_token_count).map_err(|error| {
                 format!("benchmark graph does not satisfy the fixed Qwen contract: {error}")
             })?;
-            let estimate = qwen_graph_memory_estimate(&graph, &plan, placement_total_memory_bytes)
-                .map_err(|error| error.to_string())?;
+            let row_counts = cli_prepared_workspace_rows(graph.token_count(), input_len, 1)?;
+            let estimate = qwen_graph_memory_estimate_with_prepared_workspace(
+                &graph,
+                &plan,
+                placement_total_memory_bytes,
+                &session,
+                &row_counts,
+            )
+            .map_err(|error| error.to_string())?;
             if estimate.required_bytes() <= placement_available_memory_bytes {
                 selected = Some((graph_token_count, graph, estimate));
                 break;
@@ -6062,6 +6094,9 @@ impl ModelFrontendBackend for ProductionBackend {
             "model_resident_bytes": placement.model_resident_bytes(),
             "workspace_baseline_bytes": placement.workspace_baseline_bytes(),
             "workspace_arena_bytes": placement.workspace_arena_bytes(),
+            "prepared_plan_bytes": placement.prepared_plan_bytes(),
+            "prepared_queue_bytes": placement.prepared_queue_bytes(),
+            "prepared_context_bytes": placement.prepared_context_bytes(),
             "request_state_bytes": placement.request_state_bytes(),
             "safety_reserve_bytes": placement.safety_reserve_bytes(),
         });
@@ -6531,6 +6566,9 @@ impl ModelFrontendBackend for ProductionBackend {
                     "placement_safety_reserve_bytes": placement.safety_reserve_bytes(),
                     "workspace_separate_allocation_bytes": placement.workspace_baseline_bytes(),
                     "workspace_arena_bytes": placement.workspace_arena_bytes(),
+                    "prepared_plan_bytes": placement.prepared_plan_bytes(),
+                    "prepared_queue_bytes": placement.prepared_queue_bytes(),
+                    "prepared_context_bytes": placement.prepared_context_bytes(),
                     "model_ready": model_ready_memory,
                     "after_model_drop": final_memory,
                     "model_resident_high_water_bytes": model_resident_high_water_bytes,
@@ -7741,6 +7779,23 @@ fn cli_prefill_chunk_candidates(
     }
     qwen_prefill_chunk_candidates(total_memory_bytes, input_tokens)
         .map_err(|error| error.to_string())
+}
+
+fn cli_prepared_workspace_rows(
+    graph_capacity: u64,
+    prompt_tokens: u64,
+    max_verification_rows: u64,
+) -> Result<Vec<u64>, String> {
+    if graph_capacity == 0 {
+        return Err("prepared workspace placement requires a non-zero graph capacity".to_owned());
+    }
+    let mut rows = vec![graph_capacity];
+    let tail = prompt_tokens % graph_capacity;
+    if tail != 0 {
+        rows.push(tail);
+    }
+    rows.extend(1..=max_verification_rows.min(graph_capacity));
+    Ok(rows)
 }
 
 fn cli_state_capacity_with_mtp_slack(

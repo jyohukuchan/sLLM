@@ -143,11 +143,10 @@ e2m1x8_scaled2_to_i8x4_pair(const uint32_t packed) noexcept {
 #if defined(__gfx1201__)
 __device__ __forceinline__ uint32_t
 e2m1x4_to_e4m3fn_exact_bits(const uint16_t packed) noexcept {
-  const uint32_t lanes =
-      (static_cast<uint32_t>(packed) & UINT32_C(0x000f)) |
-      ((static_cast<uint32_t>(packed) & UINT32_C(0x00f0)) << 4U) |
-      ((static_cast<uint32_t>(packed) & UINT32_C(0x0f00)) << 8U) |
-      ((static_cast<uint32_t>(packed) & UINT32_C(0xf000)) << 12U);
+  // Spread four nibbles into byte lanes without changing their encodings.
+  uint32_t lanes = static_cast<uint32_t>(packed);
+  lanes = (lanes | (lanes << 8U)) & UINT32_C(0x00ff00ff);
+  lanes = (lanes | (lanes << 4U)) & UINT32_C(0x0f0f0f0f);
   constexpr uint32_t positive_0_3 = UINT32_C(0x3c383000);
   constexpr uint32_t positive_4_7 = UINT32_C(0x4c484440);
   constexpr uint32_t low_index_mask = UINT32_C(0x07070707);
@@ -1899,9 +1898,93 @@ __device__ __forceinline__ void fp8_outer_decode_gfx1030_fused_id68_body(
   }
 }
 
+// Phase 83.5: the adopted M=1 tuples use separate code objects from both
+// the broad ID82 wrapper and the ID92 M=2..4 wrappers.  Each wrapper calls
+// the measured Rows=1 fused body, preserving ID82 LUT decode, FP32 accumulation
+// order, and BF16 RNE epilogue.
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n12288_v1(
+    const uint8_t *const activation, const float *const activation_scales,
+    const uint8_t *const weight, const float *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  __shared__ __align__(16) uint16_t lut[272U];
+  lut[fp8_outer_decode_lut_slot(threadIdx.x)] =
+      sllm_fp8_outer_decode_gfx1030_lds_lut_fp16_v1[threadIdx.x];
+  __syncthreads();
+  fp8_outer_decode_gfx1030_fused_id82_body<1U, UINT64_C(5120), UINT64_C(12288),
+                                           10U>(activation, activation_scales,
+                                                weight, weight_scales, output,
+                                                m, k, n, lut);
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n1024_v1(
+    const uint8_t *const activation, const float *const activation_scales,
+    const uint8_t *const weight, const float *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  __shared__ __align__(16) uint16_t lut[272U];
+  lut[fp8_outer_decode_lut_slot(threadIdx.x)] =
+      sllm_fp8_outer_decode_gfx1030_lds_lut_fp16_v1[threadIdx.x];
+  __syncthreads();
+  fp8_outer_decode_gfx1030_fused_id82_body<1U, UINT64_C(5120), UINT64_C(1024),
+                                           10U>(activation, activation_scales,
+                                                weight, weight_scales, output,
+                                                m, k, n, lut);
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n17408_v1(
+    const uint8_t *const activation, const float *const activation_scales,
+    const uint8_t *const weight, const float *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  __shared__ __align__(16) uint16_t lut[272U];
+  lut[fp8_outer_decode_lut_slot(threadIdx.x)] =
+      sllm_fp8_outer_decode_gfx1030_lds_lut_fp16_v1[threadIdx.x];
+  __syncthreads();
+  fp8_outer_decode_gfx1030_fused_id82_body<1U, UINT64_C(5120), UINT64_C(17408),
+                                           10U>(activation, activation_scales,
+                                                weight, weight_scales, output,
+                                                m, k, n, lut);
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k17408n5120_v1(
+    const uint8_t *const activation, const float *const activation_scales,
+    const uint8_t *const weight, const float *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  __shared__ __align__(16) uint16_t lut[272U];
+  lut[fp8_outer_decode_lut_slot(threadIdx.x)] =
+      sllm_fp8_outer_decode_gfx1030_lds_lut_fp16_v1[threadIdx.x];
+  __syncthreads();
+  fp8_outer_decode_gfx1030_fused_id82_body<1U, UINT64_C(17408), UINT64_C(5120),
+                                           34U>(activation, activation_scales,
+                                                weight, weight_scales, output,
+                                                m, k, n, lut);
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k6144n5120_v1(
+    const uint8_t *const activation, const float *const activation_scales,
+    const uint8_t *const weight, const float *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  __shared__ __align__(16) uint16_t lut[272U];
+  lut[fp8_outer_decode_lut_slot(threadIdx.x)] =
+      sllm_fp8_outer_decode_gfx1030_lds_lut_fp16_v1[threadIdx.x];
+  __syncthreads();
+  fp8_outer_decode_gfx1030_fused_id82_body<1U, UINT64_C(6144), UINT64_C(5120),
+                                           12U>(activation, activation_scales,
+                                                weight, weight_scales, output,
+                                                m, k, n, lut);
+}
+
 // Phase 83 ID92: one CTA computes two through four rows while keeping each
 // output-column FP8 weight dword and scale live across the row accumulators.
-// The two exact tuples below use the existing ID82 LUT codec; the lm-head
+// The projection tuples below use the existing ID82 LUT codec; the lm-head
 // tuple uses the existing ID68 scalar codec. M=1 never enters these wrappers.
 extern "C" __global__
 __launch_bounds__(256, 1) void sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n10240_v1(
@@ -1926,6 +2009,146 @@ __launch_bounds__(256, 1) void sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n
   } else if (m == 4U) {
     fp8_outer_decode_gfx1030_fused_id82_body<4U, UINT64_C(5120),
                                              UINT64_C(10240), 10U>(
+        activation, activation_scales, weight, weight_scales, output, m, k, n,
+        lut);
+  }
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_fp8_outer_decode_gfx1030_fused_k6144n5120_v1(
+    const uint8_t *const activation, const float *const activation_scales,
+    const uint8_t *const weight, const float *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  __shared__ __align__(16) uint16_t lut[272U];
+  lut[fp8_outer_decode_lut_slot(threadIdx.x)] =
+      sllm_fp8_outer_decode_gfx1030_lds_lut_fp16_v1[threadIdx.x];
+  __syncthreads();
+  if (m == 2U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<2U, UINT64_C(6144), UINT64_C(5120),
+                                             12U>(activation, activation_scales,
+                                                  weight, weight_scales, output,
+                                                  m, k, n, lut);
+  } else if (m == 3U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<3U, UINT64_C(6144), UINT64_C(5120),
+                                             12U>(activation, activation_scales,
+                                                  weight, weight_scales, output,
+                                                  m, k, n, lut);
+  } else if (m == 4U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<4U, UINT64_C(6144), UINT64_C(5120),
+                                             12U>(activation, activation_scales,
+                                                  weight, weight_scales, output,
+                                                  m, k, n, lut);
+  }
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n12288_v1(
+    const uint8_t *const activation, const float *const activation_scales,
+    const uint8_t *const weight, const float *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  __shared__ __align__(16) uint16_t lut[272U];
+  lut[fp8_outer_decode_lut_slot(threadIdx.x)] =
+      sllm_fp8_outer_decode_gfx1030_lds_lut_fp16_v1[threadIdx.x];
+  __syncthreads();
+  if (m == 2U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<2U, UINT64_C(5120),
+                                             UINT64_C(12288), 10U>(
+        activation, activation_scales, weight, weight_scales, output, m, k, n,
+        lut);
+  } else if (m == 3U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<3U, UINT64_C(5120),
+                                             UINT64_C(12288), 10U>(
+        activation, activation_scales, weight, weight_scales, output, m, k, n,
+        lut);
+  } else if (m == 4U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<4U, UINT64_C(5120),
+                                             UINT64_C(12288), 10U>(
+        activation, activation_scales, weight, weight_scales, output, m, k, n,
+        lut);
+  }
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n1024_v1(
+    const uint8_t *const activation, const float *const activation_scales,
+    const uint8_t *const weight, const float *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  __shared__ __align__(16) uint16_t lut[272U];
+  lut[fp8_outer_decode_lut_slot(threadIdx.x)] =
+      sllm_fp8_outer_decode_gfx1030_lds_lut_fp16_v1[threadIdx.x];
+  __syncthreads();
+  if (m == 2U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<2U, UINT64_C(5120), UINT64_C(1024),
+                                             10U>(activation, activation_scales,
+                                                  weight, weight_scales, output,
+                                                  m, k, n, lut);
+  } else if (m == 3U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<3U, UINT64_C(5120), UINT64_C(1024),
+                                             10U>(activation, activation_scales,
+                                                  weight, weight_scales, output,
+                                                  m, k, n, lut);
+  } else if (m == 4U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<4U, UINT64_C(5120), UINT64_C(1024),
+                                             10U>(activation, activation_scales,
+                                                  weight, weight_scales, output,
+                                                  m, k, n, lut);
+  }
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n17408_v1(
+    const uint8_t *const activation, const float *const activation_scales,
+    const uint8_t *const weight, const float *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  __shared__ __align__(16) uint16_t lut[272U];
+  lut[fp8_outer_decode_lut_slot(threadIdx.x)] =
+      sllm_fp8_outer_decode_gfx1030_lds_lut_fp16_v1[threadIdx.x];
+  __syncthreads();
+  if (m == 2U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<2U, UINT64_C(5120),
+                                             UINT64_C(17408), 10U>(
+        activation, activation_scales, weight, weight_scales, output, m, k, n,
+        lut);
+  } else if (m == 3U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<3U, UINT64_C(5120),
+                                             UINT64_C(17408), 10U>(
+        activation, activation_scales, weight, weight_scales, output, m, k, n,
+        lut);
+  } else if (m == 4U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<4U, UINT64_C(5120),
+                                             UINT64_C(17408), 10U>(
+        activation, activation_scales, weight, weight_scales, output, m, k, n,
+        lut);
+  }
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_fp8_outer_decode_gfx1030_fused_k17408n5120_v1(
+    const uint8_t *const activation, const float *const activation_scales,
+    const uint8_t *const weight, const float *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  __shared__ __align__(16) uint16_t lut[272U];
+  lut[fp8_outer_decode_lut_slot(threadIdx.x)] =
+      sllm_fp8_outer_decode_gfx1030_lds_lut_fp16_v1[threadIdx.x];
+  __syncthreads();
+  if (m == 2U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<2U, UINT64_C(17408),
+                                             UINT64_C(5120), 34U>(
+        activation, activation_scales, weight, weight_scales, output, m, k, n,
+        lut);
+  } else if (m == 3U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<3U, UINT64_C(17408),
+                                             UINT64_C(5120), 34U>(
+        activation, activation_scales, weight, weight_scales, output, m, k, n,
+        lut);
+  } else if (m == 4U) {
+    fp8_outer_decode_gfx1030_fused_id82_body<4U, UINT64_C(17408),
+                                             UINT64_C(5120), 34U>(
         activation, activation_scales, weight, weight_scales, output, m, k, n,
         lut);
   }
@@ -2716,7 +2939,7 @@ sllm_matmul_nvfp4_w4a4_block16_prefill_dp4a_64x64_body(
   static_assert(sizeof(Index) == sizeof(uint32_t) ||
                 sizeof(Index) == sizeof(uint64_t));
   constexpr uint32_t tile_m = TileM;
-  static_assert(tile_m == 32U || tile_m == 64U);
+  static_assert(tile_m == 32U || tile_m == 64U || tile_m == 128U);
   constexpr uint32_t tile_n = 64U;
   constexpr uint32_t tile_k = TileK;
   static_assert(tile_k == 32U || tile_k == 128U);
@@ -2914,6 +3137,24 @@ __launch_bounds__(256, 1) void sllm_nvfp4_w4a4_prefill_compensated64x64_v1(
     const float *const input_tensor_scale, uint16_t *const output,
     const uint64_t m, const uint64_t k, const uint64_t n) {
   sllm_matmul_nvfp4_w4a4_block16_prefill_dp4a_64x64_body<32U, 64U, uint64_t,
+                                                         true>(
+      packed_activation, activation_block_scales, packed_weight,
+      weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
+      k, n);
+}
+
+// ID87 gfx1030 TileM128 body. Keep this as a separate device symbol so the
+// 64x64 path retains its original LDS allocation and code object.
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_nvfp4_w4a4_prefill_compensated128x64_v1(
+    const uint8_t *const packed_activation,
+    const uint8_t *const activation_block_scales,
+    const uint8_t *const packed_weight,
+    const uint8_t *const weight_block_scales,
+    const float *const weight_tensor_scale,
+    const float *const input_tensor_scale, uint16_t *const output,
+    const uint64_t m, const uint64_t k, const uint64_t n) {
+  sllm_matmul_nvfp4_w4a4_block16_prefill_dp4a_64x64_body<32U, 128U, uint64_t,
                                                          true>(
       packed_activation, activation_block_scales, packed_weight,
       weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
@@ -6273,6 +6514,7 @@ __launch_bounds__(256, 1) void sllm_matmul_nvfp4_block16_prefill_row8_tiled256_v
 
 #include "fp8_prefill_short_m32.inc"
 #include "nvfp4_decode_scale_lut.inc"
+#include "nvfp4_small_m_vgpr_reuse.inc"
 
 // Phase83: independent row grids reuse the exact single-row reduction.
 extern "C" __global__
@@ -6562,6 +6804,49 @@ hipError_t launch_fp8_outer_decode_gfx1030_lds_lut_wave4col32(
     return hipErrorInvalidValue;
   }
   if (fp8_outer_decode_gfx1030_lds_lut_tuple_shape(m, k, n)) {
+    const uint32_t grid = static_cast<uint32_t>(
+        (n + kFp8OuterDecodeGfx1030Half2ColumnsPerWorkgroup - 1U) /
+        kFp8OuterDecodeGfx1030Half2ColumnsPerWorkgroup);
+    if (k == UINT64_C(5120) && n == UINT64_C(12288)) {
+      hipLaunchKernelGGL(
+          sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n12288_v1,
+          dim3(grid), dim3(kFp8OuterDecodeGfx1030LdsLutWorkgroupSize), 0U,
+          stream, activation, activation_scales, weight, weight_scales, output,
+          m, k, n);
+      return hipGetLastError();
+    }
+    if (k == UINT64_C(5120) && n == UINT64_C(1024)) {
+      hipLaunchKernelGGL(
+          sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n1024_v1,
+          dim3(grid), dim3(kFp8OuterDecodeGfx1030LdsLutWorkgroupSize), 0U,
+          stream, activation, activation_scales, weight, weight_scales, output,
+          m, k, n);
+      return hipGetLastError();
+    }
+    if (k == UINT64_C(5120) && n == UINT64_C(17408)) {
+      hipLaunchKernelGGL(
+          sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n17408_v1,
+          dim3(grid), dim3(kFp8OuterDecodeGfx1030LdsLutWorkgroupSize), 0U,
+          stream, activation, activation_scales, weight, weight_scales, output,
+          m, k, n);
+      return hipGetLastError();
+    }
+    if (k == UINT64_C(17408) && n == UINT64_C(5120)) {
+      hipLaunchKernelGGL(
+          sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k17408n5120_v1,
+          dim3(grid), dim3(kFp8OuterDecodeGfx1030LdsLutWorkgroupSize), 0U,
+          stream, activation, activation_scales, weight, weight_scales, output,
+          m, k, n);
+      return hipGetLastError();
+    }
+    if (k == UINT64_C(6144) && n == UINT64_C(5120)) {
+      hipLaunchKernelGGL(
+          sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k6144n5120_v1,
+          dim3(grid), dim3(kFp8OuterDecodeGfx1030LdsLutWorkgroupSize), 0U,
+          stream, activation, activation_scales, weight, weight_scales, output,
+          m, k, n);
+      return hipGetLastError();
+    }
     if (k == UINT64_C(5120) && n == UINT64_C(17408)) {
       return launch_fp8_outer_decode_gfx1030_lds_lut_k5120n17408(
           activation, activation_scales, weight, weight_scales, output, m, k, n,
@@ -6678,7 +6963,32 @@ hipError_t launch_fp8_outer_decode_gfx1030_fused_m2_4(
   const uint32_t grid = static_cast<uint32_t>(
       (n + kFp8OuterDecodeGfx1030Half2ColumnsPerWorkgroup - 1U) /
       kFp8OuterDecodeGfx1030Half2ColumnsPerWorkgroup);
-  if (n == UINT64_C(10240)) {
+  if (k == UINT64_C(6144) && n == UINT64_C(5120)) {
+    hipLaunchKernelGGL(
+        sllm_matmul_fp8_outer_decode_gfx1030_fused_k6144n5120_v1, dim3(grid),
+        dim3(kFp8OuterDecodeGfx1030LdsLutWorkgroupSize), 0U, stream, activation,
+        activation_scales, weight, weight_scales, output, m, k, n);
+  } else if (k == UINT64_C(5120) && n == UINT64_C(12288)) {
+    hipLaunchKernelGGL(
+        sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n12288_v1, dim3(grid),
+        dim3(kFp8OuterDecodeGfx1030LdsLutWorkgroupSize), 0U, stream, activation,
+        activation_scales, weight, weight_scales, output, m, k, n);
+  } else if (k == UINT64_C(5120) && n == UINT64_C(1024)) {
+    hipLaunchKernelGGL(
+        sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n1024_v1, dim3(grid),
+        dim3(kFp8OuterDecodeGfx1030LdsLutWorkgroupSize), 0U, stream, activation,
+        activation_scales, weight, weight_scales, output, m, k, n);
+  } else if (k == UINT64_C(5120) && n == UINT64_C(17408)) {
+    hipLaunchKernelGGL(
+        sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n17408_v1, dim3(grid),
+        dim3(kFp8OuterDecodeGfx1030LdsLutWorkgroupSize), 0U, stream, activation,
+        activation_scales, weight, weight_scales, output, m, k, n);
+  } else if (k == UINT64_C(17408) && n == UINT64_C(5120)) {
+    hipLaunchKernelGGL(
+        sllm_matmul_fp8_outer_decode_gfx1030_fused_k17408n5120_v1, dim3(grid),
+        dim3(kFp8OuterDecodeGfx1030LdsLutWorkgroupSize), 0U, stream, activation,
+        activation_scales, weight, weight_scales, output, m, k, n);
+  } else if (n == UINT64_C(10240)) {
     hipLaunchKernelGGL(
         sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n10240_v1, dim3(grid),
         dim3(kFp8OuterDecodeGfx1030LdsLutWorkgroupSize), 0U, stream, activation,
@@ -6825,6 +7135,7 @@ hipError_t launch_nvfp4_w4a4(const uint8_t *const packed_activation,
       variant != KernelVariant::Nvfp4W4A4DecodeActivationShared &&
       variant != KernelVariant::Nvfp4W4A4DecodeScaleLut &&
       variant != KernelVariant::Nvfp4W4A4SmallMRowGrid &&
+      variant != KernelVariant::Nvfp4W4A4SmallMVgprReuse &&
       variant != KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid) {
     return hipErrorInvalidValue;
   }
@@ -6860,6 +7171,25 @@ hipError_t launch_nvfp4_w4a4(const uint8_t *const packed_activation,
         stream, packed_activation, activation_block_scales, packed_weight,
         weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
         k, n);
+  } else if (variant == KernelVariant::Nvfp4W4A4SmallMVgprReuse) {
+#if defined(SLLM_HIP_COMPILE_TARGET)
+    const bool supported_target =
+        std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1030") == 0 ||
+        std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1201") == 0;
+    if (!supported_target ||
+        !sllm_matmul_kernel::phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(m, k,
+                                                                         n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1,
+        dim3(static_cast<uint32_t>((n + UINT64_C(31)) / UINT64_C(32))),
+        dim3(256), 0U, stream, packed_activation, activation_block_scales,
+        packed_weight, weight_block_scales, weight_tensor_scale,
+        input_tensor_scale, output, m, k, n);
+#else
+    return hipErrorNotSupported;
+#endif
   } else if (variant == KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid) {
 #if defined(SLLM_HIP_COMPILE_TARGET)
     if (std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1201") != 0 ||
@@ -6954,12 +7284,29 @@ hipError_t launch_nvfp4_w4a4(const uint8_t *const packed_activation,
     if (m <= 1U || k == 0U || (k % 16U) != 0U || n == 0U) {
       return hipErrorInvalidValue;
     }
-    hipLaunchKernelGGL(
-        sllm_nvfp4_w4a4_prefill_compensated64x64_v1,
-        dim3(static_cast<uint32_t>(((m + 63U) / 64U) * ((n + 63U) / 64U))),
-        dim3(kWorkgroupSize), 0U, stream, packed_activation,
-        activation_block_scales, packed_weight, weight_block_scales,
-        weight_tensor_scale, input_tensor_scale, output, m, k, n);
+    const bool tile_m128 =
+#if defined(SLLM_HIP_COMPILE_TARGET)
+        std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1030") == 0 &&
+#else
+        false &&
+#endif
+        sllm_matmul_kernel::phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(
+            m, k, n);
+    if (tile_m128) {
+      hipLaunchKernelGGL(
+          sllm_nvfp4_w4a4_prefill_compensated128x64_v1,
+          dim3(static_cast<uint32_t>(((m + 127U) / 128U) * ((n + 63U) / 64U))),
+          dim3(kWorkgroupSize), 0U, stream, packed_activation,
+          activation_block_scales, packed_weight, weight_block_scales,
+          weight_tensor_scale, input_tensor_scale, output, m, k, n);
+    } else {
+      hipLaunchKernelGGL(
+          sllm_nvfp4_w4a4_prefill_compensated64x64_v1,
+          dim3(static_cast<uint32_t>(((m + 63U) / 64U) * ((n + 63U) / 64U))),
+          dim3(kWorkgroupSize), 0U, stream, packed_activation,
+          activation_block_scales, packed_weight, weight_block_scales,
+          weight_tensor_scale, input_tensor_scale, output, m, k, n);
+    }
   } else if (variant == KernelVariant::Nvfp4W4A4PrefillDp4a64x64) {
     if (m <= 1U || k == 0U || (k % 16U) != 0U || n == 0U) {
       return hipErrorInvalidValue;
@@ -7010,13 +7357,59 @@ hipError_t launch_nvfp4_w4a4(const uint8_t *const packed_activation,
     if (!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(m, k, n)) {
       return hipErrorInvalidValue;
     }
-    hipLaunchKernelGGL(sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1,
-                       dim3(static_cast<uint32_t>((n + 63U) / 64U),
-                            static_cast<uint32_t>((m + 127U) / 128U)),
-                       dim3(kWorkgroupSize), 0U, stream, packed_activation,
-                       activation_block_scales, packed_weight,
-                       weight_block_scales, weight_tensor_scale,
-                       input_tensor_scale, output, m, k, n);
+    if (phase83_gfx1201_nvfp4_w4a4_wmma_kahan_pad68_shape(m, k, n)) {
+      if (k == UINT64_C(5120) && n == UINT64_C(17408)) {
+        hipLaunchKernelGGL(sllm_nvfp4_gfx1201_wmma128x64_pad68_k5120n17408_v1,
+                           dim3(static_cast<uint32_t>((n + 63U) / 64U),
+                                static_cast<uint32_t>((m + 127U) / 128U)),
+                           dim3(kWorkgroupSize), 0U, stream, packed_activation,
+                           activation_block_scales, packed_weight,
+                           weight_block_scales, weight_tensor_scale,
+                           input_tensor_scale, output, m, k, n);
+      } else {
+        hipLaunchKernelGGL(sllm_nvfp4_gfx1201_wmma128x64_pad68_k17408n5120_v1,
+                           dim3(static_cast<uint32_t>((n + 63U) / 64U),
+                                static_cast<uint32_t>((m + 127U) / 128U)),
+                           dim3(kWorkgroupSize), 0U, stream, packed_activation,
+                           activation_block_scales, packed_weight,
+                           weight_block_scales, weight_tensor_scale,
+                           input_tensor_scale, output, m, k, n);
+      }
+    } else if (phase83_gfx1201_nvfp4_w4a4_wmma_kahan_aligned_shape(m, k, n)) {
+      if (k == UINT64_C(5120) && n == UINT64_C(17408)) {
+        hipLaunchKernelGGL(sllm_nvfp4_gfx1201_wmma128x64_aligned_k5120n17408_v1,
+                           dim3(static_cast<uint32_t>((n + 63U) / 64U),
+                                static_cast<uint32_t>((m + 127U) / 128U)),
+                           dim3(kWorkgroupSize), 0U, stream, packed_activation,
+                           activation_block_scales, packed_weight,
+                           weight_block_scales, weight_tensor_scale,
+                           input_tensor_scale, output, m, k, n);
+      } else {
+        hipLaunchKernelGGL(sllm_nvfp4_gfx1201_wmma128x64_aligned_k17408n5120_v1,
+                           dim3(static_cast<uint32_t>((n + 63U) / 64U),
+                                static_cast<uint32_t>((m + 127U) / 128U)),
+                           dim3(kWorkgroupSize), 0U, stream, packed_activation,
+                           activation_block_scales, packed_weight,
+                           weight_block_scales, weight_tensor_scale,
+                           input_tensor_scale, output, m, k, n);
+      }
+    } else if (phase83_gfx1201_nvfp4_w4a4_wmma_kahan_stage64_shape(m, k, n)) {
+      hipLaunchKernelGGL(
+          sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_lookahead_v1,
+          dim3(static_cast<uint32_t>((n + 63U) / 64U),
+               static_cast<uint32_t>((m + 127U) / 128U)),
+          dim3(kWorkgroupSize), 0U, stream, packed_activation,
+          activation_block_scales, packed_weight, weight_block_scales,
+          weight_tensor_scale, input_tensor_scale, output, m, k, n);
+    } else {
+      hipLaunchKernelGGL(sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1,
+                         dim3(static_cast<uint32_t>((n + 63U) / 64U),
+                              static_cast<uint32_t>((m + 127U) / 128U)),
+                         dim3(kWorkgroupSize), 0U, stream, packed_activation,
+                         activation_block_scales, packed_weight,
+                         weight_block_scales, weight_tensor_scale,
+                         input_tensor_scale, output, m, k, n);
+    }
   } else if (variant == KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64) {
     if (m <= 1U || k == 0U || (k % 16U) != 0U || n == 0U) {
       return hipErrorInvalidValue;

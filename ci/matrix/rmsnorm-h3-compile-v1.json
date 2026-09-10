@@ -31,7 +31,7 @@
       "files": [
         {
           "path": "include/sllm/hip.h",
-          "sha256": "bb53f2dd1cc0223ff88a2b051ce11229b74d7ef3ddc7d4b81d207254b4563749"
+          "sha256": "8d72ca744a01b00b133e4dafb0a05cfd3d6eab48bbd512ab0694dc6bdf8678ba"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel.hip.cpp",
@@ -42,7 +42,7 @@
           "sha256": "dc9d910305791097ae32463ba134da4c4aa398fdc55d40e59e4eb2b70f0c84d6"
         }
       ],
-      "source_set_sha256": "b4c3c032720550487ba995778d5a10c0fb59d2fce28780b7d53207ce16678965"
+      "source_set_sha256": "2ea1cb74c2ca588b27cd5dbac4d91964305821f0258b387aa38f817031abd31a"
     },
     "host_abi": {
       "canonical_order": [
@@ -59,11 +59,11 @@
         },
         {
           "path": "native/hip/src/public_runtime.hip.cpp",
-          "sha256": "574d1fc4a426bc3189ae18a8c407c7f359c20a62a1ea13ed34b78219013d2f29"
+          "sha256": "fbb906d62dbf22f7e7dd054ac9e289fb137fcc6f1d154db2d1bbbac33db97b9a"
         },
         {
           "path": "native/hip/src/public_runtime_internal.hpp",
-          "sha256": "52d207e29446d7f3bf3f9873774dd2d00074dbf8195f07c937515a873766fb60"
+          "sha256": "a705484e1c91bbf21793caa1a661befd00ba7e0ddb2d5cc6a39499521cb8d653"
         },
         {
           "path": "native/hip/src/rmsnorm_api.cpp",
@@ -74,7 +74,7 @@
           "sha256": "62675cd693719f711541768a2f52182fdc22a98fc70d21fe66f6ea041df4be19"
         }
       ],
-      "source_set_sha256": "66742dabb61ec43e0af4ebdfcb63ffa3eccd12e6f7cb2328900068cd7352b1db"
+      "source_set_sha256": "cba2e0c8271634a5633b1f9ed48edd90e2507db3e41a84504522d018b918ffac"
     },
     "binding_build": {
       "canonical_order": [
@@ -87,7 +87,7 @@
       "files": [
         {
           "path": "crates/sllm-hip-sys/build.rs",
-          "sha256": "9d211e042d6d80f91f75f2febc8eeb7eed547d80468ef5669f46ed1c02495d81"
+          "sha256": "956db57119eb6f798088757889568ca02bd9b41ed47946c6b6dfd1349fb2b898"
         },
         {
           "path": "crates/sllm-hip-sys/src/bindings.rs",
@@ -95,7 +95,7 @@
         },
         {
           "path": "crates/sllm-hip/src/rmsnorm.rs",
-          "sha256": "6ac1f336238786b04ea1001d65a37c86f53487a3f5e8d1eb68bc54f61aacc168"
+          "sha256": "0df0129d7712c6c06304eabd1e86a8a35de70dcccd1e69792062506afd9c17da"
         },
         {
           "path": "crates/sllm-core/src/op.rs",
@@ -103,10 +103,10 @@
         },
         {
           "path": "native/hip/CMakeLists.txt",
-          "sha256": "e4da3beabc6a0721fe54d2688d227153797ccc33c72d970eb4ea1c3a8471dda3"
+          "sha256": "9ec7d84d99031c167c0aafce4f95c87756b9ffcfc7bfd96ff1a5649790f74b4c"
         }
       ],
-      "source_set_sha256": "a03a99c68c61fb4c84753908e861ebb89f2aef4300817a57275da365e5dff4b8"
+      "source_set_sha256": "842508de1680bd2df557581169aad3e0c0bebf76a6efbd023cfe0cbacb87bd12"
     },
     "ci_contract": {
       "canonical_order": [
@@ -152,11 +152,11 @@
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "e75bc728e1910a805b1f81c2a6afeda04ada20c6502991fdc8d0a909b41e6ed5"
+          "sha256": "d0b790e919721eaf5205b54ae72d254a33b0e736ca467f912892e0e12840116d"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "a0b1e9c55b45ba42758899fbe3358f607a37011d3452b1ec90bd6233620edfd6"
+          "sha256": "2d47bbf5b7b431bdf5c30559e2f21693c657c503caa4f2cd10496645dc14d501"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -183,7 +183,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "ca81f3f18c4212272856abcd1b8133345c46b75b6acc5931687bc8aec0e2eddc"
+      "source_set_sha256": "09f4d4f4808889689b5305924982bfadc1e14c3c70eec54d8a5db968a8cd537f"
     }
   },
   "source_symbol_map": [
@@ -499,7 +499,9 @@
             "{repo}/native/hip/src/moe_expert_kernel.hip.cpp",
             "{repo}/native/hip/src/moe_route_kernel.hip.cpp",
             "{repo}/native/hip/src/rotary_kernel.hip.cpp",
+            "{repo}/native/hip/src/row_concat_kernel.hip.cpp",
             "{repo}/native/hip/src/token_selector_kernel.hip.cpp",
+            "{repo}/native/hip/src/token_selector_pq_kernel.hip.cpp",
             "-x",
             "none",
             "-o",
@@ -691,7 +693,9 @@
             "{repo}/native/hip/src/moe_expert_kernel.hip.cpp",
             "{repo}/native/hip/src/moe_route_kernel.hip.cpp",
             "{repo}/native/hip/src/rotary_kernel.hip.cpp",
+            "{repo}/native/hip/src/row_concat_kernel.hip.cpp",
             "{repo}/native/hip/src/token_selector_kernel.hip.cpp",
+            "{repo}/native/hip/src/token_selector_pq_kernel.hip.cpp",
             "-x",
             "none",
             "-o",

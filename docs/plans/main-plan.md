@@ -389,7 +389,17 @@ gfx1201のVMM growによる別live KV破損は通常stateのresident選択で回
 
 #### Phase 83.5: 追加最適化と速度目標
 
-- Phase 83完了後、正しさを維持したまま測定で特定したボトルネックを最適化する。Phase 84・85の番号は維持し、順序は83→83.5→84→85とする。
+- **2026-09-10ユーザー決定:** Phase83.5の速度目標を緩和し、追加の速度追求を終了する。旧V620 200/20・R9700 500/25 tok/sは比較用に残し、未達を達成扱いにしない。正しさ・公開経路・資源管理・最終比較記録・CIと公開の残件を閉じて完了する。次の[Phase84はMTP重みの量子化](active/2026/09/1-10/phase84-mtp-weight-quantization.md)とし、従来の他精度最適化をPhase85、batchingをPhase86へ繰り下げる。新しい速度下限は設定しない。
+
+- 2026-09-09ユーザー指示により、llama.cppを基本の実装参照として[Phase83.5実行計画](archive/2026/09/1-10/phase83-5-llama-guided-performance.md)を作成し着手した。
+  量子化matmul・attentionとMTPのbatch／state／samplingを比較し、共通経路の改善と既定採用を進める。
+  直接reuseも検討し、実際のcopy／adaptation／portはprovenanceを記録する。
+- 最終candidate（R56＋lint/format修正）の8192/128・1 warmup＋3 measuredでは、MTPあり中央値はV620 **216.571／25.409 tok/s**、R9700 **541.402／34.541 tok/s**。MTPなしはV224.891／14.325、R550.149／19.083 tok/s。両GPUでHIP-only／cleanup0、MTPありの128token・採否はR56と一致した。R9700初回decodeは約24.55 tok/sで、warmup後との差を分けて記録する。反復値は旧参考目標を上回るが、速度目標の緩和決定を取り消したり追加の速度追求を再開したりしない。詳細は[最終比較記録](../history/2026/09/1-10/phase83-5-closeout-evidence.json)。
+- 主な変更はMTP部分採用時のstate復元、固定K20のGPU p/q検証、companion prefix準備の不要演算削除、BF16行結合、量子化共有、target/shapeに応じたmatmul・MXFP8 attentionと残差融合。各対象の数値・境界検査と通常経路の到達を確認した。全モデルの一律高速化は主張しない。
+- 不採用候補、初回失敗と訂正、実装ごとの測定・source identityは[Phase83.5履歴](../history/2026/09/1-10/phase83-5-llama-guided-performance.md)に保存する。両GPUの最終公開CLI/APIとMTP有無の比較、host検査・必要なlint/manifest修正・reviewを完了した。公開commitのCIを最終手順で確認する。
+- MTP companionを含む全configurationの厳密な総reservationは追加改善候補であり、今回の固定8192／128・32GB収容条件とは区別する。
+- 不採用のMTP draft/M3 Graph実験経路は削除し、既存M1経路とcheckpointを維持した。整数／FP64累積、softmax実験、N32／M64 tile変更、exact group、scaled BF16 ingress等の試行・失敗と訂正・不採用理由は実行計画と数値変更台帳へ記録し、同じ候補を根拠なく再試行しない。r19のR9700 profileはkernel別の相対費用順位に限って使い、同一streamのtimestamp逆転があるためGPU占有率や待ち時間を推定しない。
+- Phase 83完了後、正しさを維持したまま測定で特定したボトルネックを最適化する。2026-09-10変更後の順序は83→83.5→84（MTP量子化）→85（他精度）→86（batching）とする。
 - 新しい代表性能基準はtemplate適用後の8,192入力token／実際に確定した128出力tokenへ統一する。
   Qwen3.8 27B NVFP4、MXFP8 E4 KV、固定sampling、MTP有効、single GPU／batch=1で次を目標とする。
 
@@ -401,9 +411,9 @@ gfx1201のVMM growによる別live KV破損は通常stateのresident選択で回
 - prefillにはMTPのprefix準備を含める。decodeにはMTPのdraft／verify／棄却・replay／samplingをwall時間へ含め、
   棄却tokenをthroughputへ加算しない。1 warmup＋3 measuredの中央値を用い、
   TTFT／end-to-end時間とばらつきも記録する。達成可能性は未検証であり、prefillの改善をMTP統合だけに期待しない。
-- Phase 83.5の完了は上記速度の達成とPhase 83で確認した正しさ・公開経路・資源管理の維持を対象とする。
+- Phase 83.5の完了はPhase 83で確認した正しさ・公開経路・資源管理の維持、最終比較の記録と公開を対象とし、上記速度の達成は2026-09-10ユーザー決定で必須条件から外す。
   tools未対応は残件として明記し、vision、全モデル、TP、batchingやコーディングエージェント機能全体の完了は含めない。
-  Phase 83.5の目標未達を無断で緩和せず、原因と差を記録して再計画する。両Phaseの完了時にそれぞれcommit・push・CI確認を行う。詳細な計時・比較条件は
+  Phase 83.5の旧目標未達とユーザー承認による緩和を記録する。両Phaseの完了時にそれぞれcommit・push・CI確認を行う。詳細な計時・比較条件は
   [Phase 83計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
 
 ### 最適化の共通化と既定採用の方針
@@ -424,7 +434,7 @@ gfx1201のVMM growによる別live KV破損は通常stateのresident選択で回
   [Phase 82履歴](../history/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md)へ記録する。過去の測定履歴を保持し、
   観測事実と原因推定を分ける。今回判断できない候補は不足事項と再検討条件を残し、未確認を採用済みと扱わない。
 
-具体的な対象と順序は[現行Phase 76〜85計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正とし、
+具体的な対象と順序は[現行Phase 76〜86計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正とし、
 Phase 79の共通化内容は[Phase 79計画](archive/2026/09/1-10/phase79-common-optimization.md)に記録する。
 
 ### 既存の優先順位・採用基準
@@ -607,7 +617,7 @@ Phase 79の共通化内容は[Phase 79計画](archive/2026/09/1-10/phase79-commo
 | 完了・公開CI成功 | 81 | 固定sampling profileの共通GPU実装・API統合。代表条件でprefill／decodeへの追加負担がほぼないことを確認 |
 | 完了 | 82 | 不採用最適化の削除・試行と失敗理由の記録、データ不足候補の条件付き既定採用 |
 | 完了・実装検証済み | 83 | MXFP8 E4 KV・固定sampling／MTP・CLI/API統合、両GPU長文・対話・lifecycleを確認。速度改善は83.5 |
-| 計画済み | 83.5 | 正しさを維持した追加最適化と8,192入力／128出力の速度目標を達成 |
+| 実装中 | 83.5 | llama.cppを参考に共通経路とMTPを最適化し、8,192入力／128出力の速度目標を達成 |
 | 計画済み | 84 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了（旧83） |
 | 計画済み | 85 | NVFP4のGPU batching最適化（旧84） |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
@@ -649,7 +659,7 @@ sLLMサーバー統合を先行する。KVはユーザーが受容したMXFP8 E4
 `--qwen38-nvfp4`引数で検証済みsafetensorsを読み込む。この限定経路は最終公開入力をGGUFへ
 統一する方針の全面変更ではない。OpenWebUI接続を含む
 [完了計画](archive/2026/09/1-10/qwen38-nvfp4-r9700-server.md)の範囲を実装・実機確認した。これは2026-09-06時点の旧計画における
-Phase 79のstatic FP8 KV・MTP全体やPhase 81 batchingの完了を意味せず、現行の対応先はそれぞれPhase 83とPhase 85である。
+Phase 79のstatic FP8 KV・MTP全体やPhase 81 batchingの完了を意味せず、現行の対応先はそれぞれPhase83とPhase86である。
 続くユーザー指示でFP16 KVを受容し、Phase78のR9700高速opt-inを常駐サービスへ適用する。
 初回MXFP8配置ではこのopt-in設定が未指定だった。
 [高速経路適用計画](archive/2026/09/1-10/qwen38-r9700-server-fastpath.md)で同条件HTTP速度を比較し、greedy7.881→19.922 tok/s、温度0.7で12.822 tok/sを確認した。
@@ -661,7 +671,7 @@ vision／MTP等をBF16で保持し、KVはstatic tensor FP8 recipeを指定す�
 recipeの実行に必要な範囲だけを先行する。Phase 76で統合・correctness・baseline／profile、Phase 77でsingle-request decode、
 Phase 78でsingle-request prefill、Phase 79でstatic FP8 KV・MTP・文章生成closeoutを行う。その後Phase 80で他精度を一巡し、
 Phase 81でNVFP4 batchingへ進む。これは2026-09-03時点の旧計画記録であり、現在はPhase 81固定GPU sampling完了後、Phase 82最適化整理、Phase 83 MXFP8 E4 KV／MTP、
-Phase 84他精度、Phase 85 batchingの順である。詳細は[Phase 76〜85計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
+Phase83.5、Phase84 MTP量子化、Phase85他精度、Phase86 batchingの順である。詳細は[Phase 76〜86計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
 2026-09-03時点で固定artifactのV620 `gfx1030` 2台とR9700 `gfx1201`（single-GPU visible）のfull-model smoke
 （17-token prefill、4-token decode、replay、fallback 0、cleanup 0）とNVFP4 W4A4 M=1 decode kernel id 58の実dispatchを確認し、
 Phase 76〜77とPhase 78のcorrectness／dispatch部分は完了したが、Phase 78自体は速度ゲート未達のため保留とした。R9700は全GPU可視のphysical index 2ではHIP最小kernelが`invalid image`となるため、
@@ -687,7 +697,7 @@ sLLM exact artifactのoperator profile、NVFP4のcompute／memory rooflineとFP8
 他GPU向けvLLM／SGLang実装はno-copy構造参照だけに使い、そのthroughputをlocal性能差へ代入しない。P78-P1で
 operator family別wall差と有効なpeerまたはroofline／provider gapから実装順、中間目標、候補を改訂してから着手し、両targetの
 prefill絶対・相対gateとdecode 50%帯域gateを通過した後にPhase 79 static FP8 KV／MTP／CLI/APIへ進む。これは当時の旧Phase番号による記録であり、
-現在はPhase 83に対応する。詳細な測定契約、中間replan値、実装方法は[Phase 76〜85計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
+現在はPhase 83に対応する。詳細な測定契約、中間replan値、実装方法は[Phase 76〜86計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
 汎用FP8 artifact対応の保留は維持する。
 
 2026-09-04の継続profileでは、NVFP4 decode ID67、V620 FP8 decode ID68、R9700 hipBLASLt decode
@@ -719,7 +729,7 @@ Phase 78は未完了である。gfx1030 FP8 decode ID82は512/32同一build A/B�
 未統合候補はgfx1030 FP8 prefill LDS LUT `1.300x`、gfx1030 NVFP4 decode scale LUT `1.44〜2.10x`、
 gfx1201 NVFP4→FP8 staging `2.08〜5.10x`である。最後のstagingはID83として実装途中で、enum／workspace／staging
 kernelは存在するがproduction launchは未接続で、selectorから隔離してある。ID80は実モデル効果なし、ID81は`2.575%`退行で
-非採用。正確なopt-in集合、測定値、途中状態、再開順は[Phase 76〜85計画の2026-09-05 checkpoint](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
+非採用。正確なopt-in集合、測定値、途中状態、再開順は[Phase 76〜86計画の2026-09-05 checkpoint](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)を正本とする。
 同日の再開後、ID83は追加のFP8再符号化による丸め／飽和を確認し、N3候補としてselector隔離を維持する。
 再開順はID72の端数chunk選択修正と、演算順を保持するFP8 prefill／NVFP4 decode LUT候補へ更新した。
 長文探索値はV620 `275.312／13.251 tok/s`、端数修正後のR9700 `1134.906／16.688 tok/s`（prefill／decode）で、
@@ -786,7 +796,7 @@ TTFTは`30625.455→30252.204 ms`へ改善し、全token／文章／停止理由
 NVFP4 signedpack再構成のprivate r26は両targetの数値検証を通過したが、実GPUで速度改善がなく非採用とした。
 本番r25を維持している。ID72のN2採用判断待ちとPhase 78の最終性能条件は未解決のままである。
 容量2048のV620探索はrocBLAS workspace OOMで終了したため、1024の証拠を維持し、
-命令・cache再利用に基づく最適化へ絞る。最新の詳細は同じPhase 76〜85計画を正とする。
+命令・cache再利用に基づく最適化へ絞る。最新の詳細は同じPhase 76〜86計画を正とする。
 R9700のread counterは計測中の`profile_standard`とAMD upstreamの256-byte request event追加で取得できた。
 r25固定binaryのwhole-model counterは両targetで取得し、出力／audit一致と全kernel coverageを確認した。
 GL2C/EA read-request量はdecodeあたりV620約21.66 GB、R9700約21.80 GBであり、物理DRAM bytesとは区別する。

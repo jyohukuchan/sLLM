@@ -203,8 +203,9 @@ pub use execution::{
     ExecutionSessionRequest, ExecutionState, ExecutionStateImageV1, ExecutionSubmissionAdapter,
     ExecutionTransferAdapter, KvState, KvStateAppendSubmission, KvStateId, LinearAttentionBindings,
     LinearAttentionState, LinearAttentionStateId, LinearAttentionSubmission,
-    Ministral3YarnSubmission, OwnedTensorBinding, PrepareSupport, PreparedOperation,
-    PreparedOperationId, QueueCompletionMode, Readback, ShutdownReport, Submission, Transfer,
+    Ministral3YarnSubmission, OwnedTensorBinding, PrepareSupport, PreparedMatmulFootprint,
+    PreparedOperation, PreparedOperationId, QueueCompletionMode, Readback, ShutdownReport,
+    Submission, Transfer,
 };
 pub use fake::{FakeBackend, MAX_FAKE_MATERIALIZATION_BYTES};
 pub use final_output::{
@@ -610,9 +611,10 @@ pub use qwen_execution::{
     QWEN_PREFILL_CHUNK_BUCKETS, QWEN_PREFILL_SMALL_DEVICE_CHUNK_TOKENS,
     QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES, QwenExecutionAudit, QwenExecutionError,
     QwenExecutionOutput, QwenExecutionRequest, QwenGraphMemoryEstimate, QwenKvLayerMemoryAudit,
-    QwenKvPayloadEvidence, QwenKvStateImageV1, QwenLinearStateImageV1, QwenPrefixForkAuditV1,
-    QwenPrefixStateV1, QwenRequestMemoryAudit, QwenResidentModel, QwenStateImageV1,
-    qwen_graph_memory_estimate, qwen_prefill_chunk_candidates,
+    QwenKvPayloadEvidence, QwenKvStateImageV1, QwenLinearStateImageV1, QwenMtpPqDecisionV1,
+    QwenPrefixForkAuditV1, QwenPrefixStateV1, QwenRequestMemoryAudit, QwenResidentModel,
+    QwenStateImageV1, qwen_graph_memory_estimate,
+    qwen_graph_memory_estimate_with_prepared_workspace, qwen_prefill_chunk_candidates,
 };
 pub use qwen_graph::{
     QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES,

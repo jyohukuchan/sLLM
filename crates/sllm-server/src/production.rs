@@ -54,9 +54,10 @@ use sllm_core::{
     builtin_reviewed_model_lock, gemma4_mtp_pair_semantic_id,
     open_and_verify_official_ministral3_gguf, parse_control_vector_lock_v1,
     parse_gemma4_mtp_model_lock, parse_lora_lock_v1, parse_ministral3_model_lock,
-    qwen_graph_memory_estimate, qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy,
-    read_derived_gguf_lock, verify_derived_gguf, verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp,
-    verify_gguf_qwen35_moe, verify_unsloth_qwen38_nvfp4,
+    qwen_graph_memory_estimate_with_prepared_workspace, qwen_prefill_chunk_candidates,
+    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, verify_derived_gguf,
+    verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp, verify_gguf_qwen35_moe,
+    verify_unsloth_qwen38_nvfp4,
 };
 use sllm_frontend::{
     ApplyTemplateResultV1, DecodeModeV1, Gemma4MoeChatTemplateV1, Gemma4MtpGenerationExecutorV1,
@@ -568,8 +569,15 @@ fn qwen_embedding_graph(
     let mut rejected = Vec::new();
     for target_rows in candidates {
         let graph = qwen_embedding_graph_for_rows(state, target_rows, token_count)?;
-        let estimate = qwen_graph_memory_estimate(&graph, &state.plan, total_memory)
-            .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+        let row_counts = qwen_prepared_workspace_rows(graph.token_count(), token_count, 1)?;
+        let estimate = qwen_graph_memory_estimate_with_prepared_workspace(
+            &graph,
+            &state.plan,
+            total_memory,
+            &state.session,
+            &row_counts,
+        )
+        .map_err(|error| BackendErrorV1::new(error.to_string()))?;
         let incremental = estimate
             .required_bytes()
             .checked_sub(estimate.model_resident_bytes())
@@ -583,6 +591,25 @@ fn qwen_embedding_graph(
         "no embedding prefill chunk fits available device memory {available_memory}; candidates chunk:incremental-required [{}]",
         rejected.join(",")
     )))
+}
+
+fn qwen_prepared_workspace_rows(
+    graph_capacity: u64,
+    prompt_tokens: u64,
+    max_verification_rows: u64,
+) -> Result<Vec<u64>, BackendErrorV1> {
+    if graph_capacity == 0 {
+        return Err(BackendErrorV1::new(
+            "prepared workspace placement requires a non-zero graph capacity",
+        ));
+    }
+    let mut rows = vec![graph_capacity];
+    let tail = prompt_tokens % graph_capacity;
+    if tail != 0 {
+        rows.push(tail);
+    }
+    rows.extend(1..=max_verification_rows.min(graph_capacity));
+    Ok(rows)
 }
 
 fn qwen_embed_one(
@@ -2515,6 +2542,9 @@ pub struct ProductionRequestAuditV1 {
     pub placement_available_memory_bytes: Option<u64>,
     pub placement_required_bytes: Option<u64>,
     pub placement_incremental_required_bytes: Option<u64>,
+    pub placement_prepared_plan_bytes: Option<u64>,
+    pub placement_prepared_queue_bytes: Option<u64>,
+    pub placement_prepared_context_bytes: Option<u64>,
     pub workspace_separate_allocation_bytes: Option<u64>,
     pub workspace_arena_bytes: Option<u64>,
     pub allocated_request_state_bytes: u64,
@@ -4446,6 +4476,9 @@ impl ChatGenerationBackendV1 for Ministral3ChatBackendV1 {
             placement_available_memory_bytes: None,
             placement_required_bytes: None,
             placement_incremental_required_bytes: None,
+            placement_prepared_plan_bytes: None,
+            placement_prepared_queue_bytes: None,
+            placement_prepared_context_bytes: None,
             workspace_separate_allocation_bytes: Some(workspace_bytes),
             workspace_arena_bytes: Some(workspace_bytes),
             allocated_request_state_bytes: allocated.request_state().current_bytes(),
@@ -6267,12 +6300,29 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         };
         let mut rejected = Vec::new();
         let mut selected = None;
+        let max_verification_rows = if mtp_target {
+            (mtp_draft_width + 1) as u64
+        } else if ngram_draft_width != 0 {
+            ngram_draft_width as u64 + 1
+        } else {
+            1
+        };
         for chunk_rows in chunk_candidates {
             let graph = build_graph(chunk_rows)
                 .map_err(|error| BackendErrorV1::new(format!("request graph failed: {error}")))?;
-            let estimate =
-                qwen_graph_memory_estimate(&graph, &state.plan, placement_total_memory_bytes)
-                    .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+            let row_counts = qwen_prepared_workspace_rows(
+                graph.token_count(),
+                graph_prompt_tokens,
+                max_verification_rows,
+            )?;
+            let estimate = qwen_graph_memory_estimate_with_prepared_workspace(
+                &graph,
+                &state.plan,
+                placement_total_memory_bytes,
+                &state.session,
+                &row_counts,
+            )
+            .map_err(|error| BackendErrorV1::new(error.to_string()))?;
             let incremental_required = estimate
                 .required_bytes()
                 .checked_sub(estimate.model_resident_bytes())
@@ -6812,6 +6862,9 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             placement_available_memory_bytes: Some(placement_available_memory_bytes),
             placement_required_bytes: Some(placement.required_bytes()),
             placement_incremental_required_bytes: Some(placement_incremental_required_bytes),
+            placement_prepared_plan_bytes: Some(placement.prepared_plan_bytes()),
+            placement_prepared_queue_bytes: Some(placement.prepared_queue_bytes()),
+            placement_prepared_context_bytes: Some(placement.prepared_context_bytes()),
             workspace_separate_allocation_bytes: Some(placement.workspace_baseline_bytes()),
             workspace_arena_bytes: Some(placement.workspace_arena_bytes()),
             allocated_request_state_bytes: allocated.request_state().current_bytes(),
@@ -7724,6 +7777,9 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             placement_available_memory_bytes: None,
             placement_required_bytes: None,
             placement_incremental_required_bytes: None,
+            placement_prepared_plan_bytes: None,
+            placement_prepared_queue_bytes: None,
+            placement_prepared_context_bytes: None,
             workspace_separate_allocation_bytes: None,
             workspace_arena_bytes: None,
             allocated_request_state_bytes: allocated.request_state().current_bytes(),
@@ -8486,6 +8542,9 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
             placement_available_memory_bytes: None,
             placement_required_bytes: None,
             placement_incremental_required_bytes: None,
+            placement_prepared_plan_bytes: None,
+            placement_prepared_queue_bytes: None,
+            placement_prepared_context_bytes: None,
             workspace_separate_allocation_bytes: None,
             workspace_arena_bytes: None,
             allocated_request_state_bytes: allocated.request_state().current_bytes(),

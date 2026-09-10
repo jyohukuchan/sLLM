@@ -281,6 +281,7 @@ fn main() {
     let nvfp4_decode_scale_lut = source_dir.join("src/nvfp4_decode_scale_lut.inc");
     let fp8_prefill_short_m32 = source_dir.join("src/fp8_prefill_short_m32.inc");
     let nvfp4_prefill_wmma_compensated = source_dir.join("src/nvfp4_prefill_wmma_compensated.inc");
+    let nvfp4_small_m_vgpr_reuse = source_dir.join("src/nvfp4_small_m_vgpr_reuse.inc");
     let mlp_gate_up_silu_bundle_kernel_internal =
         source_dir.join("src/mlp_gate_up_silu_bundle_kernel_internal.hpp");
     let mlp_gate_up_silu_bundle_kernel =
@@ -297,7 +298,17 @@ fn main() {
     let argmax_kernel = source_dir.join("src/argmax_kernel.hip.cpp");
     let argmax_runtime = source_dir.join("src/argmax_runtime.inc");
     let token_selector_kernel_internal = source_dir.join("src/token_selector_kernel_internal.hpp");
+    let token_selector_support_internal =
+        source_dir.join("src/token_selector_support_internal.hpp");
     let token_selector_kernel = source_dir.join("src/token_selector_kernel.hip.cpp");
+    let token_selector_pq_algorithm = source_dir.join("src/token_selector_pq_algorithm.hpp");
+    let token_selector_pq_internal = source_dir.join("src/token_selector_pq_internal.hpp");
+    let token_selector_pq_kernel = source_dir.join("src/token_selector_pq_kernel.hip.cpp");
+    let token_selector_pq_runtime = source_dir.join("src/token_selector_pq_runtime.inc");
+    let row_concat_internal = source_dir.join("src/row_concat_internal.hpp");
+    let row_concat_kernel = source_dir.join("src/row_concat_kernel.hip.cpp");
+    let row_concat_runtime = source_dir.join("src/row_concat_runtime.inc");
+
     let token_selector_api_header = source_dir.join("src/token_selector_api.hpp");
     let token_selector_api = source_dir.join("src/token_selector_api.cpp");
     let token_selector_runtime = source_dir.join("src/token_selector_runtime.inc");
@@ -471,6 +482,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        nvfp4_small_m_vgpr_reuse.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         mlp_gate_up_silu_bundle_kernel_internal.display()
     );
     println!(
@@ -505,7 +520,31 @@ fn main() {
         "cargo:rerun-if-changed={}",
         token_selector_kernel_internal.display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        token_selector_support_internal.display()
+    );
     println!("cargo:rerun-if-changed={}", token_selector_kernel.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        token_selector_pq_algorithm.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        token_selector_pq_internal.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        token_selector_pq_kernel.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        token_selector_pq_runtime.display()
+    );
+    println!("cargo:rerun-if-changed={}", row_concat_internal.display());
+    println!("cargo:rerun-if-changed={}", row_concat_kernel.display());
+    println!("cargo:rerun-if-changed={}", row_concat_runtime.display());
+
     println!(
         "cargo:rerun-if-changed={}",
         token_selector_api_header.display()

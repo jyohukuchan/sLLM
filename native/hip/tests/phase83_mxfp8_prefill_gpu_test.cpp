@@ -1,16 +1,16 @@
-// Phase 83 MXFP8 GQA6 prefill provider oracle.
+// Phase 83 MXFP8 GQA6 prefill public provider oracle.
 //
-// This probe compares the ordinary packed-KV causal-attention route with the
-// explicit GQA6 qtile4 route at the production Qwen3.8 geometry.  It exercises
-// the qtile4 query-count boundary and non-zero prefix positions through the
-// public KV/attention API.  The host oracle independently applies OCP
-// MXFP8-E4M3 block-32 quantization, decodes the values, performs FP32 causal
-// softmax/value accumulation, and rounds the result to BF16.
+// This probe compares the default packed/QTILE4/QTILE8-W16 causal-attention
+// routes with an explicit GQA6 QTILE4 control at the production Qwen3.8
+// geometry. It exercises the query-count boundary and non-zero prefix
+// positions, including the gfx1030/gfx1201 QTILE8/W16 start-position boundary,
+// through the public KV/attention API. The host oracle independently applies
+// OCP MXFP8-E4M3 block-32 quantization, decodes the values, performs FP32
+// causal softmax/value accumulation, and rounds the result to BF16.
 //
-// The probe is evidence only.  It does not change the production selector or
-// establish a new default.  The qtile4 result is required to stay within the
-// existing Phase 83 oracle tolerance; provider-to-provider differences are
-// reported separately.
+// The probe is evidence only and does not change the production selector. Both
+// provider results are required to stay within the existing Phase 83 oracle
+// tolerance; provider-to-provider differences are checked separately.
 
 #include "sllm/hip.h"
 
@@ -411,6 +411,20 @@ struct Metrics final {
   uint64_t over_tolerance = 0U;
 };
 
+struct DispatchMetadata final {
+  uint32_t dispatch_count = 0U;
+  uint32_t workgroup_size = 0U;
+  uint32_t grid_size = 0U;
+  uint64_t query_count = 0U;
+  uint64_t start_position = 0U;
+  uint64_t committed_kv_length = 0U;
+  uint32_t fallback_allowed = 0U;
+  uint32_t fallback_used = 0U;
+  std::string logical_symbol;
+  std::string device_symbol;
+  std::string arch_name;
+};
+
 Metrics compare(const std::vector<uint16_t> &expected,
                 const std::vector<uint16_t> &actual) {
   Metrics result{};
@@ -473,7 +487,13 @@ struct Environment final {
     (void)setenv(kNames[1], "0", 1);
     (void)setenv(kNames[2], "0", 1);
     (void)setenv(kNames[3], "0", 1);
-    (void)setenv(kNames[4], qtile4 ? "1" : "0", 1);
+    // The default Q8/W16 provider is selected only when QTILE4 is absent.
+    // Keep the explicit QTILE4 control at "1" and remove the variable for
+    // the default route; "0" would still disable Q8/W16.
+    if (qtile4)
+      (void)setenv(kNames[4], "1", 1);
+    else
+      (void)unsetenv(kNames[4]);
     (void)setenv(kNames[5], "0", 1);
     (void)setenv(kNames[6], "0", 1);
     (void)setenv(kNames[7], "0", 1);
@@ -510,7 +530,7 @@ bool execute_attention(const sllm_context_t *const context,
                        const sllm_buffer_t *const output, const uint64_t prefix,
                        const uint64_t context_tokens, const uint32_t rows,
                        std::vector<uint16_t> *const result,
-                       std::string *const kernel_symbol) {
+                       DispatchMetadata *const dispatch) {
   sllm_causal_attention_desc_t descriptor{};
   descriptor.struct_size = sizeof(descriptor);
   descriptor.abi_version = SLLM_HIP_ABI_VERSION;
@@ -534,7 +554,17 @@ bool execute_attention(const sllm_context_t *const context,
       info.fallback_allowed != 0U || info.fallback_used != 0U ||
       !wait_release(&completion, "MXFP8 prefill wait"))
     return false;
-  kernel_symbol->assign(info.kernel_symbol);
+  dispatch->dispatch_count = info.dispatch_count;
+  dispatch->workgroup_size = info.workgroup_size_x;
+  dispatch->grid_size = info.grid_size_x;
+  dispatch->query_count = info.query_count;
+  dispatch->start_position = info.start_position;
+  dispatch->committed_kv_length = info.committed_kv_length;
+  dispatch->fallback_allowed = info.fallback_allowed;
+  dispatch->fallback_used = info.fallback_used;
+  dispatch->logical_symbol.assign(info.kernel_symbol);
+  dispatch->device_symbol.assign(info.device_symbol);
+  dispatch->arch_name.assign(info.gcn_arch_name);
   result->resize(static_cast<size_t>(rows * kQueryHeads *
                                      static_cast<uint64_t>(kHeadDim)));
   return download(queue, output, result->data(),
@@ -548,7 +578,7 @@ bool run_case(const sllm_context_t *const context,
               const std::vector<uint16_t> &value,
               const std::vector<uint16_t> &query,
               const std::vector<uint16_t> &expected, Metrics *const metrics,
-              std::string *const symbol,
+              DispatchMetadata *const dispatch,
               std::vector<uint16_t> *const actual_output) {
   const uint64_t context_tokens = prefix + rows;
   const uint64_t kv_bytes =
@@ -613,7 +643,7 @@ bool run_case(const sllm_context_t *const context,
   if (ok) {
     Environment::set(qtile4);
     ok = execute_attention(context, queue, state, buffers[2], buffers[3],
-                           prefix, context_tokens, rows, &actual, symbol);
+                           prefix, context_tokens, rows, &actual, dispatch);
     if (ok) {
       *metrics = compare(expected, actual);
       if (actual_output != nullptr)
@@ -633,6 +663,66 @@ bool run_case(const sllm_context_t *const context,
   return ok;
 }
 
+bool dispatch_matches(const uint64_t prefix, const uint32_t rows,
+                      const bool qtile4, const DispatchMetadata &actual) {
+  const bool target_has_qtile8 =
+      std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0 ||
+      std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0;
+  const bool expected_qtile8 =
+      !qtile4 && target_has_qtile8 && rows >= 128U && prefix >= 1024U;
+  const bool expected_qtile4 = rows >= 128U && !expected_qtile8;
+  const bool target_has_gfx1201_packed =
+      std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0;
+  const char *const expected_logical =
+      expected_qtile8   ? "causal_attention.prefill.gqa6_qtile8_w16.mxfp8.v1"
+      : expected_qtile4 ? "causal_attention.prefill.gqa6_qtile4.v1"
+      : target_has_gfx1201_packed
+          ? "causal_attention.online_softmax_gqa.packed_kv.gfx1201_wave.v4"
+          : "causal_attention.online_softmax_gqa.packed_kv.v3";
+  const char *const expected_device =
+      expected_qtile8 ? "sllm_causal_attention_prefill_gqa6_qtile8_w16_mxfp8_v1"
+      : expected_qtile4 ? "sllm_causal_attention_prefill_gqa6_qtile4_v1"
+      : target_has_gfx1201_packed
+          ? "sllm_causal_attention_packed_gfx1201_wave_v4"
+          : "sllm_causal_attention_online_softmax_gqa_packed_kv_v3";
+  const uint32_t expected_workgroup = expected_qtile8 ? 512U : 256U;
+  const uint32_t expected_grid =
+      expected_qtile8
+          ? static_cast<uint32_t>((static_cast<uint64_t>(rows) + 7U) / 8U) *
+                kKvHeads
+      : expected_qtile4
+          ? static_cast<uint32_t>((static_cast<uint64_t>(rows) + 3U) / 4U) *
+                kKvHeads
+          : rows * kQueryHeads;
+  const bool matches =
+      actual.dispatch_count == 1U &&
+      actual.workgroup_size == expected_workgroup &&
+      actual.grid_size == expected_grid && actual.query_count == rows &&
+      actual.start_position == prefix &&
+      actual.committed_kv_length == prefix + rows &&
+      actual.fallback_allowed == 0U && actual.fallback_used == 0U &&
+      actual.logical_symbol == expected_logical &&
+      actual.device_symbol == expected_device &&
+      actual.arch_name == SLLM_TEST_EXPECTED_TARGET;
+  if (!matches) {
+    std::fprintf(
+        stderr,
+        "dispatch metadata mismatch prefix=%llu query_count=%u provider=%s "
+        "expected=(logical=%s device=%s workgroup=%u grid=%u) "
+        "actual=(logical=%s device=%s workgroup=%u grid=%u start=%llu "
+        "committed=%llu arch=%s fallback=%u/%u)\n",
+        static_cast<unsigned long long>(prefix), rows,
+        qtile4 ? "qtile4" : "default", expected_logical, expected_device,
+        expected_workgroup, expected_grid, actual.logical_symbol.c_str(),
+        actual.device_symbol.c_str(), actual.workgroup_size, actual.grid_size,
+        static_cast<unsigned long long>(actual.start_position),
+        static_cast<unsigned long long>(actual.committed_kv_length),
+        actual.arch_name.c_str(), actual.fallback_allowed,
+        actual.fallback_used);
+  }
+  return matches;
+}
+
 } // namespace
 
 int main() {
@@ -641,60 +731,64 @@ int main() {
   sllm_queue_t *queue = nullptr;
   bool success = create_context(&context, &queue);
   if (success) {
-    constexpr std::array<uint32_t, 3> query_counts = {127U, 128U, 129U};
-    constexpr std::array<uint64_t, 3> prefixes = {0U, 31U, 256U};
-    for (const uint64_t prefix : prefixes) {
-      for (const uint32_t rows : query_counts) {
-        const uint64_t context_tokens = prefix + rows;
-        const std::vector<uint16_t> key = make_kv(context_tokens, false);
-        const std::vector<uint16_t> value = make_kv(context_tokens, true);
-        const std::vector<uint16_t> query = make_query(rows, prefix);
-        const std::vector<uint16_t> expected =
-            oracle(key, value, query, prefix, rows);
-        Metrics default_metrics{};
-        Metrics qtile_metrics{};
-        Metrics provider_metrics{};
-        std::string default_symbol;
-        std::string qtile_symbol;
-        std::vector<uint16_t> default_actual;
-        std::vector<uint16_t> qtile_actual;
-        success =
-            run_case(context, queue, prefix, rows, false, key, value, query,
-                     expected, &default_metrics, &default_symbol,
-                     &default_actual) &&
-            run_case(context, queue, prefix, rows, true, key, value, query,
-                     expected, &qtile_metrics, &qtile_symbol, &qtile_actual);
+    constexpr std::array<std::array<uint64_t, 2>, 13> cases = {
+        {{{0U, 127U}},
+         {{0U, 128U}},
+         {{0U, 129U}},
+         {{31U, 127U}},
+         {{31U, 128U}},
+         {{31U, 129U}},
+         {{256U, 127U}},
+         {{256U, 128U}},
+         {{256U, 129U}},
+         {{1023U, 127U}},
+         {{1023U, 128U}},
+         {{1024U, 128U}},
+         {{1025U, 129U}}}};
+    for (const auto &test_case : cases) {
+      const uint64_t prefix = test_case[0];
+      const uint32_t rows = static_cast<uint32_t>(test_case[1]);
+      const uint64_t context_tokens = prefix + rows;
+      const std::vector<uint16_t> key = make_kv(context_tokens, false);
+      const std::vector<uint16_t> value = make_kv(context_tokens, true);
+      const std::vector<uint16_t> query = make_query(rows, prefix);
+      const std::vector<uint16_t> expected =
+          oracle(key, value, query, prefix, rows);
+      Metrics default_metrics{};
+      Metrics qtile_metrics{};
+      Metrics provider_metrics{};
+      DispatchMetadata default_dispatch{};
+      DispatchMetadata qtile_dispatch{};
+      std::vector<uint16_t> default_actual;
+      std::vector<uint16_t> qtile_actual;
+      success =
+          run_case(context, queue, prefix, rows, false, key, value, query,
+                   expected, &default_metrics, &default_dispatch,
+                   &default_actual) &&
+          run_case(context, queue, prefix, rows, true, key, value, query,
+                   expected, &qtile_metrics, &qtile_dispatch, &qtile_actual);
+      if (success) {
+        success = dispatch_matches(prefix, rows, false, default_dispatch) &&
+                  dispatch_matches(prefix, rows, true, qtile_dispatch);
         std::printf(
             "dispatch prefix=%llu query_count=%u default=%s qtile4=%s\n",
             static_cast<unsigned long long>(prefix), rows,
-            default_symbol.c_str(), qtile_symbol.c_str());
-        if (success) {
-          provider_metrics = compare(default_actual, qtile_actual);
-          std::printf(
-              "provider_diff prefix=%llu query_count=%u max_bf16_ulp=%u "
-              "max_abs=%g max_relative=%g over_tolerance=%llu\n",
-              static_cast<unsigned long long>(prefix), rows,
-              provider_metrics.max_ulp, provider_metrics.max_abs,
-              provider_metrics.max_relative,
-              static_cast<unsigned long long>(provider_metrics.over_tolerance));
-        }
-        const bool qtile_selected =
-            rows >= 128U &&
-            qtile_symbol == "causal_attention.prefill.gqa6_qtile4.v1";
-        const bool expected_qtile = rows >= 128U;
-        if (!qtile_selected != !expected_qtile) {
-          std::fprintf(
-              stderr,
-              "unexpected qtile4 selection prefix=%llu query_count=%u\n",
-              static_cast<unsigned long long>(prefix), rows);
+            default_dispatch.logical_symbol.c_str(),
+            qtile_dispatch.logical_symbol.c_str());
+        provider_metrics = compare(default_actual, qtile_actual);
+        std::printf(
+            "provider_diff prefix=%llu query_count=%u max_bf16_ulp=%u "
+            "max_abs=%g max_relative=%g over_tolerance=%llu\n",
+            static_cast<unsigned long long>(prefix), rows,
+            provider_metrics.max_ulp, provider_metrics.max_abs,
+            provider_metrics.max_relative,
+            static_cast<unsigned long long>(provider_metrics.over_tolerance));
+        if (provider_metrics.over_tolerance != 0U)
           success = false;
-        }
-        if (default_metrics.over_tolerance != 0U ||
-            qtile_metrics.over_tolerance != 0U)
-          success = false;
-        if (!success)
-          break;
       }
+      if (default_metrics.over_tolerance != 0U ||
+          qtile_metrics.over_tolerance != 0U)
+        success = false;
       if (!success)
         break;
     }
@@ -709,7 +803,7 @@ int main() {
                      SLLM_STATUS_OK, "context release", error) &&
               context == nullptr && success;
   if (success)
-    std::printf("phase83 MXFP8 prefill qtile4 GPU PASS target=%s\n",
+    std::printf("phase83 MXFP8 prefill qtile8/w16 public GPU PASS target=%s\n",
                 SLLM_TEST_EXPECTED_TARGET);
   return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

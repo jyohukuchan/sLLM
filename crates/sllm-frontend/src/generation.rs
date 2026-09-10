@@ -1138,6 +1138,7 @@ pub struct QwenMtpGenerationExecutorV1 {
     hidden_width: usize,
     draft_width: usize,
     proposal_blocks: u64,
+    fixed_k20_pq_blocks: u64,
     proposed_draft_tokens: u64,
     accepted_draft_tokens: u64,
     committed_target_rows: u64,
@@ -1162,6 +1163,7 @@ impl QwenMtpGenerationExecutorV1 {
             hidden_width,
             draft_width: 2,
             proposal_blocks: 0,
+            fixed_k20_pq_blocks: 0,
             proposed_draft_tokens: 0,
             accepted_draft_tokens: 0,
             committed_target_rows: 0,
@@ -1187,6 +1189,7 @@ impl QwenMtpGenerationExecutorV1 {
             hidden_width,
             draft_width,
             proposal_blocks: 0,
+            fixed_k20_pq_blocks: 0,
             proposed_draft_tokens: 0,
             accepted_draft_tokens: 0,
             committed_target_rows: 0,
@@ -1269,6 +1272,21 @@ impl QwenMtpGenerationExecutorV1 {
             })
     }
 
+    fn selector_for_mtp_proposal_row(
+        selector: &DeviceTokenSelectorRequestV1,
+        row: usize,
+    ) -> Result<DeviceTokenSelectorRequestV1, GenerationServiceError> {
+        const Q_DRAFT_DOMAIN: u64 = 0x5144_5241_4654_0001;
+        let row = u64::try_from(row).map_err(|_| GenerationServiceError::CountOverflow)?;
+        let counter = selector
+            .counter()
+            .checked_mul(9)
+            .and_then(|counter| counter.checked_add(row))
+            .filter(|counter| row <= 8 && *counter != u64::MAX)
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        Ok(selector.with_rng(selector.seed() ^ Q_DRAFT_DOMAIN, counter))
+    }
+
     pub const fn draft_width(&self) -> usize {
         self.draft_width
     }
@@ -1283,6 +1301,12 @@ impl QwenMtpGenerationExecutorV1 {
 
     pub const fn proposal_blocks(&self) -> u64 {
         self.proposal_blocks
+    }
+
+    /// Successfully completed private GPU p/q verifications, including a
+    /// block whose remaining outputs are later discarded by stopping.
+    pub const fn fixed_k20_pq_blocks(&self) -> u64 {
+        self.fixed_k20_pq_blocks
     }
 
     pub const fn proposed_draft_tokens(&self) -> u64 {
@@ -1627,7 +1651,7 @@ impl QwenMtpGenerationExecutorV1 {
             self.mtp
                 .decode_mtp_with_device_selector(token, &previous_hidden, &draft_selector)
         } else {
-            self.mtp.decode_mtp(token, &previous_hidden)
+            self.mtp.decode_mtp_argmax(token, &previous_hidden)
         }
         .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
         let draft_token = if device_draft {
@@ -1693,8 +1717,25 @@ impl QwenMtpGenerationExecutorV1 {
         selector: &DeviceTokenSelectorRequestV1,
         width: usize,
     ) -> Result<GenerationStepV1, GenerationServiceError> {
-        let proposal = if mtp_device_draft_selector_enabled() {
-            self.propose_mtp_draft_with_device_selector(token_id, selector, width)?
+        let use_pq = selector.temperature() == 1.0
+            && selector.top_k() == 20
+            && selector.top_p() == 0.95
+            && self
+                .target
+                .supports_fixed_k20_mtp_with(&self.mtp)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        if use_pq {
+            // Check the largest possible counter before either model advances.
+            Self::selector_for_mtp_proposal_row(selector, width)?;
+            self.target
+                .begin_fixed_k20_target_support_capture(width + 1)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            self.mtp
+                .begin_fixed_k20_support_capture(width)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        }
+        let proposal = if use_pq || mtp_device_draft_selector_enabled() {
+            self.propose_mtp_draft_with_device_selector(token_id, selector, width, use_pq)?
         } else {
             self.propose_mtp_draft(token_id, width)
                 .map_err(GenerationServiceError::from)?
@@ -1742,23 +1783,53 @@ impl QwenMtpGenerationExecutorV1 {
                 ));
             }
         };
-        let selections = match block.selections() {
-            Some(selections) if selections.len() == width + 1 => selections,
-            Some(_) | None => {
-                self.rewind_mtp_rows(width)?;
-                return Err(GenerationServiceError::MissingDeviceSelection);
+        let selections = if use_pq {
+            // The target selector's public 16-byte records are discarded by
+            // private p/q.  Core keeps the terminal completion and support
+            // capture, but intentionally omits those records in this mode.
+            block.selections().unwrap_or(&[])
+        } else {
+            match block.selections() {
+                Some(selections) if selections.len() == width + 1 => selections,
+                Some(_) | None => {
+                    self.rewind_mtp_rows(width)?;
+                    return Err(GenerationServiceError::MissingDeviceSelection);
+                }
             }
         };
-        let mut accepted = 0_usize;
-        while accepted < width && drafts[accepted] == selections[accepted].token_id {
-            accepted += 1;
-        }
+        let pq_decision = if use_pq {
+            Some(
+                self.target
+                    .verify_mtp_fixed_k20(&self.mtp, drafts, selector.seed(), selector.counter())
+                    .map_err(|error| GenerationServiceError::Execution(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let accepted = if let Some(decision) = &pq_decision {
+            self.fixed_k20_pq_blocks = self
+                .fixed_k20_pq_blocks
+                .checked_add(1)
+                .ok_or(GenerationServiceError::CountOverflow)?;
+            decision.accepted_draft_tokens()
+        } else {
+            let mut accepted = 0_usize;
+            while accepted < width && drafts[accepted] == selections[accepted].token_id {
+                accepted += 1;
+            }
+            accepted
+        };
         let committed_rows = if accepted == width {
             width + 1
         } else {
             accepted + 1
         };
-        let steps = selections[..committed_rows]
+        let emitted = if let Some(decision) = pq_decision.as_ref() {
+            decision.selections()
+        } else {
+            &selections[..committed_rows]
+        };
+        let steps = emitted
             .iter()
             .cloned()
             .map(GenerationStepV1::from_device_selection)
@@ -1766,10 +1837,12 @@ impl QwenMtpGenerationExecutorV1 {
 
         if accepted == width {
             let hidden_start = (width - 1) * self.hidden_width;
+            // This row aligns companion state; its next-token prediction is
+            // unused because the target already selected the bonus token.
             self.mtp
-                .decode_mtp(
-                    i32::try_from(drafts[width - 1])
-                        .map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+                .decode_mtp_state_only_batch(
+                    &[i32::try_from(drafts[width - 1])
+                        .map_err(|_| GenerationServiceError::TokenIdOverflow)?],
                     &hidden[hidden_start..hidden_start + self.hidden_width],
                 )
                 .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
@@ -1785,7 +1858,7 @@ impl QwenMtpGenerationExecutorV1 {
         });
         self.queued_device_steps = (1..committed_rows)
             .map(|row| QueuedQwenDeviceStepV1 {
-                expected_input: selections[row - 1].token_id,
+                expected_input: steps[row - 1].device_argmax(),
                 selector: selectors[row].clone(),
                 step: steps[row].clone(),
             })
@@ -1868,6 +1941,7 @@ impl QwenMtpGenerationExecutorV1 {
         pending_token: u32,
         selector: &DeviceTokenSelectorRequestV1,
         requested_width: usize,
+        independent_rng: bool,
     ) -> Result<Option<DraftProposalV1>, GenerationServiceError> {
         let width = requested_width.min(self.draft_width);
         if width == 0 {
@@ -1885,7 +1959,11 @@ impl QwenMtpGenerationExecutorV1 {
             i32::try_from(pending_token).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
         let mut proposal_hidden = self.last_target_hidden_bf16.clone();
         for row in 0..width {
-            let draft_selector = Self::selector_for_mtp_draft_row(selector, row)?;
+            let draft_selector = if independent_rng {
+                Self::selector_for_mtp_proposal_row(selector, row)?
+            } else {
+                Self::selector_for_mtp_draft_row(selector, row)?
+            };
             let proposal = self
                 .mtp
                 .decode_mtp_with_device_selector(proposal_token, &proposal_hidden, &draft_selector)
@@ -1930,7 +2008,7 @@ impl QwenMtpGenerationExecutorV1 {
         for _ in 0..width {
             let proposal = self
                 .mtp
-                .decode_mtp(proposal_token, &proposal_hidden)
+                .decode_mtp_argmax(proposal_token, &proposal_hidden)
                 .map_err(|_| SpeculativeError::InvalidDecision)?;
             proposal_token = *proposal
                 .token_ids()
@@ -2023,9 +2101,9 @@ impl QwenMtpGenerationExecutorV1 {
             } else {
                 let previous_hidden_start = (draft_width - 1) * self.hidden_width;
                 self.mtp
-                    .decode_mtp(
-                        i32::try_from(drafts[draft_width - 1])
-                            .map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+                    .decode_mtp_state_only_batch(
+                        &[i32::try_from(drafts[draft_width - 1])
+                            .map_err(|_| GenerationServiceError::TokenIdOverflow)?],
                         &hidden[previous_hidden_start..previous_hidden_start + self.hidden_width],
                     )
                     .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
@@ -2042,7 +2120,7 @@ impl QwenMtpGenerationExecutorV1 {
                     &hidden[start..start + self.hidden_width]
                 };
                 self.mtp
-                    .decode_mtp(block_input, hidden_before)
+                    .decode_mtp_state_only_batch(&[block_input], hidden_before)
                     .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
             }
         }
@@ -3864,6 +3942,42 @@ mod tests {
         assert_eq!(row.additive_logits(), selector.additive_logits());
         assert_eq!(row.top_k(), selector.top_k());
         assert_eq!(row.top_p(), selector.top_p());
+    }
+
+    #[test]
+    fn qwen_mtp_proposal_rng_separates_domains_and_checks_counter_boundaries() {
+        let config = SamplerChainConfigV1::new(
+            SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).expect("parameters"),
+        )
+        .with_top_k(20)
+        .expect("top-k");
+        let chain = SamplerChainV1::new(config, &[]).expect("sampler");
+        let selector = chain
+            .prepare_device_selector(4, Some(&[true, false, true, true]), 123, 77)
+            .expect("selector");
+        let proposal = QwenMtpGenerationExecutorV1::selector_for_mtp_proposal_row(&selector, 2)
+            .expect("proposal selector");
+        assert_eq!(proposal.counter(), 695);
+        assert_eq!(proposal.seed(), 123 ^ 0x5144_5241_4654_0001);
+        assert_ne!(proposal.seed(), selector.seed());
+        assert_eq!(proposal.valid_mask(), selector.valid_mask());
+        assert_eq!(proposal.additive_logits(), selector.additive_logits());
+        assert_eq!(proposal.top_k(), 20);
+        assert_eq!(proposal.top_p(), 0.95);
+        assert!(QwenMtpGenerationExecutorV1::selector_for_mtp_proposal_row(&selector, 9).is_err());
+        let boundary = selector.with_counter(u64::MAX / 9);
+        let last = QwenMtpGenerationExecutorV1::selector_for_mtp_proposal_row(&boundary, 5)
+            .expect("last representable draw");
+        assert_eq!(last.counter(), u64::MAX - 1);
+        assert!(QwenMtpGenerationExecutorV1::selector_for_mtp_proposal_row(&boundary, 6).is_err());
+        assert!(QwenMtpGenerationExecutorV1::selector_for_mtp_proposal_row(&boundary, 7).is_err());
+        assert!(
+            QwenMtpGenerationExecutorV1::selector_for_mtp_proposal_row(
+                &selector.with_counter(u64::MAX),
+                0,
+            )
+            .is_err()
+        );
     }
 
     #[test]

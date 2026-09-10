@@ -3,6 +3,9 @@ namespace {
 using Qwen38ProjectionPackPlan = ElementwisePlan;
 
 constexpr uint64_t kQwen38ProjectionPackM = UINT64_C(1);
+constexpr uint64_t kQwen38ProjectionPackSmallNvfp4MMin = UINT64_C(2);
+constexpr uint64_t kQwen38ProjectionPackSmallNvfp4MMax = UINT64_C(4);
+constexpr uint64_t kQwen38ProjectionPackMinNvfp4M = UINT64_C(64);
 constexpr uint64_t kQwen38ProjectionPackK = UINT64_C(5120);
 constexpr uint64_t kQwen38ProjectionPackNvfp4N = UINT64_C(17408);
 constexpr uint64_t kQwen38ProjectionPackFp8GdnQkvN = UINT64_C(10240);
@@ -52,7 +55,7 @@ bool qwen38_projection_pack_binding_overlap(
 
 uint32_t qwen38_projection_pack_compute_grid(
     const sllm_matmul_kernel::KernelVariant variant,
-    const uint64_t n) noexcept {
+    const uint64_t m, const uint64_t n) noexcept {
   const auto ceil_grid = [](const uint64_t width,
                             const uint64_t tile) noexcept -> uint32_t {
     if (width == 0U || tile == 0U || width > UINT64_MAX - (tile - 1U)) {
@@ -62,6 +65,16 @@ uint32_t qwen38_projection_pack_compute_grid(
     return grid > static_cast<uint64_t>(UINT32_MAX)
                ? 0U
                : static_cast<uint32_t>(grid);
+  };
+  const auto product_grid = [](const uint32_t rows, const uint32_t columns,
+                               uint32_t *const result) noexcept -> bool {
+    if (result == nullptr || rows == 0U || columns == 0U ||
+        static_cast<uint64_t>(rows) >
+            static_cast<uint64_t>(UINT32_MAX) / columns) {
+      return false;
+    }
+    *result = rows * columns;
+    return *result != 0U;
   };
   using sllm_matmul_kernel::KernelVariant;
   switch (variant) {
@@ -76,6 +89,54 @@ uint32_t qwen38_projection_pack_compute_grid(
     return ceil_grid(n, UINT64_C(32));
   case KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64:
     return ceil_grid(n, UINT64_C(64));
+  case KernelVariant::Nvfp4W4A4PrefillCompensated64x64: {
+    const uint64_t row_tile = m >= UINT64_C(512) && (m % UINT64_C(128)) == 0U
+                                  ? UINT64_C(128)
+                                  : UINT64_C(64);
+    const uint32_t row_grid = ceil_grid(m, row_tile);
+    const uint32_t column_grid = ceil_grid(n, UINT64_C(64));
+    uint32_t result = 0U;
+    return product_grid(row_grid, column_grid, &result) ? result : 0U;
+  }
+  case KernelVariant::Fp8OuterPrefillTiled16: {
+    const uint32_t row_grid = ceil_grid(m, UINT64_C(16));
+    const uint32_t column_grid = ceil_grid(n, UINT64_C(16));
+    uint32_t result = 0U;
+    return product_grid(row_grid, column_grid, &result) ? result : 0U;
+  }
+  case KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64: {
+    const bool short_m32_n64 =
+        sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n64_shape(
+            m, kQwen38ProjectionPackK, n);
+    const bool short_m32_n32 =
+        sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n32_shape(
+            m, kQwen38ProjectionPackK, n);
+    const uint64_t row_tile = short_m32_n64 || short_m32_n32 ? UINT64_C(32)
+                                                               : UINT64_C(64);
+    const uint64_t column_tile = short_m32_n64
+                                     ? UINT64_C(64)
+                                     : short_m32_n32 ? UINT64_C(32)
+                                                     : UINT64_C(64);
+    const uint32_t row_grid = ceil_grid(m, row_tile);
+    const uint32_t column_grid = ceil_grid(n, column_tile);
+    uint32_t result = 0U;
+    return product_grid(row_grid, column_grid, &result) ? result : 0U;
+  }
+  case KernelVariant::Fp8OuterPrefillGfx1030Half2_128x64: {
+    const uint32_t row_grid = ceil_grid(m, UINT64_C(128));
+    const uint32_t column_grid = ceil_grid(n, UINT64_C(64));
+    uint32_t result = 0U;
+    return product_grid(row_grid, column_grid, &result) ? result : 0U;
+  }
+  case KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan: {
+    const uint32_t row_grid = ceil_grid(m, UINT64_C(128));
+    const uint32_t column_grid = ceil_grid(n, UINT64_C(64));
+    uint32_t result = 0U;
+    return product_grid(row_grid, column_grid, &result) ? result : 0U;
+  }
+  case KernelVariant::Nvfp4W4A4SmallMVgprReuse:
+  case KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid:
+    return ceil_grid(n, UINT64_C(32));
   case KernelVariant::Fp8Native:
     return n > static_cast<uint64_t>(UINT32_MAX) ? 0U
                                                  : static_cast<uint32_t>(n);
@@ -100,9 +161,55 @@ bool qwen38_projection_pack_valid_fp8_gdn_n(const uint64_t n,
          (index == 1U && n == kQwen38ProjectionPackFp8GdnZN);
 }
 
+bool qwen38_projection_pack_fp8_gdn_workspace_bytes(
+    const uint64_t m, const uint64_t k,
+    uint64_t *const workspace_bytes) noexcept {
+  if (workspace_bytes == nullptr || m == 0U || k != kQwen38ProjectionPackK ||
+      m > UINT64_MAX / k || m > UINT64_MAX / sizeof(float)) {
+    return false;
+  }
+  const uint64_t quantized_bytes = m * k;
+  const uint64_t scale_bytes = m * sizeof(float);
+  if (quantized_bytes > UINT64_MAX - scale_bytes) {
+    return false;
+  }
+  *workspace_bytes = quantized_bytes + scale_bytes;
+  return *workspace_bytes != 0U;
+}
+
+bool qwen38_projection_pack_fp8_gdn_quantize_grid(
+    const uint64_t m, const uint64_t k,
+    uint32_t *const grid_size) noexcept {
+  if (grid_size == nullptr || m == 0U || k != kQwen38ProjectionPackK ||
+      m > static_cast<uint64_t>(UINT32_MAX)) {
+    return false;
+  }
+  // launch_fp8_quantize launches one 256-thread workgroup per activation row.
+  *grid_size = static_cast<uint32_t>(m);
+  return *grid_size != 0U;
+}
+
+bool qwen38_projection_pack_fp8_gdn_pair_compatible(
+    const std::array<sllm_matmul::DescriptorMetadata, 2> &metadata) noexcept {
+  const auto &first = metadata[0];
+  const auto &second = metadata[1];
+  return first.m != 0U && first.m == second.m && first.k == second.k &&
+         first.k == kQwen38ProjectionPackK &&
+         first.activation.shape[0] == second.activation.shape[0] &&
+         first.activation.shape[1] == second.activation.shape[1] &&
+         first.activation.shape[0] == first.m &&
+         first.activation.shape[1] == first.k;
+}
+
 bool qwen38_projection_pack_nvfp4_member_compatible(
     const sllm_matmul::DescriptorMetadata &metadata) noexcept {
-  return metadata.m == kQwen38ProjectionPackM && metadata.k != 0U &&
+  const bool supported_rows =
+      metadata.m == kQwen38ProjectionPackM ||
+      (metadata.m >= kQwen38ProjectionPackSmallNvfp4MMin &&
+       metadata.m <= kQwen38ProjectionPackSmallNvfp4MMax) ||
+      metadata.m >= kQwen38ProjectionPackMinNvfp4M;
+  return supported_rows &&
+         metadata.k != 0U &&
          (metadata.k % UINT64_C(16)) == 0U && metadata.n != 0U &&
          metadata.nvfp4_w4a4 && metadata.weight_value_bytes != 0U &&
          metadata.weight_scale_offset >= metadata.weight.byte_offset &&
@@ -123,14 +230,44 @@ bool qwen38_projection_pack_nvfp4_pair_compatible(
          first.activation.shape[1] == second.activation.shape[1];
 }
 
-bool qwen38_projection_pack_nvfp4_workspace_bytes(
-    const uint64_t k, uint64_t *const workspace_bytes) noexcept {
-  if (workspace_bytes == nullptr || k == 0U || (k % UINT64_C(16)) != 0U ||
-      k > UINT64_MAX - UINT64_C(1)) {
+bool qwen38_projection_pack_nvfp4_packed_activation_bytes(
+    const uint64_t m, const uint64_t k,
+    uint64_t *const packed_activation_bytes) noexcept {
+  if (packed_activation_bytes == nullptr || m == 0U || k == 0U ||
+      (k % UINT64_C(16)) != 0U || k > UINT64_MAX - UINT64_C(1)) {
     return false;
   }
-  const uint64_t packed_bytes = (k + UINT64_C(1)) / UINT64_C(2);
-  const uint64_t scale_bytes = k / UINT64_C(16);
+  const uint64_t packed_row_bytes = (k + UINT64_C(1)) / UINT64_C(2);
+  if (packed_row_bytes == 0U || m > UINT64_MAX / packed_row_bytes) {
+    return false;
+  }
+  *packed_activation_bytes = m * packed_row_bytes;
+  return *packed_activation_bytes != 0U;
+}
+
+bool qwen38_projection_pack_nvfp4_workspace_bytes(
+    const uint64_t m, const uint64_t k,
+    uint64_t *const workspace_bytes) noexcept {
+  const bool supported_rows =
+      m == kQwen38ProjectionPackM ||
+      (m >= kQwen38ProjectionPackSmallNvfp4MMin &&
+       m <= kQwen38ProjectionPackSmallNvfp4MMax) ||
+      m >= kQwen38ProjectionPackMinNvfp4M;
+  if (workspace_bytes == nullptr || !supported_rows || m == 0U || k == 0U ||
+      (k % UINT64_C(16)) != 0U) {
+    return false;
+  }
+  uint64_t packed_bytes = 0U;
+  if (!qwen38_projection_pack_nvfp4_packed_activation_bytes(
+          m, k, &packed_bytes)) {
+    return false;
+  }
+  const uint64_t scale_bytes_per_row = k / UINT64_C(16);
+  if (scale_bytes_per_row == 0U ||
+      m > UINT64_MAX / scale_bytes_per_row) {
+    return false;
+  }
+  const uint64_t scale_bytes = m * scale_bytes_per_row;
   if (packed_bytes > UINT64_MAX - scale_bytes) {
     return false;
   }
@@ -139,20 +276,46 @@ bool qwen38_projection_pack_nvfp4_workspace_bytes(
 }
 
 bool qwen38_projection_pack_nvfp4_quantize_grid(
-    const uint64_t k, uint32_t *const grid_size) noexcept {
-  if (grid_size == nullptr || k == 0U || (k % UINT64_C(16)) != 0U) {
+    const uint64_t m, const uint64_t k,
+    uint32_t *const grid_size) noexcept {
+  if (grid_size == nullptr || m == 0U || k == 0U ||
+      (k % UINT64_C(16)) != 0U) {
     return false;
   }
   const uint64_t blocks = k / UINT64_C(16);
-  if (blocks > UINT64_MAX - UINT64_C(7)) {
+  if (m > UINT64_MAX / blocks || m * blocks > UINT64_MAX - UINT64_C(7)) {
     return false;
   }
-  const uint64_t grid = (blocks + UINT64_C(7)) / UINT64_C(8);
+  const uint64_t grid = (m * blocks + UINT64_C(7)) / UINT64_C(8);
   if (grid == 0U || grid > static_cast<uint64_t>(UINT32_MAX)) {
     return false;
   }
   *grid_size = static_cast<uint32_t>(grid);
   return true;
+}
+
+bool qwen38_projection_pack_nvfp4_adopted_variant(
+    const sllm_matmul_kernel::KernelVariant variant, const uint64_t m,
+    const uint64_t k, const uint64_t n, const char *const arch_name) noexcept {
+  using sllm_matmul_kernel::KernelVariant;
+  if (arch_name == nullptr) {
+    return false;
+  }
+  if (variant == KernelVariant::Nvfp4W4A4SmallMVgprReuse) {
+    return (matches_runtime_gcn_arch(arch_name, "gfx1030") ||
+            matches_runtime_gcn_arch(arch_name, "gfx1201")) &&
+           sllm_matmul_kernel::phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(
+               m, k, n);
+  }
+  if (!sllm_matmul_kernel::phase83_nvfp4_w4a4_compensated_adopted_shape(m, k,
+                                                                         n)) {
+    return false;
+  }
+  if (variant == KernelVariant::Nvfp4W4A4PrefillCompensated64x64)
+    return matches_runtime_gcn_arch(arch_name, "gfx1030");
+  if (variant == KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan)
+    return matches_runtime_gcn_arch(arch_name, "gfx1201");
+  return false;
 }
 
 void initialize_qwen38_projection_pack_dispatch_info(
@@ -173,11 +336,26 @@ void initialize_qwen38_projection_pack_dispatch_info(
       qwen38_projection_pack_fp8_gdn_role(plan->qwen38_projection_pack2_role);
   uint64_t nvfp4_workspace_bytes = 0U;
   uint32_t nvfp4_quantize_grid = 0U;
-  if (!fp8_gdn) {
+  uint64_t fp8_gdn_workspace_bytes = 0U;
+  uint32_t fp8_gdn_quantize_grid = 0U;
+  if (fp8_gdn) {
+    if (!qwen38_projection_pack_fp8_gdn_workspace_bytes(
+            plan->qwen38_projection_pack2_metadata[0].m,
+            plan->qwen38_projection_pack2_metadata[0].k,
+            &fp8_gdn_workspace_bytes) ||
+        !qwen38_projection_pack_fp8_gdn_quantize_grid(
+            plan->qwen38_projection_pack2_metadata[0].m,
+            plan->qwen38_projection_pack2_metadata[0].k,
+            &fp8_gdn_quantize_grid)) {
+      return;
+    }
+  } else {
     if (!qwen38_projection_pack_nvfp4_workspace_bytes(
+            plan->qwen38_projection_pack2_metadata[0].m,
             plan->qwen38_projection_pack2_metadata[0].k,
             &nvfp4_workspace_bytes) ||
         !qwen38_projection_pack_nvfp4_quantize_grid(
+            plan->qwen38_projection_pack2_metadata[0].m,
             plan->qwen38_projection_pack2_metadata[0].k,
             &nvfp4_quantize_grid)) {
       return;
@@ -188,13 +366,21 @@ void initialize_qwen38_projection_pack_dispatch_info(
           ? SLLM_HIP_QWEN38_PROJECTION_PACK2_KERNEL_ID_FP8_GDN_SHARED_ACTIVATION_V1
           : SLLM_HIP_QWEN38_PROJECTION_PACK2_KERNEL_ID_NVFP4_SHARED_ACTIVATION_V1;
   info->workgroup_size_x = 256U;
-  const uint32_t quantize_grid = fp8_gdn ? 1U : nvfp4_quantize_grid;
+  const uint32_t quantize_grid =
+      fp8_gdn ? fp8_gdn_quantize_grid : nvfp4_quantize_grid;
   const uint32_t compute_grid0 = qwen38_projection_pack_compute_grid(
       plan->qwen38_projection_pack2_kernel_variants[0],
+      plan->qwen38_projection_pack2_metadata[0].m,
       plan->qwen38_projection_pack2_metadata[0].n);
   const uint32_t compute_grid1 = qwen38_projection_pack_compute_grid(
       plan->qwen38_projection_pack2_kernel_variants[1],
+      plan->qwen38_projection_pack2_metadata[1].m,
       plan->qwen38_projection_pack2_metadata[1].n);
+  if (compute_grid0 == 0U || compute_grid1 == 0U ||
+      quantize_grid > UINT32_MAX - compute_grid0 ||
+      quantize_grid + compute_grid0 > UINT32_MAX - compute_grid1) {
+    return;
+  }
   info->grid_size_x = quantize_grid + compute_grid0 + compute_grid1;
   info->fallback_allowed = 0U;
   info->fallback_used = 0U;
@@ -205,8 +391,7 @@ void initialize_qwen38_projection_pack_dispatch_info(
       plan->qwen38_projection_pack2_metadata[0].output_elements +
       plan->qwen38_projection_pack2_metadata[1].output_elements;
   info->workspace_bytes =
-      fp8_gdn ? SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES
-              : nvfp4_workspace_bytes;
+      fp8_gdn ? fp8_gdn_workspace_bytes : nvfp4_workspace_bytes;
   info->role = plan->qwen38_projection_pack2_role;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, sizeof(info->kernel_symbol),
@@ -295,7 +480,7 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
         return status;
       const bool shape_valid =
           fp8_gdn
-              ? (metadata[index].m == kQwen38ProjectionPackM &&
+              ? (metadata[index].m != 0U &&
                  metadata[index].k == kQwen38ProjectionPackK &&
                  metadata[index].fp8_outer &&
                  qwen38_projection_pack_valid_fp8_gdn_n(metadata[index].n,
@@ -305,24 +490,44 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_UNSUPPORTED,
             fp8_gdn ? "Qwen3.8 projection-pack FP8 GDN requires "
-                      "M=1,K=5120,N=10240/6144"
-                    : "Qwen3.8 projection-pack requires paired M=1 "
-                      "NVFP4 W4A4 members with a shared K multiple of 16");
+                      "positive equal M,K=5120,N=10240/6144"
+                      : "Qwen3.8 projection-pack requires paired M=1, M=2..4, "
+                        "or M>=64 NVFP4 W4A4 members with a shared K multiple "
+                        "of 16");
       }
+    }
+    if (fp8_gdn &&
+        !qwen38_projection_pack_fp8_gdn_pair_compatible(metadata)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "Qwen3.8 FP8 GDN projection-pack members require equal M,K and "
+          "activation shape");
     }
     if (!fp8_gdn && !qwen38_projection_pack_nvfp4_pair_compatible(metadata)) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_UNSUPPORTED,
-          "Qwen3.8 projection-pack NVFP4 members require one BF16 M=1 "
-          "activation K and compatible block scales");
+          "Qwen3.8 projection-pack NVFP4 members require one BF16 M=1, M=2..4, "
+          "or M>=64 activation K and compatible block scales");
     }
-    if (!fp8_gdn) {
+    if (fp8_gdn) {
+      uint64_t workspace_bytes = 0U;
       uint32_t quantize_grid = 0U;
-      if (!qwen38_projection_pack_nvfp4_quantize_grid(metadata[0].k,
-                                                      &quantize_grid)) {
+      if (!qwen38_projection_pack_fp8_gdn_workspace_bytes(
+              metadata[0].m, metadata[0].k, &workspace_bytes) ||
+          !qwen38_projection_pack_fp8_gdn_quantize_grid(
+              metadata[0].m, metadata[0].k, &quantize_grid)) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_UNSUPPORTED,
-            "Qwen3.8 projection-pack NVFP4 K exceeds quantizer grid range");
+            "Qwen3.8 projection-pack FP8 GDN M*K exceeds workspace or "
+            "quantizer grid range");
+      }
+    } else {
+      uint32_t quantize_grid = 0U;
+      if (!qwen38_projection_pack_nvfp4_quantize_grid(
+              metadata[0].m, metadata[0].k, &quantize_grid)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_UNSUPPORTED,
+            "Qwen3.8 projection-pack NVFP4 M*K exceeds quantizer grid range");
       }
     }
 
@@ -418,8 +623,9 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
           variants[index] = ::sllm_matmul_kernel::select_fp8_outer_variant(
               metadata[index].m, metadata[index].k, metadata[index].n,
               arch_name, false);
-          if (qwen38_projection_pack_compute_grid(variants[index],
-                                                  metadata[index].n) == 0U) {
+          if (qwen38_projection_pack_compute_grid(
+                  variants[index], metadata[index].m, metadata[index].n) ==
+              0U) {
             return sllm_public_runtime::write_error(
                 error_sink, SLLM_STATUS_UNSUPPORTED,
                 "Qwen3.8 projection-pack FP8 GDN provider rejected the exact "
@@ -443,11 +649,20 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
           if (selected.has_value())
             concrete.emplace(*selected);
         }
+        const bool adopted_pair =
+            metadata[0].m == kQwen38ProjectionPackM ||
+            (qwen38_projection_pack_nvfp4_adopted_variant(
+                 variants[0], metadata[0].m, metadata[0].k, metadata[0].n,
+                 arch_name) &&
+             qwen38_projection_pack_nvfp4_adopted_variant(
+                 variants[1], metadata[1].m, metadata[1].k, metadata[1].n,
+                 arch_name));
         if (!concrete.has_value() || variants[0] != variants[1] ||
-            qwen38_projection_pack_compute_grid(variants[0], metadata[0].n) ==
-                0U ||
-            qwen38_projection_pack_compute_grid(variants[1], metadata[1].n) ==
-                0U) {
+            !adopted_pair ||
+            qwen38_projection_pack_compute_grid(
+                variants[0], metadata[0].m, metadata[0].n) == 0U ||
+            qwen38_projection_pack_compute_grid(
+                variants[1], metadata[1].m, metadata[1].n) == 0U) {
           return sllm_public_runtime::write_error(
               error_sink, SLLM_STATUS_UNSUPPORTED,
               "Qwen3.8 projection-pack NVFP4 selector is not safe for both "
@@ -474,11 +689,25 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
         if (concrete.has_value())
           candidate->matmul_provider_plan.emplace(*concrete);
         candidate->matmul_kernel_variant = variants[0];
+        const bool queue_workspace = !fp8_gdn &&
+                                      metadata[0].m != kQwen38ProjectionPackM;
         if (fp8_gdn) {
-          candidate->matmul_workspace_bytes =
-              SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES;
+          if (!qwen38_projection_pack_fp8_gdn_workspace_bytes(
+                  metadata[0].m, metadata[0].k,
+                  &candidate->matmul_workspace_bytes)) {
+            (void)sllm_public_runtime::AccountingState::
+                release_five_buffer_prepared_plan(
+                    context->accounting, activation->accounting,
+                    weights[0]->accounting, weights[1]->accounting,
+                    outputs[0]->accounting, outputs[1]->accounting);
+            accounting_reserved = false;
+            return sllm_public_runtime::write_error(
+                error_sink, SLLM_STATUS_UNSUPPORTED,
+                "Qwen3.8 projection-pack FP8 GDN workspace size overflowed");
+          }
         } else if (!qwen38_projection_pack_nvfp4_workspace_bytes(
-                       metadata[0].k, &candidate->matmul_workspace_bytes)) {
+                       metadata[0].m, metadata[0].k,
+                       &candidate->matmul_workspace_bytes)) {
           (void)sllm_public_runtime::AccountingState::
               release_five_buffer_prepared_plan(
                   context->accounting, activation->accounting,
@@ -489,9 +718,13 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
               error_sink, SLLM_STATUS_UNSUPPORTED,
               "Qwen3.8 projection-pack NVFP4 workspace size overflowed");
         }
-        const hipError_t workspace_status = hipMalloc(
-            &candidate->matmul_workspace,
-            static_cast<std::size_t>(candidate->matmul_workspace_bytes));
+        candidate->matmul_queue_workspace = queue_workspace;
+        const hipError_t workspace_status =
+            queue_workspace
+                ? hipSuccess
+                : hipMalloc(&candidate->matmul_workspace,
+                            static_cast<std::size_t>(
+                                candidate->matmul_workspace_bytes));
         if (workspace_status != hipSuccess) {
           (void)sllm_public_runtime::AccountingState::
               release_five_buffer_prepared_plan(
@@ -507,7 +740,9 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
           const auto *const shared_workspace =
               static_cast<const uint8_t *>(candidate->matmul_workspace);
           auto *const activation_scales = reinterpret_cast<float *>(
-              const_cast<uint8_t *>(shared_workspace) + kQwen38ProjectionPackK);
+              const_cast<uint8_t *>(shared_workspace) +
+              candidate->qwen38_projection_pack2_metadata[0].m *
+                  candidate->qwen38_projection_pack2_metadata[0].k);
           for (uint32_t index = 0U; index != 2U; ++index) {
             const auto &member =
                 candidate->qwen38_projection_pack2_metadata[index];
@@ -767,14 +1002,27 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
         qwen38_projection_pack_fp8_gdn_role(plan->qwen38_projection_pack2_role);
     uint64_t expected_workspace_bytes = 0U;
     if (fp8_gdn) {
-      expected_workspace_bytes =
-          SLLM_HIP_QWEN38_PROJECTION_PACK2_FP8_GDN_WORKSPACE_BYTES;
+      uint32_t quantize_grid = 0U;
+      if (!qwen38_projection_pack_fp8_gdn_workspace_bytes(
+              plan->qwen38_projection_pack2_metadata[0].m,
+              plan->qwen38_projection_pack2_metadata[0].k,
+              &expected_workspace_bytes) ||
+          !qwen38_projection_pack_fp8_gdn_quantize_grid(
+              plan->qwen38_projection_pack2_metadata[0].m,
+              plan->qwen38_projection_pack2_metadata[0].k, &quantize_grid)) {
+        rollback();
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "Qwen3.8 projection-pack FP8 GDN workspace metadata is invalid");
+      }
     } else {
       uint32_t quantize_grid = 0U;
       if (!qwen38_projection_pack_nvfp4_workspace_bytes(
+              plan->qwen38_projection_pack2_metadata[0].m,
               plan->qwen38_projection_pack2_metadata[0].k,
               &expected_workspace_bytes) ||
           !qwen38_projection_pack_nvfp4_quantize_grid(
+              plan->qwen38_projection_pack2_metadata[0].m,
               plan->qwen38_projection_pack2_metadata[0].k, &quantize_grid)) {
         rollback();
         return sllm_public_runtime::write_error(
@@ -782,13 +1030,22 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
             "Qwen3.8 projection-pack NVFP4 workspace metadata is invalid");
       }
     }
-    if (plan->matmul_workspace == nullptr ||
-        plan->matmul_workspace_bytes != expected_workspace_bytes ||
+    const uint64_t projection_m =
+        plan->qwen38_projection_pack2_metadata[0].m;
+    const bool queue_workspace_path =
+        !fp8_gdn && projection_m != kQwen38ProjectionPackM &&
+        plan->matmul_queue_workspace;
+    if (plan->matmul_workspace_bytes != expected_workspace_bytes ||
+        (queue_workspace_path
+             ? plan->matmul_workspace != nullptr
+             : plan->matmul_workspace == nullptr) ||
         qwen38_projection_pack_compute_grid(
             plan->qwen38_projection_pack2_kernel_variants[0],
+            plan->qwen38_projection_pack2_metadata[0].m,
             plan->qwen38_projection_pack2_metadata[0].n) == 0U ||
         qwen38_projection_pack_compute_grid(
             plan->qwen38_projection_pack2_kernel_variants[1],
+            plan->qwen38_projection_pack2_metadata[1].m,
             plan->qwen38_projection_pack2_metadata[1].n) == 0U) {
       rollback();
       return sllm_public_runtime::write_error(
@@ -870,8 +1127,25 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
       }
 
       hipError_t launch_status = hipSuccess;
+      std::unique_lock<std::mutex> matmul_scratch_lock;
+      [[maybe_unused]] auto *workspace =
+          static_cast<uint8_t *>(plan->matmul_workspace);
+      if (queue_workspace_path) {
+        matmul_scratch_lock =
+            std::unique_lock<std::mutex>(queue->matmul_scratch_mutex);
+        void *queue_workspace = nullptr;
+        const hipError_t workspace_status = acquire_queue_matmul_scratch(
+            queue, plan->matmul_workspace_bytes, &queue_workspace);
+        if (workspace_status != hipSuccess) {
+          matmul_scratch_lock.unlock();
+          return cleanup_failed_submission(
+              candidate, token, workspace_status,
+              "queue Qwen3.8 projection-pack NVFP4 workspace allocation",
+              queue, error_sink);
+        }
+        workspace = static_cast<uint8_t *>(queue_workspace);
+      }
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      auto *const workspace = static_cast<uint8_t *>(plan->matmul_workspace);
       const auto *const activation = reinterpret_cast<const uint16_t *>(
           static_cast<const uint8_t *>(plan->input0->device_pointer) +
           plan->qwen38_projection_pack2_metadata[0].activation.byte_offset);
@@ -887,10 +1161,12 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
       if (fp8_gdn) {
         auto *const quantized_activation = workspace;
         auto *const activation_scales =
-            reinterpret_cast<float *>(workspace + kQwen38ProjectionPackK);
+            reinterpret_cast<float *>(
+                workspace + projection_m *
+                                plan->qwen38_projection_pack2_metadata[0].k);
         launch_status = ::sllm_matmul_kernel::launch_fp8_quantize(
             activation, quantized_activation, activation_scales,
-            kQwen38ProjectionPackM, kQwen38ProjectionPackK, false,
+            projection_m, plan->qwen38_projection_pack2_metadata[0].k, false,
             queue->stream);
         for (uint32_t index = 0U; launch_status == hipSuccess && index != 2U;
              ++index) {
@@ -916,94 +1192,122 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
                   quantized_activation, fp8_weight, output, queue->stream);
             }
           } else if (variant == sllm_matmul_kernel::KernelVariant::
+                                     Fp8OuterPrefillTiled16) {
+            launch_status = ::sllm_matmul_kernel::launch_fp8_outer_prefill_tiled16(
+                quantized_activation, activation_scales, fp8_weight,
+                weight_scales, output, member.m, member.k, member.n,
+                queue->stream);
+          } else if (variant == sllm_matmul_kernel::KernelVariant::
+                                     Fp8OuterPrefillGfx1030Half2_128x64) {
+            launch_status = ::sllm_matmul_kernel::
+                launch_fp8_outer_prefill_gfx1030_half2_128x64(
+                    quantized_activation, activation_scales, fp8_weight,
+                    weight_scales, output, member.m, member.k, member.n,
+                    queue->stream);
+          } else if (variant == sllm_matmul_kernel::KernelVariant::
+                                     Fp8OuterPrefillGfx1030Half2_64x64) {
+            launch_status = ::sllm_matmul_kernel::
+                launch_fp8_outer_prefill_gfx1030_half2_64x64(
+                    quantized_activation, activation_scales, fp8_weight,
+                    weight_scales, output, member.m, member.k, member.n,
+                    queue->stream);
+          } else if (variant == sllm_matmul_kernel::KernelVariant::
                                     Fp8OuterDecodeGfx1030Dword8Wave4Col32) {
             launch_status = ::sllm_matmul_kernel::
                 launch_fp8_outer_decode_gfx1030_dword8_wave4col32(
                     quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, kQwen38ProjectionPackM,
-                    kQwen38ProjectionPackK, member.n, queue->stream);
+                    weight_scales, output, member.m, member.k, member.n,
+                    queue->stream);
           } else if (variant == sllm_matmul_kernel::KernelVariant::
                                     Fp8OuterDecodeGfx1030LdsLutWave4Col32) {
             launch_status = ::sllm_matmul_kernel::
                 launch_fp8_outer_decode_gfx1030_lds_lut_wave4col32(
                     quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, kQwen38ProjectionPackM,
-                    kQwen38ProjectionPackK, member.n, queue->stream);
+                    weight_scales, output, member.m, member.k, member.n,
+                    queue->stream);
           } else if (variant == sllm_matmul_kernel::KernelVariant::
                                     Fp8OuterDecodeGfx1030FusedM2_4) {
             launch_status = ::sllm_matmul_kernel::
                 launch_fp8_outer_decode_gfx1030_fused_m2_4(
                     quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, kQwen38ProjectionPackM,
-                    kQwen38ProjectionPackK, member.n, queue->stream);
+                    weight_scales, output, member.m, member.k, member.n,
+                    queue->stream);
           } else if (variant ==
                      sllm_matmul_kernel::KernelVariant::
                          Fp8OuterDecodeGfx1030ActivationSharedWave4Col32) {
             launch_status = ::sllm_matmul_kernel::
                 launch_fp8_outer_decode_gfx1030_activation_shared_wave4col32(
                     quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, kQwen38ProjectionPackM,
-                    kQwen38ProjectionPackK, member.n, queue->stream);
+                    weight_scales, output, member.m, member.k, member.n,
+                    queue->stream);
           } else if (variant ==
                      sllm_matmul_kernel::KernelVariant::
                          Fp8OuterDecodeGfx1030ActivationSharedWave8Col64) {
             launch_status = ::sllm_matmul_kernel::
                 launch_fp8_outer_decode_gfx1030_activation_shared_wave8col64(
                     quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, kQwen38ProjectionPackM,
-                    kQwen38ProjectionPackK, member.n, queue->stream);
+                    weight_scales, output, member.m, member.k, member.n,
+                    queue->stream);
           } else if (variant == sllm_matmul_kernel::KernelVariant::
                                     Fp8OuterDecodeGfx1030Half2Wave4Col32) {
             launch_status = ::sllm_matmul_kernel::
                 launch_fp8_outer_decode_gfx1030_half2_wave4col32(
                     quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, kQwen38ProjectionPackM,
-                    kQwen38ProjectionPackK, member.n, queue->stream);
+                    weight_scales, output, member.m, member.k, member.n,
+                    queue->stream);
           } else {
             launch_status = ::sllm_matmul_kernel::launch_fp8_emulation(
                 quantized_activation, activation_scales, fp8_weight,
-                weight_scales, output, kQwen38ProjectionPackM,
-                kQwen38ProjectionPackK, member.n, queue->stream);
+                weight_scales, output, member.m, member.k, member.n,
+                queue->stream);
           }
         }
       } else {
         auto *const packed_activation = workspace;
         const auto &gate = plan->qwen38_projection_pack2_metadata[0];
-        const uint64_t packed_activation_bytes =
-            (gate.k + UINT64_C(1)) / UINT64_C(2);
-        auto *const activation_block_scales =
-            workspace + packed_activation_bytes;
-        const auto *const shared_input_tensor_scale =
-            reinterpret_cast<const float *>(
-                weight_pointer(plan->qwen38_projection_pack2_weights[0],
-                               gate.input_tensor_scale_offset));
-        launch_status = ::sllm_matmul_kernel::launch_nvfp4_quantize(
-            activation, packed_activation, activation_block_scales,
-            shared_input_tensor_scale, kQwen38ProjectionPackM, gate.k,
-            queue->stream);
-        for (uint32_t index = 0U; launch_status == hipSuccess && index != 2U;
-             ++index) {
-          const auto &member = plan->qwen38_projection_pack2_metadata[index];
-          Buffer *const weight = plan->qwen38_projection_pack2_weights[index];
-          const auto *const packed_weight =
-              weight_pointer(weight, member.weight.byte_offset);
-          const auto *const weight_block_scales =
-              packed_weight + member.weight_value_bytes;
-          const auto *const weight_tensor_scale =
+        uint64_t packed_activation_bytes = 0U;
+        if (!qwen38_projection_pack_nvfp4_packed_activation_bytes(
+                gate.m, gate.k, &packed_activation_bytes)) {
+          launch_status = hipErrorInvalidValue;
+        } else {
+          // The quantizer writes all M packed rows before the scale plane;
+          // using one-row bytes here aliases scales with rows M>1.
+          auto *const activation_block_scales =
+              workspace + packed_activation_bytes;
+          const auto *const shared_input_tensor_scale =
               reinterpret_cast<const float *>(
-                  weight_pointer(weight, member.weight_tensor_scale_offset));
-          launch_status = ::sllm_matmul_kernel::launch_nvfp4_w4a4(
-              packed_activation, activation_block_scales, packed_weight,
-              weight_block_scales, weight_tensor_scale,
-              shared_input_tensor_scale,
-              output_pointer(plan->qwen38_projection_pack2_outputs[index],
-                             member.output.byte_offset),
-              member.m, member.k, member.n,
-              plan->qwen38_projection_pack2_kernel_variants[index],
+                  weight_pointer(plan->qwen38_projection_pack2_weights[0],
+                                 gate.input_tensor_scale_offset));
+          launch_status = ::sllm_matmul_kernel::launch_nvfp4_quantize(
+              activation, packed_activation, activation_block_scales,
+              shared_input_tensor_scale, gate.m, gate.k,
               queue->stream);
+          for (uint32_t index = 0U;
+               launch_status == hipSuccess && index != 2U; ++index) {
+            const auto &member = plan->qwen38_projection_pack2_metadata[index];
+            Buffer *const weight = plan->qwen38_projection_pack2_weights[index];
+            const auto *const packed_weight =
+                weight_pointer(weight, member.weight.byte_offset);
+            const auto *const weight_block_scales =
+                packed_weight + member.weight_value_bytes;
+            const auto *const weight_tensor_scale =
+                reinterpret_cast<const float *>(weight_pointer(
+                    weight, member.weight_tensor_scale_offset));
+            launch_status = ::sllm_matmul_kernel::launch_nvfp4_w4a4(
+                packed_activation, activation_block_scales, packed_weight,
+                weight_block_scales, weight_tensor_scale,
+                shared_input_tensor_scale,
+                output_pointer(plan->qwen38_projection_pack2_outputs[index],
+                               member.output.byte_offset),
+                member.m, member.k, member.n,
+                plan->qwen38_projection_pack2_kernel_variants[index],
+                queue->stream);
+          }
         }
       }
 #endif
+      if (matmul_scratch_lock.owns_lock())
+        matmul_scratch_lock.unlock();
       if (launch_status != hipSuccess) {
         return cleanup_failed_submission(
             candidate, token, launch_status,

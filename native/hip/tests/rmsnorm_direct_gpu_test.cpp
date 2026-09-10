@@ -306,7 +306,7 @@ bool run_case(const sllm_context_t *const context,
 
 bool run_residual_case(const sllm_context_t *const context,
                        const sllm_queue_t *const queue, const uint64_t rows,
-                       const uint64_t columns) {
+                       const uint64_t columns, const uint32_t scale_mode) {
   const uint64_t element_count = rows * columns;
   std::vector<uint16_t> residual(static_cast<std::size_t>(element_count));
   std::vector<uint16_t> addend(static_cast<std::size_t>(element_count));
@@ -335,6 +335,7 @@ bool run_residual_case(const sllm_context_t *const context,
   std::vector<uint16_t> expected(static_cast<std::size_t>(element_count));
   for (uint64_t row = 0U; row != rows; ++row) {
     float sum = 0.0F;
+    long double precise_sum = 0.0L;
     for (uint64_t column = 0U; column != columns; ++column) {
       const std::size_t index =
           static_cast<std::size_t>(row * columns + column);
@@ -343,15 +344,31 @@ bool run_residual_case(const sllm_context_t *const context,
       baseline_add[index] = f32_to_bf16_rne(added);
       const float intermediate = bf16_to_f32(baseline_add[index]);
       sum += intermediate * intermediate;
+      precise_sum += static_cast<long double>(intermediate) *
+                     static_cast<long double>(intermediate);
     }
     const float inverse_rms =
         1.0F / std::sqrt(sum / static_cast<float>(columns) + 1.0e-6F);
+    const long double precise_inverse_rms =
+        1.0L / std::sqrt(precise_sum / static_cast<long double>(columns) +
+                         static_cast<long double>(1.0e-6F));
     for (uint64_t column = 0U; column != columns; ++column) {
       const std::size_t index =
           static_cast<std::size_t>(row * columns + column);
-      expected[index] =
-          f32_to_bf16_rne(bf16_to_f32(baseline_add[index]) * inverse_rms *
-                          bf16_to_f32(scale[static_cast<std::size_t>(column)]));
+      const float raw_scale =
+          bf16_to_f32(scale[static_cast<std::size_t>(column)]);
+      const float effective_scale =
+          scale_mode == SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE ? 1.0F + raw_scale
+                                                           : raw_scale;
+      if (columns == 5120U) {
+        const long double precise_value =
+            static_cast<long double>(bf16_to_f32(baseline_add[index])) *
+            precise_inverse_rms * static_cast<long double>(effective_scale);
+        expected[index] = f32_to_bf16_rne(static_cast<float>(precise_value));
+      } else {
+        expected[index] = f32_to_bf16_rne(bf16_to_f32(baseline_add[index]) *
+                                          inverse_rms * effective_scale);
+      }
     }
   }
 
@@ -381,7 +398,7 @@ bool run_residual_case(const sllm_context_t *const context,
   descriptor.abi_version = SLLM_HIP_ABI_VERSION;
   descriptor.op_version = SLLM_HIP_RESIDUAL_RMSNORM_VERSION;
   descriptor.accumulation_dtype = SLLM_RMSNORM_ACCUMULATION_F32;
-  descriptor.scale_mode = SLLM_RMSNORM_SCALE_MODE_DIRECT;
+  descriptor.scale_mode = scale_mode;
   descriptor.alias_policy = SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP;
   constexpr float epsilon = 1.0e-6F;
   std::memcpy(&descriptor.epsilon_bits, &epsilon, sizeof(epsilon));
@@ -423,6 +440,10 @@ bool run_residual_case(const sllm_context_t *const context,
       static_cast<std::size_t>(element_count));
   std::vector<uint16_t> observed_output(
       static_cast<std::size_t>(element_count));
+  const bool compare_decomposed = columns == 5120U;
+  sllm_buffer_t *decomposed_output_buffer = nullptr;
+  sllm_rmsnorm_plan_t *decomposed_plan = nullptr;
+  std::vector<uint16_t> observed_decomposed;
   success = success &&
             download(queue, residual_output_buffer, &observed_residual) &&
             download(queue, output_buffer, &observed_output);
@@ -433,8 +454,8 @@ bool run_residual_case(const sllm_context_t *const context,
           observed_output[position] != expected[position]) {
         std::cerr << "residual RMSNorm bitwise oracle mismatch rows=" << rows
                   << " columns=" << columns << " index=" << index
-                  << " intermediate=0x" << std::hex
-                  << observed_residual[position] << "/0x"
+                  << " scale_mode=" << scale_mode << " intermediate=0x"
+                  << std::hex << observed_residual[position] << "/0x"
                   << baseline_add[position] << " output=0x"
                   << observed_output[position] << "/0x" << expected[position]
                   << std::dec << '\n';
@@ -443,10 +464,99 @@ bool run_residual_case(const sllm_context_t *const context,
       }
     }
   }
+  if (success && compare_decomposed) {
+    observed_decomposed.resize(static_cast<std::size_t>(element_count));
+    success = create_buffer(context, matrix_bytes, &decomposed_output_buffer);
+    if (success) {
+      /* Feed the exact BF16 add oracle to the ordinary RMSNorm path.  This
+       * makes the comparison an actual decomposed GPU execution while the
+       * fused intermediate remains checked above. */
+      success = upload(queue, residual_output_buffer, baseline_add.data(),
+                       matrix_bytes);
+    }
+    sllm_rmsnorm_desc_t decomposed_descriptor{};
+    decomposed_descriptor.struct_size = sizeof(decomposed_descriptor);
+    decomposed_descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+    decomposed_descriptor.op_version = SLLM_HIP_RMSNORM_VERSION;
+    decomposed_descriptor.accumulation_dtype = SLLM_RMSNORM_ACCUMULATION_F32;
+    decomposed_descriptor.scale_mode = scale_mode;
+    decomposed_descriptor.alias_policy =
+        SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP;
+    std::memcpy(&decomposed_descriptor.epsilon_bits, &epsilon, sizeof(epsilon));
+    decomposed_descriptor.activation =
+        binding(residual_output_buffer, 2U, rows, columns);
+    decomposed_descriptor.raw_scale = binding(scale_buffer, 1U, 1U, columns);
+    decomposed_descriptor.output =
+        binding(decomposed_output_buffer, 2U, rows, columns);
+    sllm_rmsnorm_dispatch_info_t decomposed_info{};
+    decomposed_info.struct_size = sizeof(decomposed_info);
+    decomposed_info.abi_version = SLLM_HIP_ABI_VERSION;
+    decomposed_info.info_version = SLLM_HIP_RMSNORM_DISPATCH_INFO_VERSION;
+    sllm_completion_t *decomposed_completion = nullptr;
+    success =
+        success &&
+        expect(sllm_rmsnorm_prepare(context, &decomposed_descriptor,
+                                    &decomposed_plan, &error.sink),
+               SLLM_STATUS_OK, "sllm_rmsnorm_prepare(decomposed)", error) &&
+        expect(sllm_rmsnorm_execute(decomposed_plan, queue,
+                                    &decomposed_completion, &decomposed_info,
+                                    &error.sink),
+               SLLM_STATUS_OK, "sllm_rmsnorm_execute(decomposed)", error) &&
+        wait_and_release(&decomposed_completion,
+                         "sllm_completion_wait(decomposed RMSNorm)");
+    success =
+        success && decomposed_info.backend == SLLM_BACKEND_HIP &&
+        decomposed_info.dispatch_count == 1U &&
+        decomposed_info.kernel_id ==
+            SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1 &&
+        decomposed_info.workgroup_size_x == SLLM_HIP_RMSNORM_WORKGROUP_SIZE &&
+        decomposed_info.grid_size_x == rows &&
+        decomposed_info.row_count == rows &&
+        decomposed_info.normalized_size == columns &&
+        decomposed_info.fallback_allowed == 0U &&
+        decomposed_info.fallback_used == 0U &&
+        std::strcmp(decomposed_info.kernel_symbol,
+                    "rmsnorm.baseline.wave32.v1") == 0 &&
+        std::strcmp(decomposed_info.device_symbol,
+                    "sllm_rmsnorm_baseline_wave32_v1") == 0 &&
+        std::strcmp(decomposed_info.gcn_arch_name, SLLM_TEST_EXPECTED_TARGET) ==
+            0;
+    success = success &&
+              download(queue, decomposed_output_buffer, &observed_decomposed);
+    if (success) {
+      for (uint64_t index = 0U; index != element_count; ++index) {
+        const std::size_t position = static_cast<std::size_t>(index);
+        if (observed_decomposed[position] != expected[position] ||
+            observed_decomposed[position] != observed_output[position]) {
+          std::cerr << "decomposed RMSNorm bitwise oracle mismatch rows="
+                    << rows << " columns=" << columns << " index=" << index
+                    << " scale_mode=" << scale_mode << " fused=0x" << std::hex
+                    << observed_output[position] << " decomposed=0x"
+                    << observed_decomposed[position] << " expected=0x"
+                    << expected[position] << std::dec << '\n';
+          success = false;
+          break;
+        }
+      }
+    }
+  }
+  if (decomposed_plan != nullptr) {
+    success = expect(sllm_rmsnorm_plan_release(&decomposed_plan, &error.sink),
+                     SLLM_STATUS_OK, "sllm_rmsnorm_plan_release(decomposed)",
+                     error) &&
+              success;
+  }
   if (plan != nullptr) {
     success =
         expect(sllm_residual_rmsnorm_plan_release(&plan, &error.sink),
                SLLM_STATUS_OK, "sllm_residual_rmsnorm_plan_release", error) &&
+        success;
+  }
+  if (decomposed_output_buffer != nullptr) {
+    success =
+        expect(sllm_buffer_release(&decomposed_output_buffer, &error.sink),
+               SLLM_STATUS_OK, "sllm_buffer_release(decomposed output)",
+               error) &&
         success;
   }
   success =
@@ -505,11 +615,25 @@ int main() {
       break;
     }
   }
-  constexpr std::array<std::array<uint64_t, 2>, 4> residual_cases = {
-      {{{1U, 2560U}}, {{2U, 255U}}, {{3U, 256U}}, {{3U, 257U}}}};
+  struct ResidualCase final {
+    uint64_t rows;
+    uint64_t columns;
+    uint32_t scale_mode;
+  };
+  constexpr std::array<ResidualCase, 10> residual_cases = {
+      {{1U, 2560U, SLLM_RMSNORM_SCALE_MODE_DIRECT},
+       {2U, 255U, SLLM_RMSNORM_SCALE_MODE_DIRECT},
+       {3U, 256U, SLLM_RMSNORM_SCALE_MODE_DIRECT},
+       {3U, 257U, SLLM_RMSNORM_SCALE_MODE_DIRECT},
+       {1U, 5120U, SLLM_RMSNORM_SCALE_MODE_DIRECT},
+       {2U, 5120U, SLLM_RMSNORM_SCALE_MODE_DIRECT},
+       {3U, 5120U, SLLM_RMSNORM_SCALE_MODE_DIRECT},
+       {1U, 5120U, SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE},
+       {2U, 5120U, SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE},
+       {3U, 5120U, SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE}}};
   for (const auto &residual_case : residual_cases) {
-    if (!run_residual_case(context, queue, residual_case[0],
-                           residual_case[1])) {
+    if (!run_residual_case(context, queue, residual_case.rows,
+                           residual_case.columns, residual_case.scale_mode)) {
       success = false;
       break;
     }

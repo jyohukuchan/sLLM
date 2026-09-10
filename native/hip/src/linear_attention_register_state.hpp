@@ -34,7 +34,9 @@ hipError_t launch_register_state(
     const float *norm_weight, const float *previous_recurrent_state,
     float *next_recurrent_state, uint16_t *output, uint32_t token_count,
     uint32_t qk_heads, uint32_t value_heads, uint32_t head_dim,
-    uint32_t qkv_width, uint32_t output_width, hipStream_t stream) noexcept;
+    uint32_t qkv_width, uint32_t output_width, hipStream_t stream,
+    float *checkpoint_recurrent_state = nullptr,
+    uint32_t checkpoint_rows = 0U) noexcept;
 #endif
 
 } // namespace sllm_linear_attention_kernel

@@ -901,10 +901,11 @@ typedef struct sllm_matmul_dispatch_info_t {
   uint32_t reserved[8];
 } sllm_matmul_dispatch_info_t;
 
-/* Exact Qwen3.8 NVFP4 MLP gate/up projection pair.  The M=1 activation is
- * quantized once into a plan-owned 2880-byte block16 workspace, then the
- * packed values and scales are consumed by the two ordered projection
- * dispatches. */
+/* Exact Qwen3.8 NVFP4 MLP gate/up projection pair.  M=1 keeps the original
+ * plan-owned block16 workspace; adopted M=2..4 ID94 and M>=64 ID87/ID89 rows
+ * quantize once into queue-owned scratch retained through both ordered
+ * projections. The FP8 GDN role accepts positive M with a supported member
+ * provider and uses plan-owned workspace sized for all activation rows. */
 #define SLLM_HIP_QWEN38_PROJECTION_PACK2_VERSION UINT32_C(1)
 #define SLLM_HIP_QWEN38_PROJECTION_PACK2_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_NVFP4_MLP_GATE_UP UINT32_C(1)

@@ -38,8 +38,10 @@ mod qwen38_projection_pack;
 mod residual_rmsnorm;
 mod rmsnorm;
 mod rotary;
+mod row_concat;
 mod runtime;
 mod token_selector;
+mod token_selector_pq;
 mod windowed_attention;
 
 pub use argmax::{ArgmaxDescriptor, ArgmaxDispatchInfo, ArgmaxSubmission, PreparedArgmax};

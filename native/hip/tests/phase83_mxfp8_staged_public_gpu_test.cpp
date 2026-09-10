@@ -17,7 +17,25 @@
 #define SLLM_TEST_EXPECTED_TARGET "gfx1030"
 #endif
 
+#ifndef SLLM_TEST_STAGED32_DEFAULT
+#define SLLM_TEST_STAGED32_DEFAULT 0
+#endif
+
 namespace {
+
+constexpr bool kStaged32Default = SLLM_TEST_STAGED32_DEFAULT != 0;
+constexpr uint32_t kStagedSplits = kStaged32Default ? 32U : 8U;
+constexpr uint32_t kStagedKernelId =
+    kStaged32Default
+        ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_V1
+        : SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_GFX1030_V1;
+constexpr const char *kStagedLogicalSymbol =
+    kStaged32Default ? "causal_attention.decode.wave32_split.staged.v1"
+                     : "causal_attention.decode.wave8_split.staged.gfx1030.v1";
+constexpr const char *kStagedDeviceSymbol =
+    kStaged32Default
+        ? "sllm_causal_attention_decode_wave32_split_staged_v1"
+        : "sllm_causal_attention_decode_wave8_split_staged_gfx1030_v1";
 
 constexpr uint32_t kTimeoutMs = 30'000U;
 constexpr uint32_t kKvHeads = 4U;
@@ -579,18 +597,11 @@ bool execute_public_attention(const sllm_context_t *const context,
       info.fallback_used == 0U &&
       std::strcmp(info.gcn_arch_name, SLLM_TEST_EXPECTED_TARGET) == 0 &&
       (staged
-           ? (info.dispatch_count == 2U &&
-              info.kernel_id ==
-                  SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_GFX1030_V1 &&
+           ? (info.dispatch_count == 2U && info.kernel_id == kStagedKernelId &&
               info.workgroup_size_x == 256U &&
-              info.grid_size_x == query_count * kQueryHeads * 8U &&
-              std::strcmp(
-                  info.kernel_symbol,
-                  "causal_attention.decode.wave8_split.staged.gfx1030.v1") ==
-                  0 &&
-              std::strcmp(info.device_symbol,
-                          "sllm_causal_attention_decode_wave8_split_staged_"
-                          "gfx1030_v1") == 0)
+              info.grid_size_x == query_count * kQueryHeads * kStagedSplits &&
+              std::strcmp(info.kernel_symbol, kStagedLogicalSymbol) == 0 &&
+              std::strcmp(info.device_symbol, kStagedDeviceSymbol) == 0)
            : (info.dispatch_count == 1U &&
               info.kernel_id ==
                   SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3));
@@ -598,8 +609,10 @@ bool execute_public_attention(const sllm_context_t *const context,
             << " selected_kernel_id=" << info.kernel_id
             << " dispatch_count=" << info.dispatch_count
             << " grid=" << info.grid_size_x
-            << " workgroup=" << info.workgroup_size_x
-            << " workspace_expected=" << (staged ? query_count * 198144U : 0U)
+            << " workgroup=" << info.workgroup_size_x << " workspace_expected="
+            << (staged ? query_count * kQueryHeads * kStagedSplits *
+                             (kHeadDim + 2U) * sizeof(float)
+                       : 0U)
             << " symbol=" << info.kernel_symbol << '\n';
   if (!metadata_ok) {
     std::cerr << "public selector metadata mismatch at length=" << length
@@ -713,9 +726,13 @@ bool run_public_case(const sllm_context_t *const context,
 } // namespace
 
 int main() {
-  // This test deliberately opts into only the staged provider.  Other
-  // candidate envs are cleared so metadata proves the intended selector.
-  (void)setenv("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_STAGED", "1", 1);
+  // Test either the default staged32 route or the legacy explicit control.
+  (void)unsetenv("SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32");
+  if (kStaged32Default) {
+    (void)unsetenv("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_STAGED");
+  } else {
+    (void)setenv("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_STAGED", "1", 1);
+  }
   (void)unsetenv("SLLM_CAUSAL_ATTENTION_FORCE_BASELINE");
   (void)unsetenv("SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM");
   (void)unsetenv("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT");

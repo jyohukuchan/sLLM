@@ -31,13 +31,16 @@
 #include "rmsnorm_kernel_internal.hpp"
 #include "rotary_api.hpp"
 #include "rotary_kernel_internal.hpp"
+#include "row_concat_internal.hpp"
 #include "token_selector_api.hpp"
 #include "token_selector_kernel_internal.hpp"
+#include "token_selector_pq_internal.hpp"
 #include "windowed_attention_api.hpp"
 
 #include <hip/hip_runtime.h>
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 #include <hipblas/hipblas.h>
+#include <hipblaslt/hipblaslt-ext.hpp>
 #include <hipblaslt/hipblaslt.h>
 #include <rocblas/rocblas.h>
 extern "C" rocblas_status rocblas_gemm_ex_get_solutions(
@@ -57,7 +60,9 @@ extern "C" rocblas_status rocblas_gemm_ex_get_solutions(
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -632,7 +637,8 @@ namespace sllm_linear_attention_kernel {
 hipError_t launch_convolution(const uint16_t *const, const uint16_t *const,
                               const uint16_t *const, uint16_t *const,
                               uint16_t *const, const uint32_t, const uint32_t,
-                              const uint32_t, const hipStream_t) noexcept {
+                              const uint32_t, const hipStream_t,
+                              uint16_t *const, const uint32_t) noexcept {
   return hipSuccess;
 }
 
@@ -642,8 +648,8 @@ hipError_t launch_recurrent(const uint16_t *const, const uint16_t *const,
                             const float *const, const float *const,
                             float *const, uint16_t *const, const uint32_t,
                             const uint32_t, const uint32_t, const uint32_t,
-                            const uint32_t, const uint32_t,
-                            const hipStream_t) noexcept {
+                            const uint32_t, const uint32_t, const hipStream_t,
+                            float *const, const uint32_t) noexcept {
   return hipSuccess;
 }
 
@@ -720,6 +726,14 @@ struct Fp8LtPlan;
 struct Queue;
 struct Context;
 struct GraphSpan;
+struct MatmulScratchSlot final {
+  void *allocation;
+  uint64_t bytes;
+
+  MatmulScratchSlot(void *const allocation_value,
+                    const uint64_t bytes_value) noexcept
+      : allocation(allocation_value), bytes(bytes_value) {}
+};
 struct Completion;
 bool release_graph_span_active(Completion *completion) noexcept;
 bool release_graph_span_completion(Completion *completion) noexcept;
@@ -794,6 +808,8 @@ struct Context final : QuarantineNode {
   uint64_t matmul_f16_staging_workspace_high_water_bytes;
   Queue *matmul_f16_staging_owner_queue;
   uint64_t matmul_f16_staging_in_flight;
+  uint64_t matmul_queue_scratch_current_bytes;
+  uint64_t matmul_queue_scratch_high_water_bytes;
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
   hipblasHandle_t matmul_blas_handle;
   rocblas_handle matmul_rocblas_handle;
@@ -819,7 +835,9 @@ struct Context final : QuarantineNode {
         matmul_f16_staging_workspace_bytes(0U),
         matmul_f16_staging_workspace_high_water_bytes(0U),
         matmul_f16_staging_owner_queue(nullptr),
-        matmul_f16_staging_in_flight(0U)
+        matmul_f16_staging_in_flight(0U),
+        matmul_queue_scratch_current_bytes(0U),
+        matmul_queue_scratch_high_water_bytes(0U)
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
         ,
         matmul_blas_handle(nullptr), matmul_rocblas_handle(nullptr),
@@ -850,6 +868,14 @@ struct Queue final : QuarantineNode {
   Context *context;
   hipStream_t stream;
   sllm_public_runtime::AccountingState accounting;
+  /* M>1 low-precision matmul activation scratch is queue-owned because all
+   * work on this stream is ordered. Retired slots stay alive until queue
+   * destruction so growth never frees a pointer read by an earlier enqueued
+   * quantize/GEMM pair. */
+  std::mutex matmul_scratch_mutex;
+  std::vector<MatmulScratchSlot> matmul_scratch_pool;
+  uint64_t matmul_scratch_current_bytes;
+  uint64_t matmul_scratch_high_water_bytes;
   bool release_active;
   uint32_t completion_mode;
   /* Monotonic submission order for deferred completion/fence validation. */
@@ -858,7 +884,9 @@ struct Queue final : QuarantineNode {
 
   Queue(Context *const context_value, const hipStream_t stream_value)
       : QuarantineNode(HandleKind::Queue), context(context_value),
-        stream(stream_value), accounting(), release_active(false),
+        stream(stream_value), accounting(), matmul_scratch_mutex(),
+        matmul_scratch_pool(), matmul_scratch_current_bytes(0U),
+        matmul_scratch_high_water_bytes(0U), release_active(false),
         completion_mode(SLLM_QUEUE_COMPLETION_MODE_PROFILED),
         next_submission_serial(0U), graph_capture_active(false) {}
 };
@@ -1733,6 +1761,17 @@ struct LinearAttentionState final : QuarantineNode {
   // Non-null only for the compact Phase 78 fresh-state backing allocation.
   // Forked states retain the historical independent plane ownership.
   void *state_backing;
+  // M3 speculative verification checkpoints are private, lazily allocated
+  // planes.  They are deliberately separate from the transactional pair so
+  // a failed checkpoint copy cannot alias an in-flight state slot.
+  std::array<void *, 2> checkpoint_conv_state;
+  std::array<void *, 2> checkpoint_recurrent_state;
+  void *checkpoint_backing;
+  uint32_t checkpoint_rows;
+  uint64_t checkpoint_start;
+  uint64_t checkpoint_end;
+  uint64_t checkpoint_generation;
+  bool checkpoint_armed;
   void *scratch;
   uint64_t scratch_bytes;
   sllm_public_runtime::AccountingState accounting;
@@ -1766,9 +1805,13 @@ struct LinearAttentionState final : QuarantineNode {
         qkv_width((2U * qk_heads_value + value_heads_value) * head_dim_value),
         output_width(value_heads_value * head_dim_value),
         conv_state(conv_value), recurrent_state(recurrent_value),
-        state_backing(nullptr), scratch(nullptr), scratch_bytes(0U),
-        accounting(), published_length(0U), generation(0U), active_slot(0U),
-        import_plane_mask(0U), last_published_start(0U), last_published_end(0U),
+        state_backing(nullptr), checkpoint_conv_state{nullptr, nullptr},
+        checkpoint_recurrent_state{nullptr, nullptr},
+        checkpoint_backing(nullptr), checkpoint_rows(0U), checkpoint_start(0U),
+        checkpoint_end(0U), checkpoint_generation(0U), checkpoint_armed(false),
+        scratch(nullptr), scratch_bytes(0U), accounting(), published_length(0U),
+        generation(0U), active_slot(0U), import_plane_mask(0U),
+        last_published_start(0U), last_published_end(0U),
         last_published_generation(0U), transition_token(0U),
         transition_start(0U), transition_count(0U), transition_end(0U),
         commit_allowed(false), release_active(false) {}
@@ -2120,6 +2163,7 @@ struct ElementwisePlan final : QuarantineNode {
   void *matmul_workspace;
   uint64_t matmul_workspace_bytes;
   uint64_t matmul_context_workspace_bytes = 0U;
+  bool matmul_queue_workspace = false;
   sllm_matmul_kernel::KernelVariant matmul_kernel_variant =
       sllm_matmul_kernel::KernelVariant::Baseline;
   sllm_matmul_kernel::SelectorDecision matmul_selector_decision = {
@@ -2443,6 +2487,148 @@ private:
 };
 
 OrphanOwner orphan_owner;
+
+/* Acquire one queue-local low-precision activation scratch allocation.  The
+ * caller serializes this helper with the complete quantize/GEMM enqueue
+ * sequence using Queue::matmul_scratch_mutex.  The mutex is deliberately not
+ * acquired here: the caller must hold it before entering this helper and
+ * release it only after both enqueues.  Previous slots are retained so a
+ * growth cannot free storage referenced by work already queued on the stream;
+ * the queue stream ordering makes reuse of the newest slot safe. */
+hipError_t acquire_queue_matmul_scratch(Queue *const queue,
+                                        const uint64_t required,
+                                        void **const workspace) noexcept {
+  if (queue == nullptr || queue->context == nullptr || workspace == nullptr ||
+      required == 0U ||
+      required >
+          static_cast<uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return hipErrorInvalidValue;
+  }
+  *workspace = nullptr;
+  Context *const context = queue->context;
+  std::lock_guard<std::mutex> accounting_lock(context->accounting_mutex);
+  if (context->poisoned.load() || context->release_active ||
+      queue->release_active) {
+    return hipErrorNotReady;
+  }
+  if (!queue->matmul_scratch_pool.empty() &&
+      queue->matmul_scratch_pool.back().allocation != nullptr &&
+      queue->matmul_scratch_pool.back().bytes >= required) {
+    *workspace = queue->matmul_scratch_pool.back().allocation;
+    return hipSuccess;
+  }
+
+  const uint64_t max_bytes =
+      static_cast<uint64_t>(std::numeric_limits<std::size_t>::max());
+  const uint64_t previous_capacity =
+      queue->matmul_scratch_pool.empty()
+          ? 0U
+          : queue->matmul_scratch_pool.back().bytes;
+  uint64_t allocation_bytes = required;
+  if (previous_capacity != 0U && previous_capacity <= max_bytes / 2U) {
+    allocation_bytes = std::max(required, previous_capacity * 2U);
+  }
+  if (allocation_bytes > max_bytes ||
+      queue->matmul_scratch_current_bytes >
+          std::numeric_limits<uint64_t>::max() - allocation_bytes ||
+      context->matmul_queue_scratch_current_bytes >
+          std::numeric_limits<uint64_t>::max() - allocation_bytes) {
+    return hipErrorOutOfMemory;
+  }
+
+  /* Reserve before hipMalloc.  Once capacity exists, the slot constructor is
+   * noexcept and emplace cannot allocate; a successful device allocation can
+   * therefore never become an unaccounted orphan because vector growth threw.
+   */
+  if (queue->matmul_scratch_pool.size() ==
+      queue->matmul_scratch_pool.capacity()) {
+    const std::size_t current_capacity = queue->matmul_scratch_pool.capacity();
+    const std::size_t max_slots = std::numeric_limits<std::size_t>::max();
+    if (queue->matmul_scratch_pool.size() == max_slots) {
+      return hipErrorOutOfMemory;
+    }
+    const std::size_t geometric_capacity =
+        current_capacity != 0U && current_capacity <= max_slots / 2U
+            ? current_capacity * 2U
+            : queue->matmul_scratch_pool.size() + 1U;
+    try {
+      queue->matmul_scratch_pool.reserve(geometric_capacity);
+    } catch (...) {
+      return hipErrorOutOfMemory;
+    }
+  }
+
+  void *replacement = nullptr;
+  const hipError_t allocation_status =
+      sllm_public_runtime::FaultInjector::consume(
+          sllm_public_runtime::FaultPoint::NativeCreationFailure)
+          ? hipErrorUnknown
+          : hipMalloc(&replacement, static_cast<std::size_t>(allocation_bytes));
+  if (allocation_status != hipSuccess) {
+    return allocation_status;
+  }
+  queue->matmul_scratch_pool.emplace_back(replacement, allocation_bytes);
+  queue->matmul_scratch_current_bytes += allocation_bytes;
+  queue->matmul_scratch_high_water_bytes =
+      std::max(queue->matmul_scratch_high_water_bytes,
+               queue->matmul_scratch_current_bytes);
+  context->matmul_queue_scratch_current_bytes += allocation_bytes;
+  context->matmul_queue_scratch_high_water_bytes =
+      std::max(context->matmul_queue_scratch_high_water_bytes,
+               context->matmul_queue_scratch_current_bytes);
+  *workspace = replacement;
+  return hipSuccess;
+}
+
+/* Queue release calls this after all queue submissions/completion references
+ * have drained and before deleting the Queue.  A failed HIP free leaves that
+ * slot in the quarantined Queue; it is never retried or double-freed. */
+hipError_t destroy_queue_matmul_scratch(Queue *const queue) noexcept {
+  if (queue == nullptr || queue->context == nullptr) {
+    return hipErrorInvalidValue;
+  }
+  std::lock_guard<std::mutex> scratch_lock(queue->matmul_scratch_mutex);
+  Context *const context = queue->context;
+  std::lock_guard<std::mutex> accounting_lock(context->accounting_mutex);
+  hipError_t first_error = hipSuccess;
+  bool all_freed = true;
+  for (MatmulScratchSlot &slot : queue->matmul_scratch_pool) {
+    if (slot.allocation == nullptr) {
+      if (slot.bytes != 0U) {
+        context->poisoned.store(true);
+        all_freed = false;
+      }
+      continue;
+    }
+    const hipError_t free_status =
+        free_allocation_with_fault_injection(slot.allocation);
+    if (free_status != hipSuccess) {
+      if (first_error == hipSuccess) {
+        first_error = free_status;
+      }
+      context->poisoned.store(true);
+      all_freed = false;
+      continue;
+    }
+    if (queue->matmul_scratch_current_bytes < slot.bytes ||
+        context->matmul_queue_scratch_current_bytes < slot.bytes) {
+      context->poisoned.store(true);
+      all_freed = false;
+      slot.allocation = nullptr;
+      slot.bytes = 0U;
+      continue;
+    }
+    queue->matmul_scratch_current_bytes -= slot.bytes;
+    context->matmul_queue_scratch_current_bytes -= slot.bytes;
+    slot.allocation = nullptr;
+    slot.bytes = 0U;
+  }
+  if (!all_freed) {
+    return first_error == hipSuccess ? hipErrorUnknown : first_error;
+  }
+  queue->matmul_scratch_pool.clear();
+  return hipSuccess;
+}
 
 void destroy_causal_scaled_prefill_workspace(Context *const context) noexcept {
   if (context == nullptr) {
@@ -3708,13 +3894,44 @@ struct Fp8LtHeuristicRankPolicy final {
   bool ranked_query;
   bool explicit_override;
   uint64_t rank;
+  bool algorithm_index_query;
+  uint64_t algorithm_index;
 };
+
+constexpr int32_t kFp8LtPinnedVersion = 100401;
+constexpr char kFp8LtPinnedRevision[] = "cd957402";
+
+bool matches_fp8_lt_pinned_identity(const int32_t version,
+                                    const char *const revision) noexcept {
+  return revision != nullptr && version == kFp8LtPinnedVersion &&
+         std::strcmp(revision, kFp8LtPinnedRevision) == 0;
+}
+
+std::optional<uint64_t> find_fp8_lt_heuristic_candidate(
+    const int32_t *const algorithm_indices, const uint32_t *const successful,
+    const uint64_t *const workspace_sizes, const std::size_t count,
+    const uint64_t target_algorithm_index) noexcept {
+  if ((count != 0U && (algorithm_indices == nullptr || successful == nullptr ||
+                       workspace_sizes == nullptr)) ||
+      target_algorithm_index >
+          static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+    return std::nullopt;
+  }
+  const int32_t target = static_cast<int32_t>(target_algorithm_index);
+  for (std::size_t index = 0U; index != count; ++index) {
+    if (successful[index] != 0U && workspace_sizes[index] == 0U &&
+        algorithm_indices[index] == target) {
+      return static_cast<uint64_t>(index);
+    }
+  }
+  return std::nullopt;
+}
 
 Fp8LtHeuristicRankPolicy select_fp8_lt_heuristic_rank_policy(
     const char *const arch_name, const uint32_t fp8_dtype, const uint64_t m,
     const uint64_t k, const uint64_t n,
     const char *const rank_environment) noexcept {
-  Fp8LtHeuristicRankPolicy policy{true, false, false, 0U};
+  Fp8LtHeuristicRankPolicy policy{true, false, false, 0U, false, 0U};
   if (!matches_runtime_gcn_arch(arch_name, "gfx1201")) {
     return policy;
   }
@@ -3722,7 +3939,28 @@ Fp8LtHeuristicRankPolicy select_fp8_lt_heuristic_rank_policy(
   // of the decode-only environment override and its 32-result query.
   if (m == 17U && k == 6144U && n == 5120U &&
       fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN) {
-    return {true, true, false, 3U};
+    return {true, true, false, 3U, false, 0U};
+  }
+  if (m >= 2U && m <= 4U && fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN) {
+    struct AlgorithmEntry final {
+      uint64_t k;
+      uint64_t n;
+      uint64_t algorithm_index;
+    };
+    constexpr std::array<AlgorithmEntry, 7> table = {{
+        {5120U, 6144U, 123373U},
+        {5120U, 10240U, 123374U},
+        {5120U, 12288U, 123374U},
+        {5120U, 1024U, 123373U},
+        {5120U, 17408U, 123375U},
+        {6144U, 5120U, 123373U},
+        {17408U, 5120U, 123374U},
+    }};
+    for (const auto &entry : table) {
+      if (entry.k == k && entry.n == n) {
+        return {true, false, false, 0U, true, entry.algorithm_index};
+      }
+    }
   }
   if (m != 1U)
     return policy;
@@ -3924,9 +4162,10 @@ hipError_t create_fp8_lt_plan(
     return hipErrorUnknown;
   }
   // Explicit rank selection wins.  With no environment override, exact
-  // gfx1201 decode shapes and one short projection use measured policies;
-  // other shapes retain the single-result/rank-zero query. Selection lives
-  // after descriptor construction so prepare freezes the algorithm in-plan.
+  // gfx1201 decode shapes, short projections, and the measured M=2..4 FP8
+  // shapes use measured policies; other shapes retain the single-result/
+  // rank-zero query. Selection lives after descriptor construction so prepare
+  // freezes the algorithm in-plan.
   const char *const rank_environment =
       matches_runtime_gcn_arch(arch_name, "gfx1201") && m == 1U
           ? std::getenv("SLLM_FP8_OUTER_GFX1201_HIPBLASLT_HEURISTIC_RANK")
@@ -3941,23 +4180,42 @@ hipError_t create_fp8_lt_plan(
   }
   const bool rank_opt_in = rank_policy.explicit_override;
   const uint64_t heuristic_rank = rank_policy.rank;
+  bool pinned_library_identity = false;
+  if (rank_policy.algorithm_index_query) {
+    int32_t version = 0;
+    std::array<char, 64> revision{};
+    pinned_library_identity =
+        hipblasLtGetVersion(plan->handle, &version) == HIPBLAS_STATUS_SUCCESS &&
+        hipblasLtGetGitRevision(plan->handle, revision.data()) ==
+            HIPBLAS_STATUS_SUCCESS &&
+        matches_fp8_lt_pinned_identity(version, revision.data());
+  }
+  const bool algorithm_index_query =
+      rank_policy.algorithm_index_query && pinned_library_identity;
   const int requested_solution_count =
-      rank_policy.ranked_query ? (m == 17U ? 4 : 32) : 1;
+      algorithm_index_query
+          ? 32
+          : (rank_policy.ranked_query ? (m == 17U ? 4 : 32) : 1);
   hipblasLtMatmulHeuristicResult_t heuristic{};
   static std::mutex algorithm_cache_mutex;
-  static std::map<std::array<uint64_t, 6>, hipblasLtMatmulAlgo_t>
+  static std::map<std::array<uint64_t, 9>, hipblasLtMatmulAlgo_t>
       algorithm_cache;
   // Include the selected rank so an opt-in plan cannot accidentally reuse a
   // rank-zero algorithm prepared under the default policy.  The policy bit is
   // also part of the key: rank zero requested explicitly must still perform
   // the 32-result probe instead of inheriting an earlier default query.
-  const std::array<uint64_t, 6> shape_key = {
+  // Indexed selection and the library identity are also part of the key so a
+  // pinned candidate cannot alias an unknown-library rank-zero plan.
+  const std::array<uint64_t, 9> shape_key = {
       fp8_dtype,
       m,
       k,
       n,
       heuristic_rank,
-      rank_policy.ranked_query ? UINT64_C(1) : UINT64_C(0)};
+      rank_policy.ranked_query ? UINT64_C(1) : UINT64_C(0),
+      rank_policy.algorithm_index_query ? UINT64_C(1) : UINT64_C(0),
+      pinned_library_identity ? UINT64_C(1) : UINT64_C(0),
+      rank_policy.algorithm_index};
   {
     std::lock_guard<std::mutex> cache_lock(algorithm_cache_mutex);
     const auto cached = algorithm_cache.find(shape_key);
@@ -3974,13 +4232,45 @@ hipError_t create_fp8_lt_plan(
         destroy_fp8_lt_plan(plan.release());
         return hipErrorNotSupported;
       }
-      if (solution_count <= 0 ||
-          heuristic_rank >= static_cast<uint64_t>(solution_count)) {
+      if (solution_count <= 0) {
         cleanup_preference();
         destroy_fp8_lt_plan(plan.release());
         return rank_opt_in ? hipErrorInvalidValue : hipErrorNotSupported;
       }
-      heuristic = heuristics[static_cast<std::size_t>(heuristic_rank)];
+      std::size_t selected_heuristic = 0U;
+      if (algorithm_index_query) {
+        std::array<int32_t, 32> algorithm_indices{};
+        std::array<uint32_t, 32> successful{};
+        std::array<uint64_t, 32> workspace_sizes{};
+        const std::size_t candidate_count = static_cast<std::size_t>(
+            std::min(solution_count, static_cast<int>(heuristics.size())));
+        for (std::size_t index = 0U; index != candidate_count; ++index) {
+          const auto &candidate = heuristics[index];
+          successful[index] =
+              candidate.state == HIPBLAS_STATUS_SUCCESS ? 1U : 0U;
+          workspace_sizes[index] = candidate.workspaceSize;
+          if (successful[index] != 0U && workspace_sizes[index] == 0U) {
+            hipblasLtMatmulAlgo_t algorithm = candidate.algo;
+            algorithm_indices[index] = static_cast<int32_t>(
+                hipblaslt_ext::getIndexFromAlgo(algorithm));
+          }
+        }
+        const std::optional<uint64_t> matched = find_fp8_lt_heuristic_candidate(
+            algorithm_indices.data(), successful.data(), workspace_sizes.data(),
+            candidate_count, rank_policy.algorithm_index);
+        // The measured candidate is an optimization.  A missing or unusable
+        // index falls back to the normal rank-zero result for this shape.
+        selected_heuristic =
+            matched.has_value() ? static_cast<std::size_t>(*matched) : 0U;
+      } else {
+        if (heuristic_rank >= static_cast<uint64_t>(solution_count)) {
+          cleanup_preference();
+          destroy_fp8_lt_plan(plan.release());
+          return rank_opt_in ? hipErrorInvalidValue : hipErrorNotSupported;
+        }
+        selected_heuristic = static_cast<std::size_t>(heuristic_rank);
+      }
+      heuristic = heuristics[selected_heuristic];
       if (heuristic.state != HIPBLAS_STATUS_SUCCESS ||
           heuristic.workspaceSize != 0U) {
         cleanup_preference();
@@ -7325,6 +7615,17 @@ sllm_queue_release(sllm_queue_t **const raw_queue,
       queue->release_active = false;
       return device_status;
     }
+    const hipError_t scratch_status = destroy_queue_matmul_scratch(queue);
+    if (scratch_status != hipSuccess) {
+      {
+        std::lock_guard<std::mutex> registry_lock(registry_mutex);
+        unregister_handle(*raw_queue);
+        *raw_queue = nullptr;
+      }
+      retain_poisoned(queue, queue->context);
+      return hip_failure(error_sink, scratch_status,
+                         "hipFree queue low-precision matmul scratch");
+    }
     const hipError_t destroy_status =
         destroy_stream_with_fault_injection(queue->stream);
     if (destroy_status != hipSuccess) {
@@ -10208,6 +10509,8 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
 #include "moe_route_runtime.inc"
 #include "qwen38_projection_pack_runtime.inc"
 #include "rotary_runtime.inc"
+#include "row_concat_runtime.inc"
+#include "token_selector_pq_runtime.inc"
 #include "token_selector_runtime.inc"
 #include "windowed_attention_runtime.inc"
 
@@ -12161,5 +12464,39 @@ extern "C" uint32_t sllm_test_select_fp8_lt_heuristic_rank_policy(
   *ranked_query = policy.ranked_query ? 1U : 0U;
   *explicit_override = policy.explicit_override ? 1U : 0U;
   return policy.valid ? 1U : 0U;
+}
+
+extern "C" uint64_t sllm_test_select_fp8_lt_algorithm_index_policy(
+    const char *const arch_name, const uint32_t fp8_dtype, const uint64_t m,
+    const uint64_t k, const uint64_t n,
+    const char *const rank_environment) noexcept {
+  const Fp8LtHeuristicRankPolicy policy = select_fp8_lt_heuristic_rank_policy(
+      arch_name, fp8_dtype, m, k, n, rank_environment);
+  return policy.algorithm_index_query ? policy.algorithm_index : UINT64_MAX;
+}
+
+extern "C" uint32_t
+sllm_test_fp8_lt_pinned_identity(const int32_t version,
+                                 const char *const revision) noexcept {
+  return matches_fp8_lt_pinned_identity(version, revision) ? 1U : 0U;
+}
+
+extern "C" uint32_t sllm_test_select_fp8_lt_heuristic_candidate(
+    const int32_t *const algorithm_indices, const uint32_t *const successful,
+    const uint64_t *const workspace_sizes, const uint64_t count,
+    const uint64_t target_algorithm_index,
+    uint64_t *const selected_position) noexcept {
+  if (selected_position == nullptr) {
+    return 0U;
+  }
+  *selected_position = UINT64_MAX;
+  const std::optional<uint64_t> selected = find_fp8_lt_heuristic_candidate(
+      algorithm_indices, successful, workspace_sizes,
+      static_cast<std::size_t>(count), target_algorithm_index);
+  if (!selected.has_value()) {
+    return 0U;
+  }
+  *selected_position = *selected;
+  return 1U;
 }
 #endif

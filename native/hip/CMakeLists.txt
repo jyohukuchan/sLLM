@@ -538,6 +538,10 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set(SLLM_ARGMAX_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/argmax_kernel.hip.o")
         set(SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/token_selector_kernel.hip.o")
+        set(SLLM_TOKEN_SELECTOR_PQ_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/token_selector_pq_kernel.hip.o")
+        set(SLLM_ROW_CONCAT_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/row_concat_kernel.hip.o")
         set(SLLM_MOE_ROUTE_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/moe_route_kernel.hip.o")
         set(SLLM_DEEPSEEK_V4_MOE_ROUTE_G1_KERNEL_OBJECT
@@ -592,6 +596,9 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 src/matmul_kernel_internal.hpp src/argmax_api.hpp
                 src/argmax_kernel_internal.hpp src/rmsnorm_api.hpp
                 src/token_selector_api.hpp src/token_selector_kernel_internal.hpp
+                src/token_selector_pq_internal.hpp src/token_selector_pq_runtime.inc
+                src/row_concat_internal.hpp src/row_concat_runtime.inc
+                src/token_selector_support_internal.hpp
                 src/moe_route_api.hpp src/moe_route_kernel_internal.hpp
                 src/deepseek_v4_moe_route_api.hpp
                 src/deepseek_v4_moe_route_kernel_internal.hpp
@@ -687,6 +694,30 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
             DEPENDS src/token_selector_kernel.hip.cpp
                 src/token_selector_kernel_internal.hpp
+                src/token_selector_support_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_TOKEN_SELECTOR_PQ_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/token_selector_pq_kernel.hip.cpp"
+                -o "${SLLM_TOKEN_SELECTOR_PQ_G1_KERNEL_OBJECT}"
+            DEPENDS src/token_selector_pq_kernel.hip.cpp
+                src/token_selector_pq_internal.hpp src/token_selector_pq_algorithm.hpp
+                src/token_selector_support_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_ROW_CONCAT_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/row_concat_kernel.hip.cpp"
+                -o "${SLLM_ROW_CONCAT_G1_KERNEL_OBJECT}"
+            DEPENDS src/row_concat_kernel.hip.cpp
+                src/row_concat_internal.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -821,6 +852,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_MLP_GATE_UP_SILU_BUNDLE_G1_KERNEL_OBJECT}"
             "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
             "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
+            "${SLLM_TOKEN_SELECTOR_PQ_G1_KERNEL_OBJECT}"
+            "${SLLM_ROW_CONCAT_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
             "${SLLM_DEEPSEEK_V4_MOE_ROUTE_G1_KERNEL_OBJECT}"
             "${SLLM_MINIMAX_M3_MOE_ROUTE_G1_KERNEL_OBJECT}"
@@ -842,6 +875,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_MLP_GATE_UP_SILU_BUNDLE_G1_KERNEL_OBJECT}"
             "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
             "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
+            "${SLLM_TOKEN_SELECTOR_PQ_G1_KERNEL_OBJECT}"
+            "${SLLM_ROW_CONCAT_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
             "${SLLM_DEEPSEEK_V4_MOE_ROUTE_G1_KERNEL_OBJECT}"
             "${SLLM_MINIMAX_M3_MOE_ROUTE_G1_KERNEL_OBJECT}"
@@ -866,6 +901,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set_source_files_properties(src/mlp_gate_up_silu_bundle_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/argmax_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/token_selector_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/token_selector_pq_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/row_concat_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/moe_route_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/deepseek_v4_moe_route_kernel.hip.cpp
                                     PROPERTIES LANGUAGE HIP)
@@ -895,6 +932,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/mlp_gate_up_silu_bundle_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/argmax_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/token_selector_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/token_selector_pq_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/row_concat_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/moe_route_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES
             src/deepseek_v4_moe_route_kernel.hip.cpp)
@@ -1035,6 +1074,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/argmax_api.cpp
         src/token_selector_api.cpp
         src/token_selector_kernel.hip.cpp
+        src/token_selector_pq_kernel.hip.cpp
+        src/row_concat_kernel.hip.cpp
         src/moe_route_api.cpp
         src/deepseek_v4_moe_route_api.cpp
         src/minimax_m3_moe_route_api.cpp
@@ -1086,6 +1127,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/argmax_api.cpp
         src/token_selector_api.cpp
         src/token_selector_kernel.hip.cpp
+        src/token_selector_pq_kernel.hip.cpp
+        src/row_concat_kernel.hip.cpp
         src/moe_route_api.cpp
         src/deepseek_v4_moe_route_api.cpp
         src/minimax_m3_moe_route_api.cpp
@@ -1135,6 +1178,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/argmax_api.cpp
         src/token_selector_api.cpp
         src/token_selector_kernel.hip.cpp
+        src/token_selector_pq_kernel.hip.cpp
+        src/row_concat_kernel.hip.cpp
         src/moe_route_api.cpp
         src/deepseek_v4_moe_route_api.cpp
         src/minimax_m3_moe_route_api.cpp
@@ -1180,6 +1225,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/argmax_api.cpp
         src/token_selector_api.cpp
         src/token_selector_kernel.hip.cpp
+        src/token_selector_pq_kernel.hip.cpp
+        src/row_concat_kernel.hip.cpp
         src/moe_route_api.cpp
         src/deepseek_v4_moe_route_api.cpp
         src/minimax_m3_moe_route_api.cpp
@@ -1196,8 +1243,9 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         tests/fake_hip_runtime.cpp
         tests/token_selector_public_c_abi_test.cpp
     )
-    set_source_files_properties(src/token_selector_kernel.hip.cpp PROPERTIES
-        LANGUAGE CXX
+    set_source_files_properties(src/token_selector_kernel.hip.cpp
+        src/token_selector_pq_kernel.hip.cpp
+        src/row_concat_kernel.hip.cpp PROPERTIES LANGUAGE CXX
     )
     target_compile_features(sllm_token_selector_public_c_abi_host_test PRIVATE cxx_std_17)
     target_compile_definitions(sllm_token_selector_public_c_abi_host_test PRIVATE
@@ -1728,6 +1776,230 @@ if(SLLM_ENABLE_PHASE83_MXFP8_CHAIN_GPU_TEST)
         COMMAND sllm_phase83_mxfp8_chain_gpu_test)
     set_tests_properties(sllm_phase83_mxfp8_chain_gpu_test PROPERTIES
         LABELS "gpu;phase83;mxfp8;kv-chain"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE83_5_LINEAR_CHECKPOINT_GPU_TEST
+    "Build the Phase83.5 M3 linear-state checkpoint regression" OFF)
+if(SLLM_ENABLE_PHASE83_5_LINEAR_CHECKPOINT_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase83.5 checkpoint test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase83_5_linear_checkpoint_gpu_test
+        tests/phase83_5_linear_checkpoint_gpu_test.cpp)
+    target_compile_features(sllm_phase83_5_linear_checkpoint_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase83_5_linear_checkpoint_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase83_5_linear_checkpoint_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    target_link_libraries(sllm_phase83_5_linear_checkpoint_gpu_test PRIVATE sllm_hip_stub)
+    add_test(NAME sllm_phase83_5_linear_checkpoint_gpu_test
+        COMMAND sllm_phase83_5_linear_checkpoint_gpu_test)
+    set_tests_properties(sllm_phase83_5_linear_checkpoint_gpu_test PROPERTIES
+        LABELS "gpu;phase83.5;gdn;mtp-checkpoint"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE83_5_FP8_SMALL_M_PUBLIC_GPU_TEST
+    "Build the Phase83.5 FP8 small-M public ABI regression" OFF)
+if(SLLM_ENABLE_PHASE83_5_FP8_SMALL_M_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase83.5 FP8 small-M test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase83_5_fp8_small_m_public_gpu_test
+        tests/phase83_5_fp8_small_m_public_gpu_test.cpp)
+    target_compile_features(sllm_phase83_5_fp8_small_m_public_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase83_5_fp8_small_m_public_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase83_5_fp8_small_m_public_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    target_link_libraries(sllm_phase83_5_fp8_small_m_public_gpu_test PRIVATE
+        sllm_hip_stub)
+    add_test(NAME sllm_phase83_5_fp8_small_m_public_gpu_test
+        COMMAND sllm_phase83_5_fp8_small_m_public_gpu_test)
+    set_tests_properties(sllm_phase83_5_fp8_small_m_public_gpu_test PROPERTIES
+        LABELS "gpu;phase83.5;fp8;matmul"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE83_5_NVFP4_SMALL_M_VGPR_REUSE_PUBLIC_GPU_TEST
+    "Build the Phase83.5 NVFP4 small-M ID94 public ABI regression" OFF)
+if(SLLM_ENABLE_PHASE83_5_NVFP4_SMALL_M_VGPR_REUSE_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase83.5 NVFP4 small-M test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase83_5_nvfp4_small_m_vgpr_reuse_public_gpu_test
+        tests/phase83_5_nvfp4_small_m_vgpr_reuse_public_gpu_test.cpp)
+    target_compile_features(
+        sllm_phase83_5_nvfp4_small_m_vgpr_reuse_public_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(
+        sllm_phase83_5_nvfp4_small_m_vgpr_reuse_public_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(
+        sllm_phase83_5_nvfp4_small_m_vgpr_reuse_public_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    target_link_libraries(
+        sllm_phase83_5_nvfp4_small_m_vgpr_reuse_public_gpu_test PRIVATE
+        sllm_hip_stub)
+    add_test(NAME sllm_phase83_5_nvfp4_small_m_vgpr_reuse_public_gpu_test
+        COMMAND sllm_phase83_5_nvfp4_small_m_vgpr_reuse_public_gpu_test)
+    set_tests_properties(sllm_phase83_5_nvfp4_small_m_vgpr_reuse_public_gpu_test
+        PROPERTIES
+        LABELS "gpu;phase83.5;nvfp4;matmul"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE83_5_NVFP4_PREFILL_TILING_PUBLIC_GPU_TEST
+    "Build the Phase83.5 NVFP4 prefill tiling public ABI regression" OFF)
+if(SLLM_ENABLE_PHASE83_5_NVFP4_PREFILL_TILING_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase83.5 NVFP4 prefill tiling test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase83_5_nvfp4_prefill_tiling_public_gpu_test
+        tests/phase83_5_nvfp4_prefill_tiling_public_gpu_test.cpp)
+    target_compile_features(
+        sllm_phase83_5_nvfp4_prefill_tiling_public_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(
+        sllm_phase83_5_nvfp4_prefill_tiling_public_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(
+        sllm_phase83_5_nvfp4_prefill_tiling_public_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    target_link_libraries(
+        sllm_phase83_5_nvfp4_prefill_tiling_public_gpu_test PRIVATE
+        sllm_hip_stub)
+    add_test(NAME sllm_phase83_5_nvfp4_prefill_tiling_public_gpu_test
+        COMMAND sllm_phase83_5_nvfp4_prefill_tiling_public_gpu_test)
+    set_tests_properties(sllm_phase83_5_nvfp4_prefill_tiling_public_gpu_test
+        PROPERTIES
+        LABELS "gpu;phase83.5;nvfp4;matmul"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE83_5_TOKEN_SELECTOR_SUPPORT_GPU_TEST
+    "Build the fixed-K20 private workspace support GPU oracle" OFF)
+if(SLLM_ENABLE_PHASE83_5_TOKEN_SELECTOR_SUPPORT_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Fixed-K20 support test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    set_source_files_properties(
+        tests/phase83_5_token_selector_support_gpu_test.cpp PROPERTIES LANGUAGE HIP)
+    add_executable(sllm_phase83_5_token_selector_support_gpu_test
+        tests/phase83_5_token_selector_support_gpu_test.cpp)
+    target_include_directories(sllm_phase83_5_token_selector_support_gpu_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(sllm_phase83_5_token_selector_support_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase83_5_token_selector_support_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    target_link_libraries(sllm_phase83_5_token_selector_support_gpu_test PRIVATE
+        sllm_hip_stub)
+    add_test(NAME sllm_phase83_5_token_selector_support_gpu_test
+        COMMAND sllm_phase83_5_token_selector_support_gpu_test)
+    set_tests_properties(sllm_phase83_5_token_selector_support_gpu_test PROPERTIES
+        LABELS "gpu;phase83.5;sampling;mtp"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE83_5_TOKEN_SELECTOR_PQ_GPU_TEST
+    "Build the fixed-K20 private p/q verification GPU oracle" OFF)
+if(SLLM_ENABLE_PHASE83_5_TOKEN_SELECTOR_PQ_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Fixed-K20 p/q test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    set_source_files_properties(
+        tests/phase83_5_token_selector_pq_gpu_test.cpp PROPERTIES LANGUAGE HIP)
+    add_executable(sllm_phase83_5_token_selector_pq_gpu_test
+        tests/phase83_5_token_selector_pq_gpu_test.cpp)
+    target_include_directories(sllm_phase83_5_token_selector_pq_gpu_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(sllm_phase83_5_token_selector_pq_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase83_5_token_selector_pq_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    target_link_libraries(sllm_phase83_5_token_selector_pq_gpu_test PRIVATE
+        sllm_hip_stub)
+    add_test(NAME sllm_phase83_5_token_selector_pq_gpu_test
+        COMMAND sllm_phase83_5_token_selector_pq_gpu_test)
+    set_tests_properties(sllm_phase83_5_token_selector_pq_gpu_test PROPERTIES
+        LABELS "gpu;phase83.5;sampling;mtp"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE83_5_ROW_CONCAT_GPU_TEST
+    "Build the private BF16 row concat GPU oracle" OFF)
+if(SLLM_ENABLE_PHASE83_5_ROW_CONCAT_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "BF16 row concat test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    set_source_files_properties(
+        tests/phase83_5_row_concat_gpu_test.cpp PROPERTIES LANGUAGE HIP)
+    add_executable(sllm_phase83_5_row_concat_gpu_test
+        tests/phase83_5_row_concat_gpu_test.cpp)
+    target_include_directories(sllm_phase83_5_row_concat_gpu_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(sllm_phase83_5_row_concat_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase83_5_row_concat_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    target_link_libraries(sllm_phase83_5_row_concat_gpu_test PRIVATE
+        sllm_hip_stub)
+    add_test(NAME sllm_phase83_5_row_concat_gpu_test
+        COMMAND sllm_phase83_5_row_concat_gpu_test)
+    set_tests_properties(sllm_phase83_5_row_concat_gpu_test PROPERTIES
+        LABELS "gpu;phase83.5;copy;mtp"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE83_5_MXFP8_STAGED32_PUBLIC_GPU_TEST
+    "Build the Phase83.5 MXFP8 staged32 public ABI regression" OFF)
+if(SLLM_ENABLE_PHASE83_5_MXFP8_STAGED32_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase83.5 MXFP8 staged32 test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase83_5_mxfp8_staged32_public_gpu_test
+        tests/phase83_mxfp8_staged_public_gpu_test.cpp)
+    target_compile_features(
+        sllm_phase83_5_mxfp8_staged32_public_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(
+        sllm_phase83_5_mxfp8_staged32_public_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+        SLLM_TEST_STAGED32_DEFAULT=1)
+    target_compile_options(
+        sllm_phase83_5_mxfp8_staged32_public_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    target_link_libraries(
+        sllm_phase83_5_mxfp8_staged32_public_gpu_test PRIVATE
+        sllm_hip_stub)
+    add_test(NAME sllm_phase83_5_mxfp8_staged32_public_gpu_test
+        COMMAND sllm_phase83_5_mxfp8_staged32_public_gpu_test)
+    set_tests_properties(sllm_phase83_5_mxfp8_staged32_public_gpu_test
+        PROPERTIES
+        LABELS "gpu;phase83.5;mxfp8;attention"
         RESOURCE_LOCK sllm_gpu
         ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
 endif()

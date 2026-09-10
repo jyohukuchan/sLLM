@@ -688,6 +688,9 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_rmsnorm_residual_fused_wave32_v1",
             "sllm_rmsnorm_residual_fused_wave64_v1",
             "sllm_token_selector_bf16_f32_mask_v1",
+            "sllm_token_selector_fixed_topk_final_support_v1",
+            "sllm_token_selector_sparse_pq_k20_v1",
+            "sllm_concat_rows_bf16_v1",
             "sllm_token_selector_fixed_topk_final_v1",
             "sllm_token_selector_fixed_topk_initial_v1",
             "sllm_token_selector_fixed_topk_reduce_v1",
@@ -704,15 +707,33 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n10240_v1",
             "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n248320_v1",
             "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n6144_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_fused_k6144n5120_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n12288_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n1024_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n17408_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_fused_k17408n5120_v1",
+            "sllm_nvfp4_w4a4_prefill_compensated128x64_v1",
             "sllm_nvfp4_w4a4_prefill_compensated64x64_v1",
             "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1",
+            "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_lookahead_v1",
+            "sllm_nvfp4_gfx1201_wmma128x64_aligned_k5120n17408_v1",
+            "sllm_nvfp4_gfx1201_wmma128x64_pad68_k17408n5120_v1",
+            "sllm_nvfp4_gfx1201_wmma128x64_pad68_k5120n17408_v1",
+            "sllm_nvfp4_gfx1201_wmma128x64_aligned_k17408n5120_v1",
+            "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_stage64_v1",
             "sllm_nvfp4_w4a4_small_m_gfx1201_rowgrid_v1",
             "sllm_nvfp4_w4a4_small_m_rowgrid_v1",
+            "sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k17408n5120_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n1024_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n12288_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n17408_v1",
+            "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k6144n5120_v1",
         }
-        self.assertEqual(len(KERNEL_SYMBOLS), 155)
+        self.assertEqual(len(KERNEL_SYMBOLS), 176)
         self.assertEqual(tuple(sorted(KERNEL_SYMBOLS)), KERNEL_SYMBOLS)
         self.assertTrue(expected_additions <= set(KERNEL_SYMBOLS))
-        self.assertEqual(len(expected_additions), 52)
+        self.assertEqual(len(expected_additions), 73)
 
     def test_causal_attention_stub_allowlist_is_exact_and_duplicate_free(self) -> None:
         expected = (
@@ -745,10 +766,10 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
         self.assertEqual(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS, tuple(sorted(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)))
 
     def test_additional_device_stub_inventory_is_finite_and_duplicate_free(self) -> None:
-        self.assertEqual(len(ADDITIONAL_DEVICE_STUB_SYMBOLS), 80)
-        self.assertEqual(len(set(ADDITIONAL_DEVICE_STUB_SYMBOLS)), 80)
+        self.assertEqual(len(ADDITIONAL_DEVICE_STUB_SYMBOLS), 81)
+        self.assertEqual(len(set(ADDITIONAL_DEVICE_STUB_SYMBOLS)), 81)
         self.assertEqual(ADDITIONAL_DEVICE_STUB_SYMBOLS, tuple(sorted(ADDITIONAL_DEVICE_STUB_SYMBOLS)))
-        self.assertEqual(sum("causal_attention_kernel" in name for name in ADDITIONAL_DEVICE_STUB_SYMBOLS), 79)
+        self.assertEqual(sum("causal_attention_kernel" in name for name in ADDITIONAL_DEVICE_STUB_SYMBOLS), 80)
         self.assertEqual(sum("ministral3_yarn_kernel" in name for name in ADDITIONAL_DEVICE_STUB_SYMBOLS), 1)
 
     def test_host_hip_undefined_closure_includes_graph_and_gfx1030_additions(self) -> None:

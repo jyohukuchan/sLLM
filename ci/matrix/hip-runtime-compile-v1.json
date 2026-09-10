@@ -25,7 +25,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "bb53f2dd1cc0223ff88a2b051ce11229b74d7ef3ddc7d4b81d207254b4563749"
+        "sha256": "8d72ca744a01b00b133e4dafb0a05cfd3d6eab48bbd512ab0694dc6bdf8678ba"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -37,10 +37,10 @@
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
-        "sha256": "52d207e29446d7f3bf3f9873774dd2d00074dbf8195f07c937515a873766fb60"
+        "sha256": "a705484e1c91bbf21793caa1a661befd00ba7e0ddb2d5cc6a39499521cb8d653"
       }
     ],
-    "source_set_sha256": "f96e48469c70dfe9ff57ef739bd1e661d0a2352cf18201aff3c74b3eebbcfd42"
+    "source_set_sha256": "34d9ea317fd1ee530e22659bdd9dfa831e219e24e4720d3aa6c5d7ebbac02b4e"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -123,6 +123,7 @@
       "native/hip/src/moe_route_kernel_internal.hpp",
       "native/hip/src/moe_route_runtime.inc",
       "native/hip/src/nvfp4_prefill_wmma_compensated.inc",
+      "native/hip/src/nvfp4_small_m_vgpr_reuse.inc",
       "native/hip/src/public_runtime.hip.cpp",
       "native/hip/src/public_runtime_internal.hpp",
       "native/hip/src/qwen38_projection_pack_runtime.inc",
@@ -137,11 +138,19 @@
       "native/hip/src/rotary_kernel.hip.cpp",
       "native/hip/src/rotary_kernel_internal.hpp",
       "native/hip/src/rotary_runtime.inc",
+      "native/hip/src/row_concat_internal.hpp",
+      "native/hip/src/row_concat_kernel.hip.cpp",
+      "native/hip/src/row_concat_runtime.inc",
       "native/hip/src/token_selector_api.cpp",
       "native/hip/src/token_selector_api.hpp",
       "native/hip/src/token_selector_kernel.hip.cpp",
       "native/hip/src/token_selector_kernel_internal.hpp",
+      "native/hip/src/token_selector_pq_algorithm.hpp",
+      "native/hip/src/token_selector_pq_internal.hpp",
+      "native/hip/src/token_selector_pq_kernel.hip.cpp",
+      "native/hip/src/token_selector_pq_runtime.inc",
       "native/hip/src/token_selector_runtime.inc",
+      "native/hip/src/token_selector_support_internal.hpp",
       "native/hip/src/windowed_attention_api.cpp",
       "native/hip/src/windowed_attention_api.hpp",
       "native/hip/src/windowed_attention_runtime.inc"
@@ -149,7 +158,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "bb53f2dd1cc0223ff88a2b051ce11229b74d7ef3ddc7d4b81d207254b4563749"
+        "sha256": "8d72ca744a01b00b133e4dafb0a05cfd3d6eab48bbd512ab0694dc6bdf8678ba"
       },
       {
         "path": "native/hip/src/argmax_api.cpp",
@@ -201,15 +210,15 @@
       },
       {
         "path": "native/hip/src/causal_attention_kernel.hip.cpp",
-        "sha256": "554523e0fe4e31ea0ea7225db8a7bf9ea879518d302e66fcf1d478fe4f563859"
+        "sha256": "ad6aa260e71fbc39e507c79bbd53a62233f737f05cceea45d8ea5908ef73781d"
       },
       {
         "path": "native/hip/src/causal_attention_kernel_internal.hpp",
-        "sha256": "75a9e4707194945dfe1693dde4ebc2b82b1871a85b378c68927b0a7fa9a8f01e"
+        "sha256": "fc660447bcf4376e768cf6dae86bdfc7309825ced7c92dff834b101c788740cd"
       },
       {
         "path": "native/hip/src/causal_attention_runtime.inc",
-        "sha256": "550cfc7414dd827b831854f52d4a6f17cafc5de27d3f7495eb5204b110e0dd75"
+        "sha256": "b80abf261e4ed84710c67925bde58cb6b8c1d594a4da01126292ea5e1574358e"
       },
       {
         "path": "native/hip/src/deepseek_v4_moe_route_api.cpp",
@@ -325,15 +334,15 @@
       },
       {
         "path": "native/hip/src/linear_attention_kernel.hip.cpp",
-        "sha256": "ee2b21ec03e68cebd1a9ef41080b190e8ff6d9a8c32cc2789985301e24027e2a"
+        "sha256": "8ba372c08692643a0c2f7f98131fab04efdd562845d952f5793eac2bc1309418"
       },
       {
         "path": "native/hip/src/linear_attention_kernel_internal.hpp",
-        "sha256": "dd174a48d5bf82aa92612aa2f07b154016a415b7e1534019e96bb5a556909850"
+        "sha256": "083a0236de119226d2c482fc2f5dfc26442dfecb33357e3b0e41af56a339a754"
       },
       {
         "path": "native/hip/src/linear_attention_runtime.inc",
-        "sha256": "e095d376cf3ed5eca781f3d755e972132ceae8c3c882cbf46fd274c9fc1b2516"
+        "sha256": "6aa9f232c65ed1a7b8db5759c1591d9c84c942221777baf931c13cb616a3ba97"
       },
       {
         "path": "native/hip/src/low_precision_block_codec.hpp",
@@ -345,23 +354,23 @@
       },
       {
         "path": "native/hip/src/matmul_api.cpp",
-        "sha256": "48937802a18400f8daeb90013642da6c1aa4cfbb594e23b660f96a1fd6d2ab32"
+        "sha256": "65b1e65cde586fb9f660c5d16c597946472b3e5a9b13211d5d4fd5df132b0955"
       },
       {
         "path": "native/hip/src/matmul_api.hpp",
-        "sha256": "1036cbd2c493c729cef2126a7a5af0aad5e426a50c3f7dcf7d8b11f73389dd6a"
+        "sha256": "adcbb960f98ab9ee9ef41ee168477992a87921f40f2877b700d4bfe0504b4edb"
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
-        "sha256": "35ad0547c17c3bfa4a1efa12bc43579649b8cde281bd3632cb722eb5d33aea30"
+        "sha256": "d153a7cca535656a4722febae74ab5bd00d0a9b156dcb6c4742fdfc02436dbed"
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "6183d893caba61b86ba9a5048302e168fdc91e964fd1fb79f97d8d41be54da23"
+        "sha256": "82b7b0dc6d6305ce0219ec20586f3ca2f0c932533beec9955077d00962bf6513"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
-        "sha256": "521ec5b633236dd99bc1b4494cc06681cfcfa757177d5be82aa8b54fc5e2daa2"
+        "sha256": "6c3f573ac8529b8667727b843e36958a7d8f7b76cdc45c6ea47724136a2c2bcc"
       },
       {
         "path": "native/hip/src/minimax_m3_moe_route_api.cpp",
@@ -461,19 +470,23 @@
       },
       {
         "path": "native/hip/src/nvfp4_prefill_wmma_compensated.inc",
-        "sha256": "7ef99f3e84ea67ffc36c1897dcb591c665c52dca80125e4a7583b1ecea8b7e2e"
+        "sha256": "695cdf73f52a5e9d1b2fc1ecf1e5d6037d898e625c64488c64863da338658bb7"
+      },
+      {
+        "path": "native/hip/src/nvfp4_small_m_vgpr_reuse.inc",
+        "sha256": "4aae665afd0657d571e04db37db4063dfc67a13e0aebd97c672d30ebf5f461a4"
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "574d1fc4a426bc3189ae18a8c407c7f359c20a62a1ea13ed34b78219013d2f29"
+        "sha256": "fbb906d62dbf22f7e7dd054ac9e289fb137fcc6f1d154db2d1bbbac33db97b9a"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
-        "sha256": "52d207e29446d7f3bf3f9873774dd2d00074dbf8195f07c937515a873766fb60"
+        "sha256": "a705484e1c91bbf21793caa1a661befd00ba7e0ddb2d5cc6a39499521cb8d653"
       },
       {
         "path": "native/hip/src/qwen38_projection_pack_runtime.inc",
-        "sha256": "0b42b829b13b9987afbba1f272b0fd74672bb5c2a88f5dd6611770f9073a8eb1"
+        "sha256": "647da36b16dff597b0c0b0c0119cbc4b9aaadfb4b9457e39f624a036f3c0281b"
       },
       {
         "path": "native/hip/src/residual_rmsnorm_api.cpp",
@@ -520,6 +533,18 @@
         "sha256": "28a6e9e7356e90759318ea1e74e9ffd2673111ec2b85b013ab82e9a1b941da0e"
       },
       {
+        "path": "native/hip/src/row_concat_internal.hpp",
+        "sha256": "28c9b1e664e333d14e39ce3285f1b003b30bf70cf2284a8e06274957761e7e5e"
+      },
+      {
+        "path": "native/hip/src/row_concat_kernel.hip.cpp",
+        "sha256": "ac0e62625ada989afbf762c0e032bb6396c53528b7a96c93fbb7ee89dbaa20e8"
+      },
+      {
+        "path": "native/hip/src/row_concat_runtime.inc",
+        "sha256": "d5d25685dc333b94cdd5c1abda7f2ff6ed0eb1e2c83be0d318a33b8706979600"
+      },
+      {
         "path": "native/hip/src/token_selector_api.cpp",
         "sha256": "5a5b81509652ae70e42f1b5cf8433229740adfff174c84f7f966888115a1c2f9"
       },
@@ -529,15 +554,35 @@
       },
       {
         "path": "native/hip/src/token_selector_kernel.hip.cpp",
-        "sha256": "0bca6eeb6012862d75b6d523dbe6274fb3979429b1115042f24e08cc669469bc"
+        "sha256": "8b2aec0aefcdea2d90f3291a151430a13630083c0cbdb9c604901a8926805d05"
       },
       {
         "path": "native/hip/src/token_selector_kernel_internal.hpp",
         "sha256": "705bed9cd6bc67f97c64c1788e59aa24769988c418d9d5fb38dc0de47fccda92"
       },
       {
+        "path": "native/hip/src/token_selector_pq_algorithm.hpp",
+        "sha256": "c141955cdea26ecff96c93b5727df0a6788ed8550844a008fe9f6e79a669154c"
+      },
+      {
+        "path": "native/hip/src/token_selector_pq_internal.hpp",
+        "sha256": "5852a9119c4d0c34023b404109feb628fac9141c298b8eb062fbdf01070ba1d2"
+      },
+      {
+        "path": "native/hip/src/token_selector_pq_kernel.hip.cpp",
+        "sha256": "05fad081552b0084a6a463d5d1dabe88f8761a926806603c043a2e78d8482488"
+      },
+      {
+        "path": "native/hip/src/token_selector_pq_runtime.inc",
+        "sha256": "3a271fef09493f00a9604334ab7bc3f8c897cb0542ca9106a6e0dac702c1f490"
+      },
+      {
         "path": "native/hip/src/token_selector_runtime.inc",
         "sha256": "cc36fc4d763d9e5751276b69a30e35c3246ff5b7c9aaad7f143c0a2ce1276706"
+      },
+      {
+        "path": "native/hip/src/token_selector_support_internal.hpp",
+        "sha256": "d663b19ba18ee614ae49d7d897336bb2f5e3d9d763e712ea55b8faa660908816"
       },
       {
         "path": "native/hip/src/windowed_attention_api.cpp",
@@ -552,7 +597,7 @@
         "sha256": "e6d480204c7f49f0385ca511cdb2080372e114d2befa5f345a97b7d5bd0eb8f1"
       }
     ],
-    "source_set_sha256": "c830ff568c7d838460e4aff15575b0d6fc54cfbdef6271be9ed2de95f54b02ac"
+    "source_set_sha256": "8271070450aed6952e0fcd383b4a269c8e82a1ce546358462d06205f37d57017"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",
@@ -852,7 +897,9 @@
             "{repo}/native/hip/src/moe_expert_kernel.hip.cpp",
             "{repo}/native/hip/src/moe_route_kernel.hip.cpp",
             "{repo}/native/hip/src/rotary_kernel.hip.cpp",
+            "{repo}/native/hip/src/row_concat_kernel.hip.cpp",
             "{repo}/native/hip/src/token_selector_kernel.hip.cpp",
+            "{repo}/native/hip/src/token_selector_pq_kernel.hip.cpp",
             "-x",
             "none",
             "-o",
@@ -1070,7 +1117,9 @@
             "{repo}/native/hip/src/moe_expert_kernel.hip.cpp",
             "{repo}/native/hip/src/moe_route_kernel.hip.cpp",
             "{repo}/native/hip/src/rotary_kernel.hip.cpp",
+            "{repo}/native/hip/src/row_concat_kernel.hip.cpp",
             "{repo}/native/hip/src/token_selector_kernel.hip.cpp",
+            "{repo}/native/hip/src/token_selector_pq_kernel.hip.cpp",
             "-x",
             "none",
             "-o",

@@ -7,6 +7,12 @@
 この文書は、同じmodel/input/sampling条件でもlogit、token列、visible outputへ影響しうる実装変更を一か所で追跡する正本である。
 個別Phaseのplan/historyは詳細証拠を保持し、この台帳は変更理由、数値方向、観測された出力差、承認区分、rollback identityを索引する。
 
+## Phase83.5最終確認
+
+2026-09-10ユーザー指示で旧速度目標を参考値へ変更した。数値・sampling・stateの正しさは緩和しない。
+R56後のCI修正はlint/formatのみで、前後source対応とfresh buildを確認する。最終比較・API・未証明の品質範囲は
+[Phase83.5履歴](../history/2026/09/1-10/phase83-5-llama-guided-performance.md)に集約する。
+
 ## 数値変更の承認規則
 
 token完全一致は観測項目として残すが、それ単独を数値correctnessのhard gateにしない。candidateは次の区分で扱う。
@@ -54,6 +60,230 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 - 性能・resource結果、採否、target split、rollback identity。
 
 ## 変更履歴
+
+### OUT-2026-09-10-P835-ONEWAVE: small-Mのone-wave Kahan（N1候補・性能棄却）
+
+- scope／change: gfx1201 M2/3/4、既存2tuple。ID89 StageK32をone-wave M16/N64へ縮小し、ID94の32lane分割FMA＋treeと比較した。finite K16項はE2M1/E4係数最大518,400でFP32 exact、Kahan候補は標準集約boundを増やさない方向だが、pointwise改善／出力完全一致の一般保証ではない。
+- evidence: 通常6caseの全出力独立long-double oracle最大1 BF16 ULP、repeat／finite、NaN2fixtureの分類PASS。全finite scale fixtureは診断値で最大1 ULP、候補間2出力差・最大1 ULP。通常fixtureの候補間bit差は0だったが、全入力やBF16 full-model品質へ一般化しない。
+- 採否: pooled40で8.974〜29.235倍遅いため棄却。one-wave StageK32は本体へ統合せず、この案の追加調整／再測定を止める。根拠は`r28-r9700-onewave-r1/`、binary SHA `aae7638a50f9de9a114ab9c68371361c3a1f4472f9d8e69292322d2c7edf0483`。詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-10-P835-FP8-PAIR-MULTIROW: FP8 qkv/zの複数行入力量子化共有（N0・公開経路統合中）
+
+- scope／change: 既存のFP8 GDN qkv/z pairを正のM>1へ広げる。BF16入力、E4M3FNの外側scale付き重み、K5120、N10240/6144、既存target／artifact条件を維持する。b/aのBF16投影やMTP companion graphは対象外。
+- 数値方針: 2つの投影が同じ入力へ別々に実行していた同一quantizerを1回にし、同じbytes／row scaleを両memberへ渡す。memberのprovider／積和／scale処理／投入順は変えない。新たな量子化やdtype変更を加えない。
+- 検証状態: coreの対象predicate/routing testとHIP Rust checkはPASS。公開GPU testをM1/2/3/4/5/65/2048へ拡張し、符号／大きさの異なる行・入力更新・全出力解析oracle／独立matmul比較／repeat／provider／解放を確認する準備をした。両targetのnative build・host／公開GPU testはPASS。R31の初回通常生成ではprefill分192回のみ減り、graph容量と動的Mの比較誤りをR31bで修正した。通常MTP検証でもV2,592／R2,496回の追加削減、従来出力hash・HIP-only／cleanup0を確認した。正式速度目標とBF16品質同等性はこの結果だけで認定しない。
+- 詳細: [Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。入力量子化の重複除去はllama.cpp参照方針に沿って既存sLLM pairを拡張するもので、外部source importは行っていない。
+
+### OUT-2026-09-10-P835-ALIGNED-ID89: 整列したID89の境界判定削減（N0・gfx1201統合中）
+
+- scope／change: gfx1201、M>=256かつ128整列、K/N=5120/17408または逆tuple。full interiorに限りK/Nを静的化し、常に真のrow／column／K境界判定を除く。M257等は現行generic lookahead、M255以下は従来の選択を維持する。K16 contribution／Kahan順序・scale・epilogueは同じ。
+- evidence: scratch8 alignedケース（通常M256/M1024、M2048全finite scale、M256 NaN各2tuple）で全出力finite pair bit差0、repeat・nonfinite分類PASS。独立long-double oracleは各64点で最大0 ULP。追加M257各tupleはcontrol fallbackだけを実行し、aligned symbolを呼ばない。これはfull-model品質比較ではない。
+- 採否: 通常4ケース・AB/BA両順で所要時間約1.20〜1.60%短縮、M2048も約1.22〜1.41%短縮。既定ID89の該当shapeへ統合する。新しいprovider ID／env／dtypeは加えない。通常APIとfull-model確認は未完了。
+- identity: harness source SHA `56dd2527211e3c17166400239ffd00f63ea6e658130a049558c07a14287f1fb6`、binary SHA `58dfebfe4b1c409da32287a8adddff21dbfdb91c4ed0f0a7b210279e156148f3`、kernel object SHA `a6f6d614c91bbfcb107a1a26ebcda52033e7dc310df12549d459a4ace045ba35`。証拠は`r30-r9700-aligned-r1/summary.json`、[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。R9700通常serviceは同じhash・healthz/readyz200・接続0へ復元済み。
+
+- 統合検証: r30公開経路は長すぎるkernel名のmetadata照合で失敗。r30bでNUL込み53 byteへ短縮し64 byte assertを修正した。演算変更なし。旧名archiveはscratchとISA一致だが、r30b公開6caseはoracle最大0 ULP／repeat／metadata／解放PASS、通常8192/128もHIP-only／出力hash維持／cleanup0。prefill446.442／decode23.561 tok/sの単回で、正式目標は未達。
+
+### OUT-2026-09-10-P835-WAVE-CAUSAL: wave共通causal判定（N0・両GPU統合中）
+
+- scope／change: gfx1030／gfx1201 MXFP8 E4のGQA6 Q8/W16 prefill。同一waveの3itemが同じquery rowを使うことから、row／valid／causal limitをwaveごとに一度計算する。無効rowをguardし、unsigned演算の意味とQK／softmax／Vの全演算・key順を維持する。
+- 分類／evidence: **N0**。両GPUの通常4ケース＋NaN K/V＋large finiteの7ケースで、全headの全finite pair bit／repeat／nonfinite分類をPASS。通常2ケースはfull独立oracle、残りは各3,072点oracleを確認した。prefix1025/M129のpartial tileを含む。r25 V-only変更と合わせたr26 full-model単回では、各GPUの128token hashがr19と一致した。BF16比の品質同等性は未評価。
+- 採否: 両targetの全4通常case・両順で改善し、既存kernelへsource統合する。V620 pooled時間約1.44〜2.44%短縮、R9700 prefix7168/M1024は75.000→61.362 ms（約18.18%短縮）。短いcaseへ同じ倍率を主張しない。VGPR106→102／99→95、R9700 occupancy12→16、spill0。新provider／env／dtypeは追加しない。
+- identity: 修正harness SHA `8115bce25b43cf328438fc9185d9d8fe39732b8963085e132e2e8931c581afb7`、V binary SHA `025b9b74e55c10e72c77df731fda7d4ee253b5d111fd4a42628110423250dadc`、R binary SHA `29b62c4904245a1c59d55286031f4097a562645e78c057b853d3f9ead0614a19`。証拠は`r26-v620a-causal-hoist-r1/`、`r26-r9700-causal-hoist-r1/`。r1 harnessに残ったN1比較条件と上側中央値は実行前に別名r2へ訂正した。詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-10-P835-QUARTER-SCALE: ID94 quarter factor共有（N0・gfx1030統合中）
+
+- scope／change: NVFP4 W4A4 small-M、M2/3/4・K5120/N17408と逆tuple。整数dotのquarter factorをactivation scaleへ一度掛け、4列で再利用する。dot4／FMA／wave reduction／tensor scale／BF16丸めを維持する。
+- 分類: **N0**。整数dot最大2304とE4 mantissa最大15の積は16bitに収まり、両括弧順がFP32でexact。全254finite scale×4,609整数dotのhost bit一致、NaN分類一致を確認した。
+- GPU evidence: gfx1030／gfx1201で通常6ケース＋全finite scale＋NaN2ケースの全finite pair bit一致、repeat／分類をPASS。通常とNaNの独立long-double oracleは最大1 BF16 ULP。全finiteの独立oracleは診断値で最大1 ULP。両GPU統合版r26のfull-model単回では各GPUの128token hashがr19と一致したが、BF16比の品質同等性は未評価。
+- 採否: V620の全6ケース・両順で改善、pooled40の所要時間約0.80〜1.88%減。gfx1030 ID94だけへ既定source統合し、新しいprovider／envは追加しない。R9700は0.9953〜1.0034倍で差が一貫しないため現行を維持する。fresh r26のfull-model単回と両targetの公開ID94全6ケースはPASS。正式性能・通常API lifecycleの最新候補確認は残る。
+- identity: scratch candidate SHA `5bad1e2d89cdef8407df307191237fd3df1e81c94cd409203660f9030a478569`、V binary SHA `b912654053acb104448462c459c637b4f8532a5076d081e91a457e0ae19e6971`、R binary SHA `d39299e76115d8b8cc29753e96f5f9ed530b2013e497f094a643aae78fc4628c`。V統合後の生成命令は測定済み候補と一致。証拠は`r25-v620a-quarter-fold-r1/`、`r25-r9700-quarter-fold-r1/`、`r25-smallm-quarter-integration/`。詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-10-P835-EXACT-GROUP: NVFP4の厳密4項group（N1候補・性能棄却）
+
+- scope／change: gfx1201のscratch N32 lookaheadでfinite／非zero scaleの指数range和が3以下の場合、4つのK16 termをexactなFP32和へまとめてKahanを1回行う。条件外は従来の4回更新。比較対象は現在のN64。WMMAとscale、tensor scale、最終丸めは同じで本体未導入。
+- 分類: **N1候補**。E2M1 K16とE4M3 scaleの整数係数は最大518,400、4項の絶対値和は指数差3以下で16,588,800となり24bitに収まる。groupの絶対値和が元のtermの絶対値和を超えないため、同じ項数上限での標準Kahan誤差boundを比較する。pointwise改善／token一致の保証ではない。
+- evidence: R9700の11ケースで両者repeat／全出力finite・nonfinite分類、各64点の独立oracleをPASS（最大0 ULP）。全finite境界M2048のpair差はwide481出力・最大128 ULP、down239出力・最大41 ULP。これら差分点全体のoracle評価やfull-model比較は未実施。
+- 採否: 全case・両順で約2.4〜2.6倍遅く性能棄却。100%group適用のfixtureでも遅いのでこの実装の追加調整は止める。VGPR180、8 waves/SIMD、LDS25,600 B、spill0という資源量だけで採用しない。
+- identity: include SHA `4662aac7963cb80f5811e12a5339ce7cf2319fe14aa1f0eeadbb481cd49c5af9`、binary SHA `b635ac08445652d2f8fa74b42f9a7cd2039fb9160984b375981bc56b3202c1f1`、証拠は`r24-r9700-exact-group-r1/`。raw20配列は小数3桁・閉じ括弧欠落を記録しparser側で扱う。詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。本体未導入なのでproduction rollback不要。
+
+### OUT-2026-09-10-P835-N32-LOOKAHEAD: NVFP4出力tile縮小（N0・性能棄却）
+
+- scope／change: gfx1201の現在のID89 StageK64 lookaheadをM128/N64からM128/N32へ分割するscratch。各出力のK16 WMMA順、scale、Kahan、最終丸めは同じで、weight prefetchとscale staging境界だけをN32に合わせる。productionへ導入していない。
+- 分類／evidence: **N0**。M127/129/257/1024/2048・wide/downとNaN scaleを含む全11ケースで、全出力pair一致、両者repeat、finite／nonfinite分類、各64点の独立oracleをPASS。最大oracle差0 ULP。full-model比較は未実施。
+- 採否: VGPR228→163、occupancy6→9 waves/SIMD、LDS30,720→25,600 B、spill0だが、全shape・AB/BA両順で約6〜23%遅く性能棄却。harnessは20回の上側中央値のみを保存したため通常の偶数中央値は復元できない。raw欠落を明記し、同一binaryを再測定して結果を選び直さない。
+- identity: include SHA `45e925c164495fca66a2b578ff00f5d7844cb33b8459fbe06cc6c8c028358b4a`、kernel object SHA `812f55ba1d281ee4784790d98b8fbc8459d24c2c41434eeb6f2b2ea044e85b23`、corrected harness binary SHA `905a6a166469f912c40a564e20a2056c7961bda42fcb6a1b3bfde8c80e0dd0b0`。証拠は`r23-r9700-lookahead-n32-r1/`、詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。本体未導入なのでproduction rollback不要。
+
+### OUT-2026-09-10-P835-BLOCK16: key順block softmax（N1候補・両GPUで性能棄却）
+
+- scope／change: 既存MXFP8 E4 Q8/W16 prefillのQK・decode・causal maskを保ち、16keyの最大値で既存stateをrescaleし、key順のdenominator加算とVのFMAを行うscratch。初回blockと例外・overflowの恐れがあるblock以降は従来式を使う。productionへ導入していない。
+- 分類: **N1候補**。同じ最終weightのexp引数差は旧／blockとも最大値との差へtelescopingし、exp因子と積・和の丸め回数は増えない。signed Vは絶対誤差、underflowは共通の加法誤差を含む一様なworst-case boundで扱う。初回の従来式は共通prefixとして比較する。各入力でのpointwise改善やBF16 full-model品質同等性は主張しない。解析は`r21-block-softmax-bound.md`。
+- V620 evidence: 4通常caseの全出力finite／repeat、2caseの全独立oracle（最大1 BF16 ULP）、長い2caseの各3,072点oracle（最大0 ULP）、active key15/16/17・31/32/33の候補単独oracle／repeat、NaN K/Vの分類、有限値overflow guard fixtureをPASS。通常caseのcontrolとの差は22／12／6／80出力、最大1 ULP。full-model token比較は未実施。
+- 採否: AB／BA各20組の全4caseでV620は約2.70〜2.84倍、R9700は約3.0〜5.3倍遅く、**両targetで性能棄却**。raw配列から偶数個の中央2値を平均する中央値を再計算し、harnessの上側中央値とは区別する。採否は変わらず、同一binaryの再測定は行わない。R9700も同じ検査matrixをexit0で完了した。R証拠は`r21-r9700-guarded-r1/`で、元serviceとcandidate identity不変、復旧後healthz／readyz200を確認した。
+- r22では有限・非正のexp引数確認を残してguard内の重複expだけを除いた。数値契約・state更新は同じで、両GPUの同matrixをPASSしたがV620約2.56〜2.70倍、R9700約2.95〜5.17倍遅く棄却。このblock16方式の追加調整を止める。source SHA `634698009caac0c4c00430b72f3f2ecf8389a5d829d0b2b25dc2db04bca24ded`、証拠は`r22-v620a-no-duplicate-exp-r1/`と`r22-r9700-no-duplicate-exp-r1/`。full-model未実施。
+- identity: candidate source SHA `526cd2b3e8e2f2e43ec7873c4f3980e0569d8c1e112bf75c2d613fd368f6e34c`、control SHA `fd770f8a6bdf413e0a278a413c40f03f194f738c01f8e506b3e5815c3a20038c`、V binary SHA `3561b1ba448c426666519131c2012303cceb97eeaf903a07ce244eee7d8103af`。証拠は`r21-v620a-guarded-r1/summary.json`、詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。本体未導入なのでproduction rollback不要。
+
+### OUT-2026-09-10-P835-ONE-EXP: online softmaxのexp(0)除去（N0候補・性能棄却）
+
+- scope／change: MXFP8 Q8/W16 prefillだけで、finite scoreとfiniteまたは初期-INFのmaximumについて、必ず1となるexp(0)を省略する。nonfinite経路は元の2-exp式を維持し、QK／denominator／V積算／BF16丸めは変更しない。本体への導入はない。
+- evidence: 両GPUの数値式10caseで各更新段階のfinite bit／nonfinite分類とhost oracleをPASS。attention4caseの全出力control bit／repeat／finite、うち2caseの独立oracleをPASS。長い2caseまで独立oracleを実行したとはしない。R9700の最初のhost harnessはtarget定義違いで起動前にexit2となり、別binaryで訂正した証拠だけを使う。
+- 採否: V620は全4caseで0.38〜1.33%遅い。R9700も主要caseで約0.4〜0.5%遅く、M129の約0.15%差は両順序で再現しないため**両targetで性能棄却**。資源量は不変でも全体の演算費用削減にはつながらず、full-modelへ進めない。
+- identity: `.local-artifacts/phase83-5/r20-one-exp/v620a-r1/`と`r9700-r2/`。失敗したR9700 `r9700-r1/`も保持する。詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-10-P835-FIXED-ACCUM: NVFP4整数累積scratch（N1候補・性能棄却）
+
+- scope: gfx1201 ID89の現行StageK64 lookahead、K5120／17408。productionは変更していない。
+- change: E2M1 K16 dotとfinite E4 scaleを整数のQ20表現へ移し、外側のFP32 Kahan累積をsigned64のexact和へ置換する。K17408までの絶対値上限はsigned64以内。最終FP32変換、tensor scale乗算、BF16丸めを維持し、NaN scaleは明示的にnonfinite出力へ分岐する。
+- 分類: **N1候補**。finite scopeの実数式を保持し、外側累積をexactにする誤差解析を記録した。旧Kahan出力との完全一致は採用条件にしない。GPU試験は独立long-double oracleを各64点、repeatと全出力のfinite／nonfinite分類で確認した限定証拠である。
+- output: M2048の全finite scale境界fixtureではcontrolとの差が975出力、最大47 BF16 ULP。sampled oracleは両者最大0 ULPだが、差分975点全体の独立精度検証ではない。NaN fixtureは両者5,376 nonfinite、強制sample3点も分類一致。full-model token／BF16品質比較は未実施。
+- 採否: AB／BA各20組の全6caseで約1.71〜1.85倍遅く**性能棄却**。追加integer-WMMA派生は行わない。SGPR spill53はVGPR laneへ退避しprivate segment0だが、命令数は増加した。spillのみを遅延の唯一の原因とは断定しない。
+- 後続FP64候補（r18）: 同じFP32 termをFP64でK昇順に加算し、最後にFP32へ丸める。絶対誤差boundは`[u32+(1+u32)gamma_1088(u64)]Σ|term|`で、標準的なFP32 Kahanの約`2u32Σ|term|`より小さいN1候補。各64点oracle／repeat／nonfinite分類はPASSしたが約4.8〜4.95倍遅く棄却。finite境界975差分／最大47 ULP、full-model未実施。証拠は`fp64-outer-r18/`と`r18-r9700-candidates-r1/`。
+- identity: 現行control section SHA `3c28200e573acfccc5e52ae5a0ed28ed6d5c5fa65f1d52b95d72467a4d8ae754`。scratch `fixedpoint-r17/`、GPU証拠`r17-r9700-fixedpoint-r1/`。本体への導入がないためproduction rollbackは不要。
+- 詳細: [Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+
+### OUT-2026-09-10-P835-PREFILL-PAIR: NVFP4 gate/up量子化共有（N0・既定統合済み）
+
+- scope: exact gfx1030／gfx1201、既存NVFP4 gate/up projection pair、M>=64、K5120／N17408。M1の既存経路と対象外の分解は維持する。
+- change／分類: **N0**。同一入力・同一scaleの量子化を1回へ共有し、各projectionのprovider・演算順・丸めは変えない。queue scratchの排他は量子化から両projectionのenqueueまで保持する。
+- correctness: 初回r16はscale planeのoffsetにM乗算が欠けてGPU FAIL。r16bでchecked layoutをsizing／execute間で共有して修正。両GPUのM64,65,127,128,129,512で独立2matmul比較・数値oracle・repeat・量子化1回・cleanupをPASSした。
+- output: 同一r16b binary、8192/128、T1/P.95/K20、seed123、MXFP8 KV、MTP幅2のoff/onで、各GPUの128token hashが一致（分岐なし）。V620 MTP74/107、R9700 76/104も不変。これは1入力の比較でありBF16 full-model品質同等性の証拠ではない。
+- 性能／resource: 重複量子化224回を削減し、workspace／request high-waterは不変、HIP-only／cleanup0。単回prefillはV62039,997.216→40,537.306 ms、R970019,081.115→19,146.437 msで改善を確認できず既定採用を見送る。その後、1 fenceに揃えた実chunkの同一process AB／BA各20組で中央値約1.0〜1.8%の費用削減を確認した（V620 M2048は順序差あり）。全体改善の認定とは分け、既定採用時のrollback互換性を確認中。
+- identity／rollback: r16bの実測は`candidate-gfx1030-r16b-prefill-shared`／`candidate-gfx1201-r16b-prefill-shared`のsource・binary digestへ対応し、そのbinaryでは明示1だけ有効。r19のsourceでは無指定／1を有効、0／不正値を従来分解へ変更した。native providerがprepare段階でUnsupportedを返した場合も従来2matmulへ戻す。その他のprepare失敗・submit後の失敗では戻さない。focused host検査と下記のr19公開GPU／full-model検証を通過した。
+- r19確認: 両targetの8192/128単回で共有env未指定の既定経路、r16b明示onとの128token一致、HIP-only／cleanup0を確認。通常APIの短文／SSE／cancel／recovery／8192/128も両者PASS。これはPhase83.5速度目標の正式達成やBF16品質同等性の認定ではない。
+- 詳細: [Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。証拠は`v620a-r16b-prefill-shared-comparison.json`と`r16b-r9700-prefill-shared-r1/batch-summary.json`。
+
+### OUT-2026-09-10-P835-M3-DOWN-LDS: ID94 activation共有（N0・既定統合済み）
+
+- scope: exact gfx1201、NVFP4 W4A4、M3、K17408／N5120のDown projection。gfx1030、M2/M4、wide M3は既存bodyを維持する。
+- change／分類: **N0**。3行のdecoded activationとscaleを64個のK16 blockごとにLDSへ共有する。weight prefetch、laneごとのK順、dot4／FMA／shuffle reduction、tensor scaleとBF16丸めは保持し、消費前・上書き前に同期する。既存LUTとID94を使い、新しい公開symbolや選択envは追加しない。
+- evidence: scratchの全15,360出力で独立host oracle最大0 ULP、control bit一致／repeat／finiteを確認。BAの時間格納ラベルを凍結sourceとraw配列から補正した比較はcontrol0.118519／candidate0.1137185 ms、AB／BAとも約4%短縮。wide側は約0.27%で採用しない。証拠は`r18-r9700-candidates-r1/batch-summary-corrected.json`で、補正前のpool中央値を使わない。
+- integration: r19 sourceへDownだけ統合。gfx1201 compileは93 VGPR／49 SGPR／LDS4,896 B、spill0。公開GPUのM2/3/4×2tupleは両targetで全出力oracle最大0 ULP／repeat／finite／解放をPASS。R9700 full-model単回の128tokenはr16bと一致、通常API5caseもPASS。prefill416.296／decode23.456 tok/sで全体速度目標は未達であり、scratchの局所短縮と区別する。切戻しには既存ID94 provider制御またはsource identityを用いる。
+- 詳細: [Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+
+### OUT-2026-09-10-P835-QTILE8-B4: gfx1030のK/V 4行staging（N0）
+
+- scope: 既存gfx1030 MXFP8 Q8/W16 prefill provider。selector、query/head geometry、encoding範囲は変更しない。
+- change: K/Vを4行ずつLDSへ読み込み、key昇順、QK reduction、owner-lane online softmax、V積算、BF16丸めを維持する。
+- 分類: **N0**。同一演算順のままloadと同期をまとめる。gfx1201は実測で悪化したため元の1行stagingを維持する。
+- evidence: scratchの4caseで全出力control bit一致、repeat／finite、独立oracle最大1 ULP。r15 production公開経路の13境界caseもoracle最大1 ULP、Q4 controlとの全出力一致、dispatch／cleanup PASS。V620 full-model 8192/128のM3有効runはr13の128token hashと一致したが、単独変更の速度効果は未確定。
+- 性能: V620 scratchで約0.65〜0.80%改善、R9700で約1.7〜4.0%悪化。r15既定構成の正式1 warmup＋3 measuredはprefill中央値198.577009079／decode23.795903167 tok/sで、prefill200の目標は未達。scratch改善をfull-modelの速度達成へ読み替えない。
+- rollback: gfx1030を同じkernel内の既存1行staging bodyへ戻す。
+- 詳細: [Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。raw証拠は`.local-artifacts/phase83-5/qtile-kv4-r14/`と`r15-public-mxfp8-prefill-gfx1030/`。
+
+
+### OUT-2026-09-10-P835-QUEUE-SCRATCH: 低精度matmul作業領域のqueue再利用
+
+- scope: M>1のNVFP4／MXFP4／MXFP8／MXFP6 matmul。M1とFP8 outerの個別確保は維持する。
+- change／分類: **N0**。planごとの一時領域を同一queueの再利用領域へ移す。量子化・演算・丸め順とproviderは変更せず、同一streamへの量子化とmatmulのenqueue全体をmutexで保護する。異なるqueueは別領域を持つ。
+- correctness: r12の公開NVFP4 small-Mは両GPU・両tuple・M2/3/4の全出力oracle最大0 ULP、prefillは非整列境界でsampled oracle／全出力finite・repeat／cleanupをPASS。r13ではMXFP4/8/6の既存M>1を含むsynthetic／実重みmatrixも両GPUでPASS（最大relative error約0.00390、HIP-only、cleanup0）。
+- resource: 通常APIの8192/128・context8320・自動chunk2048は両GPUでHTTP/SSE200、HIP-only、cleanup0。r11で再現したOOMを解消した。単回の完走であり速度目標達成の判定ではない。
+- output: r11の同条件APIはOOMのため完走token比較がない。生成例をBF16 full-model品質同等性の証拠とはしない。
+- identity／rollback: gfx1030 `r12-queue-scratch`、gfx1201 `candidate-gfx1201-r12-queue-scratch`の固定source／binary digestと`r12-public-*`証拠。rollbackはr11のplan個別確保で、通常APIのOOMも再発し得る。
+- r13はprepareとallocation-free footprint queryのchecked layout計算を共有し、作業領域サイズをadmissionへ計上する変更。演算式は不変。ホストquery回帰、両GPU公開matmul、通常API8192/128をPASSし、同条件r12 APIと生成textが一致した。
+- 詳細: [Phase83.5実行計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-10-P835-M3-CHECKPOINT: MTP部分採用時のGDN prefix保存
+
+- scope: exact gfx1030／gfx1201、M3検証のrow0／row1、対応linear-state backend。Qwen3.8 27B NVFP4／MXFP8 E4 KV／固定GPU sampling／MTP幅2で実モデル確認。
+- change: M3中のconv／FP32 recurrent stateを2 planeへ保存し、部分採用時は選択planeをactive slotへコピーする。pre-block slotは保持し、KV lengthをtrimする。全targetのM1／M2 replayを省略するがsampling・RNG・companion stateの規則は変更しない。
+- 分類: **N0（M3 state保存と下記固定matrixのtoken互換scope）**。保存自体はM3の演算順・丸めを変更しない。legacy replayはM1／M2 matmulを使い丸めが異なり得るため、任意入力のbit一致へ一般化しない。
+- 数値: 新private runtime GPU testはqk16／value48／d128／conv4、非zero初期state、accept1／2／full3、次M1、再arm、stale／invalid row、巻戻しを両targetでPASS。独立oracleの最大BF16差0／3 ULP、conv bit一致、FP32 recurrent最大絶対差約5.30e-7／5.46e-7。テストoracleのK offsetとgfx1030物理layoutの誤りを修正し、失敗logも保持した。
+- full-model: r9b→r10は両GPUとも同一8192/128 fixture・seed123・T1/P.95/K20で128token hash一致（初回分岐なし）。各1測定であり品質集合の検証ではない。BF16 full-model品質同等性は未証明。
+- 性能／資源: decodeはV620 19.335→24.176、R9700 18.479→22.893 tok/s。request追加293.625 MiB、allocation peak25,021,492,176 B、cleanup zero。正式反復と公開lifecycle確認は未完了。
+- r11の一括commitは同じplaneのcopyをまとめ、最後の1 fence後だけ全stateを公開する。3stateのGPU payload／次M1、preflight無変更、native hostのcopy／fence失敗poisonを確認。両GPUの同一8192/128単回tokenはr10と一致し、N0の同じscopeを維持する。新しいmodel品質同等性の主張はない。証拠は`r11-public-checkpoint-*`／`r11-comparison.json`。
+- identity／rollback: `candidate-gfx1030-r10-mtp-checkpoint`／`candidate-gfx1201-r10-mtp-checkpoint`のsource・binary digest、GPU `r10-public-checkpoint-*-r3`、full-model `r10-comparison.json`。戻す場合はr9bのlegacy target replayへ戻し、capture／lazy allocationも無効化する。未対応backendは実行前Unsupportedでlegacy replayを使う。
+- 詳細: [Phase83.5実行計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-09-P835-QTILE8-OWNER-SOFTMAX: query別owner laneのsoftmax（N0）
+
+- scope: exact gfx1030／gfx1201、既存QTile8/W16 MXFP8 E4、q24／kv4／d256、M>=128、prefix>=1024。
+- baseline/candidate: wave内3queryのQK順を維持し、lane0で順番に行ったsoftmax更新をowner lane0/1/2へ分配する。
+  ownerごとにmaximum／denominatorを保持し、各queryのrescale／contributionだけをbroadcastする。
+  key順、FP32式、V累積順とBF16丸めは維持する。kernel symbol／selector／KV配置は変更しない。
+- 分類: 両targetの固定fixtureで全出力control bit一致を確認した範囲の**N0**。
+  境界の独立oracleと長caseのsampled oracleは実行範囲を区別し、full-model BF16品質の証拠とはしない。
+- correctness: prefix1024/M128、1025/M129、8193/M128、7168/M1024の4caseで両targetとも
+  fullcontrol／repeat bit一致、nonfinite0、exit0。境界oracle最大1 ULP、7168/M1024の独立oracleは
+  3query×2heads×全256次元のみで最大0 ULP。初期large-range fixtureで既存control自身に9 ULP／abs0.5差が
+  出た診断は未解決として保持する。許容差を変更してPASSにしていない。
+  r9b公開GPUは両targetでQTile4/QTile8切替境界を含む既存matrix、独立oracle最大1 ULP、
+  QTile4比較0差、repeat／cleanupをPASS。r9のQTile4移植ミスは公開検査で検出し修正済み。
+- 性能: 200ms warmup＋20 AB／BAで7168/M1024はV620 139.922→135.944ms、
+  R9700 78.781→74.657ms。両targetともprivate segment0、LDS2048、occupancy維持。
+  単体の約2.8%／5.2%短縮をモデル速度へ換算しない。
+- 不採用案: 最初のscore配列版はV620の8193/M128で約8.5%遅く、private segment16 B/laneのため棄却した。
+  初回divergent shuffle誤りは修正したが、修正後の測定でも遅かった。全診断は`qtile8-softmax-ilp/`に保持する。
+- rollback: QTile8 bodyをowner-lane変更前へ戻す。既存の明示QTILE4／baseline選択も維持する。
+- 詳細: [Phase83.5実行計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-09-P835-GFX1201-FP8-SMALLM: hipBLASLt algorithm identity選択（N0）
+
+- scope: exact gfx1201、E4M3FN outer-scale FP8、M2..4、hipBLASLt version100401／revision cd957402。
+  対象K/Nは5120/6144、5120/10240、5120/12288、5120/1024、5120/17408、6144/5120、17408/5120。
+- baseline/candidate: 既存rank0から、同一descriptorのsuccessful／zero-workspace heuristic候補に含まれる
+  index123373（K5120/N6144、K5120/N1024、K6144/N5120）、123374（K5120/N10240、K5120/N12288、
+  K17408/N5120）、123375（K5120/N17408）を選ぶ。配列順位で選ばず、未知library identity・候補欠落時はrank0を維持。
+  M1／M17と明示override、FP8量子化、scale、BF16出力契約は変更しない。
+- 分類: 固定matrixの全出力比較で数値一致を確認した範囲の**N0**。library内の全入力に対する演算順一致は未証明であり、
+  kernel名や単一生成例だけでBF16参照品質同等性を主張しない。
+- correctness: 2tuple×M2/3/4×10候補の全60候補で全出力rank0比較・独立FP32 FMA→BF16 oracle最大0 ULP、
+  finite、3回repeat一致。公開runtimeのr7 controlも2tuple×M1..5で最大0 ULP／cleanup PASS。
+  r8公開runtimeも同10ケースで全出力oracle最大0 ULP／repeat／cleanup PASS。rocprofでM1..4の
+  MT16x16x32とM5の旧MT16x128x32を確認した。r8 full-model単回も前候補と128出力hash一致、cleanup PASS。
+- 性能: 200ms連続warmup＋20 AB／BAでrank0約90〜132µsに対し選択候補約33〜46µs。
+  約2.7〜2.85倍は単体の観測値で、モデル改善率ではない。
+- 追加5tuple: M1..4×10候補の200行で全出力rank0比較／独立oracle最大0 ULP、finite／3 repeat一致。
+  初回wrapper終了137と途中継続の意図的停止130を単独PASSとは扱わず、完了済み行と最終継続exit0を結合した証拠。
+  M2..4の単体倍率は約1.29〜2.96倍で、M1は既に調整済みのため新しい改善とは数えない。
+  r8公開controlとr9追加policyの両方が7tuple×M1..5で全出力oracle最大0 ULP／cleanup PASS。
+  r9 traceで追加index123375相当のMT16x16/WSGRB1を9dispatch確認した。r9bとの差はattention sourceだけで、
+  FP8証拠の対応を`r9b-fp8-evidence-mapping.json`へ記録した。
+- rollback: r7のM2..4 single-result/rank0 policy。library identityとopaque algo選択modeをplan/cacheへ保持する。
+- 詳細: [Phase83.5実行計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-09-P835-GFX1030-MXFP8-DECODE: staged32のvalue/scale decode統合（N0）
+
+- scope: exact gfx1030、MXFP8 E4、staged32 decode stage1。Q8/W16 prefill、旧8-wave、gfx1201、E5は対象外。
+- baseline/candidate: E4値とE8M0 scaleを別々にfloatへ変換して乗算する処理を、既存E4 `decode_scaled`へ統合する。
+  KVロード順、QK／online softmax／V累積順、BF16丸めは維持。256×256コードのhost exhaustiveで有限値bit一致、
+  NaN class一致を確認し、GPU固定matrixでも全出力一致した範囲を**N0**として扱う。
+- correctness: V620-B scratchのprefix1023／1024／1025／8192／8193、M1／3でfull control／repeat bit一致、
+  finite PASS、独立oracle最大1 ULP。scale 0xffの別probeは両方1536非有限値、hash／repeat一致で、伝播契約の証拠とする。
+  r8公開runtimeはlength1023／1024／1025・M1..4で既定ID93切替、独立oracle最大1 ULP、
+  finite／repeat／cleanup PASS。r8 full-model単回も前候補と128出力hash一致、cleanup PASS。
+- 性能: 200ms warmup＋20 AB／BA、8192／8193 prefixではM1約17.8%、M3約29.6〜29.7%短縮。
+  VGPR53→48、occupancy16維持、spill0。gfx1201は同案で遅くなったため採用しない。
+- rollback: gfx1030 staged32でも旧value/scale別decodeを使うr6 attention body。
+- 詳細: [Phase83.5実行計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-09-P835-ID89-LOOKAHEAD: NVFP4 StageK64先読み（N0）
+
+- scope: exact gfx1201、NVFP4 W4A4、`(K,N)=(5120,17408)/(17408,5120)`、`M>=256`。
+- baseline/candidate: rolled StageK64の単一LDSを2 parityへ分け、次のK64 tileのpacked値とscaleを
+  VGPRへ先読みする。各出力の4個のK16 WMMAとKahan加算順、量子化decode、scale、BF16 RNEを維持するため**N0**。
+  logical ID89を維持し、deviceは`sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_lookahead_v1`へ変わる。
+- correctness: M256 wide／M257 down／M1024両tupleのscratchは全出力control／repeat一致、finite PASS、
+  64点独立long-double oracle最大0 ULP。r7公開GPUのM255／256／257両tupleも境界oracle最大0 ULP、
+  metadata切替／全出力finite／repeat／cleanupをPASS。r7モデル8192／128単回はHIP-only／非有限0／cleanup zero、
+  128出力tokenはr6と一致した。
+- 採否: 200ms warmup＋20 AB／BAで約1.16〜1.26倍のため上記scopeへ統合。
+  VGPR127→228、LDS15360→30720 bytes、spill0。rollbackは旧StageK64 symbolで、StageK32も保持する。
+- 詳細: [Phase83.5実行計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-09-P835-ID87-TILE128: NVFP4 prefill行tile拡大（N0）
+
+- scope: exact gfx1030、NVFP4 W4A4、`(K,N)=(5120,17408)/(17408,5120)`、`M>=512 && M%128==0`。
+- baseline/candidate: ID87のTileM64をTileM128へ拡大し、weightのロードをより多くの行で共有する。
+  同じtemplate bodyで各出力のK順序、dot4、補償加算、scale、BF16 RNEを維持するため**N0**。
+  logical ID87は維持し、device symbolは`sllm_nvfp4_w4a4_prefill_compensated128x64_v1`へ変わる。
+- correctness: scratchの両tuple・M127／128／129／512／1024で全出力control／repeat一致、
+  境界sample oracle最大0 ULP、finite PASS。r6公開GPUでは両tuple・M511／512／513／1023／1024／1025の
+  device切替、境界5×5 oracle最大0 ULP、全出力finite／repeat／cleanupをPASS。r6モデル8192／128単回もPASSし、
+  128出力tokenはr5と一致した。FP8 M1変更も同時に入った測定のため、モデル速度差をTileMだけへ帰属させない。
+- 採否: M512／1024で約2.8〜6.3%高速化し上記scopeへ統合。M129は約21%遅いため端数行へ拡張しない。
+  VGPRは103→152、LDSは6144→9216 bytes、spill0。rollbackは旧TileM64 device symbol。
+- 詳細: [Phase83.5実行計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
 
 ### OUT-2026-09-09-P83-GFX1201-RESIDENT-KV: gfx1201通常KVのresident固定（N0）
 
@@ -104,6 +334,9 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 ### OUT-2026-09-09-P83-FP8-FUSED-M2-4: ID92 FP8 outer fused M2--4（N1）
 
 - scope: exact `gfx1030`、FP8 outer E4M3FN、`K=5120`、`M=2..4`、`N=10240`（GDN qkv）、`N=6144`（GDN z）または`N=248320`（lm_head）。`M=1`、FNUZ、別の`K/N`、別targetは既存providerへ戻す。
+- Phase83.5の追加scope（公開経路検証中）: exact gfx1030、E4M3FN、`M=2..4`、`K=6144/N=5120`へ同じID92を拡張する。既存ID82 bodyのtupleを`6144/5120/12 groups`として各rowへ適用し、M1・FNUZ・範囲外shapeを変えない。K=6144では約96更新＋5段のwave reductionに対し、ID71は約3072更新であり、同じ前提のworst-case boundが増加しないN1として扱う。V620-Aのscratch probeはM2/3/4で独立sample oracle最大0 ULP、全出力のID71比較も0差だった。単体中央値は約50.6／58.1／160.2 µsだがcontrolの分散が大きく、比率を安定した高速化率とは認定しない。raw source／oracle／測定は`.local-artifacts/phase83-5/fp8-smallm-experiment/`。r2の公開runtimeではM1〜5の全出力oracleとselector／cleanupを確認し、V620の8192／128・MTP単回もPASSした。正式反復の速度とBF16 full-model品質同等性は未認定。
+- Phase83.5の追加4 tuple（統合中）: `M=2..4`、`(K,N)=(5120,12288)/(5120,1024)/(5120,17408)/(17408,5120)`。同じfused bodyを10／34 groupsで再利用し、lane内dot2更新＋5段shuffleはK5120で80＋5、K17408で272＋5。ID71のK/2更新に対するN1分類を維持する。V620-Aのscratchでは12ケースすべてが全出力ID71一致、独立FP32-FMA／BF16 oracle 144点で最大0 ULPだった。単体中央値は約4.4〜10.6倍だが、公開runtimeとfull-modelの速度へ一般化せず、r4で確認する。詳細は`.local-artifacts/phase83-5/fp8-smallm-more/`。
+- Phase83.5 r4公開検証: 追加5 tuple×M1〜5×3反復の75実行で全出力BF16 oracle最大0 ULP、公開selector／device symbol／cleanupを確認した。証拠は`.local-artifacts/phase83-5/fp8-smallm-public-r4/`。V620-Aの8192／128・MTP幅2単回はprefill198.308／decode16.766 tok/s。正式反復とBF16 full-model品質同等性の証明ではない。
 - baseline/candidate: 通常のM>1 providerはID71 `matmul.fp8.outer.prefill.gfx1030.half2.64x64.v1`であり、64x64 tile、K32 LDS staging、FP32 accumulatorを使う。ID92は一つのCTAで2--4行を同時に計算し、GDNのN10240/N6144では既存ID82のLDS LUT E4M3FN decode、lm_headのN248320では既存ID68のdword8 E4M3FN decodeを行う。各rowの全K項、activation／weight scale、`float_to_bf16_rne_bits(acc * activation_scale * weight_scale)`を保持するが、ID71のthread-local K順とは異なり、各waveの部分和をordered shuffle treeで結合する。したがって、M1 provider（ID82/ID68）とのrowwise算術はbitwise一致する一方、通常M>1のID71との演算順はN0とは分類しない。
 - 分類: **N1（上記scope内）**。K項集合、E4M3FN decode、FP32 accumulator、scale適用、BF16 RNEを変えない。ID71の一出力はK=5120で約2560個のhalf2 dot更新をthread-localに逐次蓄積するのに対し、ID92は各laneの約80更新を5段のwave shuffle treeへ渡すため、候補の依存深さは概ね`gamma_85`（80更新＋5段）で、ID71の概ね`gamma_2560`より増加しない。これは標準浮動小数点boundに基づくN1分類であり、pointwiseなbitwise一致や全shapeへの一般化は主張しない。
 - 数値検証: V620-A `gfx1030`の公開runtime probe（GPU UUID `GPU-76a08c022586fed6`）で、3 exact shapeの`M=1..4`、repeat、finite、独立sampled E4M3FN/BF16 oracle、cleanupを確認した。M2--4は全shapeでID92、`dispatch_count=2`、oracle最大BF16 ULP差0、resources releasedを得た。比較用の既存ID71 probeも同じfixtureでfinite、oracle最大ULP差0、ID82/68 rowwise出力との差0 ULPだったが、これはfixture結果であり、ID71との一般的なbitwise互換性を意味しない。公開probe identityは`.local-artifacts/phase83/fp8-id92-public-gfx1030-r1/summary.json`に記録する。
@@ -111,37 +344,69 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 - rollback: ID92のkernel/provider選択を無効化またはshape条件を外すと、gfx1030の既存ID71（M>1）へ戻す。`M=1`は既存のID82／ID68を維持し、FNUZ、非有限payload、未対応shape／targetは既存fail-closed規則に従う。
 - 詳細: [Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)、ID92 public probe summary: `.local-artifacts/phase83/fp8-id92-public-gfx1030-r1/summary.json`。
 
-### OUT-2026-09-09-P83-GQA6-QTILE4-MXFP8: GQA6 QTILE4 MXFP8 prefill（N1・数値分類、採用保留）
+### OUT-2026-09-09-P835-FP8-M1-TUPLES: ID82 FP8 M1 tuple拡張（N1・統合中）
 
-- scope: `q_heads=24`、`kv_heads=4`（GQA ratio 6）、`head_dim=256`、query count `>=128`、standard OCP MXFP8 E4M3 block32／E8M0 KVを対象とする。解析の入力範囲は有限で実用的な通常値に限定し、別のhead幅・GQA ratio・特殊値の一般化は主張しない。現時点の性能証拠はV620 `gfx1030`だけである。
+- scope: exact gfx1030、E4M3FN、M=1、K/N=5120/12288、5120/1024、5120/17408、6144/5120、17408/5120。M2〜4のID92、FNUZ、他targetと明示rollbackは維持する。
+- candidate: 測定済み`fp8_outer_decode_gfx1030_fused_id82_body<Rows=1>`を独立M1 device wrapperで呼ぶ。M2〜4と同じwrapperに混ぜて最大VGPRを共有しない。LUTでのexact FP8→FP16変換、FP32 dot2／wave reduction、outer scaleとBF16 RNEを維持する。N1分類は既存ID82の前提を引き継ぎ、実験の全出力一致だけでN0とはしない。Kは積の個数であり依存深さではない。lane内dot2更新はK5120で80、K6144で96、K17408で272、後段wave shuffleは5段。
+- evidence: V620-B scratchの5tupleは全出力ID68比較／repeat／finiteをPASSし、独立境界sample oracle最大0 ULP。200ms連続warmup＋20組AB／BAで1.679／2.501／1.514／1.597／1.693倍。初回の短いwarmupではclock過渡があったため、安定比較を採用根拠とする。VGPR170／spill0は性能判定の代替にしない。
+- status: `.local-artifacts/phase83-5/fp8-m1-more/`にraw証拠を保持する。新buildでの公開GPU・モデル全体・正式反復は未完了。
+
+### OUT-2026-09-09-P83-GQA6-QTILE4-MXFP8: GQA6 QTILE4 MXFP8 prefill（N1・Phase83.5で既定化検証中）
+
+- scope: `q_heads=24`、`kv_heads=4`（GQA ratio 6）、`head_dim=256`、query count `>=128`、standard OCP MXFP8 E4M3 block32／E8M0 KVを対象とする。解析の入力範囲は有限で実用的な通常値に限定し、別のhead幅・GQA ratio・特殊値の一般化は主張しない。Phase83当初の性能証拠はV620 `gfx1030`だけであり、Phase83.5の両target探索は下記へ追記する。
 - baseline/candidate: baselineのgeneric causal attentionは256個のQK積をFP32でbalanced reduction treeへ渡し、依存深さは8段である。candidateのQTILE4は各laneの8積を4組のpairへまとめ、pair treeと5段のwave shuffleで合計8段にする。両方とも同じMXFP8 decode／E8M0 scale、FP32 causal online maximum・denominator・weighted-V更新、key順序、BF16 RNE出力を維持する。256次元の暗黙scaleは両経路とも`1/16`である。
 - 分類: **N1**。実数式、入力項、dtype、丸めstageを変えず、QK reductionの標準上界は両経路とも概ね`gamma_8 * Σ|product|`であり、candidateのworst-case boundは増加しない。これはpointwiseなBF16誤差改善やbitwise一致を保証する主張ではない。resident FP16 mirrorを必要としないMXFP8直接decodeの分類であり、常駐FP16複製を許可する変更でもない。
-- 数値gate／採否: 上記のN1分類は本台帳と[Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)の規則に従う数値互換性gateへ自動適用する。ただしproduction既定化・採用は別判断であり、target／shapeを限定したGPU correctness、performance、fallback、cleanup、API／MTP統合の確認を要する。現時点で`SLLM_CAUSAL_ATTENTION_GQA6_QTILE4=1`は明示opt-inのままとする。
+- 数値gate／採否: 上記のN1分類は本台帳と[Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)の規則に従う数値互換性gateへ自動適用する。ただしproduction既定化・採用は別判断であり、target／shapeを限定したGPU correctness、performance、fallback、cleanup、API／MTP統合の確認を要する。Phase83完了時は`SLLM_CAUSAL_ATTENTION_GQA6_QTILE4=1`を明示opt-inとして保持した。
 - 探索性能: V620 `gfx1030`、8,192入力／128出力、MXFP8、ID87 compensated prefill＋QTILE4、MTP無効、warmup 0／measured 1の診断値は prefill **211.0486 tok/s**、decode **7.8054 tok/s** だった。これは単回の探索値であり、Phase 83のMTP有効200／20目標、正式な反復性能比較、既定採用の証拠ではない。ユーザー目標は未達・未完了である。
 - 検証状態: 独立MXFP8 prefill GPU oracleはV620 `gfx1030`とR9700 `gfx1201`で完了した（`.local-artifacts/phase83/mxfp8-prefill-gfx1030-r1`／`mxfp8-prefill-gfx1201-r1`）。query127／128／129、prefix0／31／256で最大BF16 ULP差1以内、当該fixtureのprovider間出力はbitwise一致した。127は選択境界の対照であり、既定採用範囲を広げる証拠ではない。未実施の全model・全shape品質、MTP有効時の性能、R9700採用範囲はこの分類へ含めない。
-- rollback: `SLLM_CAUSAL_ATTENTION_GQA6_QTILE4=0`または未設定でgeneric MXFP8経路へ戻す。未知値、範囲外shape、非対応target／encodingは既存selectorのfail-closed規則に従う。
+- Phase83.5: 両targetの8192／128・MTP幅2・既存candidate併用探索を終え、上記exact geometry、query>=128、sliding／explicit score scaleなしのMXFP8 E4に限って未設定時の既定選択を実装中。Rust検証とnative dispatchを同時に変更する。新buildでの公開経路確認と正式性能測定は未完了であり、[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)で追跡する。
+- rollback: Phase83.5の既定化後は`SLLM_CAUSAL_ATTENTION_GQA6_QTILE4=0`でgeneric MXFP8経路へ戻す。明示`=1`の既存opt-in範囲を維持し、その他の値は新しい既定選択を無効にする。未設定での既定化は上記scopeだけであり、非対応target／encodingの扱いとforce baselineを維持する。
 
-### OUT-2026-09-09-P83-NVFP4-PREFILL-COMPENSATED: ID87／ID89 NVFP4 prefill補償加算（N1候補・opt-in保留）
+### OUT-2026-09-09-P835-GQA6-QTILE8-W16: GQA6 QTILE8／16-wave（QTILE4比N0・検証中）
+
+- scope: exact `gfx1030`、standard MXFP8 E4 KV、q24／kv4／d256、query count>=128、start position>=1024、sliding／explicit score scaleなし。QTILE4 flag未設定時だけQ4より優先する。gfx1201も同じscopeへ拡張する作業中であり、新buildの公開経路は未検証。
+- 数値分類: QTILE4比**N0**。queryごとの8積のpair tree、wave shuffle、key順序、online softmax、weighted-V更新とBF16 RNEを維持する。query tileを4→8、wave数を8→16へ増やし、waveあたり3queryを維持してK/Vの共有loadを減らす。generic経路比の分類は上記Q4のN1を引き継ぐ。
+- 検証: scratchのV620-Bでprefix1024／7168とquery127／128／129／1024の8ケースが独立oracle最大1 BF16 ULP、Q4比bitwise一致。127はscratch境界対照でありproduction採用外。両targetのproduction r2 release buildは成功したが、公開runtime経由の数値・モデル性能・正式反復は検証中。全入力のbitwise一致やBF16 full-model品質同等性の実測とは扱わない。
+- gfx1201追加探索: M127／128／129×prefix1023／1024／1025とM1024／prefix7168の10ケースは独立oracle最大1 ULP、Q4比全出力bitwise一致、repeat一致。長prefixの単体時間は83.524→78.258 ms。境界の時間比は0.911〜1.008で、全shapeの改善を主張しない。証拠は`.local-artifacts/phase83-5/qtile8-r9700/`。
+- rollback: `SLLM_CAUSAL_ATTENTION_GQA6_QTILE4=1`で従来Q4、`=0`でgenericへ戻す。その他の明示値とforce baselineも新しい既定選択を無効にする。
+
+### OUT-2026-09-09-P83-NVFP4-PREFILL-COMPENSATED: ID87／ID89 NVFP4 prefill補償加算（N1候補・Phase83.5で既定化検証中）
 
 - scope: Qwen3.8 NVFP4 W4A4の実測projection shape、`M>1`、`(K,N)=(5120,17408)`または`(17408,5120)`、有限で実用的な通常値のencoded入力。別の`K/N`、非有限payload、全model品質への一般化は行わない。
 - baseline/candidate: Phase 82通常経路のID59 `sllm_matmul_nvfp4_w4a4_block16_prefill_row8_tiled256_v1`を正式baselineとする。ID59は同じE2M1 block16項を8個のK-strided partialと固定wave mergeへ渡す。ID87は同じblock16 integer dotとscale順を64x64/K32 tileで計算し、各FP32出力へKahan補償を加える。ID89はgfx1201のE2M1→E4M3FN exact ingressと固定FP32 WMMA fragmentを使い、fragment項をKahan補償付きで蓄積する。両candidateのglobal tensor scaleはID59と同じ`(accumulator * weight_tensor_scale) * input_tensor_scale`順で適用する。
 - 分類: **N1候補（記載scope内）**。有限・実用的な通常値では、E2M1 block16 dotとE4M3 scaleのblock termを同じ集合として扱える。ID59の加算深さは概ね`ceil(K/256)-1+8`（`K=5120`で27、`K=17408`で75）であるのに対し、ID87のKahan誤差は標準的に`(2u+O((K/16)u^2)) * Σ|block_term|`へ局所化できる。ID89もexact ingress、固定FP32 fragment、Kahan outer accumulationへ差を局所化する。この記録はpointwiseなBF16改善、bitwise一致、全shapeの一律boundを保証しない。fragment内のboundを含むscope外の一般化は別途確認する。
 - 数値検証: ID87のgfx1030 standalone probeは、非整列を含むsmall shapeの全点とlarge shapeのsampleを独立encoded long-double oracleへ照合し、`max_bf16_ulp=0`、repeat、finite、cleanupを確認した。ID89のR9700 gfx1201 probeは`M=63/64/65/1024`、wide/down、2 seedの10 caseで`max_candidate_oracle_ulp=0`、candidate repeat PASS、controlとの差は最大1 ULPだった。後者のcontrolはID64の診断比較であり、Phase 82正式baseline ID59との採否比較へ読み替えない。
-- 性能・採否: ID89を明示選択したQwen3.8 8192/128、MXFP8、MTP無効、QTILE4併用のR9700探索行はprefill `364.0048`／decode `9.7603` tok/sだった。この値は当時のID89 includeでpragma scopeを修正する前の探索binaryであり、最終sourceの採用証拠へ再利用しない。単回探索であり、MTP目標、正式反復、ID59との差分帰属を示さない。ID87／ID89ともproduction既定化は保留し、full-modelのID59比較、性能、fallback、cleanup、API/MTP統合を別途確認する。
-- rollback: ID87は`SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED`、ID89は`SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED`を未設定または`0`に戻す。両flagは明示opt-inのままとする。
+- 性能・採否: ID89を明示選択したQwen3.8 8192/128、MXFP8、MTP無効、QTILE4併用のR9700探索行はprefill `364.0048`／decode `9.7603` tok/sだった。この値は当時のID89 includeでpragma scopeを修正する前の探索binaryであり、最終sourceの採用証拠へ再利用しない。単回探索であり、MTP目標、正式反復、ID59との差分帰属を示さない。Phase83完了時はID87／ID89ともproduction既定化を保留した。Phase83.5では両targetの同一fixture・MTP探索のHIP-only／非有限logitなし／cleanup zeroを確認し、下記の既定化を検証している。
+- Phase83.5の既定化scope: exact gfx1030のID87／gfx1201のID89、`M>=64`、`(K,N)=(5120,17408)/(17408,5120)`。既存の明示opt-in範囲は変更しない。新buildでの通常CLI/API dispatchと正式反復は未完了。
+- rollback: ID87は`SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED=0`、ID89は`SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED=0`。NVFP4 prefill制御の明示値があれば新しい未設定時の既定化を抑制し、既存の明示provider選択順を維持する。
 - 詳細: [Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)、ID89 probe summary: `.local-artifacts/phase83/wmma-kahan-gfx1201-r1/summary.txt`。
 
-### OUT-2026-09-09-P83-NVFP4-SMALL-M-ROWGRID: ID88／ID90 small-M rowgrid（N1・ID84とのrowwise N0、opt-in保留）
+### OUT-2026-09-09-P835-NVFP4-STAGE64: ID89 K64 staging（StageK32比N0・統合中）
+
+- scope: exact gfx1201、NVFP4 W4A4、M>=256、K/N=5120/17408または17408/5120。logical ID89を維持し、別device symbol `sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_stage64_v1`を選ぶ。
+- 数値分類: StageK32比N0。K16ごとのWMMA項とKahan補償加算の順序、scale、BF16丸めを維持し、LDSへ先読みする範囲だけを増やす。
+- 検証: R9700 scratchのM255／256／257・両tupleでsample oracle最大0 ULP、有限値、repeat、StageK32との全出力hash一致。M255は非選択側の対照。production compileでStageK64は127 VGPR、15,360 bytes LDS、spill0。r5公開runtimeではM255／256／257の新旧device symbol切替、5×5境界sample oracle最大0 ULP、全出力finite／repeat／cleanupをPASSした。r5全モデル単回はprefill383.547／decode13.794 tok/s、r2と128出力token一致。正式反復は未完了。
+- 初回失敗: scale stagingの後半未初期化をstrided loadで修正した。K32／K64を同じwrapperへ入れた実装もLDS合算のため撤回し、別symbolへ分離した。証拠は`.local-artifacts/phase83-5/nvfp4-prefill-experiment/`。
+
+### OUT-2026-09-09-P835-NVFP4-VGPR-REUSE: ID94 small-M weight再利用（ID88／ID90比N0・統合中）
+
+- scope: exact gfx1030／gfx1201、NVFP4 W4A4、M2〜4、K/N=5120/17408または17408/5120。未設定時にgfx1030はID88、gfx1201はID90からID94へ切り替える。各targetの明示ROWGRID=1は従来ID88／90、=0等は新既定を無効にする。
+- 数値分類: ID88／ID90比N0。同一laneの重みdecode／scaleを複数rowのregister accumulatorで再利用する。rowごとのdot4、FMA、wave reductionとBF16丸めを維持し、weight用LDS／Kごとのworkgroup barrierを増やさない。
+- 検証: V620-B scratchの両tuple×M2〜4で全出力独立oracle／control／repeat最大0 ULP、有限値。200ms程度のwarmup後の20組AB／BAで1.104〜1.443倍。.local-artifacts/phase83-5/nvfp4-smallm-public-r5/のfresh公開APIテストでも6ケースの全出力独立oracle最大0 ULP、repeat／finite／ID94／symbol／grid／cleanupがPASSした。V620-A r5全モデル単回は197.570／17.806 tok/s、r4と128出力token一致。正式反復は未完了。scratch証拠は`.local-artifacts/phase83-5/nvfp4-smallm-vgpr-paired/`。
+
+- gfx1201追加: 200ms連続warmup＋20組AB／BAの6ケースで1.671〜2.816倍、全出力独立oracle／ID90比較／repeat最大0 ULP。ID90と同じblock昇順、4回dot4、block単位FMA、wave32 shuffle、BF16 RNEを保つN0として対象2tuple・M2〜4へ統合した。両target compile-onlyとselector hostはPASS。fresh公開GPUと全モデルは次buildで確認する。
+
+### OUT-2026-09-09-P83-NVFP4-SMALL-M-ROWGRID: ID88／ID90 small-M rowgrid（N1・ID84とのrowwise N0、Phase83.5で既定化検証中）
 
 - scope: NVFP4 W4A4の実測projection shape、`M=2..4`、`(K,N)=(5120,17408)`または`(17408,5120)`。ID88はgfx1030、ID90はgfx1201だけを対象とし、他shape・targetへ一般化しない。
 - baseline/candidate: ID88は各`blockIdx.y` rowをID84のM=1 body（gfx1030のID73 reduction）へ渡す既存rowgrid経路で、ID90は同じrow分割をgfx1201のID84 activation-shared M=1 body（ID67 reduction）へ渡す。各rowの入力・scale・weight・output offset、dot順、FP32 reduction、BF16 RNEはID84 M=1と同じである。
 - 分類: **N1（記載scope内。ID84のM=1繰返しに対してはN0）**。Phase 82正式baseline ID59の各出力rowも同じblock16項の和であり、ID59は`tile_k=256`ごとに各partialへ`ceil(K/256)`項を逐次加算した後、wave shuffle 5段と固定merge 3段を通る。したがって加算依存深さは`K=5120`で`19-1+5+3=27`、`K=17408`で`68-1+5+3=75`である。ID88/ID90は`B=K/16`個のblockを各laneの`lane+32*j`順に処理し（lookaheadはこの順序を分割するだけ）、各laneの項数はそれぞれ10／34、wave shuffleは5段なので深さは両Kでそれぞれ`10-1+5=14`、`34-1+5=38`となる。各blockの4 DP4Aはint32で厳密に合計され、NVFP4の有限な実用E4M3 scaleと`0.25`を含むblock termはこのscopeではFP32に厳密に表現できるため、candidateの標準boundはID59の`gamma_27`／`gamma_75`以下の`gamma_14`／`gamma_38`（共通の`Σ|block_term|`に対するbound）となる。よってID59に対するworst-case誤差boundは増加しない。これはpointwiseなBF16改善、bitwise一致、全shape・非有限payloadへの一般化を保証しない。
 - 数値検証: ID88のgfx1030 public/runtime probeは両NVFP4 tuple、`M=1..4`、repeat・finite・cleanup・独立sample oracleをPASSし、最大BF16 ULP差は0だった。ID90のR9700 public API probeも両tupleの`M=1..4`とFP8 controlを同一runtimeで実行し、ID90 dispatch、fallback未使用、`max_bf16_ulp=0`、cleanupを確認した。これはoperator-levelの証拠であり、full-model出力の証拠ではない。
-- 性能・採否: ID88のV620 probeはwideのM2/3/4が`0.330887/0.464328/0.604291 ms`、downが`0.347286/0.489568/0.613569 ms`だった。ID90のR9700 probeはwideが`0.264843/0.272364/0.352605 ms`、downが`0.193083/0.275764/0.357604 ms`だった。測定は2 warmup＋5 measuredのbounded probeであり、新しい性能gateやfull-model採用条件を作らない。両IDはopt-in保留である。
-- rollback: ID88は`SLLM_NVFP4_W4A4_SMALL_M_ROWGRID`、ID90は`SLLM_NVFP4_W4A4_SMALL_M_ROWGRID_GFX1201`を未設定または`0`に戻す。範囲外shapeは既存selectorへ戻す。
+- 性能・採否: ID88のV620 probeはwideのM2/3/4が`0.330887/0.464328/0.604291 ms`、downが`0.347286/0.489568/0.613569 ms`だった。ID90のR9700 probeはwideが`0.264843/0.272364/0.352605 ms`、downが`0.193083/0.275764/0.357604 ms`だった。測定は2 warmup＋5 measuredのbounded probeであり、新しい性能gateやfull-model採用条件を作らない。Phase83完了時は両IDをopt-inとして保持した。Phase83.5では上記exact target／M2..4／2 tupleの未設定時既定化を実装中で、新buildの公開経路確認は未完了。
+- rollback: ID88は`SLLM_NVFP4_W4A4_SMALL_M_ROWGRID=0`、ID90は`SLLM_NVFP4_W4A4_SMALL_M_ROWGRID_GFX1201=0`。明示prefill制御は既定化より優先し、範囲外shapeは既存selectorへ戻す。
 - 詳細: [Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)、ID90 probe summary: `.local-artifacts/phase83/small-m-gfx1201-r1/summary.txt`。
 
-### OUT-2026-09-09-P83-MXFP8-ATTENTION-STAGED32: ID93 staged32 attention（N1・共通opt-in）
+### OUT-2026-09-09-P83-MXFP8-ATTENTION-STAGED32: ID93 staged32 attention（N1・Phase83.5で既定化検証中）
 
 - scope: exact `gfx1030`／`gfx1201`、standard OCP MXFP8 E4 KV、`q_heads=24`、`kv_heads=4`、`head_dim=256`、
   query count `M=1..4`、committed KV length `>=1024`、sliding windowなし、explicit score scaleなし。
@@ -161,8 +426,11 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
   公開runtimeのV620-Bでもlength `1023/1024/1025`×`M=1/3/4`とlength `8192`×`M=3`を実行し、
   境界1023ではbaseline ID3、1024以上ではID93・2 dispatch・workspace・cleanupを確認した。
   これらはoperator-levelの探索値であり、full-model/API/MTP性能の完了証拠ではない。
-- 採否: ID93は両target共通の明示opt-in `SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32=1`として接続し、
-  最終公開GPU・full-model検証までは既定化しない。未設定、`=0`、force baseline、範囲外shapeでは既存経路へrollbackする。
+- 採否: Phase83ではID93を両target共通の明示opt-inとして保持した。Phase83.5では上記scopeに限って
+  `SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32`未設定時の既定化を実装中。両targetのMTP full-model探索では
+  HIP-only、非有限logitなし、cleanup zeroを確認したが、新buildでの既定dispatchと正式反復は未完了。
+  明示`=0`（および`1`以外の値）、force baseline、範囲外shapeは従来経路を維持する。
+  gfx1030のstage8明示選択はstage32未設定時に優先し、stage32明示`=1`の従来の優先順位を維持する。
 - 詳細: [Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)、
   V620 staged32 report: `.local-artifacts/phase83/attention-stage32-scratch-gfx1030-r1/report.md`。
 
@@ -1161,6 +1429,13 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 - 決定: shared adoption。
 - 詳細: [Phase 24履歴](../history/2026/08/11-20/phase24-prefill-terminal-row-projection-optimization.md)。
 
+### OUT-2026-09-10-P835-R36-R37: attention候補の限定統合と棄却
+
+- R36はN0候補。gfx1201・M2048・既存prefix>=1024のQ8/W16でK/Vをwave内registerへ読み込み、QK reduction／key順／softmax／BF16丸めを維持する。scratchは独立oracle最大1 BF16 ULP、finite pair差0、repeat／非finite分類をPASS。対象3 prefixで約1.6〜4.3%短縮し限定統合した。両target compileとgfx1201統合後4case oracle／repeat／分類検査をPASS。通常モデル速度の確認は残る。
+- R37はdenominator／value rescaleの明示FMA化によるN1候補。標準集約誤差bound非増加の解析とattention数値検査は通過したが、測定全shapeで約1〜2%遅く不採用。小さいrecurrence probeはloader errorで未実行であり、GPU PASSではない。
+- R32 support captureはN0。固定K20の既存分布を256 Bのprivate workspaceへ保持し、公開16 B選択結果を維持する。V620本体focused6caseをPASS。後続のp/q sampling変更はまだ通常生成へ接続しておらず、このN0判定に含めない。
+- 詳細: [Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。full-model BF16品質同等性を認定しない。
+
 ## 運用
 
 - 今後、出力へ影響しうる変更はPhase historyだけで完結させず、この台帳へ一項目を追加する。
@@ -1168,3 +1443,92 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 - 台帳更新は実装と同じcommitに含める。raw model、full logits、生成全文は追跡せず、bounded aggregateとidentityだけを残す。
 
 [メイン計画](../plans/main-plan.md)
+
+
+### OUT-2026-09-10-P835-R32-PQ: 固定samplingとGPU stochastic MTP
+
+- scope: Qwen3.8 NVFP4、MXFP8 KV、固定T1/P.95/K20、対応する同一sessionのtarget／BF16 companion。supportは256 B、decisionは144 Bで、全語彙やsupportのCPU転送をしない。
+- change: draftを独立乱数のqから選び、min(1,p/q)で採用し、棄却時は正のp-q、全採用時はtarget bonusから選択する。targetの固定sampling分布を維持する方式変更として扱い、N1丸め誤差改善と混同しない。非MTP selectorの乱数契約は維持する。
+- correctness: production private wrapperを通したgfx1030／gfx1201各35caseを独立dense long-double oracleで確認。正常10、不正record15、wrapper引数10、width1/2/3/8、解放を含む。V初回testのallocation alignment失敗はdispatch前の失敗として保持し、testのみ修正後のarchive再利用対応を保存した。
+- output: 8192入力／128出力・seed123の旧R31b MTP→新R32 p/q比較はV7/128、R2/128が同位置一致、両方2token目から分岐。新旧sampling乱数・検証方式の変更を含み、同一binary MTP有無の比較ではない。通常生成は各53/53・50/50 blockでp/qへ到達しHIP-only／fallbackなし／cleanup0。BF16 full-model品質同等性は未証明で、token一致率から品質劣化率を推定しない。
+- evidence: `.local-artifacts/phase83-5/pq-public-gfx1030-r32-r2/`、`pq-public-gfx1201-r32-r2/`、`r32-pq-v620a-ordinary-r1/`、`r32-pq-r9700-ordinary-r1/`。詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+- 同一R32 binaryのV620 MTP off/on単回を追加確認し、同位置7/128・共通prefix1。offは従来hash `e38500f139e36819d6ed273c95f17e9384aba6e623106b162b679535efb2d9c9`、onは`316dc877624f4f03edafe20ff3002ef53dd4f4d90742441bcf23dd61e9ba27ff`。model／fixture／seed／chunk2048一致を保存した。これは出力差の再現で、品質同等性は未証明。`r32-v620-mtp-off-on-comparison.json`。
+
+- R9700も同一R32 binaryのMTP off/onを追加確認した。offは従来hash `ded3d447d4d100eaff932a5c70e8be1e55b84af4bfee6649acde91b6dd60c506`、onは`7d939adfc7c9b60bb30677bd1c56d462cc6a3b1b86c7512c29913f5d0bb99155`で、同位置2/128・共通prefix1。`r32-r9700-mtp-off-on-comparison.json`。単回の出力比較でありBF16品質評価ではない。
+
+### OUT-2026-09-10-P835-R39: target support-only readback
+
+- change: p/qが使用しないtargetの公開16 B selector recordだけをCPUへ転送せず、GPU support／sampling式／乱数／state操作を維持するN0変更。companionの抽選結果とsupport D2Dは維持する。
+- failure: 初回Vモデルは公開token数をstate出力行数としていたsliceで失敗した。入力blockの実行数を渡すよう修正し、公開recordなしの部分／全採用slice回帰を含む6testをPASS。初回失敗を速度／GPU PASSとはしない。
+- output: 修正r2のV620通常8192/128でR32と128token、p/q53block、draft74/106採用、dispatch数が一致し、HIP-only／fallbackなし／cleanup0。両target build／source identityと無変更native archiveの対応を保存。R9700と通常APIは確認中。詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+- R39 r2 R9700も128token・p/q50block・draft78/100採用がR32と一致し、HIP-only／fallbackなし／cleanup0。V APIの5caseもPASSし、MTP提案2／採用2後のcancel、復旧、長入力text hash一致、解放を確認した。decode単回はR32 24.360→R39 23.929 tok/sであり、この差を速度改善とは認定しない。
+
+
+### OUT-2026-09-10-P835-R40: MTP state-onlyのKV後の不要計算削除
+
+- scope: 単一full-attention companionの明示state-only呼出し。prefix primingと全採用後の状態合わせで使う。通常targetやMTPの出力を必要とする呼出しは全tailを維持する。
+- change: Q/K/V／preprocess／KV encodeとpublicationを維持し、その後の読まれないattention／MLP等を省くN0変更。後続のstate依存がないことをgraphで確認し、未消費appendや空segmentの誤完了を拒否する。
+- correctness: host M1／容量超過前の無変更／次の通常draftと関連29testをPASS（既存3 ignored）。実8192/128では両GPUでR39と128token・MTP採否が一致、target dispatch不変、companion dispatchはV507／R543減少。HIP-only／fallbackなし／cleanup0。host容量1fixtureをM2/M3の証拠にしない。
+- evidence: `.local-artifacts/phase83-5/r40-ordinary-comparison.json`、`r40-native-evidence-reuse.json`。単回速度はV219.257／25.143、R447.964／24.375 tok/sでR目標未達。BF16 full-model品質同等性の追加主張はない。詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-10-P835-R43: MTP入力のBF16行結合
+
+- classification: N0。連続BF16行列2個を列方向へ結合するuint16 load/storeのみで、演算・丸め・samplingを変更しない。nativeはモデル寸法に依存せず、実M>1のMTP入力へ接続する。
+- correctness: V620 exact gfx1030のfresh archiveでM1/2/3/127/128/129、非整列列数、offset、guard、signed zero／subnormal／NaN payloadのbitwise oracleとread-only input alias、エラー境界をPASS。core側は連続stride・範囲・overflow・output overlapを検査する。R9700と通常モデルの確認は進行中。
+- evidence: `row-concat-public-gfx1030-r43-r1`。出力品質のBF16比較や通常モデル速度の証拠へは拡張しない。詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+- V620通常8192/128でもR40と128token・MTP採否が一致し、HIP-only／fallbackなし／cleanup0を確認した。`r43-v620-output-comparison.json`。
+
+- R9700通常8192/128もR40と128token・MTP採否が一致、HIP-only／fallbackなし／cleanup0。`r43-r9700-output-comparison.json`。
+
+- V620 R43 APIも5case PASS、8192/128 text hashはbenchmarkと一致。MTP進行後cancelと復旧、cleanup0を確認。BF16品質同等性の証拠ではない。
+
+- R9700 fresh archiveのconcat単体もbitwise／境界PASS。両GPUの単体と通常生成の検査を完了し、R43は採用候補として維持する。
+
+### OUT-2026-09-10-P835-R45-R47: metadata取得と既存attentionの接続修正
+
+- classification: N0。R45はmetadataの取得を既存native直接queryへ変更し、前後のstate length・identity・generation・physical metadataのチェックを維持する。readbackのlive viewは維持する。R47はR36のhost-side device macro誤用をruntime GPU／M条件へ置き換える。数値式・型・K/V読込み後の計算順を変更しない。
+- R36の過去の統合数値PASSだけではWaveLocalKv=trueへの到達を証明できていなかった。R47 fresh archiveでM2048の3prefixとM129境界のoracle／全出力比較をPASSし、通常profileのtrue48回・false0回を確認した。
+- 両GPUの通常8192/128はR43と128token・MTP採否・dispatch数が一致、HIP-only／fallbackなし／cleanup0。BF16 full-model品質の未測定範囲は変わらない。詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+
+### OUT-2026-09-10-P835-R48: FP8 operand LDSのrow padding
+
+- classification: N0候補。NVFP4→E4M3FN exact ingress、scale値、K16 WMMA／FP32 Kahan／BF16丸め順を維持し、LDSの物理row strideだけ64→68 Bに変更する。通常採用予定範囲はgfx1201・M2048・K5120/N17408と逆tuple。
+- evidence: `r48-r52-r9700-scratch-r1/root-audit.json`。実aligned controlに対するfinite全出力pair差0、repeat、各64sampleの独立long-double oracle最大0 ULP、candidate自身のNaN fixture分類をPASS。M128/127/129はcontrolのみを実行し、candidateの証拠へ拡張しない。
+- status: 本体へ接続済み。R48+R52のfresh公開gfx1201経路でM255/256/257/2047/2048/2049・両tupleの12caseをPASSし、M2048のpadding選択と隣接shapeの既存選択を確認した。両GPUの通常8192/128でR47と128token・MTP採否が一致し、HIP-only／cleanup0。scratchの約20.7〜21.0%時間短縮とfull-model速度は区別する。`r48-r52-prefill-public-gfx1201-r1`、`r48-r52-v620-output-comparison.json`、`r48-r52-r9700-output-comparison.json`。BF16 full-model品質同等性の追加認定はない。詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+
+### OUT-2026-09-10-P835-R52: E2M1 byte展開の整数命令削減
+
+- classification: N0。4項のmasked shiftを2段のbit spreadへ置換し、E4M3FN lookupとsignを維持する。全65,536入力のhost／gfx1201 codec oracle、65535/65536/65537境界・guard・repeatをPASS。
+- evidence: `r52-r9700-matched-r1`。M256/1024/2048・2 tupleのaligned candidate8caseでfinite全出力pair差0、NaN分類／repeat一致、sampled long-double oracle最大0 ULP。M257はcontrol-only。scratchで約1.3〜1.6%高速だったが、他shapeやfull-model速度へは一般化しない。
+- status: R48と合わせて本体へ反映済み。上記R48のfresh公開GPU12caseと両GPU通常モデルで数値・出力・解放を確認した。V620正式1 warmup＋3 measuredでも全128token一致。R9700単回はprefill517.648／decode24.720 tok/sでdecode目標未達のため、Phase83.5は継続中。BF16 full-model品質同等性を追加認定しない。詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-10-P835-R53: M2〜4のNVFP4 gate/up入力量子化共有
+
+- classification: N0候補。既存projection packの共有対象を実M2/3/4へ広げ、同一BF16入力とinput-global scaleの量子化を1回にまとめる。両memberは既存ID94、gate→up順、量子化byte／scaleと丸めを維持する。M1とM5〜63の既存経路は維持する。
+- scope: exact gfx1030／gfx1201、検証済みQwen3.8 targetの既存NVFP4 gate/up pair。MTP companion自体のBF16演算は変更しない。graph容量ではなく実token_countで選び、Unsupportedのfallbackはprepare時に限定する。
+- status: core関連8test、HIP wrapper境界1test、CPU-only公開runtime host testと両targetのfresh buildをPASS。続いて両GPUの公開経路でM2/3/4の行別入力による全出力oracle、direct/shared bitwise一致、repeat、workspace／dispatch、M5 Unsupportedと解放をPASSした。通常8192/128も両GPUで128token・MTP採否がR48+R52と一致し、target dispatchのみV2,968／R2,800減、HIP-only／cleanup0を確認した。V単回218.998／25.117、R515.377／24.923 tok/sで、Rのdecode目標は未達。証拠は`r53-gfx1030-output-comparison.json`／`r53-gfx1201-output-comparison.json`、`r53-verification/`、`r53-pack-public-gfx1030-r1`／`r53-pack-public-gfx1201-r1`、詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-10-P835-R55: 既存ResidualRmsNorm融合の適用拡大
+
+- classification: 有限入力についてN0候補。residual addのFP32和を従来どおりBF16へ丸め、その中間値を使って同じwave reduction順・epsilon・OffsetOne scale・BF16出力丸めを計算する既存kernelを再利用する。中間residual tensorも出力として保持する。
+- scope: 検証済みQwen3.8 artifactとrecipe digestが一致する64-layer targetの隣接64 pair。既存Qwen3.5-4B scopeは維持し、MTP companionは対象外。native kernel／公開ABIは追加しない。llama.cppはQwen35 graphのresidual／FFN接続を構造参照したもので、source importは行わない。
+- status: V620のH5120 M1/2/3・Direct／OffsetOneについて、高精度CPU数学oracle・BF16 Add中間・通常GPU RMSNormとのbitwise比較をPASSした（`r55-rmsnorm-public-gfx1030-r2`）。初回r1はCPU逐次FP32和の誤差でOffsetOneのBF16中点を跨いだためFAILし、独立再現とGPU pair診断後に新H5120 oracleだけlong doubleへ修正した。数値kernel／許容差は変更せず失敗記録も保持した。R9700公開r2もPASSし、core統合後の両GPU通常8192/128で出力・採否がR53と一致、HIP-only／cleanup0を確認した。target dispatchはV3,648／R3,456減ったが、R9700単回decode24.790はR53の24.923より遅く、速度改善は未確認。非有限値のpayloadやBF16 full-model品質の未測定範囲を認定しない。調査は`r55-qwen38-residual-rmsnorm-expansion.md`、詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+### OUT-2026-09-10-P835-R54: MTP companion hidden行のGPU内引渡し
+
+- classification: N0候補。fixed-K20 p/qのcompanion proposal間で、同じBF16 hidden行のhost readback／uploadを同一queueのD2Dへ置換する。最初のtarget hidden uploadは保持し、最終proposalの未消費hiddenはreadbackしない。数値kernel・RNG・採否・commit／rollbackの演算は変更しない。
+- scope: 現行fixed-K20 p/q MTP経路。その他selector経路は従来host hiddenを保持する。native ABI変更なし。
+- status: host recorderでwidth1/2/3の転送契約とcopy／graph失敗を検査。両GPU通常8192/128でR55との128token／text hash、MTP採否・dispatch一致、HIP-only／cleanup0を確認した。転送数はhost recorderの観測と実GPU traceを区別する。V620単回decode25.073→22.077へ低下したため速度採用は保留、R9700単回24.850も目標未達。証拠は`r54-gfx1030-output-comparison.json`／`r54-gfx1201-output-comparison.json`、詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+- R54最終判断: 速度改善を確認できず、本体から専用経路を削除した。上記の数値・出力維持は保存した試行candidateの証拠であり、現在の既定経路の変更ではない。D2D kernel自体を低下原因と断定せず、source／差分／ordinary／traceを保持する。
+
+### OUT-2026-09-10-P835-R56: MLP residualと次段RMSNormの融合
+
+- classification: finite scopeのN0候補。既存ResidualRmsNormのBF16 Add丸め・同じreduction／scale／epsilonと2出力を維持し、MLP後の63 inter-layer pairとfinal1 pairへ適用する。新native kernel／ABIなし。
+- scope: R55と同じexact Qwen3.8 target。attention64とMLP64を別集計し、既存4B／MTP companion／adapter／multimodal条件は維持する。finalノードのpre-norm hiddenはfused output0、normalized hiddenはoutput1を読む。元tensor IDと各consumerを維持する。
+- status: graph／core focused host検査と両GPU通常8192/128をPASS。128token／text hashとMTP採否はR55に一致、HIP-only／cleanup0。V3,648／R3,456の追加dispatch削減を確認したが、R9700単回decode24.435は目標未達で速度改善を認定しない。native数値証拠の不変対応は`r56-native-evidence-mapping.json`、新graph／runtime出力は`r56-gfx1030-output-comparison.json`／`r56-gfx1201-output-comparison.json`、詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。

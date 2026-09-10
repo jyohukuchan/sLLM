@@ -48,7 +48,9 @@ hipError_t launch_convolution(const uint16_t *qkv, const uint16_t *conv_weight,
                               uint16_t *convolved_qkv,
                               uint16_t *next_conv_state, uint32_t token_count,
                               uint32_t qkv_width, uint32_t conv_kernel_size,
-                              hipStream_t stream) noexcept;
+                              hipStream_t stream,
+                              uint16_t *checkpoint_conv_state = nullptr,
+                              uint32_t checkpoint_rows = 0U) noexcept;
 
 hipError_t launch_recurrent(
     const uint16_t *convolved_qkv, const uint16_t *z, const uint16_t *b_input,
@@ -56,7 +58,9 @@ hipError_t launch_recurrent(
     const float *norm_weight, const float *previous_recurrent_state,
     float *next_recurrent_state, uint16_t *output, uint32_t token_count,
     uint32_t qk_heads, uint32_t value_heads, uint32_t head_dim,
-    uint32_t qkv_width, uint32_t output_width, hipStream_t stream) noexcept;
+    uint32_t qkv_width, uint32_t output_width, hipStream_t stream,
+    float *checkpoint_recurrent_state = nullptr,
+    uint32_t checkpoint_rows = 0U) noexcept;
 
 // Exact gfx1030 m=1 path. One block owns one Q/K head and processes its two
 // value heads in sequence, sharing the Q/K load and normalization while

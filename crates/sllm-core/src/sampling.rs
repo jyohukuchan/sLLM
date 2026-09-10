@@ -1110,6 +1110,16 @@ impl DeviceTokenSelectorRequestV1 {
         request
     }
 
+    /// Retain the distribution and output contract while selecting an
+    /// independent random stream. Speculative draft sampling uses this so
+    /// proposal draws do not share the target acceptance or replacement RNG.
+    pub fn with_rng(&self, seed: u64, counter: u64) -> Self {
+        let mut request = self.clone();
+        request.seed = seed;
+        request.counter = counter;
+        request
+    }
+
     pub const fn return_logprob(&self) -> bool {
         self.return_logprob
     }

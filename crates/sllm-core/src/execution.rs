@@ -567,6 +567,15 @@ impl AdapterResource {
 /// Backend implementation hook for an owned execution session.  It may only
 /// obtain its opaque resources through the checked downcast accessors on the
 /// session passed to each method.
+/// Native preparation storage that is not part of a graph's tensor arena.
+/// Queue and context requirements are reusable capacities, not per-node sums.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PreparedMatmulFootprint {
+    pub plan_persistent_bytes: u64,
+    pub queue_workspace_bytes: u64,
+    pub context_workspace_bytes: u64,
+}
+
 pub trait ExecutionSessionAdapter: Send + Sync {
     /// Exact target selected when the backend context was opened, when the
     /// backend can report it.  This is crate-private control-plane metadata;
@@ -575,10 +584,74 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         None
     }
 
+    /// Private fixed-K20 workspace capture format, independent of support for
+    /// the ordinary 16-byte token selector result. Version 1 stores a 256-byte
+    /// compact support at workspace offset zero after selector completion.
+    /// Consumers must retain it before reusing the workspace. Other backends
+    /// must not opt in merely because they implement top-k sampling.
+    fn fixed_k20_support_scratch_version(&self) -> Option<u32> {
+        None
+    }
+
+    /// Private fixed-K20 p/q verifier ABI version.  This is separate from
+    /// the producer scratch format so a backend cannot enter a mutating p/q
+    /// route merely because it can export selector support rows.
+    fn fixed_k20_mtp_verifier_version(&self) -> Option<u32> {
+        None
+    }
+
+    /// Version of the private synchronous BF16 row-concatenation operation.
+    /// This capability is queried before a caller flushes any pending work;
+    /// unsupported adapters therefore retain their existing copy sequence.
+    fn bf16_row_concat_version(&self) -> Option<u32> {
+        None
+    }
+
+    /// Concatenates two contiguous BF16 matrices row-wise into one owned
+    /// output range.  The operation is synchronous from the adapter boundary:
+    /// a successful return means the output is ready for subsequent work.
+    #[allow(clippy::too_many_arguments)]
+    fn concat_bf16_rows(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _queue: &ExecutionQueue,
+        _left: &BufferRange,
+        _right: &BufferRange,
+        _output: &BufferRange,
+        _rows: u64,
+        _left_columns: u64,
+        _right_columns: u64,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support synchronous BF16 row concatenation".to_owned(),
+        })
+    }
+
+    /// Runs the private fixed-K20 MTP acceptance/residual operation over
+    /// request-owned compact support rows.  The public token-selector ABI is
+    /// deliberately unchanged; backends that have not adopted the private
+    /// operation remain unsupported and must use the caller's legacy route.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_fixed_k20_mtp(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _queue: &ExecutionQueue,
+        _target: &BufferRange,
+        _draft: &BufferRange,
+        _draft_ids: &[u32],
+        _seed: u64,
+        _absolute_position: u64,
+        _output: &BufferRange,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support fixed-K20 MTP verification".to_owned(),
+        })
+    }
+
     /// Maximum byte count accepted by one H2D or D2H transfer.
     fn max_transfer_bytes(&self) -> u64;
 
-    /// Free device memory observed immediately before the session was opened.
+    /// Free device memory observed when this method is called.
     /// Backends that cannot report it return `None`; callers that require a
     /// fail-closed placement preflight must reject that absence explicitly.
     fn available_memory_bytes(&self) -> Option<u64> {
@@ -594,6 +667,15 @@ pub trait ExecutionSessionAdapter: Send + Sync {
     }
 
     fn supports(&self, descriptor: &SemanticOpDescriptor) -> PrepareSupport;
+
+    /// Estimates an unbound matmul without allocating device storage.
+    /// `None` means unknown; callers must not interpret it as zero bytes.
+    fn estimate_matmul_footprint(
+        &self,
+        _descriptor: &SemanticOpDescriptor,
+    ) -> Result<Option<PreparedMatmulFootprint>, ExecutionError> {
+        Ok(None)
+    }
 
     fn create_queue(
         &self,
@@ -950,6 +1032,98 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         })
     }
 
+    /// Arms the private M3 width-2 checkpoint planes before the target
+    /// verification transition. Unsupported backends must reject here, before
+    /// any state transition or request-visible mutation.
+    fn prepare_linear_attention_prefix_checkpoint(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &LinearAttentionState,
+        _expected_start: u64,
+        _token_count: u32,
+        _rows: u32,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support linear-attention prefix checkpoints".to_owned(),
+        })
+    }
+
+    /// Validates one completed M3 checkpoint without modifying the published
+    /// state. Callers use this pass for every layer before committing any one
+    /// layer, so a partial validation cannot expose a partial rollback.
+    fn validate_linear_attention_prefix_checkpoint(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &LinearAttentionState,
+        _expected_start: u64,
+        _expected_end: u64,
+        _rows: u32,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support linear-attention prefix checkpoint validation"
+                .to_owned(),
+        })
+    }
+
+    /// Commits one already validated accepted row. The backend must fail the
+    /// request if a copy fails after the first destination plane is touched;
+    /// it must not fall back to replay from a partially overwritten slot.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_linear_attention_prefix_checkpoint(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &LinearAttentionState,
+        _queue: &ExecutionQueue,
+        _expected_start: u64,
+        _expected_end: u64,
+        _prefix_end: u64,
+        _row_index: u32,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support linear-attention prefix checkpoint commit".to_owned(),
+        })
+    }
+
+    /// Commits a validated accepted row for several linear states.  The
+    /// default keeps non-HIP adapters source-compatible by using their
+    /// existing single-state operation.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_linear_attention_prefix_checkpoints(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        queue: &ExecutionQueue,
+        states: &[&LinearAttentionState],
+        expected_start: u64,
+        expected_end: u64,
+        prefix_end: u64,
+        row_index: u32,
+    ) -> Result<(), ExecutionError> {
+        for state in states {
+            self.commit_linear_attention_prefix_checkpoint(
+                access,
+                state,
+                queue,
+                expected_start,
+                expected_end,
+                prefix_end,
+                row_index,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Disarms a prepared checkpoint after full acceptance or request abort.
+    fn discard_linear_attention_prefix_checkpoint(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &LinearAttentionState,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support linear-attention prefix checkpoint discard"
+                .to_owned(),
+        })
+    }
+
     fn execute_linear_attention(
         &self,
         _access: &ExecutionAdapterAccess<'_>,
@@ -1166,6 +1340,204 @@ impl ExecutionSession {
         self.state.adapter.expected_target()
     }
 
+    /// Reports the private compact-support workspace format implemented by
+    /// this backend; ordinary top-k support alone does not imply a format.
+    pub fn fixed_k20_support_scratch_version(&self) -> Result<Option<u32>, ExecutionError> {
+        self.ensure_open()?;
+        Ok(self.state.adapter.fixed_k20_support_scratch_version())
+    }
+
+    pub fn fixed_k20_mtp_verifier_version(&self) -> Result<Option<u32>, ExecutionError> {
+        self.ensure_open()?;
+        Ok(self.state.adapter.fixed_k20_mtp_verifier_version())
+    }
+
+    /// Reports support for the private synchronous BF16 row-concatenation
+    /// operation.  Callers use this capability before flushing a pending
+    /// segment so unsupported backends can keep their established path.
+    pub fn bf16_row_concat_version(&self) -> Result<Option<u32>, ExecutionError> {
+        self.ensure_open()?;
+        Ok(self.state.adapter.bf16_row_concat_version())
+    }
+
+    /// Synchronously concatenates two contiguous BF16 matrices by row.  Core
+    /// validates ownership, byte geometry, overflow, alignment, and aliases
+    /// before invoking the private backend operation; there is no host-copy
+    /// or fallback path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn concat_bf16_rows(
+        &self,
+        queue: &ExecutionQueue,
+        left: BufferRange,
+        right: BufferRange,
+        output: BufferRange,
+        rows: u64,
+        left_columns: u64,
+        right_columns: u64,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_queue(queue)?;
+        self.ensure_buffer(left.buffer())?;
+        self.ensure_buffer(right.buffer())?;
+        self.ensure_buffer(output.buffer())?;
+        if self.bf16_row_concat_version()? != Some(1) {
+            return Err(ExecutionError::Unsupported {
+                reason: "backend does not support synchronous BF16 row concatenation version 1"
+                    .to_owned(),
+            });
+        }
+        if rows == 0 || left_columns == 0 || right_columns == 0 {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "BF16 row concatenation requires non-zero rows and column counts"
+                    .to_owned(),
+            });
+        }
+        let left_bytes = rows
+            .checked_mul(left_columns)
+            .and_then(|elements| elements.checked_mul(2))
+            .ok_or_else(|| ExecutionError::InvalidRange {
+                reason: "BF16 row concatenation left byte count overflowed u64".to_owned(),
+            })?;
+        let right_bytes = rows
+            .checked_mul(right_columns)
+            .and_then(|elements| elements.checked_mul(2))
+            .ok_or_else(|| ExecutionError::InvalidRange {
+                reason: "BF16 row concatenation right byte count overflowed u64".to_owned(),
+            })?;
+        let output_bytes = rows
+            .checked_mul(left_columns.checked_add(right_columns).ok_or_else(|| {
+                ExecutionError::InvalidRange {
+                    reason: "BF16 row concatenation column count overflowed u64".to_owned(),
+                }
+            })?)
+            .and_then(|elements| elements.checked_mul(2))
+            .ok_or_else(|| ExecutionError::InvalidRange {
+                reason: "BF16 row concatenation output byte count overflowed u64".to_owned(),
+            })?;
+        if left.size_bytes() < left_bytes
+            || right.size_bytes() < right_bytes
+            || output.size_bytes() < output_bytes
+        {
+            return Err(ExecutionError::InvalidRange {
+                reason: format!(
+                    "BF16 row concatenation ranges are too small: left {left_bytes}, right {right_bytes}, output {output_bytes}"
+                ),
+            });
+        }
+        if left.offset_bytes() % 2 != 0
+            || right.offset_bytes() % 2 != 0
+            || output.offset_bytes() % 2 != 0
+        {
+            return Err(ExecutionError::InvalidRange {
+                reason: "BF16 row concatenation ranges must be two-byte aligned".to_owned(),
+            });
+        }
+        if buffer_ranges_overlap(&left, &output) || buffer_ranges_overlap(&right, &output) {
+            return Err(ExecutionError::AliasOverlap {
+                left: "BF16 row concatenation input",
+                right: "BF16 row concatenation output",
+            });
+        }
+        self.state.adapter.concat_bf16_rows(
+            &ExecutionAdapterAccess { session: self },
+            queue,
+            &left,
+            &right,
+            &output,
+            rows,
+            left_columns,
+            right_columns,
+        )
+    }
+
+    /// Executes the private fixed-K20 MTP verifier after all support rows have
+    /// been retained in request-owned device buffers.  This wrapper performs
+    /// the range and identity checks shared by every backend; it never stages
+    /// support through host memory and never falls back to a CPU decision.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_fixed_k20_mtp(
+        &self,
+        queue: &ExecutionQueue,
+        target: BufferRange,
+        draft: BufferRange,
+        draft_ids: &[u32],
+        seed: u64,
+        absolute_position: u64,
+        output: BufferRange,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_queue(queue)?;
+        self.ensure_buffer(target.buffer())?;
+        self.ensure_buffer(draft.buffer())?;
+        self.ensure_buffer(output.buffer())?;
+        if self.fixed_k20_support_scratch_version()? != Some(1)
+            || self.fixed_k20_mtp_verifier_version()? != Some(1)
+        {
+            return Err(ExecutionError::Unsupported {
+                reason: "fixed-K20 MTP support/verifier version 1 is unavailable".to_owned(),
+            });
+        }
+        let width = draft_ids.len();
+        if !(1..=8).contains(&width) {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "fixed-K20 MTP verification requires 1 through 8 drafts".to_owned(),
+            });
+        }
+        let width_u64 = u64::try_from(width).expect("bounded width fits u64");
+        let expected_target = width_u64
+            .checked_add(1)
+            .and_then(|rows| rows.checked_mul(256))
+            .ok_or_else(|| ExecutionError::InvalidRange {
+                reason: "fixed-K20 target support range overflowed".to_owned(),
+            })?;
+        let expected_draft =
+            width_u64
+                .checked_mul(256)
+                .ok_or_else(|| ExecutionError::InvalidRange {
+                    reason: "fixed-K20 draft support range overflowed".to_owned(),
+                })?;
+        if target.size_bytes() != expected_target
+            || draft.size_bytes() != expected_draft
+            || output.size_bytes() != 144
+        {
+            return Err(ExecutionError::InvalidRange {
+                reason: format!(
+                    "fixed-K20 MTP ranges must be target={expected_target}, draft={expected_draft}, decision=144"
+                ),
+            });
+        }
+        if target.offset_bytes() % 8 != 0
+            || draft.offset_bytes() % 8 != 0
+            || output.offset_bytes() % 16 != 0
+        {
+            return Err(ExecutionError::InvalidRange {
+                reason: "fixed-K20 MTP ranges do not satisfy support/decision alignment".to_owned(),
+            });
+        }
+        if buffer_ranges_overlap(&target, &draft) || buffer_ranges_overlap(&target, &output) {
+            return Err(ExecutionError::AliasOverlap {
+                left: "fixed-K20 target support",
+                right: "fixed-K20 verifier range",
+            });
+        }
+        if buffer_ranges_overlap(&draft, &output) {
+            return Err(ExecutionError::AliasOverlap {
+                left: "fixed-K20 draft support",
+                right: "fixed-K20 decision",
+            });
+        }
+        self.state.adapter.verify_fixed_k20_mtp(
+            &ExecutionAdapterAccess { session: self },
+            queue,
+            &target,
+            &draft,
+            draft_ids,
+            seed,
+            absolute_position,
+            &output,
+        )
+    }
+
     pub fn max_transfer_bytes(&self) -> Result<u64, ExecutionError> {
         self.ensure_open()?;
         let limit = self.state.adapter.max_transfer_bytes();
@@ -1185,6 +1557,19 @@ impl ExecutionSession {
     pub fn total_memory_bytes(&self) -> Result<Option<u64>, ExecutionError> {
         self.ensure_open()?;
         Ok(self.state.adapter.total_memory_bytes())
+    }
+
+    pub fn estimate_matmul_footprint(
+        &self,
+        descriptor: &SemanticOpDescriptor,
+    ) -> Result<Option<PreparedMatmulFootprint>, ExecutionError> {
+        let _admission = self
+            .state
+            .adapter_admission
+            .lock()
+            .map_err(|_| ExecutionError::Closing)?;
+        self.ensure_open()?;
+        self.state.adapter.estimate_matmul_footprint(descriptor)
     }
 
     /// Returns exact current and high-water accounting for this session.
@@ -1694,6 +2079,7 @@ impl ExecutionSession {
             execution_in_flight: Arc::new(AtomicBool::new(false)),
             operation_admission: Arc::new(Mutex::new(())),
             _allocation: allocation,
+            checkpoint_allocation: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1854,6 +2240,7 @@ impl ExecutionSession {
                 execution_in_flight: Arc::new(AtomicBool::new(false)),
                 operation_admission: Arc::new(Mutex::new(())),
                 _allocation: allocation,
+                checkpoint_allocation: Arc::new(Mutex::new(None)),
             },
             audit,
         ))
@@ -1880,6 +2267,229 @@ impl ExecutionSession {
             expected_length,
             rewind_length,
         )
+    }
+
+    /// Arms the backend-owned two-row M3 prefix checkpoint before execution.
+    /// This operation is admission-only: an unsupported backend leaves the
+    /// state untouched so the caller can retain the legacy replay path.
+    pub fn prepare_linear_attention_prefix_checkpoint(
+        &self,
+        state: &LinearAttentionState,
+        expected_start: u64,
+        token_count: u32,
+        rows: u32,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_linear_attention_state(state)?;
+        let snapshot = self.linear_attention_state_snapshot(state)?;
+        if snapshot.length() != expected_start {
+            return Err(ExecutionError::StaleLinearAttentionLength {
+                expected: expected_start,
+                actual: snapshot.length(),
+            });
+        }
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        if state.execution_in_flight.load(Ordering::Acquire) {
+            return Err(ExecutionError::Busy);
+        }
+        let checkpoint_lease = {
+            let guard = state
+                .checkpoint_allocation
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            if guard.is_some() {
+                None
+            } else {
+                let bytes = linear_state_checkpoint_allocation_bytes(state.descriptor).ok_or_else(
+                    || ExecutionError::InvalidRange {
+                        reason: "linear-attention checkpoint bytes overflowed".to_owned(),
+                    },
+                )?;
+                Some(
+                    self.state
+                        .allocation_accounting
+                        .reserve(AllocationCategory::RequestState, bytes)?,
+                )
+            }
+        };
+        if let Err(error) = self
+            .state
+            .adapter
+            .prepare_linear_attention_prefix_checkpoint(
+                &ExecutionAdapterAccess { session: self },
+                state,
+                expected_start,
+                token_count,
+                rows,
+            )
+        {
+            drop(checkpoint_lease);
+            return Err(error);
+        }
+        if let Some(lease) = checkpoint_lease {
+            let mut guard = state
+                .checkpoint_allocation
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            *guard = Some(lease);
+        }
+        Ok(())
+    }
+
+    /// Validates one completed M3 checkpoint without mutating it. Callers
+    /// should invoke this for every layer before invoking any commit method.
+    pub fn validate_linear_attention_prefix_checkpoint(
+        &self,
+        state: &LinearAttentionState,
+        expected_start: u64,
+        expected_end: u64,
+        rows: u32,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_linear_attention_state(state)?;
+        let snapshot = self.linear_attention_state_snapshot(state)?;
+        if snapshot.length() != expected_end {
+            return Err(ExecutionError::StaleLinearAttentionLength {
+                expected: expected_end,
+                actual: snapshot.length(),
+            });
+        }
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        if state.execution_in_flight.load(Ordering::Acquire) {
+            return Err(ExecutionError::Busy);
+        }
+        self.state
+            .adapter
+            .validate_linear_attention_prefix_checkpoint(
+                &ExecutionAdapterAccess { session: self },
+                state,
+                expected_start,
+                expected_end,
+                rows,
+            )
+    }
+
+    /// Commits one accepted M3 row after all layer validations have passed.
+    pub fn commit_linear_attention_prefix_checkpoint(
+        &self,
+        state: &LinearAttentionState,
+        queue: &ExecutionQueue,
+        expected_start: u64,
+        expected_end: u64,
+        prefix_end: u64,
+        row_index: u32,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_linear_attention_state(state)?;
+        self.ensure_queue(queue)?;
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        if state.execution_in_flight.load(Ordering::Acquire) {
+            return Err(ExecutionError::Busy);
+        }
+        self.state
+            .adapter
+            .commit_linear_attention_prefix_checkpoint(
+                &ExecutionAdapterAccess { session: self },
+                state,
+                queue,
+                expected_start,
+                expected_end,
+                prefix_end,
+                row_index,
+            )
+    }
+
+    /// Commits one accepted M3 row across all linear states.  Admission locks
+    /// remain held until the adapter returns so a batch backend can validate,
+    /// copy, fence, and publish without another state transition interleaving.
+    pub fn commit_linear_attention_prefix_checkpoints(
+        &self,
+        queue: &ExecutionQueue,
+        states: &[&LinearAttentionState],
+        expected_start: u64,
+        expected_end: u64,
+        prefix_end: u64,
+        row_index: u32,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_queue(queue)?;
+        if states.is_empty() {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "linear-attention checkpoint batch is empty".to_owned(),
+            });
+        }
+        for (index, state) in states.iter().enumerate() {
+            self.ensure_linear_attention_state(state)?;
+            if states[..index]
+                .iter()
+                .any(|previous| previous.id == state.id)
+            {
+                return Err(ExecutionError::InvalidRequest {
+                    reason: "linear-attention checkpoint batch contains a duplicate state"
+                        .to_owned(),
+                });
+            }
+        }
+        // Admission locks are acquired in state-id order rather than caller
+        // order.  The batch API can be reached concurrently with another
+        // batch containing the same states in a different order; canonical
+        // ordering prevents those callers from deadlocking while the guards
+        // remain held across the backend's copy/fence/publication sequence.
+        let mut lock_order = states.to_vec();
+        lock_order.sort_by_key(|state| state.id.raw());
+        let mut admissions = Vec::with_capacity(states.len());
+        for state in lock_order {
+            let admission = state
+                .operation_admission
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            if state.execution_in_flight.load(Ordering::Acquire) {
+                return Err(ExecutionError::Busy);
+            }
+            admissions.push(admission);
+        }
+        self.state
+            .adapter
+            .commit_linear_attention_prefix_checkpoints(
+                &ExecutionAdapterAccess { session: self },
+                queue,
+                states,
+                expected_start,
+                expected_end,
+                prefix_end,
+                row_index,
+            )
+    }
+
+    /// Disarms a prepared checkpoint after full acceptance or request abort.
+    pub fn discard_linear_attention_prefix_checkpoint(
+        &self,
+        state: &LinearAttentionState,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_linear_attention_state(state)?;
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        if state.execution_in_flight.load(Ordering::Acquire) {
+            return Err(ExecutionError::Busy);
+        }
+        self.state
+            .adapter
+            .discard_linear_attention_prefix_checkpoint(
+                &ExecutionAdapterAccess { session: self },
+                state,
+            )
     }
 
     /// Admits one ordered convolution/recurrent state transition. The output
@@ -2816,6 +3426,12 @@ fn linear_state_allocation_bytes(descriptor: LinearAttentionStateDescriptor) -> 
     convolution.checked_add(recurrent)
 }
 
+fn linear_state_checkpoint_allocation_bytes(
+    descriptor: LinearAttentionStateDescriptor,
+) -> Option<u64> {
+    linear_state_allocation_bytes(descriptor)?.checked_mul(2)
+}
+
 /// Opaque, session-owned device allocation.
 #[derive(Clone)]
 pub struct ExecutionBuffer {
@@ -2990,6 +3606,7 @@ pub struct LinearAttentionState {
     execution_in_flight: Arc<AtomicBool>,
     operation_admission: Arc<Mutex<()>>,
     _allocation: Option<Arc<AllocationLease>>,
+    checkpoint_allocation: Arc<Mutex<Option<Arc<AllocationLease>>>>,
 }
 
 impl fmt::Debug for LinearAttentionState {
@@ -4017,6 +4634,16 @@ fn intervals_overlap(left_start: u64, left_end: u64, right_start: u64, right_end
     left_start < right_end && right_start < left_end
 }
 
+fn buffer_ranges_overlap(left: &BufferRange, right: &BufferRange) -> bool {
+    left.buffer.id() == right.buffer.id()
+        && intervals_overlap(
+            left.offset_bytes,
+            left.end_offset(),
+            right.offset_bytes,
+            right.end_offset(),
+        )
+}
+
 fn kv_state_plane_kinds(encoding: KvCacheEncoding) -> Vec<StatePlaneKindV1> {
     let mut planes = vec![StatePlaneKindV1::KvKey, StatePlaneKindV1::KvValue];
     match encoding {
@@ -5042,6 +5669,8 @@ mod tests {
         upload_calls: AtomicUsize,
         readback_calls: AtomicUsize,
         d2d_copy_error: AtomicBool,
+        row_concat_supported: AtomicBool,
+        row_concat_calls: AtomicUsize,
         support_gate: Mutex<Option<SupportGate>>,
     }
 
@@ -5267,6 +5896,27 @@ mod tests {
             destination_storage[destination_start..destination_start + source_size]
                 .copy_from_slice(&bytes);
             Ok(Box::new(TestTransfer))
+        }
+
+        fn bf16_row_concat_version(&self) -> Option<u32> {
+            self.row_concat_supported
+                .load(Ordering::Relaxed)
+                .then_some(1)
+        }
+
+        fn concat_bf16_rows(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            _queue: &ExecutionQueue,
+            _left: &BufferRange,
+            _right: &BufferRange,
+            _output: &BufferRange,
+            _rows: u64,
+            _left_columns: u64,
+            _right_columns: u64,
+        ) -> Result<(), ExecutionError> {
+            self.row_concat_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
         }
 
         fn shutdown(
@@ -6232,6 +6882,70 @@ mod tests {
         drop(copy);
         assert_eq!(session.memory_snapshot().workspace().current_bytes(), 0);
         assert_eq!(session.memory_snapshot().request_state().current_bytes(), 0);
+    }
+
+    #[test]
+    fn bf16_row_concat_validates_ranges_and_preserves_source_aliasing() {
+        let adapter = Arc::new(TestAdapter::default());
+        let session = ExecutionSession::new(
+            "concat-test",
+            Arc::clone(&adapter) as Arc<dyn ExecutionSessionAdapter>,
+        );
+        let queue = session.create_queue().unwrap();
+        let source = session.allocate(24).unwrap();
+        let output = session.allocate(24).unwrap();
+        assert_eq!(session.bf16_row_concat_version().unwrap(), None);
+        assert!(matches!(
+            session.concat_bf16_rows(
+                &queue,
+                source.range(0, 24).unwrap(),
+                source.range(0, 12).unwrap(),
+                output.range(0, 24).unwrap(),
+                3,
+                2,
+                2,
+            ),
+            Err(ExecutionError::Unsupported { .. })
+        ));
+
+        adapter.row_concat_supported.store(true, Ordering::Relaxed);
+        assert_eq!(session.bf16_row_concat_version().unwrap(), Some(1));
+        session
+            .concat_bf16_rows(
+                &queue,
+                source.range(0, 12).unwrap(),
+                source.range(0, 12).unwrap(),
+                output.range(0, 24).unwrap(),
+                3,
+                2,
+                2,
+            )
+            .unwrap();
+        assert_eq!(adapter.row_concat_calls.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            session.concat_bf16_rows(
+                &queue,
+                source.range(0, 12).unwrap(),
+                source.range(0, 12).unwrap(),
+                source.range(0, 24).unwrap(),
+                3,
+                2,
+                2,
+            ),
+            Err(ExecutionError::AliasOverlap { .. })
+        ));
+        assert!(matches!(
+            session.concat_bf16_rows(
+                &queue,
+                source.range(0, 12).unwrap(),
+                source.range(0, 12).unwrap(),
+                output.range(0, 24).unwrap(),
+                3,
+                3,
+                u64::MAX,
+            ),
+            Err(ExecutionError::InvalidRange { .. })
+        ));
     }
 
     #[test]
@@ -7631,9 +8345,7 @@ mod tests {
                 )
                 .unwrap(),
             ],
-            vec![
-                TensorView::contiguous(DType::Bf16, &[17, crate::QWEN35_VOCAB_SIZE]).unwrap(),
-            ],
+            vec![TensorView::contiguous(DType::Bf16, &[17, crate::QWEN35_VOCAB_SIZE]).unwrap(),],
         )
         .is_err());
         assert!(

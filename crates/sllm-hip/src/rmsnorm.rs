@@ -32,7 +32,17 @@ impl TensorBinding {
     }
 
     pub(crate) fn raw(&self) -> Result<sys::sllm_tensor_binding_t, RuntimeError> {
-        let rank = u32::try_from(self.view.shape().len()).map_err(|_| {
+        Self::raw_view(&self.view, Some(&self.buffer))
+    }
+
+    /// Lowers tensor metadata for an ABI descriptor.  `None` is reserved for
+    /// allocation-free metadata queries; every normal prepared operation uses
+    /// `raw` and therefore still requires a real buffer handle.
+    pub(crate) fn raw_view(
+        view: &TensorView,
+        buffer: Option<&Buffer>,
+    ) -> Result<sys::sllm_tensor_binding_t, RuntimeError> {
+        let rank = u32::try_from(view.shape().len()).map_err(|_| {
             RuntimeError::local(
                 RuntimeStatus::InvalidTensorBinding,
                 "tensor rank does not fit ABI",
@@ -46,13 +56,7 @@ impl TensorBinding {
         }
         let mut shape = [0_u64; 8];
         let mut strides = [0_u64; 8];
-        for (index, (&extent, &stride)) in self
-            .view
-            .shape()
-            .iter()
-            .zip(self.view.strides())
-            .enumerate()
-        {
+        for (index, (&extent, &stride)) in view.shape().iter().zip(view.strides()).enumerate() {
             shape[index] = u64::try_from(extent).map_err(|_| {
                 RuntimeError::local(
                     RuntimeStatus::MetadataOverflow,
@@ -66,12 +70,20 @@ impl TensorBinding {
                 )
             })?;
         }
+        let raw_buffer = buffer
+            .map(|buffer| {
+                buffer
+                    .raw_handle()
+                    .map(|handle| handle.as_ptr() as *const sys::sllm_buffer_t)
+            })
+            .transpose()?
+            .unwrap_or(std::ptr::null());
         Ok(sys::sllm_tensor_binding_t {
             struct_size: size_of::<sys::sllm_tensor_binding_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            buffer: self.buffer.raw_handle()?.as_ptr(),
-            byte_offset: self.view.byte_offset(),
-            dtype: match self.view.dtype() {
+            buffer: raw_buffer,
+            byte_offset: view.byte_offset(),
+            dtype: match view.dtype() {
                 DType::Bf16 => sys::SLLM_TENSOR_DTYPE_BF16,
                 DType::F32 => sys::SLLM_TENSOR_DTYPE_F32,
                 DType::F8E4M3Fn => sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
@@ -80,7 +92,7 @@ impl TensorBinding {
                 DType::I32 => sys::SLLM_TENSOR_DTYPE_I32,
                 _ => u32::MAX,
             },
-            encoding: match self.view.encoding() {
+            encoding: match view.encoding() {
                 Encoding::Unquantized => sys::SLLM_TENSOR_ENCODING_UNQUANTIZED,
                 Encoding::Nvfp4 {
                     block_size: 16,

@@ -257,12 +257,26 @@ matmul_lowp_concrete_provider_plan(
     concrete_tile = TilePolicy::DecodeWave4Column32;
     concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
     break;
+  case KernelVariant::Nvfp4W4A4SmallMVgprReuse:
+    if (provider.format != MatmulFormat::Nvfp4W4A4 ||
+        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
+         provider.target != sllm_lowp::ExactTarget::Gfx1201) ||
+        !::sllm_matmul_kernel::phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(
+            provider.m, provider.k, provider.n)) {
+      return std::nullopt;
+    }
+    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
+    concrete_tile = TilePolicy::DecodeWave4Column32;
+    concrete_inner_product = InnerProduct::E2M1BlockScaledDp4aFp32;
+    break;
   case KernelVariant::Nvfp4W4A4SmallMRowGrid:
     if (provider.format != MatmulFormat::Nvfp4W4A4 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030 ||
-        provider.m < 2U || provider.m > 4U ||
-        !::sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_activation_shared_shape(
-            1U, provider.k, provider.n)) return std::nullopt;
+        provider.target != sllm_lowp::ExactTarget::Gfx1030 || provider.m < 2U ||
+        provider.m > 4U ||
+        !::sllm_matmul_kernel::
+            phase78_nvfp4_w4a4_decode_activation_shared_shape(1U, provider.k,
+                                                              provider.n))
+      return std::nullopt;
     concrete_provider = ProviderKind::Nvfp4W4A4Block16;
     concrete_tile = TilePolicy::DecodeWave4Column32;
     concrete_inner_product = InnerProduct::E2M1BlockScaledDp4aFp32;
@@ -271,7 +285,8 @@ matmul_lowp_concrete_provider_plan(
     if (provider.format != MatmulFormat::Nvfp4W4A4 ||
         provider.target != sllm_lowp::ExactTarget::Gfx1201 ||
         !::sllm_matmul_kernel::phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(
-            provider.m, provider.k, provider.n)) return std::nullopt;
+            provider.m, provider.k, provider.n))
+      return std::nullopt;
     concrete_provider = ProviderKind::Nvfp4W4A4Block16;
     concrete_tile = TilePolicy::DecodeWave4Column32;
     concrete_inner_product = InnerProduct::E2M1BlockScaledDp4aFp32;
@@ -525,7 +540,14 @@ matmul_lowp_concrete_provider_plan(
       return std::nullopt;
     }
     concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::BlockRow64Column64;
+    concrete_tile =
+        variant == KernelVariant::Nvfp4W4A4PrefillCompensated64x64 &&
+                provider.target == sllm_lowp::ExactTarget::Gfx1030 &&
+                ::sllm_matmul_kernel::
+                    phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(
+                        provider.m, provider.k, provider.n)
+            ? TilePolicy::BlockRow128Column64
+            : TilePolicy::BlockRow64Column64;
     concrete_inner_product = InnerProduct::E2M1BlockScaledFp32;
     break;
   case KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan:
@@ -652,6 +674,304 @@ bool matmul_lowp_workspace_bytes(
   }
   *workspace_bytes = value_total + scale_total;
   return true;
+}
+
+struct MatmulWorkspaceFootprint final {
+  uint64_t persistent_bytes = 0U;
+  uint64_t queue_bytes = 0U;
+  uint64_t context_bytes = 0U;
+  uint64_t activation_scale_offset = 0U;
+};
+
+bool matmul_workspace_multiply(const uint64_t left, const uint64_t right,
+                               uint64_t *const result) noexcept {
+  if (result == nullptr ||
+      (left != 0U && right > std::numeric_limits<uint64_t>::max() / left)) {
+    return false;
+  }
+  *result = left * right;
+  return true;
+}
+
+bool matmul_workspace_add(const uint64_t left, const uint64_t right,
+                          uint64_t *const result) noexcept {
+  if (result == nullptr ||
+      right > std::numeric_limits<uint64_t>::max() - left) {
+    return false;
+  }
+  *result = left + right;
+  return true;
+}
+
+bool matmul_workspace_round_up4(const uint64_t value,
+                                uint64_t *const rounded) noexcept {
+  if (rounded == nullptr || value > std::numeric_limits<uint64_t>::max() - 3U) {
+    return false;
+  }
+  *rounded = (value + UINT64_C(3)) & ~UINT64_C(3);
+  return true;
+}
+
+/* Computes exactly the bytes consumed by one prepared matmul.  This helper
+ * intentionally has no context, handle, allocator, or library dependency so
+ * the metadata-only admission query and the real prepare path share the same
+ * checked layout arithmetic. */
+sllm_status_t matmul_workspace_footprint_from_metadata(
+    const sllm_matmul::DescriptorMetadata &metadata,
+    const sllm_lowp::PreparedProviderPlan *const provider, const bool lowp_path,
+    const bool split4_plan, const bool nvfp4_f16_staging,
+    const bool short_mixed_shape, MatmulWorkspaceFootprint *const footprint,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (footprint == nullptr) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "matmul workspace footprint output is null");
+  }
+  *footprint = MatmulWorkspaceFootprint{};
+
+  /* Baseline BF16 plans have no matmul-owned workspace.  The prepare path
+   * calls this helper only inside the quantized/short-mixed branch, while the
+   * metadata-only query also serves ordinary BF16 descriptors. */
+  if (!short_mixed_shape && !lowp_path && !metadata.fp8_outer) {
+    return SLLM_STATUS_OK;
+  }
+
+  uint64_t workspace_bytes = 0U;
+  if (short_mixed_shape) {
+    if (!::sllm_matmul_kernel::phase49_gfx1030_mixed_workspace_bytes(
+            metadata.m, metadata.n, &workspace_bytes) ||
+        metadata.m > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+        metadata.k > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+        metadata.n > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "mixed matmul workspace or dispatch size overflowed");
+    }
+  } else if (lowp_path) {
+    if (provider == nullptr || !provider->supported() ||
+        !matmul_lowp_workspace_bytes(*provider, &workspace_bytes)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "low-precision matmul workspace footprint is unsupported");
+    }
+    if (split4_plan) {
+      uint64_t partial_offset = 0U;
+      uint64_t split4_workspace_bytes = 0U;
+      if (!::sllm_matmul_kernel::phase78_nvfp4_w4a4_split4_workspace(
+              metadata.m, metadata.k, metadata.n, &partial_offset,
+              &split4_workspace_bytes) ||
+          workspace_bytes != partial_offset) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_UNSUPPORTED,
+            "NVFP4 split4 workspace layout is incompatible");
+      }
+      workspace_bytes = split4_workspace_bytes;
+    }
+  } else {
+    uint64_t value_bytes = 0U;
+    if (metadata.mxfp6_w6a6) {
+      uint64_t packed = 0U;
+      if (!matmul_workspace_multiply(metadata.k, UINT64_C(3), &packed)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+            "MXFP6 workspace value size overflowed");
+      }
+      if (!matmul_workspace_multiply(metadata.m, packed / UINT64_C(4),
+                                     &value_bytes)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+            "MXFP6 workspace value size overflowed");
+      }
+    } else if (metadata.mxfp8_w8a8) {
+      if (!matmul_workspace_multiply(metadata.m, metadata.k, &value_bytes)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+            "MXFP8 workspace value size overflowed");
+      }
+    } else if (metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4) {
+      if (metadata.k > std::numeric_limits<uint64_t>::max() - 1U ||
+          !matmul_workspace_multiply(metadata.m,
+                                     (metadata.k + UINT64_C(1)) / UINT64_C(2),
+                                     &value_bytes)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+            "packed low-precision workspace value size overflowed");
+      }
+    } else {
+      if (!matmul_workspace_multiply(metadata.m, metadata.k, &value_bytes)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+            "matmul workspace value size overflowed");
+      }
+    }
+
+    uint64_t scale_offset = value_bytes;
+    if (!(metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 || metadata.mxfp8_w8a8 ||
+          metadata.mxfp6_w6a6) &&
+        !matmul_workspace_round_up4(value_bytes, &scale_offset)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "matmul workspace scale offset overflowed");
+    }
+    uint64_t scale_bytes = 0U;
+    if (metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 || metadata.mxfp8_w8a8 ||
+        metadata.mxfp6_w6a6) {
+      const uint64_t block_size =
+          (metadata.nvfp4_w4a4 ? UINT64_C(16) : UINT64_C(32));
+      if (metadata.k >
+              std::numeric_limits<uint64_t>::max() - (block_size - 1U) ||
+          !matmul_workspace_multiply(
+              metadata.m, (metadata.k + block_size - 1U) / block_size,
+              &scale_bytes)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+            "low-precision workspace scale size overflowed");
+      }
+    } else if (!matmul_workspace_multiply(metadata.m, UINT64_C(4),
+                                          &scale_bytes)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "matmul workspace scale size overflowed");
+    }
+    if (!matmul_workspace_add(scale_offset, scale_bytes, &workspace_bytes)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "matmul workspace size overflowed");
+    }
+    footprint->activation_scale_offset = scale_offset;
+  }
+
+  if (lowp_path && metadata.m > UINT64_C(1)) {
+    footprint->queue_bytes = workspace_bytes;
+  } else {
+    footprint->persistent_bytes = workspace_bytes;
+  }
+
+  if (nvfp4_f16_staging) {
+    ::sllm_matmul_kernel::F16StagingWorkspaceLayout staging_layout{};
+    uint64_t reservation_bytes = 0U;
+    if (!::sllm_matmul_kernel::phase78_gfx1201_nvfp4_w4a4_f16_staging_shape(
+            metadata.m, metadata.k, metadata.n) ||
+        !::sllm_matmul_kernel::f16_staging_workspace_layout(
+            metadata.m, metadata.k, metadata.n, &staging_layout) ||
+        staging_layout.total_bytes == 0U ||
+        !::sllm_matmul_kernel::qwen38_f16_staging_workspace_reservation(
+            metadata.m, &reservation_bytes) ||
+        reservation_bytes < staging_layout.total_bytes) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "FP16 staging matmul workspace footprint is unsupported");
+    }
+    footprint->context_bytes = reservation_bytes;
+  }
+
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t select_matmul_workspace_footprint(
+    const sllm_matmul::DescriptorMetadata &metadata,
+    const char *const arch_name, MatmulWorkspaceFootprint *const footprint,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (arch_name == nullptr || footprint == nullptr) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "matmul workspace footprint selection input is null");
+  }
+
+  const bool quantized_weight_path =
+      metadata.fp8_outer || metadata.nvfp4 || metadata.nvfp4_w4a4 ||
+      metadata.mxfp4_w4a4 || metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6;
+  bool short_mixed_shape =
+      !quantized_weight_path &&
+      ::sllm_matmul_kernel::phase49_gfx1030_short_mixed_shape(
+          metadata.m, metadata.k, metadata.n);
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  if (short_mixed_shape) {
+    const char *const disable_short_mixed =
+        std::getenv("SLLM_MATMUL_GFX1030_SHORT_MIXED");
+    if (disable_short_mixed != nullptr &&
+        std::strcmp(disable_short_mixed, "0") == 0) {
+      short_mixed_shape = false;
+    } else {
+      short_mixed_shape = matches_runtime_gcn_arch(arch_name, "gfx1030");
+    }
+  }
+#else
+  short_mixed_shape = false;
+#endif
+
+  const bool lowp_path = matmul_lowp_path(metadata);
+  std::optional<sllm_lowp::PreparedProviderPlan> provider;
+  bool split4_plan = false;
+  sllm_matmul_kernel::KernelVariant kernel_variant =
+      sllm_matmul_kernel::KernelVariant::Baseline;
+  if (metadata.fp8_outer) {
+    const bool fnuz = metadata.fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ;
+    const sllm_matmul_kernel::SelectorDecision selector_decision =
+        sllm_matmul_kernel::select_fp8_outer_decision(
+            metadata.m, metadata.k, metadata.n, arch_name, fnuz);
+    if (!selector_decision.supported) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "FP8 outer matmul workspace provider is unsupported");
+    }
+    kernel_variant = selector_decision.variant;
+  }
+  if (lowp_path) {
+    sllm_lowp::MatmulFormat format{};
+    if (!matmul_lowp_format(metadata, &format)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "matmul low-precision format is unsupported");
+    }
+    const sllm_lowp::ExactTarget target = matmul_lowp_target(arch_name);
+    const sllm_lowp::ProviderRequest request = sllm_lowp::make_provider_request(
+        format, target, metadata.m, metadata.n, metadata.k);
+    const sllm_lowp::PreparedProviderPlan prepared =
+        sllm_lowp::prepare_provider_plan(request);
+    if (!prepared.supported()) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "matmul low-precision provider rejected target, layout, shape, or "
+          "numerics");
+    }
+    const sllm_matmul_kernel::SelectorDecision selector_decision =
+        matmul_lowp_selector_decision(metadata, prepared, arch_name);
+    if (!selector_decision.supported) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "matmul low-precision selector rejected the provider contract");
+    }
+    kernel_variant = selector_decision.variant;
+    const auto concrete =
+        matmul_lowp_concrete_provider_plan(prepared, kernel_variant);
+    if (!concrete.has_value()) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "matmul low-precision concrete provider is unavailable");
+    }
+    provider.emplace(*concrete);
+    split4_plan =
+        metadata.nvfp4_w4a4 &&
+        ((kernel_variant ==
+              sllm_matmul_kernel::KernelVariant::Nvfp4W4A4PrefillDp4a64x64 &&
+          matches_runtime_gcn_arch(arch_name, "gfx1030") &&
+          ::sllm_matmul_kernel::phase78_gfx1030_nvfp4_w4a4_split4_shape(
+              metadata.m, metadata.k, metadata.n)) ||
+         (kernel_variant == sllm_matmul_kernel::KernelVariant::
+                                Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+          matches_runtime_gcn_arch(arch_name, "gfx1201") &&
+          ::sllm_matmul_kernel::phase78_gfx1201_nvfp4_w4a4_split4_shape(
+              metadata.m, metadata.k, metadata.n)));
+  }
+
+  const bool nvfp4_f16_staging =
+      metadata.nvfp4_w4a4 &&
+      kernel_variant ==
+          sllm_matmul_kernel::KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging;
+  return matmul_workspace_footprint_from_metadata(
+      metadata, provider.has_value() ? &provider.value() : nullptr, lowp_path,
+      split4_plan, nvfp4_f16_staging, short_mixed_shape, footprint, error_sink);
 }
 
 // The caller holds the context accounting lock. The cache is intentionally
@@ -860,6 +1180,74 @@ hipError_t launch_matmul_f16_staging_f32_gemm(
 #endif
 
 } // namespace
+
+extern "C" sllm_status_t sllm_hip_matmul_workspace_footprint(
+    const sllm_context_t *const raw_context,
+    const sllm_matmul_desc_t *const descriptor,
+    uint64_t *const persistent_bytes, uint64_t *const queue_bytes,
+    uint64_t *const context_bytes,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (persistent_bytes == nullptr || queue_bytes == nullptr ||
+        context_bytes == nullptr || raw_context == nullptr ||
+        descriptor == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "matmul workspace footprint input or output is null");
+    }
+    sllm_matmul::DescriptorMetadata metadata{};
+    const sllm_status_t descriptor_status =
+        sllm_matmul::validate_and_copy_unbound_descriptor(descriptor, &metadata,
+                                                          error_sink);
+    if (descriptor_status != SLLM_STATUS_OK) {
+      return descriptor_status;
+    }
+
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    Context *const context = lookup<Context>(raw_context, HandleKind::Context);
+    if (context == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "matmul workspace footprint context handle is stale or wrong kind");
+    }
+    std::lock_guard<std::mutex> accounting_lock(context->accounting_mutex);
+    if (context->poisoned.load() || context->release_active) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "matmul workspace footprint context is poisoned or releasing");
+    }
+    MatmulWorkspaceFootprint footprint{};
+    const sllm_status_t footprint_status = select_matmul_workspace_footprint(
+        metadata, context->device_properties.gcnArchName, &footprint,
+        error_sink);
+    if (footprint_status != SLLM_STATUS_OK) {
+      return footprint_status;
+    }
+    if (footprint.persistent_bytes >
+            static_cast<uint64_t>(std::numeric_limits<std::size_t>::max()) ||
+        footprint.queue_bytes >
+            static_cast<uint64_t>(std::numeric_limits<std::size_t>::max()) ||
+        footprint.context_bytes >
+            static_cast<uint64_t>(std::numeric_limits<std::size_t>::max())) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "matmul workspace footprint exceeds host size");
+    }
+    *persistent_bytes = footprint.persistent_bytes;
+    *queue_bytes = footprint.queue_bytes;
+    *context_bytes = footprint.context_bytes;
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in matmul workspace footprint query");
+  }
+}
 
 extern "C" sllm_status_t
 sllm_matmul_prepare(const sllm_context_t *const raw_context,
@@ -1148,34 +1536,47 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
               metadata.nvfp4_w4a4 && candidate->matmul_kernel_variant ==
                                          ::sllm_matmul_kernel::KernelVariant::
                                              Nvfp4W4A4PrefillGfx1201F16Staging;
-          if (nvfp4_f16_staging) {
-            ::sllm_matmul_kernel::F16StagingWorkspaceLayout
-                f16_staging_layout{};
-            const bool layout_valid =
-                ::sllm_matmul_kernel::
-                    phase78_gfx1201_nvfp4_w4a4_f16_staging_shape(
-                        metadata.m, metadata.k, metadata.n) &&
-                ::sllm_matmul_kernel::f16_staging_workspace_layout(
-                    metadata.m, metadata.k, metadata.n, &f16_staging_layout);
-            const uint64_t staged_total_bytes = f16_staging_layout.total_bytes;
-            uint64_t reservation_bytes = 0U;
-            if (!layout_valid || staged_total_bytes == 0U ||
-                !::sllm_matmul_kernel::qwen38_f16_staging_workspace_reservation(
-                    metadata.m, &reservation_bytes) ||
-                reservation_bytes < staged_total_bytes ||
-                reservation_bytes >
-                    static_cast<uint64_t>(
-                        std::numeric_limits<std::size_t>::max())) {
-              (void)sllm_public_runtime::AccountingState::release_prepared_plan(
-                  context->accounting, activation->accounting,
-                  weight->accounting, output->accounting);
-              return sllm_public_runtime::write_error(
-                  error_sink, SLLM_STATUS_UNSUPPORTED,
-                  "FP16 staging matmul workspace size overflowed");
-            }
+          MatmulWorkspaceFootprint footprint{};
+          const sllm_status_t footprint_status =
+              matmul_workspace_footprint_from_metadata(
+                  metadata,
+                  candidate->matmul_provider_plan.has_value()
+                      ? &candidate->matmul_provider_plan.value()
+                      : nullptr,
+                  lowp_path, split4_plan, nvfp4_f16_staging, short_mixed_shape,
+                  &footprint, error_sink);
+          if (footprint_status != SLLM_STATUS_OK ||
+              footprint.persistent_bytes >
+                  static_cast<uint64_t>(
+                      std::numeric_limits<std::size_t>::max()) ||
+              footprint.queue_bytes >
+                  static_cast<uint64_t>(
+                      std::numeric_limits<std::size_t>::max()) ||
+              footprint.context_bytes >
+                  static_cast<uint64_t>(
+                      std::numeric_limits<std::size_t>::max())) {
+            (void)sllm_public_runtime::AccountingState::release_prepared_plan(
+                context->accounting, activation->accounting, weight->accounting,
+                output->accounting);
+            return footprint_status == SLLM_STATUS_OK
+                       ? sllm_public_runtime::write_error(
+                             error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+                             "matmul workspace footprint exceeds host size")
+                       : footprint_status;
+          }
+          [[maybe_unused]] const uint64_t scale_offset =
+              footprint.activation_scale_offset;
+          candidate->matmul_context_workspace_bytes = footprint.context_bytes;
+          candidate->matmul_workspace_bytes =
+              lowp_path && metadata.m > UINT64_C(1)
+                  ? footprint.queue_bytes
+                  : footprint.persistent_bytes;
+          candidate->matmul_queue_workspace =
+              lowp_path && metadata.m > UINT64_C(1);
+          if (footprint.context_bytes != 0U) {
             const hipError_t staging_status =
-                reserve_matmul_f16_staging_workspace_locked(context,
-                                                            reservation_bytes);
+                reserve_matmul_f16_staging_workspace_locked(
+                    context, footprint.context_bytes);
             if (staging_status != hipSuccess) {
               (void)sllm_public_runtime::AccountingState::release_prepared_plan(
                   context->accounting, activation->accounting,
@@ -1188,90 +1589,10 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
               return hip_failure(error_sink, staging_status,
                                  "hipMalloc FP16 staging matmul workspace");
             }
-            candidate->matmul_context_workspace_bytes = reservation_bytes;
-          }
-          uint64_t scale_offset = 0U;
-          if (short_mixed_shape) {
-            uint64_t workspace_bytes = 0U;
-            const bool workspace_valid =
-                ::sllm_matmul_kernel::phase49_gfx1030_mixed_workspace_bytes(
-                    metadata.m, metadata.n, &workspace_bytes);
-            if (!workspace_valid ||
-                workspace_bytes >
-                    static_cast<uint64_t>(
-                        std::numeric_limits<std::size_t>::max()) ||
-                metadata.m >
-                    static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
-                metadata.k >
-                    static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
-                metadata.n >
-                    static_cast<uint64_t>(std::numeric_limits<int>::max())) {
-              (void)sllm_public_runtime::AccountingState::release_prepared_plan(
-                  context->accounting, activation->accounting,
-                  weight->accounting, output->accounting);
-              return sllm_public_runtime::write_error(
-                  error_sink, SLLM_STATUS_UNSUPPORTED,
-                  "mixed matmul workspace or dispatch size overflowed");
-            }
-            candidate->matmul_workspace_bytes = workspace_bytes;
-          } else if (lowp_path) {
-            if (!matmul_lowp_workspace_bytes(
-                    *candidate->matmul_provider_plan,
-                    &candidate->matmul_workspace_bytes)) {
-              (void)sllm_public_runtime::AccountingState::release_prepared_plan(
-                  context->accounting, activation->accounting,
-                  weight->accounting, output->accounting);
-              return sllm_public_runtime::write_error(
-                  error_sink, SLLM_STATUS_UNSUPPORTED,
-                  "low-precision matmul workspace size overflowed");
-            }
-            if (split4_plan) {
-              uint64_t partial_offset = 0U;
-              uint64_t split4_workspace_bytes = 0U;
-              if (!::sllm_matmul_kernel::phase78_nvfp4_w4a4_split4_workspace(
-                      metadata.m, metadata.k, metadata.n, &partial_offset,
-                      &split4_workspace_bytes) ||
-                  candidate->matmul_workspace_bytes != partial_offset) {
-                (void)
-                    sllm_public_runtime::AccountingState::release_prepared_plan(
-                        context->accounting, activation->accounting,
-                        weight->accounting, output->accounting);
-                return sllm_public_runtime::write_error(
-                    error_sink, SLLM_STATUS_UNSUPPORTED,
-                    "NVFP4 split4 workspace layout is incompatible");
-              }
-              candidate->matmul_workspace_bytes = split4_workspace_bytes;
-            }
-          } else {
-            const uint64_t value_bytes =
-                metadata.mxfp6_w6a6
-                    ? metadata.m * (metadata.k * UINT64_C(3) / UINT64_C(4))
-                : metadata.mxfp8_w8a8 ? metadata.m * metadata.k
-                : metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
-                    ? metadata.m * ((metadata.k + UINT64_C(1)) / UINT64_C(2))
-                    : metadata.m * metadata.k;
-            scale_offset = metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ||
-                                   metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6
-                               ? value_bytes
-                               : (value_bytes + UINT64_C(3)) & ~UINT64_C(3);
-            candidate->matmul_workspace_bytes =
-                scale_offset +
-                (metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ||
-                         metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6
-                     ? metadata.m *
-                           ((metadata.k +
-                             ((metadata.mxfp4_w4a4 || metadata.mxfp8_w8a8 ||
-                               metadata.mxfp6_w6a6)
-                                  ? UINT64_C(31)
-                                  : UINT64_C(15))) /
-                            ((metadata.mxfp4_w4a4 || metadata.mxfp8_w8a8 ||
-                              metadata.mxfp6_w6a6)
-                                 ? UINT64_C(32)
-                                 : UINT64_C(16)))
-                     : metadata.m * UINT64_C(4));
           }
           const hipError_t workspace_status =
-              candidate->matmul_workspace_bytes == 0U
+              candidate->matmul_queue_workspace ||
+                      candidate->matmul_workspace_bytes == 0U
                   ? hipSuccess
                   : hipMalloc(&candidate->matmul_workspace,
                               static_cast<std::size_t>(
@@ -1702,6 +2023,29 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
             : ::sllm_matmul_kernel::select_variant(
                   plan->matmul_metadata.m, plan->matmul_metadata.k,
                   plan->matmul_metadata.n, arch_name);
+    void *matmul_workspace = plan->matmul_workspace;
+    [[maybe_unused]] uint64_t matmul_workspace_bytes =
+        plan->matmul_workspace_bytes;
+    std::unique_lock<std::mutex> matmul_scratch_lock;
+    const bool queue_workspace_path =
+        plan->matmul_queue_workspace &&
+        (plan->matmul_metadata.mxfp8_w8a8 || plan->matmul_metadata.mxfp6_w6a6 ||
+         plan->matmul_metadata.mxfp4_w4a4 || plan->matmul_metadata.nvfp4_w4a4);
+    if (queue_workspace_path) {
+      matmul_scratch_lock =
+          std::unique_lock<std::mutex>(queue->matmul_scratch_mutex);
+      const hipError_t workspace_status = acquire_queue_matmul_scratch(
+          queue, plan->matmul_workspace_bytes, &matmul_workspace);
+      if (workspace_status != hipSuccess) {
+        matmul_scratch_lock.unlock();
+        execute_guard.disarm();
+        return cleanup_failed_submission(
+            candidate, token, workspace_status,
+            "queue low-precision matmul workspace allocation", queue,
+            error_sink);
+      }
+      matmul_workspace_bytes = plan->matmul_workspace_bytes;
+    }
     hipError_t launch_status = hipSuccess;
     if (plan->matmul_metadata.mxfp8_w8a8) {
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
@@ -1715,13 +2059,12 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
             plan->matmul_metadata.m * plan->matmul_metadata.k;
         const uint64_t activation_scale_bytes =
             plan->matmul_metadata.m * plan->matmul_metadata.k / UINT64_C(32);
-        if (plan->matmul_workspace == nullptr ||
-            plan->matmul_workspace_bytes <
+        if (matmul_workspace == nullptr ||
+            matmul_workspace_bytes <
                 activation_value_bytes + activation_scale_bytes) {
           launch_status = hipErrorOutOfMemory;
         } else {
-          auto *const quantized =
-              static_cast<uint8_t *>(plan->matmul_workspace);
+          auto *const quantized = static_cast<uint8_t *>(matmul_workspace);
           auto *const activation_scales = quantized + activation_value_bytes;
           const auto *const fp8_weight =
               static_cast<const uint8_t *>(weight_storage);
@@ -1752,12 +2095,12 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
             (plan->matmul_metadata.k * UINT64_C(3) / UINT64_C(4));
         const uint64_t activation_scale_bytes =
             plan->matmul_metadata.m * plan->matmul_metadata.k / UINT64_C(32);
-        if (plan->matmul_workspace == nullptr ||
-            plan->matmul_workspace_bytes <
+        if (matmul_workspace == nullptr ||
+            matmul_workspace_bytes <
                 activation_value_bytes + activation_scale_bytes) {
           launch_status = hipErrorOutOfMemory;
         } else {
-          auto *const packed = static_cast<uint8_t *>(plan->matmul_workspace);
+          auto *const packed = static_cast<uint8_t *>(matmul_workspace);
           auto *const activation_scales = packed + activation_value_bytes;
           const auto *const packed_weight =
               static_cast<const uint8_t *>(weight_storage);
@@ -1789,13 +2132,13 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
         const uint64_t activation_scale_bytes =
             plan->matmul_metadata.m *
             ((plan->matmul_metadata.k + UINT64_C(31)) / UINT64_C(32));
-        if (plan->matmul_workspace == nullptr ||
-            plan->matmul_workspace_bytes <
+        if (matmul_workspace == nullptr ||
+            matmul_workspace_bytes <
                 packed_activation_bytes + activation_scale_bytes) {
           launch_status = hipErrorOutOfMemory;
         } else {
           auto *const packed_activation =
-              static_cast<uint8_t *>(plan->matmul_workspace);
+              static_cast<uint8_t *>(matmul_workspace);
           auto *const activation_block_scales =
               packed_activation + packed_activation_bytes;
           const auto *const packed_weight =
@@ -1818,11 +2161,12 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
     } else if (plan->matmul_metadata.nvfp4_w4a4) {
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
       // Production kernels are absent from the host-contract binary.  Permit
-      // only ID73's ordered quantize+compute route to publish a completion so
+      // ID73 and queue-owned lowp scratch routes can publish a completion so
       // selector identity, two-dispatch accounting, and async ownership can
       // be tested without claiming a GPU numerical result.
-      launch_status = variant == ::sllm_matmul_kernel::KernelVariant::
-                                     Nvfp4W4A4DecodeActivationShared
+      launch_status = plan->matmul_queue_workspace ||
+                              variant == ::sllm_matmul_kernel::KernelVariant::
+                                             Nvfp4W4A4DecodeActivationShared
                           ? hipSuccess
                           : hipErrorInvalidValue;
 #else
@@ -1836,13 +2180,13 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
         const uint64_t activation_scale_bytes =
             plan->matmul_metadata.m *
             ((plan->matmul_metadata.k + UINT64_C(15)) / UINT64_C(16));
-        if (plan->matmul_workspace == nullptr ||
-            plan->matmul_workspace_bytes <
+        if (matmul_workspace == nullptr ||
+            matmul_workspace_bytes <
                 packed_activation_bytes + activation_scale_bytes) {
           launch_status = hipErrorOutOfMemory;
         } else {
           auto *const packed_activation =
-              static_cast<uint8_t *>(plan->matmul_workspace);
+              static_cast<uint8_t *>(matmul_workspace);
           auto *const activation_block_scales =
               packed_activation + packed_activation_bytes;
           const auto *const packed_weight =
@@ -1884,8 +2228,8 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
                       plan->matmul_metadata.m, plan->matmul_metadata.k,
                       plan->matmul_metadata.n, &partial_offset,
                       &split4_workspace_bytes) ||
-                  plan->matmul_workspace == nullptr ||
-                  plan->matmul_workspace_bytes < split4_workspace_bytes) {
+                  matmul_workspace == nullptr ||
+                  matmul_workspace_bytes < split4_workspace_bytes) {
                 launch_status = hipErrorOutOfMemory;
               } else {
                 auto *const partial = reinterpret_cast<float *>(
@@ -2327,6 +2671,9 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
           activation, weight, output, plan->matmul_metadata.m,
           plan->matmul_metadata.k, plan->matmul_metadata.n, variant,
           queue->stream);
+    }
+    if (matmul_scratch_lock.owns_lock()) {
+      matmul_scratch_lock.unlock();
     }
     if (launch_status != hipSuccess) {
       execute_guard.disarm();

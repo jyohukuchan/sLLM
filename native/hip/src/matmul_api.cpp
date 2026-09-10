@@ -29,9 +29,10 @@ sllm_status_t
 validate_tensor(const sllm_tensor_binding_t &binding,
                 TensorMetadata *const copied, const uint32_t expected_dtype,
                 const uint32_t expected_encoding, const uint64_t element_bytes,
-                const bool append_outer_scales, const bool packed_nvfp4,
-                const bool packed_mxfp4, const bool packed_mxfp8,
-                const bool packed_mxfp6, const bool append_input_tensor_scale,
+                const bool require_buffer, const bool append_outer_scales,
+                const bool packed_nvfp4, const bool packed_mxfp4,
+                const bool packed_mxfp8, const bool packed_mxfp6,
+                const bool append_input_tensor_scale,
                 sllm_error_sink_t *const sink) noexcept {
   if (binding.struct_size != sizeof(binding)) {
     return sllm_public_runtime::write_error(
@@ -49,10 +50,13 @@ validate_tensor(const sllm_tensor_binding_t &binding,
         sink, SLLM_STATUS_RESERVED_NONZERO,
         "matmul tensor binding reserved fields must be zero");
   }
-  if (binding.buffer == nullptr || binding.rank != 2U) {
+  if (binding.rank != 2U || (require_buffer ? binding.buffer == nullptr
+                                            : binding.buffer != nullptr)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_TENSOR_BINDING,
-        "matmul tensor binding requires a buffer and rank two");
+        require_buffer
+            ? "matmul tensor binding requires a buffer and rank two"
+            : "metadata-only matmul tensor binding must omit its buffer");
   }
   if (binding.dtype != expected_dtype) {
     return sllm_public_runtime::write_error(
@@ -230,9 +234,10 @@ validate_descriptor_prefix(const sllm_matmul_desc_t *const descriptor,
 }
 
 sllm_status_t
-validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
-                             DescriptorMetadata *const metadata,
-                             sllm_error_sink_t *const sink) noexcept {
+validate_and_copy_descriptor_impl(const sllm_matmul_desc_t *const descriptor,
+                                  DescriptorMetadata *const metadata,
+                                  const bool require_buffers,
+                                  sllm_error_sink_t *const sink) noexcept {
   if (descriptor == nullptr || metadata == nullptr) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR,
@@ -272,8 +277,8 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
       descriptor->op_version == SLLM_HIP_MATMUL_NVFP4_VERSION || nvfp4_w4a4;
   sllm_status_t status = validate_tensor(
       descriptor->activation, &metadata->activation, SLLM_TENSOR_DTYPE_BF16,
-      SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2), false, false, false, false,
-      false, false, sink);
+      SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2), require_buffers, false,
+      false, false, false, false, false, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
@@ -299,14 +304,15 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
       fp8_outer || nvfp4 || mxfp4_w4a4 || mxfp8_w8a8 || mxfp6_w6a6
           ? UINT64_C(1)
           : UINT64_C(2),
-      fp8_outer, nvfp4, mxfp4_w4a4, mxfp8_w8a8, mxfp6_w6a6, nvfp4_w4a4, sink);
+      require_buffers, fp8_outer, nvfp4, mxfp4_w4a4, mxfp8_w8a8, mxfp6_w6a6,
+      nvfp4_w4a4, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  status = validate_tensor(descriptor->output, &metadata->output,
-                           SLLM_TENSOR_DTYPE_BF16,
-                           SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2), false,
-                           false, false, false, false, false, sink);
+  status = validate_tensor(
+      descriptor->output, &metadata->output, SLLM_TENSOR_DTYPE_BF16,
+      SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2), require_buffers, false,
+      false, false, false, false, false, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
@@ -364,6 +370,20 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
     metadata->input_tensor_scale_offset = 0U;
   }
   return SLLM_STATUS_OK;
+}
+
+sllm_status_t
+validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
+                             DescriptorMetadata *const metadata,
+                             sllm_error_sink_t *const sink) noexcept {
+  return validate_and_copy_descriptor_impl(descriptor, metadata, true, sink);
+}
+
+sllm_status_t
+validate_and_copy_unbound_descriptor(const sllm_matmul_desc_t *const descriptor,
+                                     DescriptorMetadata *const metadata,
+                                     sllm_error_sink_t *const sink) noexcept {
+  return validate_and_copy_descriptor_impl(descriptor, metadata, false, sink);
 }
 
 bool intervals_overlap(const TensorMetadata &left,

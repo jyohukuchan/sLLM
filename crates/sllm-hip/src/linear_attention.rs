@@ -45,6 +45,51 @@ const GFX942_WAVE64_COLUMN_RECURRENT_DEVICE_SYMBOL: &str =
     "sllm_linear_attention_column_state_wave64_v3";
 const GFX942_WAVE64_COLUMN_WORKGROUP_SIZE: u32 = 256;
 
+// M3 checkpoint operations are intentionally private to the Rust/HIP bridge.
+// They are not added to sllm-hip-sys because the installed C ABI remains
+// unchanged; the native symbols have matching host-stub definitions.
+unsafe extern "C" {
+    fn sllm_linear_attention_state_prepare_checkpoint(
+        state: *const sys::sllm_linear_attention_state_t,
+        expected_start: u64,
+        token_count: u32,
+        rows: u32,
+        error_sink: *mut sys::sllm_error_sink_t,
+    ) -> sys::sllm_status_t;
+    fn sllm_linear_attention_state_validate_checkpoint(
+        state: *const sys::sllm_linear_attention_state_t,
+        expected_start: u64,
+        expected_end: u64,
+        rows: u32,
+        error_sink: *mut sys::sllm_error_sink_t,
+    ) -> sys::sllm_status_t;
+    fn sllm_linear_attention_state_commit_checkpoint(
+        context: *const sys::sllm_context_t,
+        queue: *const sys::sllm_queue_t,
+        state: *const sys::sllm_linear_attention_state_t,
+        expected_start: u64,
+        expected_end: u64,
+        prefix_end: u64,
+        row_index: u32,
+        error_sink: *mut sys::sllm_error_sink_t,
+    ) -> sys::sllm_status_t;
+    fn sllm_linear_attention_state_commit_checkpoint_batch(
+        context: *const sys::sllm_context_t,
+        queue: *const sys::sllm_queue_t,
+        states: *const *const sys::sllm_linear_attention_state_t,
+        state_count: u32,
+        expected_start: u64,
+        expected_end: u64,
+        prefix_end: u64,
+        row_index: u32,
+        error_sink: *mut sys::sllm_error_sink_t,
+    ) -> sys::sllm_status_t;
+    fn sllm_linear_attention_state_discard_checkpoint(
+        state: *const sys::sllm_linear_attention_state_t,
+        error_sink: *mut sys::sllm_error_sink_t,
+    ) -> sys::sllm_status_t;
+}
+
 struct LinearAttentionStateInner {
     raw: usize,
     context: Context,
@@ -278,6 +323,129 @@ impl LinearAttentionStateResource {
                 self.raw_handle()?.as_ptr(),
                 expected_length,
                 rewind_length,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    pub(crate) fn prepare_checkpoint(
+        &self,
+        expected_start: u64,
+        token_count: u32,
+        rows: u32,
+    ) -> Result<(), RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let status = unsafe {
+            sllm_linear_attention_state_prepare_checkpoint(
+                self.raw_handle()?.as_ptr(),
+                expected_start,
+                token_count,
+                rows,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    pub(crate) fn validate_checkpoint(
+        &self,
+        expected_start: u64,
+        expected_end: u64,
+        rows: u32,
+    ) -> Result<(), RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let status = unsafe {
+            sllm_linear_attention_state_validate_checkpoint(
+                self.raw_handle()?.as_ptr(),
+                expected_start,
+                expected_end,
+                rows,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    pub(crate) fn commit_checkpoint(
+        &self,
+        queue: &Queue,
+        expected_start: u64,
+        expected_end: u64,
+        prefix_end: u64,
+        row_index: u32,
+    ) -> Result<(), RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let status = unsafe {
+            sllm_linear_attention_state_commit_checkpoint(
+                self.inner.context.raw_handle()?.as_ptr(),
+                queue.raw_handle()?.as_ptr(),
+                self.raw_handle()?.as_ptr(),
+                expected_start,
+                expected_end,
+                prefix_end,
+                row_index,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    pub(crate) fn commit_checkpoints(
+        states: &[&Self],
+        queue: &Queue,
+        expected_start: u64,
+        expected_end: u64,
+        prefix_end: u64,
+        row_index: u32,
+    ) -> Result<(), RuntimeError> {
+        let first = states.first().ok_or_else(|| {
+            RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "linear attention checkpoint commit batch is empty",
+            )
+        })?;
+        let raw_states = states
+            .iter()
+            .map(|state| {
+                state
+                    .raw_handle()
+                    .map(|raw| raw.as_ptr() as *const sys::sllm_linear_attention_state_t)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let state_count = u32::try_from(raw_states.len()).map_err(|_| {
+            RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "linear attention checkpoint commit batch is too large",
+            )
+        })?;
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let status = unsafe {
+            sllm_linear_attention_state_commit_checkpoint_batch(
+                first.inner.context.raw_handle()?.as_ptr(),
+                queue.raw_handle()?.as_ptr(),
+                raw_states.as_ptr(),
+                state_count,
+                expected_start,
+                expected_end,
+                prefix_end,
+                row_index,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    pub(crate) fn discard_checkpoint(&self) -> Result<(), RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let status = unsafe {
+            sllm_linear_attention_state_discard_checkpoint(
+                self.raw_handle()?.as_ptr(),
                 &mut error_sink,
             )
         };

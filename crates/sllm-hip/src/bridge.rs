@@ -21,9 +21,9 @@ use sllm_core::{
     ExecutionMinistral3YarnSubmissionAdapter, ExecutionQueueFenceAdapter, ExecutionReadbackAdapter,
     ExecutionSession, ExecutionSessionAdapter, ExecutionSessionRequest, ExecutionState,
     ExecutionStateImageV1, ExecutionSubmissionAdapter, ExecutionTransferAdapter, KvCacheEncoding,
-    OpaqueStatePlane, OwnedTensorBinding, PrepareSupport, PreparedOperation,
-    QueueCompletionMode as CoreQueueCompletionMode, ShutdownReport, StateLayerMetadataV1,
-    StateOwnerKindV1, StatePlaneKindV1,
+    OpaqueStatePlane, OwnedTensorBinding, PrepareSupport, PreparedMatmulFootprint,
+    PreparedOperation, QueueCompletionMode as CoreQueueCompletionMode, ShutdownReport,
+    StateLayerMetadataV1, StateOwnerKindV1, StatePlaneKindV1,
 };
 
 use crate::argmax::{ArgmaxDispatchInfo, ArgmaxSubmission, PreparedArgmax};
@@ -34,6 +34,7 @@ use crate::kv_state::{
 use crate::linear_attention::{
     LinearAttentionCompletion, LinearAttentionEvidence, LinearAttentionStateResource,
 };
+use crate::row_concat::RowConcat;
 use crate::runtime::logical_gcn_arch_name;
 use crate::{
     ArgmaxDescriptor, AttentionPreprocessDescriptor, AttentionPreprocessDispatchInfo,
@@ -217,7 +218,7 @@ pub(crate) fn open_execution_session(
         backend,
         context,
         total_memory_bytes: device.total_memory_bytes,
-        available_memory_bytes: device.available_memory_bytes,
+        available_memory: HipAvailableMemory::Device(request.device_index()),
     });
     Ok(Arc::new(ExecutionSession::new(HIP_BACKEND_NAME, adapter)))
 }
@@ -418,15 +419,114 @@ impl Drop for ActiveOperation {
     }
 }
 
+// Device free memory changes after model upload, native plan preparation,
+// and request allocation.  Only immutable total capacity is cached below.
+// Query failures return None so placement cannot reuse a stale free count.
+enum HipAvailableMemory {
+    Device(u32),
+    #[cfg(test)]
+    Fixed(u64),
+}
+
 struct HipExecutionSession {
     state: Arc<HipSessionState>,
     backend: HipBackend,
     context: Context,
     total_memory_bytes: u64,
-    available_memory_bytes: u64,
+    available_memory: HipAvailableMemory,
 }
 
 impl ExecutionSessionAdapter for HipExecutionSession {
+    fn fixed_k20_support_scratch_version(&self) -> Option<u32> {
+        Some(1)
+    }
+
+    fn fixed_k20_mtp_verifier_version(&self) -> Option<u32> {
+        Some(1)
+    }
+
+    fn bf16_row_concat_version(&self) -> Option<u32> {
+        Some(1)
+    }
+
+    fn concat_bf16_rows(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        queue: &sllm_core::ExecutionQueue,
+        left: &BufferRange,
+        right: &BufferRange,
+        output: &BufferRange,
+        rows: u64,
+        left_columns: u64,
+        right_columns: u64,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        let queue = access.downcast_queue_payload::<Queue>(queue)?;
+        let left_offset = left.offset_bytes();
+        let right_offset = right.offset_bytes();
+        let output_offset = output.offset_bytes();
+        let left = access.downcast_buffer_payload::<Buffer>(left.buffer())?;
+        let right = access.downcast_buffer_payload::<Buffer>(right.buffer())?;
+        let output = access.downcast_buffer_payload::<Buffer>(output.buffer())?;
+        RowConcat {
+            context: &self.context,
+            queue,
+            left,
+            left_offset,
+            right,
+            right_offset,
+            output,
+            output_offset,
+            rows,
+            left_columns,
+            right_columns,
+        }
+        .run()
+        .map_err(map_backend_error)
+    }
+
+    fn verify_fixed_k20_mtp(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        queue: &sllm_core::ExecutionQueue,
+        target: &BufferRange,
+        draft: &BufferRange,
+        draft_ids: &[u32],
+        seed: u64,
+        absolute_position: u64,
+        output: &BufferRange,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        if !(1..=8).contains(&draft_ids.len()) {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "fixed-K20 MTP verification requires 1 through 8 drafts".to_owned(),
+            });
+        }
+        let width = draft_ids.len() as u32;
+        let mut ids = [0_u32; 8];
+        ids[..draft_ids.len()].copy_from_slice(draft_ids);
+        let queue = access.downcast_queue_payload::<Queue>(queue)?;
+        let target_buffer = access.downcast_buffer_payload::<Buffer>(target.buffer())?;
+        let draft_buffer = access.downcast_buffer_payload::<Buffer>(draft.buffer())?;
+        let output_buffer = access.downcast_buffer_payload::<Buffer>(output.buffer())?;
+        crate::token_selector_pq::Verification {
+            context: &self.context,
+            queue,
+            target: target_buffer,
+            target_offset: target.offset_bytes(),
+            draft: draft_buffer,
+            draft_offset: draft.offset_bytes(),
+            draft_ids: crate::token_selector_pq::DraftIdsV1 { ids },
+            width,
+            seed,
+            absolute_position,
+            decision: output_buffer,
+            decision_offset: output.offset_bytes(),
+        }
+        .run()
+        .map_err(map_backend_error)
+    }
+
     fn expected_target(&self) -> Option<String> {
         self.context.expected_target().map(str::to_owned)
     }
@@ -436,7 +536,13 @@ impl ExecutionSessionAdapter for HipExecutionSession {
     }
 
     fn available_memory_bytes(&self) -> Option<u64> {
-        Some(self.available_memory_bytes)
+        match self.available_memory {
+            HipAvailableMemory::Device(device_index) => Context::query_device(device_index)
+                .ok()
+                .map(|device| device.available_memory_bytes),
+            #[cfg(test)]
+            HipAvailableMemory::Fixed(bytes) => Some(bytes),
+        }
     }
 
     fn total_memory_bytes(&self) -> Option<u64> {
@@ -489,6 +595,16 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             };
         }
         PrepareSupport::Supported
+    }
+
+    fn estimate_matmul_footprint(
+        &self,
+        descriptor: &sllm_core::SemanticOpDescriptor,
+    ) -> Result<Option<PreparedMatmulFootprint>, ExecutionError> {
+        self.state.ensure_open()?;
+        self.backend
+            .estimate_matmul_footprint(&self.context, descriptor)
+            .map_err(map_backend_error)
     }
 
     fn create_queue(
@@ -1109,6 +1225,97 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             .map_err(map_backend_error)
     }
 
+    fn prepare_linear_attention_prefix_checkpoint(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::LinearAttentionState,
+        expected_start: u64,
+        token_count: u32,
+        rows: u32,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        access
+            .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?
+            .prepare_checkpoint(expected_start, token_count, rows)
+            .map_err(map_linear_checkpoint_prepare_error)
+    }
+
+    fn validate_linear_attention_prefix_checkpoint(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::LinearAttentionState,
+        expected_start: u64,
+        expected_end: u64,
+        rows: u32,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        access
+            .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?
+            .validate_checkpoint(expected_start, expected_end, rows)
+            .map_err(map_backend_error)
+    }
+
+    fn commit_linear_attention_prefix_checkpoint(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::LinearAttentionState,
+        queue: &sllm_core::ExecutionQueue,
+        expected_start: u64,
+        expected_end: u64,
+        prefix_end: u64,
+        row_index: u32,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        let resource = access
+            .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?;
+        let queue = access.downcast_queue_payload::<Queue>(queue)?.clone();
+        resource
+            .commit_checkpoint(&queue, expected_start, expected_end, prefix_end, row_index)
+            .map_err(map_backend_error)
+    }
+
+    fn commit_linear_attention_prefix_checkpoints(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        queue: &sllm_core::ExecutionQueue,
+        states: &[&sllm_core::LinearAttentionState],
+        expected_start: u64,
+        expected_end: u64,
+        prefix_end: u64,
+        row_index: u32,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        let queue = access.downcast_queue_payload::<Queue>(queue)?.clone();
+        let resources = states
+            .iter()
+            .map(|state| {
+                access
+                    .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        LinearAttentionStateResource::commit_checkpoints(
+            &resources,
+            &queue,
+            expected_start,
+            expected_end,
+            prefix_end,
+            row_index,
+        )
+        .map_err(map_backend_error)
+    }
+
+    fn discard_linear_attention_prefix_checkpoint(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::LinearAttentionState,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        access
+            .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?
+            .discard_checkpoint()
+            .map_err(map_backend_error)
+    }
+
     fn execute_linear_attention(
         &self,
         access: &ExecutionAdapterAccess<'_>,
@@ -1203,7 +1410,7 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 HipPreparedPlan::Qwen38ProjectionPack2(
                     self.backend
                         .prepare_qwen38_projection_pack2(&self.context, descriptor)
-                        .map_err(map_backend_error)?,
+                        .map_err(map_qwen_projection_pack_prepare_error)?,
                 )
             }
             sllm_core::SemanticOpKind::GdnProjectionBundle => {
@@ -2727,6 +2934,24 @@ fn map_backend_error(error: RuntimeError) -> ExecutionError {
     }
 }
 
+fn map_prepare_unsupported_error(error: RuntimeError) -> ExecutionError {
+    if error.status() == RuntimeStatus::Unsupported {
+        ExecutionError::Unsupported {
+            reason: error.message().to_owned(),
+        }
+    } else {
+        map_backend_error(error)
+    }
+}
+
+fn map_linear_checkpoint_prepare_error(error: RuntimeError) -> ExecutionError {
+    map_prepare_unsupported_error(error)
+}
+
+fn map_qwen_projection_pack_prepare_error(error: RuntimeError) -> ExecutionError {
+    map_prepare_unsupported_error(error)
+}
+
 fn map_async_error(error: RuntimeError) -> ExecutionError {
     match error.status() {
         RuntimeStatus::Busy => ExecutionError::Busy,
@@ -3218,7 +3443,7 @@ mod tests {
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
             total_memory_bytes: u64::MAX,
-            available_memory_bytes: u64::MAX,
+            available_memory: HipAvailableMemory::Fixed(u64::MAX),
         };
         assert_eq!(
             adapter.max_transfer_bytes(),
@@ -3319,7 +3544,7 @@ mod tests {
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
             total_memory_bytes: u64::MAX,
-            available_memory_bytes: u64::MAX,
+            available_memory: HipAvailableMemory::Fixed(u64::MAX),
         };
         assert_eq!(
             adapter.supports(&attention_descriptor()),
@@ -3334,7 +3559,7 @@ mod tests {
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
             total_memory_bytes: u64::MAX,
-            available_memory_bytes: u64::MAX,
+            available_memory: HipAvailableMemory::Fixed(u64::MAX),
         };
         let contract = SplitHalfRotaryContract::new(3, 1, 6, 4, 10_000.0, 255, 3, 262_144)
             .expect("valid rotary contract");
@@ -3361,7 +3586,7 @@ mod tests {
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
             total_memory_bytes: u64::MAX,
-            available_memory_bytes: u64::MAX,
+            available_memory: HipAvailableMemory::Fixed(u64::MAX),
         };
         let contract = WindowedCausalAttentionContract::new(3, 1, 6, 2, 3, 5, Some(4), 1.0)
             .expect("valid windowed attention contract");
@@ -3385,7 +3610,7 @@ mod tests {
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
             total_memory_bytes: u64::MAX,
-            available_memory_bytes: u64::MAX,
+            available_memory: HipAvailableMemory::Fixed(u64::MAX),
         };
         let contract = TokenSelectorContractV1::new(257, 0.75, 7, 11).unwrap();
         let descriptor = SemanticOpDescriptor::new_token_select(
@@ -3430,7 +3655,7 @@ mod tests {
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
             total_memory_bytes: u64::MAX,
-            available_memory_bytes: u64::MAX,
+            available_memory: HipAvailableMemory::Fixed(u64::MAX),
         };
         let route = SemanticOpDescriptor::new(
             sllm_core::SemanticOpKind::MoeRoute,
@@ -3496,7 +3721,7 @@ mod tests {
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
             total_memory_bytes: u64::MAX,
-            available_memory_bytes: u64::MAX,
+            available_memory: HipAvailableMemory::Fixed(u64::MAX),
         };
         let score = deepseek_v4_route_descriptor(CoreDeepSeekV4MoeRouteMode::Score, true, 1.5);
         let hash = deepseek_v4_route_descriptor(CoreDeepSeekV4MoeRouteMode::Hash, false, 1.25);
@@ -3653,6 +3878,29 @@ mod tests {
             ExecutionError::AsyncFailure {
                 status: sys::SLLM_STATUS_INVALID_ARGUMENT,
                 diagnostic: "DeepSeek V4 route rejected duplicate hash expert ids".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn qwen_projection_prepare_maps_only_unsupported_to_typed_prepare_error() {
+        assert_eq!(
+            map_qwen_projection_pack_prepare_error(RuntimeError::local(
+                RuntimeStatus::Unsupported,
+                "Qwen3.8 projection-pack provider rejected the exact target",
+            )),
+            ExecutionError::Unsupported {
+                reason: "Qwen3.8 projection-pack provider rejected the exact target".to_owned(),
+            }
+        );
+        assert_eq!(
+            map_qwen_projection_pack_prepare_error(RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "Qwen3.8 projection-pack descriptor is invalid",
+            )),
+            ExecutionError::BackendStatus {
+                status: sys::SLLM_STATUS_INVALID_ARGUMENT,
+                diagnostic: "Qwen3.8 projection-pack descriptor is invalid".to_owned(),
             }
         );
     }

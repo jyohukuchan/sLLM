@@ -111,14 +111,26 @@ constexpr const char
 constexpr const char *kFp8OuterDecodeGfx1030ActivationSharedWave8DeviceSymbol =
     "sllm_matmul_fp8_outer_decode_gfx1030_actshared_wave8col64_v1";
 // Phase 78 ID82: exact gfx1030 M=1 E4M3FN ingress through a resident padded
-// 256-entry FP16-bit LUT in LDS.  The selector is opt-in and reuses the ID68
-// shape boundary; baseline, FNUZ, and other targets retain their rollback.
+// 256-entry FP16-bit LUT in LDS.  The selector keeps explicit controls and
+// rollback precedence, while the measured default shape family has dedicated
+// M=1 code objects for five Qwen38 tuples.  Baseline, FNUZ, neighboring
+// tuples, and other targets retain their rollback.
 constexpr const char *kFp8OuterDecodeGfx1030LdsLutLogicalKernelId =
     "matmul.fp8.outer.decode.gfx1030.lds_lut.wave4col32.v1";
 constexpr const char *kFp8OuterDecodeGfx1030LdsLutDeviceSymbol =
     "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_wave4col32_v1";
-// The four exact Qwen38 decode tuples use separate code objects so their
+// The five adopted Qwen38 M=1 tuples use separate code objects so their
 // high-register rolled loops cannot affect the broad ID82 shape family.
+constexpr const char *kFp8OuterDecodeGfx1030LdsLutM1K5120N12288DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n12288_v1";
+constexpr const char *kFp8OuterDecodeGfx1030LdsLutM1K5120N1024DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n1024_v1";
+constexpr const char *kFp8OuterDecodeGfx1030LdsLutM1K5120N17408DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n17408_v1";
+constexpr const char *kFp8OuterDecodeGfx1030LdsLutM1K17408N5120DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k17408n5120_v1";
+constexpr const char *kFp8OuterDecodeGfx1030LdsLutM1K6144N5120DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k6144n5120_v1";
 constexpr const char *kFp8OuterDecodeGfx1030LdsLutK5120N17408DeviceSymbol =
     "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k5120n17408_v1";
 constexpr const char *kFp8OuterDecodeGfx1030LdsLutK6144N5120DeviceSymbol =
@@ -136,8 +148,18 @@ constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4LogicalKernelId =
     "matmul.fp8.outer.decode.gfx1030.fused.m2_4.v1";
 constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4K5120N10240DeviceSymbol =
     "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n10240_v1";
+constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4K5120N12288DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n12288_v1";
+constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4K5120N1024DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n1024_v1";
+constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4K5120N17408DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n17408_v1";
+constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4K17408N5120DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_fused_k17408n5120_v1";
 constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4K5120N6144DeviceSymbol =
     "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n6144_v1";
+constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4K6144N5120DeviceSymbol =
+    "sllm_matmul_fp8_outer_decode_gfx1030_fused_k6144n5120_v1";
 constexpr const char *kFp8OuterDecodeGfx1030FusedM2_4K5120N248320DeviceSymbol =
     "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n248320_v1";
 constexpr uint32_t kFp8OuterDecodeGfx1030LdsLutWorkgroupSize = 256U;
@@ -168,7 +190,17 @@ static_assert(sizeof("matmul.fp8.outer.decode.gfx1030.fused.m2_4.v1") <= 64U);
 static_assert(
     sizeof("sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n10240_v1") <= 64U);
 static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n12288_v1") <= 64U);
+static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n1024_v1") <= 64U);
+static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n17408_v1") <= 64U);
+static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_fused_k17408n5120_v1") <= 64U);
+static_assert(
     sizeof("sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n6144_v1") <= 64U);
+static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_fused_k6144n5120_v1") <= 64U);
 static_assert(
     sizeof("sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n248320_v1") <=
     64U);
@@ -197,6 +229,21 @@ static_assert(sizeof("matmul.fp8.outer.decode.gfx1030.lds_lut.wave4col32.v1") <=
               64U);
 static_assert(
     sizeof("sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_wave4col32_v1") <=
+    64U);
+static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n12288_v1") <=
+    64U);
+static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n1024_v1") <=
+    64U);
+static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n17408_v1") <=
+    64U);
+static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k17408n5120_v1") <=
+    64U);
+static_assert(
+    sizeof("sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k6144n5120_v1") <=
     64U);
 static_assert(
     sizeof("sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k5120n17408_v1") <=
@@ -256,8 +303,26 @@ constexpr const char *kNvfp4W4A4PrefillGfx1201WmmaKahanLogicalKernelId =
     "matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x64.kahan.v1";
 constexpr const char *kNvfp4W4A4PrefillGfx1201WmmaKahanDeviceSymbol =
     "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1";
+constexpr const char *kNvfp4W4A4PrefillGfx1201WmmaKahanStage64DeviceSymbol =
+    "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_stage64_v1";
+constexpr const char *kNvfp4W4A4PrefillGfx1201WmmaKahanLookaheadDeviceSymbol =
+    "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_lookahead_v1";
+constexpr const char
+    *kNvfp4W4A4PrefillGfx1201WmmaKahanAlignedK5120N17408DeviceSymbol =
+        "sllm_nvfp4_gfx1201_wmma128x64_aligned_k5120n17408_v1";
+constexpr const char
+    *kNvfp4W4A4PrefillGfx1201WmmaKahanAlignedK17408N5120DeviceSymbol =
+        "sllm_nvfp4_gfx1201_wmma128x64_aligned_k17408n5120_v1";
+constexpr const char
+    *kNvfp4W4A4PrefillGfx1201WmmaKahanPad68K5120N17408DeviceSymbol =
+        "sllm_nvfp4_gfx1201_wmma128x64_pad68_k5120n17408_v1";
+constexpr const char
+    *kNvfp4W4A4PrefillGfx1201WmmaKahanPad68K17408N5120DeviceSymbol =
+        "sllm_nvfp4_gfx1201_wmma128x64_pad68_k17408n5120_v1";
 constexpr const char *kNvfp4W4A4PrefillGfx1201WmmaKahanEnvironment =
     "SLLM_NVFP4_W4A4_PREFILL_FORCE_WMMA_COMPENSATED";
+constexpr const char *kNvfp4W4A4PrefillCompensatedEnvironment =
+    "SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED";
 // Phase 83: gfx1201 small-M row grid reuses ID84's activation-shared M=1
 // body once per row.  Keep a separate identity and flag from ID88 because
 // the latter is the gfx1030 ID73 wrapper and has different LDS behavior.
@@ -267,13 +332,33 @@ constexpr const char *kNvfp4W4A4SmallMGfx1201RowGridDeviceSymbol =
     "sllm_nvfp4_w4a4_small_m_gfx1201_rowgrid_v1";
 constexpr const char *kNvfp4W4A4SmallMGfx1201RowGridEnvironment =
     "SLLM_NVFP4_W4A4_SMALL_M_ROWGRID_GFX1201";
+constexpr const char *kNvfp4W4A4SmallMVgprReuseLogicalKernelId =
+    "matmul.nvfp4.w4a4.small_m.vgpr_reuse.v1";
+constexpr const char *kNvfp4W4A4SmallMVgprReuseDeviceSymbol =
+    "sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1";
 static_assert(sizeof("matmul.nvfp4.w4a4.small_m.gfx1201.rowgrid.v1") <= 64U);
 static_assert(sizeof("sllm_nvfp4_w4a4_small_m_gfx1201_rowgrid_v1") <= 64U);
+static_assert(sizeof("matmul.nvfp4.w4a4.small_m.vgpr_reuse.v1") <= 64U);
+static_assert(sizeof("sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1") <= 64U);
 static_assert(sizeof("sllm_nvfp4_w4a4_prefill_gfx1201_wmma_ordinary_v1") <=
               64U);
 static_assert(sizeof("matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x64.kahan.v1") <=
               64U);
 static_assert(sizeof("sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1") <=
+              64U);
+static_assert(
+    sizeof("sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_stage64_v1") <=
+    64U);
+static_assert(
+    sizeof("sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_lookahead_v1") <=
+    64U);
+static_assert(sizeof("sllm_nvfp4_gfx1201_wmma128x64_aligned_k5120n17408_v1") <=
+              64U);
+static_assert(sizeof("sllm_nvfp4_gfx1201_wmma128x64_aligned_k17408n5120_v1") <=
+              64U);
+static_assert(sizeof("sllm_nvfp4_gfx1201_wmma128x64_pad68_k5120n17408_v1") <=
+              64U);
+static_assert(sizeof("sllm_nvfp4_gfx1201_wmma128x64_pad68_k17408n5120_v1") <=
               64U);
 
 constexpr bool
@@ -595,6 +680,7 @@ enum class KernelVariant : uint32_t {
   Nvfp4W4A4SmallMGfx1201RowGrid = 90U,
   Bf16PrefillGfx1030_64x64 = 91U,
   Fp8OuterDecodeGfx1030FusedM2_4 = 92U,
+  Nvfp4W4A4SmallMVgprReuse = 94U,
 };
 
 // Selector state is intentionally kept inside the native runtime.  The
@@ -639,6 +725,20 @@ inline bool selector_env_is_one(const char *const name) noexcept {
 
 inline bool selector_env_is_present(const char *const name) noexcept {
   return name != nullptr && std::getenv(name) != nullptr;
+}
+
+inline bool nvfp4_w4a4_prefill_control_present() noexcept {
+  return selector_env_is_present(kNvfp4W4A4PrefillCompensatedEnvironment) ||
+         selector_env_is_present(
+             kNvfp4W4A4PrefillGfx1201WmmaKahanEnvironment) ||
+         selector_env_is_present("SLLM_NVFP4_W4A4_SMALL_M_ROWGRID") ||
+         selector_env_is_present(kNvfp4W4A4SmallMGfx1201RowGridEnvironment) ||
+         selector_env_is_present("SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8") ||
+         selector_env_is_present("SLLM_NVFP4_W4A4_PREFILL_FORCE_COL8") ||
+         selector_env_is_present("SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A") ||
+         selector_env_is_present(
+             "SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA") ||
+         selector_env_is_present(kNvfp4W4A4PrefillGfx1201F16StagingEnvironment);
 }
 
 // A baseline can be selected for three different reasons that matter when
@@ -1185,12 +1285,98 @@ phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(const uint64_t m, const uint64_t k,
          ((k == 5120U && n == 17408U) || (k == 17408U && n == 5120U));
 }
 
+// The full-model candidate runs cover the large prefill rows. Keep the
+// default adoption narrower than the explicit ID87/ID89 opt-ins, which retain
+// their existing M>1 shape admission for targeted experiments.
+constexpr bool
+phase83_nvfp4_w4a4_compensated_adopted_shape(const uint64_t m, const uint64_t k,
+                                             const uint64_t n) noexcept {
+  return m >= 64U &&
+         ((k == 5120U && n == 17408U) || (k == 17408U && n == 5120U));
+}
+
+// ID87 keeps its logical selector identity while the measured gfx1030
+// TileM128 body is admitted only for full 128-row tiles. M tails and smaller
+// rows remain on the original 64x64 device symbol.
+constexpr bool phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(
+    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
+  return m >= 512U && (m % 128U) == 0U &&
+         ((k == 5120U && n == 17408U) || (k == 17408U && n == 5120U));
+}
+
+constexpr bool phase83_gfx1201_nvfp4_w4a4_wmma_kahan_adopted_shape(
+    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
+  return phase83_nvfp4_w4a4_compensated_adopted_shape(m, k, n);
+}
+
+constexpr bool phase83_gfx1201_nvfp4_w4a4_wmma_kahan_stage64_shape(
+    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
+  return m >= 256U && phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(m, k, n);
+}
+
+constexpr bool phase83_gfx1201_nvfp4_w4a4_wmma_kahan_aligned_shape(
+    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
+  return phase83_gfx1201_nvfp4_w4a4_wmma_kahan_stage64_shape(m, k, n) &&
+         (m % 128U) == 0U;
+}
+
+constexpr bool phase83_gfx1201_nvfp4_w4a4_wmma_kahan_pad68_shape(
+    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
+  return m == 2048U &&
+         ((k == 5120U && n == 17408U) || (k == 17408U && n == 5120U));
+}
+
 static_assert(phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(2U, 5120U, 17408U));
 static_assert(phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(1024U, 17408U,
                                                           5120U));
 static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(1U, 5120U, 17408U));
 static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(2U, 5121U, 17408U));
 static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(2U, 5120U, 5120U));
+static_assert(phase83_nvfp4_w4a4_compensated_adopted_shape(64U, 5120U, 17408U));
+static_assert(phase83_nvfp4_w4a4_compensated_adopted_shape(1024U, 17408U,
+                                                           5120U));
+static_assert(!phase83_nvfp4_w4a4_compensated_adopted_shape(63U, 5120U,
+                                                            17408U));
+static_assert(!phase83_nvfp4_w4a4_compensated_adopted_shape(64U, 5121U,
+                                                            17408U));
+static_assert(!phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(511U, 5120U,
+                                                                  17408U));
+static_assert(phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(512U, 5120U,
+                                                                 17408U));
+static_assert(!phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(513U, 5120U,
+                                                                  17408U));
+static_assert(!phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(1023U, 17408U,
+                                                                  5120U));
+static_assert(phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(1024U, 17408U,
+                                                                 5120U));
+static_assert(!phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(1025U, 17408U,
+                                                                  5120U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_stage64_shape(255U, 5120U,
+                                                                   17408U));
+static_assert(phase83_gfx1201_nvfp4_w4a4_wmma_kahan_stage64_shape(256U, 5120U,
+                                                                  17408U));
+static_assert(phase83_gfx1201_nvfp4_w4a4_wmma_kahan_stage64_shape(257U, 17408U,
+                                                                  5120U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_aligned_shape(255U, 5120U,
+                                                                   17408U));
+static_assert(phase83_gfx1201_nvfp4_w4a4_wmma_kahan_aligned_shape(256U, 5120U,
+                                                                  17408U));
+static_assert(phase83_gfx1201_nvfp4_w4a4_wmma_kahan_aligned_shape(256U, 17408U,
+                                                                  5120U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_aligned_shape(257U, 17408U,
+                                                                   5120U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_stage64_shape(256U, 5121U,
+                                                                   17408U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_pad68_shape(2047U, 5120U,
+                                                                 17408U));
+static_assert(phase83_gfx1201_nvfp4_w4a4_wmma_kahan_pad68_shape(2048U, 5120U,
+                                                                17408U));
+static_assert(phase83_gfx1201_nvfp4_w4a4_wmma_kahan_pad68_shape(2048U, 17408U,
+                                                                5120U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_pad68_shape(2049U, 5120U,
+                                                                 17408U));
+static_assert(!phase83_gfx1201_nvfp4_w4a4_wmma_kahan_pad68_shape(2048U, 5121U,
+                                                                 17408U));
 
 // ID62's separate gfx1030 index32 body is selected only when every logical
 // extent and byte-plane product fits in uint32_t. The 128-element headroom
@@ -1304,6 +1490,23 @@ constexpr bool phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(
              1U, k, n);
 }
 
+constexpr bool phase83_gfx1030_nvfp4_w4a4_small_m_vgpr_reuse_shape(
+    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
+  return m >= 2U && m <= 4U &&
+         phase78_nvfp4_w4a4_decode_activation_shared_shape(1U, k, n);
+}
+
+// ID94's row-reuse body is target-neutral across the two exact targets that
+// provide the same wave32 dot4 and BF16 epilogue contract.  Keep the existing
+// gfx1030 helper above for source/test compatibility and use this common
+// predicate for the shared logical/device variant.
+constexpr bool
+phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(const uint64_t m, const uint64_t k,
+                                            const uint64_t n) noexcept {
+  return m >= 2U && m <= 4U &&
+         phase78_nvfp4_w4a4_decode_activation_shared_shape(1U, k, n);
+}
+
 constexpr uint64_t
 nvfp4_w4a4_decode_activation_shared_lds_bytes(const uint64_t k) noexcept {
   return (k / UINT64_C(16)) * UINT64_C(5) * sizeof(uint32_t);
@@ -1339,6 +1542,21 @@ static_assert(!phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(5U, 5120U,
                                                                 17408U));
 static_assert(!phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(2U, 5120U,
                                                                 5120U));
+static_assert(phase83_gfx1030_nvfp4_w4a4_small_m_vgpr_reuse_shape(2U, 5120U,
+                                                                  17408U));
+static_assert(phase83_gfx1030_nvfp4_w4a4_small_m_vgpr_reuse_shape(4U, 17408U,
+                                                                  5120U));
+static_assert(!phase83_gfx1030_nvfp4_w4a4_small_m_vgpr_reuse_shape(1U, 5120U,
+                                                                   17408U));
+static_assert(!phase83_gfx1030_nvfp4_w4a4_small_m_vgpr_reuse_shape(5U, 5120U,
+                                                                   17408U));
+static_assert(!phase83_gfx1030_nvfp4_w4a4_small_m_vgpr_reuse_shape(2U, 5120U,
+                                                                   5120U));
+static_assert(phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(2U, 5120U, 17408U));
+static_assert(phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(4U, 17408U, 5120U));
+static_assert(!phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(1U, 5120U, 17408U));
+static_assert(!phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(5U, 5120U, 17408U));
+static_assert(!phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(2U, 5120U, 5120U));
 static_assert(nvfp4_w4a4_decode_activation_shared_lds_bytes(5120U) == 6400U);
 static_assert(nvfp4_w4a4_decode_activation_shared_lds_bytes(17408U) == 21760U);
 
@@ -1435,7 +1653,7 @@ select_nvfp4_w4a4_variant(const uint64_t m, const uint64_t k, const uint64_t n,
   }
   if ((target_is(target, "gfx1030") || target_is(target, "gfx1201")) &&
       m > 1U && k != 0U && (k % 16U) == 0U && n != 0U &&
-      selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED")) {
+      selector_env_is_one(kNvfp4W4A4PrefillCompensatedEnvironment)) {
     return KernelVariant::Nvfp4W4A4PrefillCompensated64x64;
   }
   if (target_is(target, "gfx1201") &&
@@ -1472,10 +1690,31 @@ select_nvfp4_w4a4_variant(const uint64_t m, const uint64_t k, const uint64_t n,
       phase78_gfx1201_nvfp4_w4a4_wmma128x64_shape(m, k, n)) {
     return KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64;
   }
-  return force_dp4a != nullptr && std::strcmp(force_dp4a, "1") == 0 &&
-                 k != 0U && (k % 16U) == 0U
-             ? KernelVariant::Nvfp4W4A4PrefillDp4a64x64
-             : KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
+  if (force_dp4a != nullptr && std::strcmp(force_dp4a, "1") == 0 && k != 0U &&
+      (k % 16U) == 0U) {
+    return KernelVariant::Nvfp4W4A4PrefillDp4a64x64;
+  }
+  if (target_is(target, "gfx1030") &&
+      phase83_nvfp4_w4a4_compensated_adopted_shape(m, k, n) &&
+      !nvfp4_w4a4_prefill_control_present()) {
+    return KernelVariant::Nvfp4W4A4PrefillCompensated64x64;
+  }
+  if (target_is(target, "gfx1201") &&
+      phase83_gfx1201_nvfp4_w4a4_wmma_kahan_adopted_shape(m, k, n) &&
+      !nvfp4_w4a4_prefill_control_present()) {
+    return KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan;
+  }
+  if ((target_is(target, "gfx1030") || target_is(target, "gfx1201")) &&
+      phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(m, k, n) &&
+      !nvfp4_w4a4_prefill_control_present()) {
+    return KernelVariant::Nvfp4W4A4SmallMVgprReuse;
+  }
+  if (target_is(target, "gfx1201") &&
+      phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(m, k, n) &&
+      !nvfp4_w4a4_prefill_control_present()) {
+    return KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid;
+  }
+  return KernelVariant::Nvfp4W4A4PrefillRow8Tiled256;
 }
 
 inline KernelVariant select_nvfp4_w4a4_variant(const uint64_t m) noexcept {
@@ -1546,38 +1785,74 @@ select_nvfp4_w4a4_decision(const uint64_t m, const uint64_t k, const uint64_t n,
     const bool supported =
         exact_gfx1030 && m >= 2U && m <= 4U &&
         phase78_nvfp4_w4a4_decode_activation_shared_shape(1U, k, n);
+    const bool adopted =
+        supported &&
+        !selector_env_is_present("SLLM_NVFP4_W4A4_SMALL_M_ROWGRID") &&
+        !nvfp4_w4a4_prefill_control_present();
     return make_selector_decision(
         variant, supported,
-        supported && selector_env_is_one("SLLM_NVFP4_W4A4_SMALL_M_ROWGRID"),
-        false,
-        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
+        adopted || selector_env_is_one("SLLM_NVFP4_W4A4_SMALL_M_ROWGRID"),
+        adopted,
+        !supported ? kSelectorReasonUnsupported
+        : adopted  ? kSelectorReasonAdopted
+                   : kSelectorReasonForcedShape);
+  }
+  case KernelVariant::Nvfp4W4A4SmallMVgprReuse: {
+    const bool supported = (exact_gfx1030 || exact_gfx1201) &&
+                           phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(m, k, n);
+    const bool adopted = supported && !nvfp4_w4a4_prefill_control_present();
+    return make_selector_decision(variant, supported, adopted, adopted,
+                                  !supported ? kSelectorReasonUnsupported
+                                             : kSelectorReasonAdopted);
   }
   case KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid: {
     const bool supported =
         exact_gfx1201 &&
         phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(m, k, n);
+    const bool adopted =
+        supported &&
+        !selector_env_is_present(kNvfp4W4A4SmallMGfx1201RowGridEnvironment);
+    const bool default_adopted =
+        adopted && !nvfp4_w4a4_prefill_control_present();
     return make_selector_decision(
         variant, supported,
-        supported &&
+        default_adopted ||
             selector_env_is_one(kNvfp4W4A4SmallMGfx1201RowGridEnvironment),
-        false,
-        supported ? kSelectorReasonForcedShape : kSelectorReasonUnsupported);
+        default_adopted,
+        !supported        ? kSelectorReasonUnsupported
+        : default_adopted ? kSelectorReasonAdopted
+                          : kSelectorReasonForcedShape);
   }
   case KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan: {
     const bool supported =
         exact_gfx1201 && phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(m, k, n);
+    const bool adopted =
+        supported &&
+        phase83_gfx1201_nvfp4_w4a4_wmma_kahan_adopted_shape(m, k, n) &&
+        !nvfp4_w4a4_prefill_control_present();
     return make_selector_decision(
         variant, supported,
-        selector_env_is_one(kNvfp4W4A4PrefillGfx1201WmmaKahanEnvironment),
-        false, supported ? kSelectorReasonForced : kSelectorReasonUnsupported);
+        adopted ||
+            selector_env_is_one(kNvfp4W4A4PrefillGfx1201WmmaKahanEnvironment),
+        adopted,
+        !supported ? kSelectorReasonUnsupported
+        : adopted  ? kSelectorReasonAdopted
+                   : kSelectorReasonForced);
   }
   case KernelVariant::Nvfp4W4A4PrefillCompensated64x64: {
     const bool supported =
         known_target && k != 0U && (k % 16U) == 0U && n != 0U && m > 1U;
+    const bool adopted =
+        exact_gfx1030 &&
+        phase83_nvfp4_w4a4_compensated_adopted_shape(m, k, n) &&
+        !nvfp4_w4a4_prefill_control_present();
     return make_selector_decision(
         variant, supported,
-        selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_COMPENSATED"), false,
-        supported ? kSelectorReasonForced : kSelectorReasonUnsupported);
+        adopted || selector_env_is_one(kNvfp4W4A4PrefillCompensatedEnvironment),
+        adopted,
+        !supported ? kSelectorReasonUnsupported
+        : adopted  ? kSelectorReasonAdopted
+                   : kSelectorReasonForced);
   }
   case KernelVariant::Nvfp4W4A4PrefillDp4a64x64: {
     const bool supported =
@@ -1888,12 +2163,17 @@ constexpr bool
 fp8_outer_decode_gfx1030_lds_lut_tuple_shape(const uint64_t m, const uint64_t k,
                                              const uint64_t n) noexcept {
   return m == 1U && ((k == UINT64_C(5120) &&
-                      (n == UINT64_C(17408) || n == UINT64_C(10240) ||
-                       n == UINT64_C(6144))) ||
-                     (k == UINT64_C(6144) && n == UINT64_C(5120)));
+                      (n == UINT64_C(1024) || n == UINT64_C(6144) ||
+                       n == UINT64_C(10240) || n == UINT64_C(12288) ||
+                       n == UINT64_C(17408))) ||
+                     (k == UINT64_C(6144) && n == UINT64_C(5120)) ||
+                     (k == UINT64_C(17408) && n == UINT64_C(5120)));
 }
 
+static_assert(fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 1024U));
+static_assert(fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 12288U));
 static_assert(fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 17408U));
+static_assert(fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 17408U, 5120U));
 static_assert(fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 6144U, 5120U));
 static_assert(fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 10240U));
 static_assert(fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 6144U));
@@ -1901,20 +2181,37 @@ static_assert(!fp8_outer_decode_gfx1030_lds_lut_tuple_shape(2U, 5120U, 6144U));
 static_assert(!fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 6143U));
 static_assert(!fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 6145U));
 static_assert(!fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 5120U));
+static_assert(!fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 1023U));
+static_assert(!fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 5120U, 1025U));
+static_assert(!fp8_outer_decode_gfx1030_lds_lut_tuple_shape(1U, 17408U, 5121U));
 static_assert(!fp8_outer_decode_gfx1030_lds_lut_tuple_shape(2U, 5120U, 17408U));
 
 constexpr bool
 fp8_outer_decode_gfx1030_fused_m2_4_shape(const uint64_t m, const uint64_t k,
                                           const uint64_t n) noexcept {
-  return m >= 2U && m <= 4U && k == UINT64_C(5120) &&
-         (n == UINT64_C(6144) || n == UINT64_C(10240) || n == UINT64_C(248320));
+  return m >= 2U && m <= 4U &&
+         ((k == UINT64_C(5120) &&
+           (n == UINT64_C(1024) || n == UINT64_C(6144) ||
+            n == UINT64_C(10240) || n == UINT64_C(12288) ||
+            n == UINT64_C(17408) || n == UINT64_C(248320))) ||
+          (k == UINT64_C(6144) && n == UINT64_C(5120)) ||
+          (k == UINT64_C(17408) && n == UINT64_C(5120)));
 }
 
+static_assert(fp8_outer_decode_gfx1030_fused_m2_4_shape(2U, 5120U, 1024U));
 static_assert(fp8_outer_decode_gfx1030_fused_m2_4_shape(2U, 5120U, 6144U));
 static_assert(fp8_outer_decode_gfx1030_fused_m2_4_shape(4U, 5120U, 10240U));
+static_assert(fp8_outer_decode_gfx1030_fused_m2_4_shape(3U, 5120U, 12288U));
+static_assert(fp8_outer_decode_gfx1030_fused_m2_4_shape(4U, 5120U, 17408U));
 static_assert(fp8_outer_decode_gfx1030_fused_m2_4_shape(3U, 5120U, 248320U));
+static_assert(fp8_outer_decode_gfx1030_fused_m2_4_shape(2U, 6144U, 5120U));
+static_assert(fp8_outer_decode_gfx1030_fused_m2_4_shape(2U, 17408U, 5120U));
 static_assert(!fp8_outer_decode_gfx1030_fused_m2_4_shape(1U, 5120U, 10240U));
+static_assert(!fp8_outer_decode_gfx1030_fused_m2_4_shape(5U, 6144U, 5120U));
 static_assert(!fp8_outer_decode_gfx1030_fused_m2_4_shape(2U, 6144U, 10240U));
+static_assert(!fp8_outer_decode_gfx1030_fused_m2_4_shape(2U, 6144U, 5119U));
+static_assert(!fp8_outer_decode_gfx1030_fused_m2_4_shape(2U, 5120U, 12289U));
+static_assert(!fp8_outer_decode_gfx1030_fused_m2_4_shape(2U, 17408U, 5121U));
 static_assert(!fp8_outer_decode_gfx1030_fused_m2_4_shape(2U, 5120U, 10241U));
 
 constexpr bool fp8_outer_decode_gfx1030_activation_shared_wave4_shape(
@@ -2447,6 +2744,9 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
   if (variant == KernelVariant::Nvfp4W4A4DecodeScaleLut) {
     return kNvfp4W4A4DecodeScaleLutLogicalKernelId;
   }
+  if (variant == KernelVariant::Nvfp4W4A4SmallMVgprReuse) {
+    return kNvfp4W4A4SmallMVgprReuseLogicalKernelId;
+  }
   return variant == KernelVariant::Fp8Native      ? kFp8NativeLogicalKernelId
          : variant == KernelVariant::Fp8Emulation ? kFp8EmulationLogicalKernelId
          : variant == KernelVariant::Fp8OuterPrefillTiled16
@@ -2586,6 +2886,9 @@ constexpr const char *device_symbol(const KernelVariant variant) noexcept {
   if (variant == KernelVariant::Nvfp4W4A4DecodeScaleLut) {
     return kNvfp4W4A4DecodeScaleLutDeviceSymbol;
   }
+  if (variant == KernelVariant::Nvfp4W4A4SmallMVgprReuse) {
+    return kNvfp4W4A4SmallMVgprReuseDeviceSymbol;
+  }
   return variant == KernelVariant::Fp8Native      ? kFp8NativeDeviceSymbol
          : variant == KernelVariant::Fp8Emulation ? kFp8EmulationDeviceSymbol
          : variant == KernelVariant::Fp8OuterPrefillTiled16
@@ -2718,6 +3021,11 @@ inline const char *device_symbol_for_target(const KernelVariant variant,
                                             const char *const target,
                                             const uint64_t m, const uint64_t k,
                                             const uint64_t n) noexcept {
+  if (variant == KernelVariant::Nvfp4W4A4PrefillCompensated64x64 &&
+      target_is(target, "gfx1030") &&
+      phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(m, k, n)) {
+    return "sllm_nvfp4_w4a4_prefill_compensated128x64_v1";
+  }
   if (variant == KernelVariant::Nvfp4W4A4PrefillDp4a64x64 &&
       target_is(target, "gfx1030") &&
       phase78_nvfp4_w4a4_dp4a_index32_pipeline_shape(m, k, n)) {
@@ -2728,6 +3036,21 @@ inline const char *device_symbol_for_target(const KernelVariant variant,
       phase78_gfx1201_nvfp4_wmma_ordinary_shape(m, k, n)) {
     return kNvfp4W4A4Gfx1201WmmaOrdinaryDeviceSymbol;
   }
+  if (variant == KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan &&
+      target_is(target, "gfx1201") &&
+      phase83_gfx1201_nvfp4_w4a4_wmma_kahan_stage64_shape(m, k, n)) {
+    if (phase83_gfx1201_nvfp4_w4a4_wmma_kahan_pad68_shape(m, k, n)) {
+      return k == UINT64_C(5120)
+                 ? kNvfp4W4A4PrefillGfx1201WmmaKahanPad68K5120N17408DeviceSymbol
+                 : kNvfp4W4A4PrefillGfx1201WmmaKahanPad68K17408N5120DeviceSymbol;
+    }
+    if (phase83_gfx1201_nvfp4_w4a4_wmma_kahan_aligned_shape(m, k, n)) {
+      return k == UINT64_C(5120)
+                 ? kNvfp4W4A4PrefillGfx1201WmmaKahanAlignedK5120N17408DeviceSymbol
+                 : kNvfp4W4A4PrefillGfx1201WmmaKahanAlignedK17408N5120DeviceSymbol;
+    }
+    return kNvfp4W4A4PrefillGfx1201WmmaKahanLookaheadDeviceSymbol;
+  }
   if (variant == KernelVariant::Nvfp4W4A4DecodeScaleLut &&
       target_is(target, "gfx1201") &&
       phase78_nvfp4_w4a4_decode_scale_lut_gfx1201_activation_shared_shape(m, k,
@@ -2737,11 +3060,20 @@ inline const char *device_symbol_for_target(const KernelVariant variant,
   if (variant == KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
       target_is(target, "gfx1030") &&
       fp8_outer_decode_gfx1030_lds_lut_tuple_shape(m, k, n)) {
+    if (k == UINT64_C(5120) && n == UINT64_C(12288)) {
+      return kFp8OuterDecodeGfx1030LdsLutM1K5120N12288DeviceSymbol;
+    }
+    if (k == UINT64_C(5120) && n == UINT64_C(1024)) {
+      return kFp8OuterDecodeGfx1030LdsLutM1K5120N1024DeviceSymbol;
+    }
     if (k == UINT64_C(5120) && n == UINT64_C(17408)) {
-      return kFp8OuterDecodeGfx1030LdsLutK5120N17408DeviceSymbol;
+      return kFp8OuterDecodeGfx1030LdsLutM1K5120N17408DeviceSymbol;
+    }
+    if (k == UINT64_C(17408) && n == UINT64_C(5120)) {
+      return kFp8OuterDecodeGfx1030LdsLutM1K17408N5120DeviceSymbol;
     }
     if (k == UINT64_C(6144) && n == UINT64_C(5120)) {
-      return kFp8OuterDecodeGfx1030LdsLutK6144N5120DeviceSymbol;
+      return kFp8OuterDecodeGfx1030LdsLutM1K6144N5120DeviceSymbol;
     }
     if (k == UINT64_C(5120) && n == UINT64_C(6144)) {
       return kFp8OuterDecodeGfx1030LdsLutK5120N6144DeviceSymbol;
@@ -2751,6 +3083,21 @@ inline const char *device_symbol_for_target(const KernelVariant variant,
   if (variant == KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
       target_is(target, "gfx1030") &&
       fp8_outer_decode_gfx1030_fused_m2_4_shape(m, k, n)) {
+    if (k == UINT64_C(5120) && n == UINT64_C(12288)) {
+      return kFp8OuterDecodeGfx1030FusedM2_4K5120N12288DeviceSymbol;
+    }
+    if (k == UINT64_C(5120) && n == UINT64_C(1024)) {
+      return kFp8OuterDecodeGfx1030FusedM2_4K5120N1024DeviceSymbol;
+    }
+    if (k == UINT64_C(5120) && n == UINT64_C(17408)) {
+      return kFp8OuterDecodeGfx1030FusedM2_4K5120N17408DeviceSymbol;
+    }
+    if (k == UINT64_C(17408) && n == UINT64_C(5120)) {
+      return kFp8OuterDecodeGfx1030FusedM2_4K17408N5120DeviceSymbol;
+    }
+    if (k == UINT64_C(6144) && n == UINT64_C(5120)) {
+      return kFp8OuterDecodeGfx1030FusedM2_4K6144N5120DeviceSymbol;
+    }
     if (n == UINT64_C(6144)) {
       return kFp8OuterDecodeGfx1030FusedM2_4K5120N6144DeviceSymbol;
     }
@@ -2765,6 +3112,10 @@ inline const char *device_symbol_for_target(const KernelVariant variant,
 constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
                                const uint64_t n,
                                const uint64_t k = 0U) noexcept {
+  if (variant == KernelVariant::Nvfp4W4A4PrefillCompensated64x64 &&
+      phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(m, k, n)) {
+    return static_cast<uint32_t>(((m + 127U) / 128U) * ((n + 63U) / 64U));
+  }
   if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double ||
       variant ==
           KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4) {
@@ -2834,6 +3185,8 @@ constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
          : variant == KernelVariant::Nvfp4W4A4DecodeActivationShared
              ? static_cast<uint32_t>((n + 31U) / 32U)
          : variant == KernelVariant::Nvfp4W4A4SmallMRowGrid
+             ? static_cast<uint32_t>((n + 31U) / 32U)
+         : variant == KernelVariant::Nvfp4W4A4SmallMVgprReuse
              ? static_cast<uint32_t>((n + 31U) / 32U)
          : variant == KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid
              ? static_cast<uint32_t>((n + 31U) / 32U)
@@ -2931,6 +3284,8 @@ constexpr uint32_t workgroup_size_x(const KernelVariant variant) noexcept {
              ? kMxfp8W8A8PrefillWmmaWorkgroupSize
          : variant == KernelVariant::Nvfp4W4A4SmallMRowGrid
              ? kNvfp4W4A4DecodeScaleLutWorkgroupSize
+         : variant == KernelVariant::Nvfp4W4A4SmallMVgprReuse
+             ? kNvfp4W4A4DecodeScaleLutWorkgroupSize
          : variant == KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid
              ? kNvfp4W4A4DecodeScaleLutWorkgroupSize
          : variant == KernelVariant::Nvfp4W4A4DecodeScaleLut
@@ -2966,6 +3321,8 @@ static_assert(
     workgroup_size_x(KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan) == 256U);
 static_assert(workgroup_size_x(KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid) ==
               256U);
+static_assert(workgroup_size_x(KernelVariant::Nvfp4W4A4SmallMVgprReuse) ==
+              256U);
 static_assert(workgroup_size_x(KernelVariant::Nvfp4W4A4DecodeScaleLut) ==
               kNvfp4W4A4DecodeScaleLutWorkgroupSize);
 static_assert(workgroup_size_x(KernelVariant::Nvfp4W4A4DecodeWave4Column32) ==
@@ -2983,6 +3340,16 @@ static_assert(workgroup_size_x(KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4) ==
               kFp8OuterDecodeGfx1030LdsLutWorkgroupSize);
 static_assert(grid_size_x(KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4, 2U,
                           10240U, 5120U) == 320U);
+static_assert(grid_size_x(KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4, 2U,
+                          12288U, 5120U) == 384U);
+static_assert(grid_size_x(KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4, 2U,
+                          1024U, 5120U) == 32U);
+static_assert(grid_size_x(KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4, 2U,
+                          17408U, 5120U) == 544U);
+static_assert(grid_size_x(KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4, 2U,
+                          5120U, 17408U) == 160U);
+static_assert(grid_size_x(KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4, 2U,
+                          5120U, 6144U) == 160U);
 static_assert(
     workgroup_size_x(
         KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32) ==
@@ -3067,6 +3434,10 @@ static_assert(grid_size_x(KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid, 2U,
                           32U) == 1U);
 static_assert(grid_size_x(KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid, 4U,
                           33U) == 2U);
+static_assert(grid_size_x(KernelVariant::Nvfp4W4A4SmallMVgprReuse, 2U, 32U) ==
+              1U);
+static_assert(grid_size_x(KernelVariant::Nvfp4W4A4SmallMVgprReuse, 4U, 33U) ==
+              2U);
 static_assert(grid_size_x(KernelVariant::Mxfp8W8A8PrefillWmmaN64, 128U, 15U) ==
               1U);
 static_assert(grid_size_x(KernelVariant::Mxfp8W8A8PrefillWmmaN64, 128U, 16U) ==

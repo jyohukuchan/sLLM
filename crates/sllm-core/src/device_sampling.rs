@@ -6,9 +6,13 @@ use std::time::Duration;
 use crate::prepared_execution::require_terminal_success;
 use crate::{
     AccessMode, AllocationCategory, DType, DeviceTokenSelectorRequestV1, ExecutionBuffer,
-    ExecutionError, ExecutionQueue, ExecutionSession, OwnedTensorBinding, SamplingSelectionV1,
-    SemanticOpDescriptor, TensorView, TokenSelectorContractV1,
+    ExecutionError, ExecutionQueue, ExecutionSession, ExecutionState, OwnedTensorBinding,
+    SamplingSelectionV1, SemanticOpDescriptor, TensorView, TokenSelectorContractV1,
 };
+
+pub(crate) const FIXED_K20_SUPPORT_BYTES: u64 = 256;
+pub(crate) const FIXED_K20_DECISION_BYTES: u64 = 144;
+const MAX_FIXED_K20_SUPPORT_SLOTS: usize = 9;
 
 pub(crate) struct DeviceSamplingBuffers {
     pub(crate) additive: ExecutionBuffer,
@@ -21,6 +25,7 @@ pub(crate) struct DeviceSamplingBuffers {
     last_additive: Vec<f32>,
     last_mask: Vec<u8>,
     workspace: Option<(ExecutionBuffer, TensorView)>,
+    fixed_k20_support_slots: Option<(ExecutionBuffer, usize)>,
 }
 
 pub(crate) struct PreparedDeviceSampling {
@@ -60,7 +65,94 @@ impl DeviceSamplingBuffers {
             last_additive: Vec::new(),
             last_mask: Vec::new(),
             workspace: None,
+            fixed_k20_support_slots: None,
         })
+    }
+
+    pub(crate) fn ensure_fixed_k20_support_slots(
+        &mut self,
+        session: &ExecutionSession,
+        rows: usize,
+    ) -> Result<(), ExecutionError> {
+        if !(1..=MAX_FIXED_K20_SUPPORT_SLOTS).contains(&rows) {
+            return Err(invalid(format!(
+                "fixed-K20 support capture requires 1 through {MAX_FIXED_K20_SUPPORT_SLOTS} rows"
+            )));
+        }
+        if self
+            .fixed_k20_support_slots
+            .as_ref()
+            .is_some_and(|(_, capacity)| *capacity >= rows)
+        {
+            return Ok(());
+        }
+        let bytes = u64::try_from(rows)
+            .ok()
+            .and_then(|rows| rows.checked_mul(FIXED_K20_SUPPORT_BYTES))
+            .ok_or_else(|| invalid("fixed-K20 support slot allocation overflowed"))?;
+        let buffer = session.allocate_with_category(bytes, AllocationCategory::RequestState)?;
+        self.fixed_k20_support_slots = Some((buffer, rows));
+        Ok(())
+    }
+
+    pub(crate) fn capture_fixed_k20_support_row(
+        &mut self,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        row: usize,
+        timeout: Duration,
+    ) -> Result<(), ExecutionError> {
+        let (workspace, workspace_view) = self
+            .workspace
+            .as_ref()
+            .ok_or_else(|| invalid("fixed-K20 support capture has no selector workspace"))?;
+        if workspace_view.payload_bytes() < FIXED_K20_SUPPORT_BYTES {
+            return Err(invalid(
+                "fixed-K20 support capture workspace is smaller than its record",
+            ));
+        }
+        let (support, capacity) = self
+            .fixed_k20_support_slots
+            .as_ref()
+            .ok_or_else(|| invalid("fixed-K20 support slots were not allocated"))?;
+        if row >= *capacity {
+            return Err(invalid("fixed-K20 support row is outside request storage"));
+        }
+        let source = workspace.range(0, FIXED_K20_SUPPORT_BYTES)?;
+        let offset = u64::try_from(row)
+            .ok()
+            .and_then(|row| row.checked_mul(FIXED_K20_SUPPORT_BYTES))
+            .ok_or_else(|| invalid("fixed-K20 support row offset overflowed"))?;
+        let destination = support.range(offset, FIXED_K20_SUPPORT_BYTES)?;
+        let mut copy = session.copy_device_to_device(queue, source, destination)?;
+        match copy.wait(timeout)? {
+            ExecutionState::Success => Ok(()),
+            ExecutionState::Pending => Err(ExecutionError::NotReady),
+            ExecutionState::Failure => Err(invalid("fixed-K20 support copy failed")),
+        }
+    }
+
+    pub(crate) fn fixed_k20_support_range(
+        &self,
+        rows: usize,
+    ) -> Result<crate::BufferRange, ExecutionError> {
+        if !(1..=MAX_FIXED_K20_SUPPORT_SLOTS).contains(&rows) {
+            return Err(invalid(
+                "fixed-K20 support range row count is outside bounds",
+            ));
+        }
+        let (buffer, capacity) = self
+            .fixed_k20_support_slots
+            .as_ref()
+            .ok_or_else(|| invalid("fixed-K20 support slots were not allocated"))?;
+        if rows > *capacity {
+            return Err(invalid("fixed-K20 support range exceeds request storage"));
+        }
+        let bytes = u64::try_from(rows)
+            .ok()
+            .and_then(|rows| rows.checked_mul(FIXED_K20_SUPPORT_BYTES))
+            .ok_or_else(|| invalid("fixed-K20 support range size overflowed"))?;
+        buffer.range(0, bytes)
     }
 
     pub(crate) fn update(

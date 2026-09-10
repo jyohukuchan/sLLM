@@ -498,8 +498,18 @@ impl KvStateResource {
     }
 
     pub(crate) fn snapshot(&self) -> Result<KvStateSnapshot, RuntimeError> {
-        let view = NativeKvSnapshotOwner::create(self)?;
-        let info = view.query()?;
+        // Metadata snapshots do not need a live native view.  The state query
+        // takes the same registry/accounting locks and reports the same
+        // published metadata, while avoiding a view handle allocation and
+        // release on every transition.  Keep NativeKvSnapshotOwner for
+        // readback, where its live view is required by the evidence ABI.
+        let state_raw = self.raw_handle()?;
+        let mut info = empty_view_info();
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let status =
+            unsafe { sys::sllm_kv_state_query(state_raw.as_ptr(), &mut info, &mut error_sink) };
+        ensure_ok(status, &error_buffer, error_sink.message_length)?;
         validate_view_info(
             &info,
             &self.inner.context,
@@ -2440,7 +2450,8 @@ fn validate_causal_attention_info_with_staged_opt_ins(
         && descriptor.cache_encoding() == KvCacheEncoding::Mxfp8E4;
     let use_decode_wave_split_staged32 = !force_baseline
         && matches!(expected_target, Some("gfx1030" | "gfx1201"))
-        && staged32_decode_opt_in.is_some_and(|value| value == "1")
+        && (staged32_decode_opt_in.is_some_and(|value| value == "1")
+            || (staged32_decode_opt_in.is_none() && !use_decode_wave_split_staged))
         && (1..=4).contains(&query_count)
         && committed_kv_length >= 1024
         && query_heads == 24
@@ -2632,13 +2643,39 @@ fn validate_causal_attention_info_with_staged_opt_ins(
         && query_heads as usize / descriptor.layout().heads() == 4
         && descriptor.layout().head_dim() == 256;
     let gqa6_qtile4_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GQA6_QTILE4");
+    let use_prefill_gqa6_qtile8_w16 = use_phase33_common_provider
+        && matches!(expected_target, Some("gfx1030" | "gfx1201"))
+        && query_count >= 128
+        && start_position >= 1024
+        && query_heads == 24
+        && descriptor.layout().heads() == 4
+        && descriptor.layout().head_dim() == 256
+        && descriptor.cache_encoding() == KvCacheEncoding::Mxfp8E4
+        && gqa6_qtile4_opt_in.is_none()
+        && !force_baseline
+        && !use_prefill_gqa6_blocksoftmax_q8
+        && !use_any_gqa6_rocblas_f32;
     let use_prefill_gqa6_qtile4 = use_phase33_common_provider
         && query_count >= 128
         && query_heads as usize / descriptor.layout().heads() == 6
         && descriptor.layout().head_dim() == 256
-        && gqa6_qtile4_opt_in
-            .as_deref()
-            .is_some_and(|value| value == "1")
+        // MXFP8 E4 uses the already verified format-neutral qtile4 provider
+        // by default.  An explicit value other than "1" remains a rollback;
+        // FP16 and other encodings retain their existing opt-in behavior.
+        && match descriptor.cache_encoding() {
+            KvCacheEncoding::Mxfp8E4 => {
+                gqa6_qtile4_opt_in
+                    .as_deref()
+                    .is_some_and(|value| value == "1")
+                    || (gqa6_qtile4_opt_in.is_none()
+                        && query_heads == 24
+                        && descriptor.layout().heads() == 4
+                        && !use_prefill_gqa6_qtile8_w16)
+            }
+            _ => gqa6_qtile4_opt_in
+                .as_deref()
+                .is_some_and(|value| value == "1"),
+        }
         && !force_baseline
         && !use_prefill_gqa6_blocksoftmax_q8
         && !use_any_gqa6_rocblas_f32;
@@ -2684,6 +2721,7 @@ fn validate_causal_attention_info_with_staged_opt_ins(
             && query_count >= 128
             && !force_baseline
             && !use_scaled_prefill_gemm)
+            || use_prefill_gqa6_qtile8_w16
             || use_prefill_gqa6_qtile4
             || use_prefill_gqa6_qtile4_k4_fp16
             || use_prefill_gqa6_qtile4_k8_fp16
@@ -2837,6 +2875,11 @@ fn validate_causal_attention_info_with_staged_opt_ins(
                 "causal_attention.prefill.gqa6_qtile4_k32.fp16.v1",
                 "sllm_causal_attention_prefill_gqa6_qtile4_k32_fp16_v1",
             )
+        } else if use_prefill_gqa6_qtile8_w16 {
+            (
+                "causal_attention.prefill.gqa6_qtile8_w16.mxfp8.v1",
+                "sllm_causal_attention_prefill_gqa6_qtile8_w16_mxfp8_v1",
+            )
         } else if use_prefill_gqa6_qtile4 {
             (
                 "causal_attention.prefill.gqa6_qtile4.v1",
@@ -2901,6 +2944,8 @@ fn validate_causal_attention_info_with_staged_opt_ins(
                 192
             } else if use_decode_gqa4_split || use_decode_gqa4_split_p32 {
                 128
+            } else if use_prefill_gqa6_qtile8_w16 {
+                512
             } else {
                 sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE
             }
@@ -2933,6 +2978,11 @@ fn validate_causal_attention_info_with_staged_opt_ins(
                     .and_then(|value| (value / 256).checked_mul(descriptor.layout().heads() as u64))
                     .and_then(|value| u32::try_from(value).ok())
             } else if use_prefill_gqa6_blocksoftmax_q8 {
+                query_count
+                    .checked_add(7)
+                    .and_then(|value| (value / 8).checked_mul(descriptor.layout().heads() as u64))
+                    .and_then(|value| u32::try_from(value).ok())
+            } else if use_prefill_gqa6_qtile8_w16 {
                 query_count
                     .checked_add(7)
                     .and_then(|value| (value / 8).checked_mul(descriptor.layout().heads() as u64))
@@ -3363,6 +3413,71 @@ mod tests {
     }
 
     #[test]
+    fn mxfp8_e4_qtile8_w16_metadata_accepts_long_gfx1030_gfx1201_prefix() {
+        let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            16384,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        )
+        .unwrap();
+        for target in ["gfx1030", "gfx1201"] {
+            let context = Context::test_without_native_for_target(target);
+            for query_count in [128_u64, 129, 1024] {
+                let start_position = 1024;
+                let committed_kv_length = start_position + query_count;
+                let mut info = empty_causal_attention_info();
+                info.backend = sys::SLLM_BACKEND_HIP;
+                info.dispatch_id = 8500 + query_count;
+                info.dispatch_count = 1;
+                info.kernel_id = sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3;
+                info.workgroup_size_x = 512;
+                info.grid_size_x = u32::try_from(query_count.div_ceil(8) * 4).unwrap();
+                info.query_count = query_count;
+                info.start_position = start_position;
+                info.committed_kv_length = committed_kv_length;
+                info.q_heads = 24;
+                info.kv_heads = 4;
+                info.head_dim = 256;
+                info.scale_denominator = 16;
+                set_test_c_string(
+                    &mut info.kernel_symbol,
+                    "causal_attention.prefill.gqa6_qtile8_w16.mxfp8.v1",
+                );
+                set_test_c_string(
+                    &mut info.device_symbol,
+                    "sllm_causal_attention_prefill_gqa6_qtile8_w16_mxfp8_v1",
+                );
+                set_test_c_string(&mut info.gcn_arch_name, target);
+
+                let evidence = validate_causal_attention_info(
+                    &info,
+                    &context,
+                    start_position,
+                    committed_kv_length,
+                    descriptor,
+                    24,
+                    None,
+                    None,
+                )
+                .unwrap();
+                assert_eq!(evidence.workgroup_size_x, 512);
+                assert_eq!(evidence.grid_size_x, info.grid_size_x);
+                assert_eq!(
+                    evidence.kernel_symbol,
+                    "causal_attention.prefill.gqa6_qtile8_w16.mxfp8.v1"
+                );
+                assert_eq!(
+                    evidence.device_symbol,
+                    "sllm_causal_attention_prefill_gqa6_qtile8_w16_mxfp8_v1"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn mxfp8_e4_staged_decode_metadata_accepts_exact_opt_in_and_rejects_invalid() {
         let context = Context::test_without_native_for_target("gfx1030");
         let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
@@ -3504,7 +3619,7 @@ mod tests {
                     None,
                     None,
                     None,
-                    Some(std::ffi::OsStr::new("1")),
+                    None,
                 )
                 .unwrap();
                 assert_eq!(evidence.kernel_id, info.kernel_id);
@@ -3523,7 +3638,7 @@ mod tests {
                         None,
                         None,
                         None,
-                        None,
+                        Some(std::ffi::OsStr::new("0")),
                     )
                     .is_err()
                 );

@@ -156,7 +156,7 @@ load_kv_specialized(const void *const values, const void *const scales,
 // Load and decode the shared E8M0 scale once per wave instead of repeating the
 // same work in every lane.  Other providers keep the format-neutral loader
 // because their lane-to-dimension mapping is not guaranteed to match a block.
-template <typename BlockFormat>
+template <typename BlockFormat, bool UseFusedE4Decode = false>
 __device__ float load_kv_qtile4_mx(const void *const values,
                                    const void *const scales, const uint64_t row,
                                    const uint32_t dimension,
@@ -164,31 +164,43 @@ __device__ float load_kv_qtile4_mx(const void *const values,
   const auto view = sllm_lowp::make_block_scaled_view<BlockFormat>(
       values, scales, nullptr, head_dim);
   const uint8_t value = view.values[row * view.value_stride + dimension];
-  const float decoded =
-      sllm_lowp::ScalarCodec<typename BlockFormat::Element>::decode(value);
-  float scale = 0.0F;
-  if ((dimension & (BlockFormat::kBlockSize - 1U)) == 0U) {
-    const uint8_t scale_bits =
-        view.block_scales[row * view.scale_stride +
-                          dimension / BlockFormat::kBlockSize];
-    scale = sllm_lowp::ScalarCodec<sllm_lowp::E8M0>::decode(scale_bits);
+  if constexpr (UseFusedE4Decode && BlockFormat::kElementPower == 8) {
+    uint32_t scale_code = 0U;
+    if ((dimension & (BlockFormat::kBlockSize - 1U)) == 0U) {
+      scale_code = static_cast<uint32_t>(
+          view.block_scales[row * view.scale_stride +
+                            dimension / BlockFormat::kBlockSize]);
+    }
+    scale_code = __shfl(scale_code, 0U, BlockFormat::kBlockSize);
+    return sllm_lowp::ScalarCodec<sllm_lowp::E4M3Fn>::decode_scaled(
+        value, static_cast<uint8_t>(scale_code));
+  } else {
+    const float decoded =
+        sllm_lowp::ScalarCodec<typename BlockFormat::Element>::decode(value);
+    float scale = 0.0F;
+    if ((dimension & (BlockFormat::kBlockSize - 1U)) == 0U) {
+      const uint8_t scale_bits =
+          view.block_scales[row * view.scale_stride +
+                            dimension / BlockFormat::kBlockSize];
+      scale = sllm_lowp::ScalarCodec<sllm_lowp::E8M0>::decode(scale_bits);
+    }
+    scale = __shfl(scale, 0U, BlockFormat::kBlockSize);
+    return decoded * scale;
   }
-  scale = __shfl(scale, 0U, BlockFormat::kBlockSize);
-  return decoded * scale;
 }
 
-template <uint32_t Encoding>
+template <uint32_t Encoding, bool UseFusedE4Decode = false>
 __device__ __forceinline__ float
 load_kv_qtile4(const void *const values, const void *const scales,
                const float *const outer_scales, const uint64_t row,
                const uint32_t dimension, const uint32_t head_dim,
                const float static_scale) noexcept {
   if constexpr (Encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
-    return load_kv_qtile4_mx<sllm_lowp::Mxfp8E4Block32>(values, scales, row,
-                                                        dimension, head_dim);
+    return load_kv_qtile4_mx<sllm_lowp::Mxfp8E4Block32, UseFusedE4Decode>(
+        values, scales, row, dimension, head_dim);
   } else if constexpr (Encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) {
-    return load_kv_qtile4_mx<sllm_lowp::Mxfp8E5Block32>(values, scales, row,
-                                                        dimension, head_dim);
+    return load_kv_qtile4_mx<sllm_lowp::Mxfp8E5Block32, UseFusedE4Decode>(
+        values, scales, row, dimension, head_dim);
   } else {
     return load_kv_specialized<Encoding>(values, scales, outer_scales, row,
                                          dimension, head_dim, static_scale);
@@ -542,6 +554,12 @@ __launch_bounds__(32, 1) void causal_attention_decode_wave_split_staged_stage1_k
   const uint64_t committed_kv_length = start_position + query_index + 1U;
   float accumulations[kDimensionsPerLane];
   float query_values[kDimensionsPerLane];
+#if defined(__gfx1030__)
+  constexpr bool kUseFusedE4Decode =
+      kWaveCount == 32U && Encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1;
+#else
+  constexpr bool kUseFusedE4Decode = false;
+#endif
 #pragma unroll
   for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
     accumulations[index] = 0.0F;
@@ -566,14 +584,14 @@ __launch_bounds__(32, 1) void causal_attention_decode_wave_split_staged_stage1_k
       if (current < head_dim) {
         if constexpr (UseQueryPreload) {
           partial += query_values[index] *
-                     load_kv_qtile4<Encoding>(key, key_scales, key_outer_scales,
-                                              kv_row, current, head_dim,
-                                              static_key_scale);
+                     load_kv_qtile4<Encoding, kUseFusedE4Decode>(
+                         key, key_scales, key_outer_scales, kv_row, current,
+                         head_dim, static_key_scale);
         } else {
           partial += bf16_to_f32(query_row[current]) *
-                     load_kv_qtile4<Encoding>(key, key_scales, key_outer_scales,
-                                              kv_row, current, head_dim,
-                                              static_key_scale);
+                     load_kv_qtile4<Encoding, kUseFusedE4Decode>(
+                         key, key_scales, key_outer_scales, kv_row, current,
+                         head_dim, static_key_scale);
         }
       }
     }
@@ -599,7 +617,7 @@ __launch_bounds__(32, 1) void causal_attention_decode_wave_split_staged_stage1_k
       if (current < head_dim) {
         accumulations[index] =
             accumulations[index] * rescale +
-            contribution * load_kv_qtile4<Encoding>(
+            contribution * load_kv_qtile4<Encoding, kUseFusedE4Decode>(
                                value, value_scales, value_outer_scales, kv_row,
                                current, head_dim, static_value_scale);
       }
@@ -1976,6 +1994,381 @@ __launch_bounds__(256, 1) void causal_attention_prefill_gqa4_qtile4_kernel(
         if (current < head_dim) {
           output_row[current] = f32_to_bf16_rne(accumulations[item][index] /
                                                 running_denominator[item]);
+        }
+      }
+    }
+  }
+}
+
+// MXFP8 E4 GQA6 long-prefix candidate.  A block owns eight adjacent query
+// rows and one KV head (48 logical query/head pairs). Sixteen wave32 waves
+// process three pairs each. K and V are loaded by disjoint halves of the
+// 512-thread block, then the same per-pair query order, reduction tree, and
+// online-softmax update used by qtile4 are retained. This keeps numerical
+// accumulation order independent of the LDS traffic reduction.
+template <uint32_t Encoding, uint32_t GqaRatio, bool WaveLocalKv = false>
+__global__
+__launch_bounds__(512, 1) void causal_attention_prefill_gqa6_qtile8_w16_kernel(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t start_position, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim,
+    const float static_key_scale, const float static_value_scale) {
+  constexpr uint32_t kWaveSize = 32U;
+  constexpr uint32_t kWaveCount = 16U;
+  constexpr uint32_t kGqaRatio = GqaRatio;
+  constexpr uint32_t kQueryTile = 8U;
+  constexpr uint32_t kLogicalQueries = kGqaRatio * kQueryTile;
+  constexpr uint32_t kQueriesPerWave = kLogicalQueries / kWaveCount;
+  constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
+  constexpr uint32_t kDimensionsPerLane = kHeadDim / kWaveSize;
+  static_assert(kGqaRatio == 6U);
+  static_assert(kLogicalQueries % kWaveCount == 0U);
+  static_assert(kQueriesPerWave == 3U);
+  const uint64_t flat = blockIdx.x;
+  const uint64_t tile = flat / kv_heads;
+  const uint32_t kv_head = static_cast<uint32_t>(flat % kv_heads);
+  const uint64_t first_row = tile * kQueryTile;
+  if (first_row >= query_count) {
+    return;
+  }
+
+  const uint32_t dimension = threadIdx.x;
+  const uint32_t lane = dimension & (kWaveSize - 1U);
+  const uint32_t wave = dimension / kWaveSize;
+  const uint32_t first_query_head = kv_head * kGqaRatio;
+  // All three logical items in a wave share one row because
+  // kQueriesPerWave=3 and kGqaRatio=6. Preserve the original short-circuit
+  // behavior for invalid rows by guarding the causal-limit addition.
+  const uint64_t wave_row =
+      first_row + (static_cast<uint64_t>(wave) * kQueriesPerWave) / kGqaRatio;
+  const bool wave_row_valid = wave_row < query_count;
+  const uint64_t wave_causal_limit =
+      wave_row_valid ? start_position + wave_row : 0U;
+
+#if defined(__gfx1030__)
+  // Scratch qtile-kv4-r14 mapping: four complete K/V rows are staged by the
+  // same 512 threads, then consumed in ascending key order.  This is the
+  // measured V620 path; gfx1201 retains the original one-row staging below.
+  constexpr uint32_t kKeyTile = 4U;
+  __shared__ float key_tile[kKeyTile][kHeadDim];
+  __shared__ float value_tile[kKeyTile][kHeadDim];
+#endif
+  float query_values[kQueriesPerWave][kDimensionsPerLane];
+  float accumulations[kQueriesPerWave][kDimensionsPerLane] = {};
+  // Lane 0/1/2 owns one query each.  Keep the online-softmax state only in
+  // that owner lane; value updates and final normalization consume it via
+  // wave shuffles.
+  float own_running_maximum = -std::numeric_limits<float>::infinity();
+  float own_running_denominator = 0.0F;
+#pragma unroll
+  for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+    const uint32_t logical_query = wave * kQueriesPerWave + item;
+    const uint64_t row = first_row + logical_query / kGqaRatio;
+    const uint64_t safe_row =
+        row < query_count ? row : static_cast<uint64_t>(query_count - 1U);
+    const uint32_t query_head = first_query_head + logical_query % kGqaRatio;
+    const uint16_t *const query_row =
+        query +
+        (safe_row * q_heads + query_head) * static_cast<uint64_t>(head_dim);
+#pragma unroll
+    for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+      const uint32_t current = lane + index * kWaveSize;
+      query_values[item][index] = row < query_count && current < head_dim
+                                      ? bf16_to_f32(query_row[current])
+                                      : 0.0F;
+    }
+  }
+
+  const uint64_t tile_end = first_row + kQueryTile;
+  const uint64_t last_row =
+      (tile_end < query_count ? tile_end : query_count) - 1U;
+  const uint64_t last_query_position = start_position + last_row;
+#if defined(__gfx1030__)
+  for (uint64_t key_begin = 0U; key_begin <= last_query_position;
+       key_begin += kKeyTile) {
+    const uint64_t remaining = last_query_position - key_begin + 1U;
+    const uint32_t key_count =
+        remaining < kKeyTile ? static_cast<uint32_t>(remaining) : kKeyTile;
+    for (uint32_t element = dimension; element < kKeyTile * 2U * kHeadDim;
+         element += 512U) {
+      const uint32_t key_index = element / (2U * kHeadDim);
+      const uint32_t plane_dimension = element % (2U * kHeadDim);
+      if (key_index < key_count) {
+        const uint64_t kv_row = (key_begin + key_index) * kv_heads + kv_head;
+        if (plane_dimension < head_dim) {
+          key_tile[key_index][plane_dimension] = load_kv_qtile4<Encoding>(
+              key, key_scales, key_outer_scales, kv_row, plane_dimension,
+              head_dim, static_key_scale);
+        } else {
+          const uint32_t value_dimension = plane_dimension - head_dim;
+          value_tile[key_index][value_dimension] = load_kv_qtile4<Encoding>(
+              value, value_scales, value_outer_scales, kv_row, value_dimension,
+              head_dim, static_value_scale);
+        }
+      }
+    }
+    __syncthreads();
+
+    for (uint32_t key_index = 0U; key_index < key_count; ++key_index) {
+      const uint64_t key_position = key_begin + key_index;
+      float own_score = 0.0F;
+      uint32_t own_active = 0U;
+#pragma unroll
+      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+        const bool item_active =
+            wave_row_valid && key_position <= wave_causal_limit;
+        float products[kDimensionsPerLane];
+#pragma unroll
+        for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+          const uint32_t current = lane + index * kWaveSize;
+          products[index] =
+              item_active && current < head_dim
+                  ? query_values[item][index] * key_tile[key_index][current]
+                  : 0.0F;
+        }
+        const float pair0 = products[0] + products[1];
+        const float pair1 = products[2] + products[3];
+        const float pair2 = products[4] + products[5];
+        const float pair3 = products[6] + products[7];
+        float partial = (pair0 + pair1) + (pair2 + pair3);
+        for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
+          partial += __shfl_down(partial, offset, kWaveSize);
+        }
+        const float reduced_score = __shfl(partial, 0U, kWaveSize);
+        if (lane == item) {
+          own_score = reduced_score;
+          own_active = item_active ? 1U : 0U;
+        }
+      }
+
+      if (lane < kQueriesPerWave && own_active != 0U) {
+        own_score *= rsqrtf(static_cast<float>(head_dim));
+      }
+
+      float own_rescale = 1.0F;
+      float own_contribution = 0.0F;
+      if (lane < kQueriesPerWave && own_active != 0U) {
+        const float own_next_maximum = fmaxf(own_running_maximum, own_score);
+        own_rescale = expf(own_running_maximum - own_next_maximum);
+        own_contribution = expf(own_score - own_next_maximum);
+        own_running_denominator =
+            own_running_denominator * own_rescale + own_contribution;
+        own_running_maximum = own_next_maximum;
+      }
+#pragma unroll
+      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+        const float rescale = __shfl(own_rescale, static_cast<int>(item),
+                                     static_cast<int>(kWaveSize));
+        const float contribution =
+            __shfl(own_contribution, static_cast<int>(item),
+                   static_cast<int>(kWaveSize));
+        const bool item_active =
+            wave_row_valid && key_position <= wave_causal_limit;
+#pragma unroll
+        for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+          const uint32_t current = lane + index * kWaveSize;
+          if (item_active && current < head_dim) {
+            accumulations[item][index] =
+                accumulations[item][index] * rescale +
+                contribution * value_tile[key_index][current];
+          }
+        }
+      }
+    }
+    __syncthreads();
+  }
+#else
+  if constexpr (WaveLocalKv) {
+    // gfx1201 M=2048 path: each wave loads its own K/V lane slice, removing
+    // the per-key LDS staging and barriers while preserving key order and the
+    // existing QK/softmax/value arithmetic.
+    for (uint64_t key_position = 0U; key_position <= last_query_position;
+         ++key_position) {
+      const uint64_t kv_row = key_position * kv_heads + kv_head;
+      float key_register[kDimensionsPerLane];
+#pragma unroll
+      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+        const uint32_t current = lane + index * kWaveSize;
+        key_register[index] =
+            load_kv_qtile4<Encoding>(key, key_scales, key_outer_scales, kv_row,
+                                     current, head_dim, static_key_scale);
+      }
+
+      float own_score = 0.0F;
+      uint32_t own_active = 0U;
+#pragma unroll
+      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+        const bool item_active =
+            wave_row_valid && key_position <= wave_causal_limit;
+        float products[kDimensionsPerLane];
+#pragma unroll
+        for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+          const uint32_t current = lane + index * kWaveSize;
+          products[index] =
+              item_active && current < head_dim
+                  ? query_values[item][index] * key_register[index]
+                  : 0.0F;
+        }
+        const float pair0 = products[0] + products[1];
+        const float pair1 = products[2] + products[3];
+        const float pair2 = products[4] + products[5];
+        const float pair3 = products[6] + products[7];
+        float partial = (pair0 + pair1) + (pair2 + pair3);
+        for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
+          partial += __shfl_down(partial, offset, kWaveSize);
+        }
+        const float reduced_score = __shfl(partial, 0U, kWaveSize);
+        if (lane == item) {
+          own_score = reduced_score;
+          own_active = item_active ? 1U : 0U;
+        }
+      }
+
+      if (lane < kQueriesPerWave && own_active != 0U) {
+        own_score *= rsqrtf(static_cast<float>(head_dim));
+      }
+
+      float own_rescale = 1.0F;
+      float own_contribution = 0.0F;
+      if (lane < kQueriesPerWave && own_active != 0U) {
+        const float own_next_maximum = fmaxf(own_running_maximum, own_score);
+        own_rescale = expf(own_running_maximum - own_next_maximum);
+        own_contribution = expf(own_score - own_next_maximum);
+        own_running_denominator =
+            own_running_denominator * own_rescale + own_contribution;
+        own_running_maximum = own_next_maximum;
+      }
+      float value_register[kDimensionsPerLane];
+#pragma unroll
+      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+        const uint32_t current = lane + index * kWaveSize;
+        value_register[index] = load_kv_qtile4<Encoding>(
+            value, value_scales, value_outer_scales, kv_row, current, head_dim,
+            static_value_scale);
+      }
+#pragma unroll
+      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+        const float rescale = __shfl(own_rescale, static_cast<int>(item),
+                                     static_cast<int>(kWaveSize));
+        const float contribution =
+            __shfl(own_contribution, static_cast<int>(item),
+                   static_cast<int>(kWaveSize));
+        const bool item_active =
+            wave_row_valid && key_position <= wave_causal_limit;
+#pragma unroll
+        for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+          const uint32_t current = lane + index * kWaveSize;
+          if (item_active && current < head_dim) {
+            accumulations[item][index] = accumulations[item][index] * rescale +
+                                         contribution * value_register[index];
+          }
+        }
+      }
+    }
+  } else {
+    __shared__ float key_tile[kHeadDim];
+    __shared__ float value_tile[kHeadDim];
+    for (uint64_t key_position = 0U; key_position <= last_query_position;
+         ++key_position) {
+      const uint64_t kv_row = key_position * kv_heads + kv_head;
+      if (dimension < head_dim) {
+        key_tile[dimension] =
+            load_kv_qtile4<Encoding>(key, key_scales, key_outer_scales, kv_row,
+                                     dimension, head_dim, static_key_scale);
+      } else if (dimension < 2U * head_dim) {
+        const uint32_t value_dimension = dimension - head_dim;
+        value_tile[value_dimension] = load_kv_qtile4<Encoding>(
+            value, value_scales, value_outer_scales, kv_row, value_dimension,
+            head_dim, static_value_scale);
+      }
+      __syncthreads();
+
+      float own_score = 0.0F;
+      uint32_t own_active = 0U;
+#pragma unroll
+      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+        const bool item_active =
+            wave_row_valid && key_position <= wave_causal_limit;
+        float products[kDimensionsPerLane];
+#pragma unroll
+        for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+          const uint32_t current = lane + index * kWaveSize;
+          products[index] = item_active && current < head_dim
+                                ? query_values[item][index] * key_tile[current]
+                                : 0.0F;
+        }
+        const float pair0 = products[0] + products[1];
+        const float pair1 = products[2] + products[3];
+        const float pair2 = products[4] + products[5];
+        const float pair3 = products[6] + products[7];
+        float partial = (pair0 + pair1) + (pair2 + pair3);
+        for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
+          partial += __shfl_down(partial, offset, kWaveSize);
+        }
+        const float reduced_score = __shfl(partial, 0U, kWaveSize);
+        if (lane == item) {
+          own_score = reduced_score;
+          own_active = item_active ? 1U : 0U;
+        }
+      }
+
+      if (lane < kQueriesPerWave && own_active != 0U) {
+        own_score *= rsqrtf(static_cast<float>(head_dim));
+      }
+
+      float own_rescale = 1.0F;
+      float own_contribution = 0.0F;
+      if (lane < kQueriesPerWave && own_active != 0U) {
+        const float own_next_maximum = fmaxf(own_running_maximum, own_score);
+        own_rescale = expf(own_running_maximum - own_next_maximum);
+        own_contribution = expf(own_score - own_next_maximum);
+        own_running_denominator =
+            own_running_denominator * own_rescale + own_contribution;
+        own_running_maximum = own_next_maximum;
+      }
+#pragma unroll
+      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+        const float rescale = __shfl(own_rescale, static_cast<int>(item),
+                                     static_cast<int>(kWaveSize));
+        const float contribution =
+            __shfl(own_contribution, static_cast<int>(item),
+                   static_cast<int>(kWaveSize));
+        const bool item_active =
+            wave_row_valid && key_position <= wave_causal_limit;
+#pragma unroll
+        for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+          const uint32_t current = lane + index * kWaveSize;
+          if (item_active && current < head_dim) {
+            accumulations[item][index] = accumulations[item][index] * rescale +
+                                         contribution * value_tile[current];
+          }
+        }
+      }
+      __syncthreads();
+    }
+  }
+#endif
+
+#pragma unroll
+  for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+    const uint32_t logical_query = wave * kQueriesPerWave + item;
+    const uint64_t row = first_row + logical_query / kGqaRatio;
+    const uint32_t query_head = first_query_head + logical_query % kGqaRatio;
+    if (row < query_count) {
+      uint16_t *const output_row = output + (row * q_heads + query_head) *
+                                                static_cast<uint64_t>(head_dim);
+      const float denominator =
+          __shfl(own_running_denominator, static_cast<int>(item),
+                 static_cast<int>(kWaveSize));
+#pragma unroll
+      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+        const uint32_t current = lane + index * kWaveSize;
+        if (current < head_dim) {
+          output_row[current] =
+              f32_to_bf16_rne(accumulations[item][index] / denominator);
         }
       }
     }
@@ -4649,6 +5042,48 @@ hipError_t launch(
 #undef SLLM_LAUNCH_QTILE4_GQA4
 #undef SLLM_LAUNCH_DECODE_WAVE
 #undef SLLM_DISPATCH_ATTENTION_ENCODING
+  return hipGetLastError();
+}
+
+hipError_t launch_gqa6_qtile8_w16(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t start_position, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim, const uint32_t encoding,
+    const float static_key_scale, const float static_value_scale,
+    const bool wave_local_kv, const hipStream_t stream) noexcept {
+  if (query == nullptr || key == nullptr || value == nullptr ||
+      key_scales == nullptr || value_scales == nullptr || output == nullptr ||
+      query_count < 128U || query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M ||
+      start_position < 1024U || q_heads != 24U || kv_heads != 4U ||
+      head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM ||
+      encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
+    return hipErrorInvalidValue;
+  }
+  const uint64_t gqa_block_count =
+      (static_cast<uint64_t>(query_count) + 7U) / 8U * kv_heads;
+  if (gqa_block_count > std::numeric_limits<uint32_t>::max()) {
+    return hipErrorInvalidValue;
+  }
+  if (wave_local_kv) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(causal_attention_prefill_gqa6_qtile8_w16_kernel<
+                        SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 6U, true>),
+        dim3(static_cast<uint32_t>(gqa_block_count)), dim3(512U), 0U, stream,
+        query, key, value, key_scales, value_scales, key_outer_scales,
+        value_outer_scales, output, query_count, start_position, q_heads,
+        kv_heads, head_dim, static_key_scale, static_value_scale);
+  } else {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(causal_attention_prefill_gqa6_qtile8_w16_kernel<
+                        SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 6U>),
+        dim3(static_cast<uint32_t>(gqa_block_count)), dim3(512U), 0U, stream,
+        query, key, value, key_scales, value_scales, key_outer_scales,
+        value_outer_scales, output, query_count, start_position, q_heads,
+        kv_heads, head_dim, static_key_scale, static_value_scale);
+  }
   return hipGetLastError();
 }
 
