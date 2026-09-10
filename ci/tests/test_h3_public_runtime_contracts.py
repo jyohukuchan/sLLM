@@ -34,6 +34,7 @@ from run_h3_public_runtime_compile import (  # noqa: E402
     declared_public_symbols,
     render_commands,
     require_clean_checkout,
+    _require_host_symbols,
     main as run_h3_public_runtime_main,
 )
 from validate_h3_public_runtime_contracts import (  # noqa: E402
@@ -766,11 +767,46 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
         self.assertEqual(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS, tuple(sorted(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)))
 
     def test_additional_device_stub_inventory_is_finite_and_duplicate_free(self) -> None:
-        self.assertEqual(len(ADDITIONAL_DEVICE_STUB_SYMBOLS), 81)
-        self.assertEqual(len(set(ADDITIONAL_DEVICE_STUB_SYMBOLS)), 81)
+        expected_gqa6_w16_variants = (
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_162__device_stub__causal_attention_prefill_gqa6_qtile8_w16_kernelILj6ELj6ELb0EEEvPKtPKvS5_S5_S5_PKfS7_Ptjmjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_162__device_stub__causal_attention_prefill_gqa6_qtile8_w16_kernelILj6ELj6ELb1EEEvPKtPKvS5_S5_S5_PKfS7_Ptjmjjjff",
+        )
+        self.assertTrue(set(expected_gqa6_w16_variants) <= set(ADDITIONAL_DEVICE_STUB_SYMBOLS))
+        self.assertEqual(len(ADDITIONAL_DEVICE_STUB_SYMBOLS), 83)
+        self.assertEqual(len(set(ADDITIONAL_DEVICE_STUB_SYMBOLS)), 83)
         self.assertEqual(ADDITIONAL_DEVICE_STUB_SYMBOLS, tuple(sorted(ADDITIONAL_DEVICE_STUB_SYMBOLS)))
-        self.assertEqual(sum("causal_attention_kernel" in name for name in ADDITIONAL_DEVICE_STUB_SYMBOLS), 80)
+        self.assertEqual(sum("causal_attention_kernel" in name for name in ADDITIONAL_DEVICE_STUB_SYMBOLS), 82)
         self.assertEqual(sum("ministral3_yarn_kernel" in name for name in ADDITIONAL_DEVICE_STUB_SYMBOLS), 1)
+
+    def test_host_stub_allowlist_accepts_exact_gqa6_variants_and_rejects_unknown(self) -> None:
+        def record(name: str, *, defined: bool = True, symbol_type: str = "Function", type_number: int = 2, section: str = ".text") -> dict[str, object]:
+            return {
+                "name": name,
+                "defined": defined,
+                "binding": "Global",
+                "binding_number": 1,
+                "type": symbol_type,
+                "type_number": type_number,
+                "visibility": "STV_DEFAULT",
+                "other": 0,
+                "section": section,
+            }
+
+        records = [record(name) for name in PUBLIC_SYMBOLS]
+        records.extend(
+            [
+                record("sllm_hip_compile_probe", symbol_type="Object", type_number=1, section=".data.rel.ro"),
+                record("sllm_rmsnorm_baseline_wave32_v1", symbol_type="Object", type_number=1, section=".data.rel.ro"),
+                *(record(name, defined=False, symbol_type="NoType", type_number=0, section="Undefined") for name in EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS),
+            ]
+        )
+        known = next(name for name in ADDITIONAL_DEVICE_STUB_SYMBOLS if "qtile8_w16_kernelILj6ELj6ELb0" in name)
+        unknown = known.replace("ELb0", "ELb2")
+        with patch("run_h3_public_runtime_compile._symbol_records", return_value=[*records, record(known)]):
+            _require_host_symbols("")
+        with patch("run_h3_public_runtime_compile._symbol_records", return_value=[*records, record(unknown)]):
+            with self.assertRaises(RuntimeContractError):
+                _require_host_symbols("")
 
     def test_host_hip_undefined_closure_includes_graph_and_gfx1030_additions(self) -> None:
         additions = {

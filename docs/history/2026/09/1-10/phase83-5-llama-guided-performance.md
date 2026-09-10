@@ -19,6 +19,13 @@
 - V620比較器の初回判定は、MTP有無の出力一致を誤って要求してFAILした。測定は再実行せず、承認済み条件に合わせMTPあり対R56と各modeの反復一貫性へ訂正した。rootもraw結果から独立にtoken/採否/中央値/MADを確認した。初回失敗と訂正理由は最終比較記録に残す。
 - 累積reviewでcorrectness/security blockerなし。既存のadaptationは従来noticeで追跡し、このPhaseの新規直接importはない。公開手順ではこのcandidateをcommit/pushし、同commitのhost・basic/public-runtime H3を確認する。
 
+## 公開CIでの修正（2026-09-10）
+
+- 初回公開commit `3dbee53ba455f15051411efd68c601b31f27ad17`のhost H0/H1/H2とbasic H3は成功した。
+- [public-runtime H3](https://github.com/jyohukuchan/sLLM/actions/runs/34452726526)は両targetでコンパイル・リンク後に失敗した。GQA6 W16 kernelのbool template付きHIP起動関数2種類が、正当なdevice stubの有限リストに未登録だった。
+- 実ELFと照合した2symbolだけを追加し、未知のstubを拒否する回帰テストを追加した。CPU代替や未知のstubを一括許可していない。source manifestを同期し、修正commitのGitHub Checksでhost・basic/public-runtime H3を確認する。
+- この修正はCI検査と記録だけで、GPU演算・runtime・build入力を変更しない。最終candidateのGPU証拠は公開commitとのsource hash対応を確認して再利用する。
+
 ## 最終比較（同一candidate、8192入力/128出力）
 
 各行1 warmup＋3 measured。数値はmeasured中央値で、prefillはcompanion準備、decodeはdraft/verify/reject/replay/sampling/finishを含む。各回新しいtarget/companion requestを作成し、prefix cacheを再利用しない。
