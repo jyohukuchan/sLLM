@@ -609,6 +609,8 @@ EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS = (
     "hipblasGemmEx",
     "hipblasLtCreate",
     "hipblasLtDestroy",
+    "hipblasLtGetGitRevision",
+    "hipblasLtGetVersion",
     "hipblasLtMatmul",
     "hipblasLtMatmulAlgoGetHeuristic",
     "hipblasLtMatmulDescCreate",

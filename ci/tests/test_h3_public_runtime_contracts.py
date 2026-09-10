@@ -817,14 +817,16 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "hipGraphInstantiate",
             "hipGraphLaunch",
             "hipGraphNodeGetType",
+            "hipblasLtGetGitRevision",
+            "hipblasLtGetVersion",
             "hipMemRetainAllocationHandle",
             "hipMemcpy",
             "hipMemsetAsync",
             "hipStreamBeginCapture",
             "hipStreamEndCapture",
         }
-        self.assertEqual(len(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS), 61)
-        self.assertEqual(len(set(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS)), 61)
+        self.assertEqual(len(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS), 63)
+        self.assertEqual(len(set(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS)), 63)
         self.assertEqual(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS, tuple(sorted(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS)))
         self.assertEqual(additions, additions & set(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS))
 

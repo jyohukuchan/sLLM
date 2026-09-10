@@ -152,7 +152,7 @@
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "3896248f2bf42419a7d548842a072836c27bca45f63482c0dd570dabfdbdb9f0"
+          "sha256": "2c8fdfdd3d1bda41e4649316f6db2f01ec3f2bee062ed81ca22f2a3f7f48b51d"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
@@ -183,7 +183,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "afd6226b4263ca734184a75a4012cb1c9b5a56d9ffdf3a64e68a4e8813c04cfb"
+      "source_set_sha256": "8bc5d6762383757c869c6397390573b5d2349ad7de02642ded2347419f2e0d26"
     }
   },
   "source_symbol_map": [

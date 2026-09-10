@@ -24,6 +24,7 @@
 - 初回公開commit `3dbee53ba455f15051411efd68c601b31f27ad17`のhost H0/H1/H2とbasic H3は成功した。
 - [public-runtime H3](https://github.com/jyohukuchan/sLLM/actions/runs/34452726526)は両targetでコンパイル・リンク後に失敗した。GQA6 W16 kernelのbool template付きHIP起動関数2種類が、正当なdevice stubの有限リストに未登録だった。
 - 実ELFと照合した2symbolだけを追加し、未知のstubを拒否する回帰テストを追加した。CPU代替や未知のstubを一括許可していない。source manifestを同期し、修正commitのGitHub Checksでhost・basic/public-runtime H3を確認する。
+- 2回目の[public-runtime H3](https://github.com/jyohukuchan/sLLM/actions/runs/34453953479)ではstub検査を通過し、続く依存関数検査で`hipblasLtGetGitRevision`・`hipblasLtGetVersion`の登録漏れを検出した。runtimeが実際に使う2関数を厳密な依存リストへ同期し、欠落・余分・重複・host定義の拒否を維持する。既存native objectのHIP依存も照合し、H3対象外のevidence runtime由来3関数は追加しない。残るhost ELF検査条件を確認し、最終判定は修正commitのCIで行う。
 - この修正はCI検査と記録だけで、GPU演算・runtime・build入力を変更しない。最終candidateのGPU証拠は公開commitとのsource hash対応を確認して再利用する。
 
 ## 最終比較（同一candidate、8192入力/128出力）
