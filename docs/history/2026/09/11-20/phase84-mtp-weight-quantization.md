@@ -91,3 +91,9 @@ CI事前検査で新converter binのtarget台帳漏れを修正した。依存pa
 作業計画: [Phase84](../../../../plans/archive/2026/09/1-10/phase84-mtp-weight-quantization.md)。
 計画決定: [量子化順序](phase84-mtp-quantization-plan.md)。
 比較基準: [共通化後再計測](../1-10/phase83-common-qwen38-remeasurement.md)。
+
+## 公開後CIの修正
+
+初回commit `9af13362` のGitHub H1で、既存の `client_disconnect_cancels_active_generation` が失敗した。HTTP headerを受信してもbackendの生成開始は保証されず、CIでは開始前の切断が先行し得た。この場合にbackend内のcancel観測flagを要求していたことが競合の原因だった。
+
+テストにbackend開始の通知と切断許可の同期を加え、active generationを確認してから切断する。キャンセルのassertionと2秒の待機上限は維持し、runtimeは変更していない。該当testは10回、HTTP契約全12件も成功した。公開CIの最終結果は修正commitのchecksを正とする。production source・GPU binary・量子化成果物は変わらないため、このhost test修正を理由としたGPUの再計測は行わない。

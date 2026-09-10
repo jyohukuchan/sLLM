@@ -109,6 +109,7 @@ impl ChatGenerationBackendV1 for BlockingBackend {
 }
 
 struct EndlessBackend {
+    started: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -142,6 +143,7 @@ impl ChatGenerationBackendV1 for EndlessBackend {
         cancellation: &GenerationCancellationV1,
         sink: &mut dyn GenerationDeltaSinkV1,
     ) -> Result<BackendCompletionV1, BackendErrorV1> {
+        self.started.store(true, Ordering::Release);
         let payload = "x".repeat(16 * 1024);
         loop {
             if cancellation.is_cancelled() {
@@ -712,8 +714,10 @@ async fn post_header_failure_is_terminal_error_without_done() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_disconnect_cancels_active_generation() {
+    let started = Arc::new(AtomicBool::new(false));
     let cancelled = Arc::new(AtomicBool::new(false));
     let backend: Arc<dyn ChatGenerationBackendV1> = Arc::new(EndlessBackend {
+        started: Arc::clone(&started),
         cancelled: Arc::clone(&cancelled),
     });
     let (app, scheduler) = router(backend, 2, 1, None);
@@ -724,7 +728,9 @@ async fn client_disconnect_cancels_active_generation() {
         &valid_body(true),
         &["Content-Type: application/json"],
     );
-    tokio::task::spawn_blocking(move || {
+    let allow_disconnect = Arc::new(AtomicBool::new(false));
+    let allow_disconnect_for_client = Arc::clone(&allow_disconnect);
+    let client = tokio::task::spawn_blocking(move || {
         let mut socket = TcpStream::connect(address).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -740,12 +746,23 @@ async fn client_disconnect_cancels_active_generation() {
             assert!(count > 0, "server closed before streaming response headers");
             response_prefix.extend_from_slice(&buffer[..count]);
         }
+        while !allow_disconnect_for_client.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
         socket.shutdown(Shutdown::Both).unwrap();
-    })
-    .await
-    .unwrap();
-    wait_until(Duration::from_secs(2), || cancelled.load(Ordering::Acquire)).await;
-    assert!(cancelled.load(Ordering::Acquire));
+    });
+    let generation_started =
+        wait_until(Duration::from_secs(2), || started.load(Ordering::Acquire)).await;
+    allow_disconnect.store(true, Ordering::Release);
+    client.await.unwrap();
+    assert!(
+        generation_started,
+        "backend never entered the active generation"
+    );
+    assert!(
+        wait_until(Duration::from_secs(2), || cancelled.load(Ordering::Acquire)).await,
+        "client disconnect did not cancel the active generation"
+    );
 
     scheduler.shutdown();
     server.abort();
@@ -997,9 +1014,10 @@ async fn openwebui_max_tokens_alias_requires_the_compatibility_profile() {
     compatible_server.abort();
 }
 
-async fn wait_until(timeout: Duration, condition: impl Fn() -> bool) {
+async fn wait_until(timeout: Duration, condition: impl Fn() -> bool) -> bool {
     let started = Instant::now();
     while !condition() && started.elapsed() < timeout {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    condition()
 }

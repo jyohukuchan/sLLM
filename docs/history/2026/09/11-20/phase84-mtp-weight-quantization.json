@@ -5472,5 +5472,16 @@
       "evidence_mode": "local-development",
       "duration_seconds": 1.212911
     }
+  },
+  "publication_ci_followup": {
+    "initial_commit": "9af1336295c3360a08b09f4d0977e887b0b32d0d",
+    "initial_host_run": 34526145411,
+    "failed_test": "client_disconnect_cancels_active_generation",
+    "cause": "response headers did not guarantee backend generation started before client disconnect",
+    "fix": "synchronize generation start before client disconnect; preserve cancellation assertion and timeout",
+    "production_changes": false,
+    "focused_repetitions_passed": 10,
+    "http_contract_passed": 12,
+    "final_ci_authority": "GitHub checks on the follow-up commit"
   }
 }
