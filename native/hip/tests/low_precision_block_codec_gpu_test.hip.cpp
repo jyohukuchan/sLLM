@@ -95,6 +95,22 @@ static_assert(kMxfp8WideNUpperProvider.provider ==
               sllm_lowp::ProviderKind::Mxfp8Gfx1201Wmma);
 static_assert(kMxfp8WideNUpperProvider.tile ==
               sllm_lowp::TilePolicy::Wmma128x128x32);
+constexpr auto kMxfp8WideNTailProvider =
+    sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
+        sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8, sllm_lowp::ExactTarget::Gfx1201,
+        128U, 1025U, 4096U));
+static_assert(kMxfp8WideNTailProvider.supported());
+static_assert(kMxfp8WideNTailProvider.provider ==
+              sllm_lowp::ProviderKind::Mxfp8Gfx1201Wmma);
+static_assert(kMxfp8WideNTailProvider.tile ==
+              sllm_lowp::TilePolicy::Wmma128x64x32);
+constexpr auto kMxfp8CompleteRowN65Provider =
+    sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
+        sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8, sllm_lowp::ExactTarget::Gfx1201,
+        128U, 65U, 4096U));
+static_assert(kMxfp8CompleteRowN65Provider.supported());
+static_assert(kMxfp8CompleteRowN65Provider.provider ==
+              sllm_lowp::ProviderKind::Mxfp8Block32);
 constexpr auto kMxfp8WideNAboveProvider =
     sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
         sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8, sllm_lowp::ExactTarget::Gfx1201,
@@ -442,6 +458,18 @@ __global__ void e3m2_to_fp16_bits_kernel(const uint8_t *const packed_input,
       sllm_lowp::packed_e3m2_at(packed_input, index));
 }
 
+__global__ void packed_e3m2_at_all_codes_kernel(
+    const uint8_t *const packed_input, uint8_t *const decoded,
+    uint8_t *const decoded_legacy, const uint32_t value_count) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= value_count) {
+    return;
+  }
+  decoded[index] = sllm_lowp::packed_e3m2_at(packed_input, index);
+  decoded_legacy[index] =
+      sllm_lowp::packed_e3m2_at_legacy24(packed_input, index);
+}
+
 __global__ void e4m3fn_to_fp16_bits_x4_kernel(const uint8_t *const input,
                                               uint16_t *const converted,
                                               const uint32_t value_count) {
@@ -464,6 +492,21 @@ __global__ void block_load_kernel(const uint8_t *const values,
   const auto view = sllm_lowp::make_block_scaled_view<BlockFormat>(
       values, scales, outer_scales, columns);
   output[column] = sllm_lowp::BlockCodec<BlockFormat>::load(view, 0U, column);
+}
+
+template <typename BlockFormat>
+__global__ void
+wave_block_load_kernel(const uint8_t *const values, const uint8_t *const scales,
+                       float *const output, const uint32_t columns) {
+  const uint32_t lane = threadIdx.x & 31U;
+  const uint32_t block = blockIdx.x;
+  const auto view = sllm_lowp::make_block_scaled_view<BlockFormat>(
+      values, scales, nullptr, columns);
+  const auto group = sllm_lowp::make_wave_block32(view, 0U, block, lane);
+  const uint32_t column = block * BlockFormat::kBlockSize + lane;
+  if (column < columns) {
+    output[column] = sllm_lowp::load_wave_block32(group, lane);
+  }
 }
 
 bool compare_float(const float actual, const float expected) {
@@ -708,6 +751,100 @@ bool run_e3m2_to_e4m3_exact_conversion() {
   return ok;
 }
 
+bool run_packed_e3m2_at_all_codes() {
+  constexpr uint32_t code_count = 64U;
+  constexpr uint32_t packed_lanes = 4U;
+  constexpr uint32_t group_bytes = 3U;
+  constexpr uint32_t group_count = code_count;
+  constexpr uint32_t value_count = group_count * packed_lanes;
+  // This is intentionally the exact final-group allocation. In particular,
+  // slot 3 of group 63 must not read a fourth byte.
+  constexpr uint32_t packed_bytes = group_count * group_bytes;
+  std::vector<uint8_t> packed(packed_bytes, 0U);
+  std::vector<uint8_t> expected(value_count, 0U);
+  for (uint32_t group = 0U; group != group_count; ++group) {
+    const uint32_t codes[packed_lanes] = {group, code_count - 1U - group,
+                                          group ^ UINT32_C(0x15),
+                                          group ^ UINT32_C(0x2a)};
+    uint32_t packed_group = 0U;
+    for (uint32_t lane = 0U; lane != packed_lanes; ++lane) {
+      expected[group * packed_lanes + lane] = static_cast<uint8_t>(codes[lane]);
+      // Independent byte packing oracle: four 6-bit lanes occupy 24 bits.
+      packed_group |= (codes[lane] & UINT32_C(0x3f)) << (lane * 6U);
+    }
+    for (uint32_t byte = 0U; byte != group_bytes; ++byte) {
+      packed[group * group_bytes + byte] =
+          static_cast<uint8_t>(packed_group >> (byte * 8U));
+    }
+  }
+
+  std::vector<uint8_t> decoded(value_count, 0U);
+  std::vector<uint8_t> decoded_legacy(value_count, 0U);
+  uint8_t *device_packed = nullptr;
+  uint8_t *device_decoded = nullptr;
+  uint8_t *device_decoded_legacy = nullptr;
+  bool ok = hip_ok(hipMalloc(reinterpret_cast<void **>(&device_packed),
+                             packed.size()),
+                   "hipMalloc packed E3M2 all-code input") &&
+            hip_ok(hipMalloc(reinterpret_cast<void **>(&device_decoded),
+                             decoded.size()),
+                   "hipMalloc packed E3M2 all-code output") &&
+            hip_ok(hipMalloc(reinterpret_cast<void **>(&device_decoded_legacy),
+                             decoded_legacy.size()),
+                   "hipMalloc packed E3M2 legacy output") &&
+            hip_ok(hipMemcpy(device_packed, packed.data(), packed.size(),
+                             hipMemcpyHostToDevice),
+                   "hipMemcpy packed E3M2 all-code input");
+  if (ok) {
+    hipLaunchKernelGGL(packed_e3m2_at_all_codes_kernel,
+                       dim3((value_count + 255U) / 256U), dim3(256U), 0U,
+                       nullptr, device_packed, device_decoded,
+                       device_decoded_legacy, value_count);
+    ok = hip_ok(hipGetLastError(), "packed E3M2 all-code kernel") &&
+         hip_ok(hipMemcpy(decoded.data(), device_decoded, decoded.size(),
+                          hipMemcpyDeviceToHost),
+                "hipMemcpy packed E3M2 all-code output") &&
+         hip_ok(hipMemcpy(decoded_legacy.data(), device_decoded_legacy,
+                          decoded_legacy.size(), hipMemcpyDeviceToHost),
+                "hipMemcpy packed E3M2 legacy output");
+  }
+  if (ok) {
+    for (uint32_t index = 0U; index != value_count; ++index) {
+      if (decoded[index] != expected[index]) {
+        std::cerr << "packed E3M2 lane mismatch group="
+                  << (index / packed_lanes)
+                  << " lane=" << (index % packed_lanes)
+                  << " actual=" << static_cast<uint32_t>(decoded[index])
+                  << " expected=" << static_cast<uint32_t>(expected[index])
+                  << '\n';
+        ok = false;
+        break;
+      }
+      if (decoded_legacy[index] != expected[index] ||
+          decoded_legacy[index] != decoded[index]) {
+        std::cerr << "legacy packed E3M2 lane mismatch group="
+                  << (index / packed_lanes)
+                  << " lane=" << (index % packed_lanes)
+                  << " actual=" << static_cast<uint32_t>(decoded_legacy[index])
+                  << " expected=" << static_cast<uint32_t>(expected[index])
+                  << '\n';
+        ok = false;
+        break;
+      }
+    }
+  }
+  for (void *allocation : {static_cast<void *>(device_decoded_legacy),
+                           static_cast<void *>(device_decoded),
+                           static_cast<void *>(device_packed)}) {
+    if (allocation != nullptr) {
+      ok = hip_ok(hipFree(allocation),
+                  "hipFree packed E3M2 all-code allocation") &&
+           ok;
+    }
+  }
+  return ok;
+}
+
 bool run_scalar_decode(const ScalarFormat format, const uint32_t count) {
   std::vector<uint8_t> input(count);
   for (uint32_t index = 0U; index != count; ++index) {
@@ -908,7 +1045,10 @@ template <typename BlockFormat> bool run_block_load(const uint32_t columns) {
   uint8_t *device_scales = nullptr;
   float *device_outer = nullptr;
   float *device_output = nullptr;
+  float *device_wave_output = nullptr;
   std::vector<float> output(columns);
+  std::vector<float> wave_output(columns);
+  constexpr bool wave_supported = !BlockFormat::kHasOuterScale;
   bool ok =
       hip_ok(
           hipMalloc(reinterpret_cast<void **>(&device_values), values.size()),
@@ -921,6 +1061,10 @@ template <typename BlockFormat> bool run_block_load(const uint32_t columns) {
       hip_ok(hipMalloc(reinterpret_cast<void **>(&device_output),
                        output.size() * sizeof(float)),
              "hipMalloc block output") &&
+      (!wave_supported ||
+       hip_ok(hipMalloc(reinterpret_cast<void **>(&device_wave_output),
+                        wave_output.size() * sizeof(float)),
+              "hipMalloc wave block output")) &&
       hip_ok(hipMemcpy(device_values, values.data(), values.size(),
                        hipMemcpyHostToDevice),
              "hipMemcpy block values") &&
@@ -940,6 +1084,18 @@ template <typename BlockFormat> bool run_block_load(const uint32_t columns) {
                           output.size() * sizeof(float), hipMemcpyDeviceToHost),
                 "hipMemcpy block output");
   }
+  if constexpr (wave_supported) {
+    if (ok) {
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(wave_block_load_kernel<BlockFormat>),
+                         dim3(blocks), dim3(32U), 0U, nullptr, device_values,
+                         device_scales, device_wave_output, columns);
+      ok = hip_ok(hipGetLastError(), "wave block load kernel") &&
+           hip_ok(hipMemcpy(wave_output.data(), device_wave_output,
+                            wave_output.size() * sizeof(float),
+                            hipMemcpyDeviceToHost),
+                  "hipMemcpy wave block output");
+    }
+  }
   if (ok) {
     for (uint32_t column = 0U; column != columns; ++column) {
       if (!compare_float(output[column], expected[column])) {
@@ -948,10 +1104,18 @@ template <typename BlockFormat> bool run_block_load(const uint32_t columns) {
         ok = false;
         break;
       }
+      if (wave_supported &&
+          !compare_float(wave_output[column], expected[column])) {
+        std::cerr << "wave block mismatch columns=" << columns
+                  << " column=" << column << '\n';
+        ok = false;
+        break;
+      }
     }
   }
   for (void *allocation :
-       {static_cast<void *>(device_output), static_cast<void *>(device_outer),
+       {static_cast<void *>(device_wave_output),
+        static_cast<void *>(device_output), static_cast<void *>(device_outer),
         static_cast<void *>(device_scales),
         static_cast<void *>(device_values)}) {
     if (allocation != nullptr) {
@@ -1043,6 +1207,7 @@ int main() {
   ok = run_provider_contract() && ok;
   ok = run_e4m3fn_to_fp16_exact_conversion() && ok;
   ok = run_e3m2_to_e4m3_exact_conversion() && ok;
+  ok = run_packed_e3m2_at_all_codes() && ok;
   ok = run_scalar_decode(ScalarFormat::E4M3Fn, 256U) && ok;
   ok = run_scalar_decode(ScalarFormat::E4M3FnuZ, 256U) && ok;
   ok = run_scalar_decode(ScalarFormat::E5M2, 256U) && ok;
@@ -1071,6 +1236,7 @@ int main() {
                "\"exact_e3m2_to_e4m3_codes\":64,"
                "\"exact_e3m2_to_fp16_bits_codes\":64,"
                "\"exact_e3m2_packed_lanes\":4,"
+               "\"exact_packed_e3m2_at_codes_per_slot\":64,"
                "\"exact_e4m3_to_fp16_bits_codes\":256,"
                "\"exact_e4m3_fp16_lanes\":4,"
                "\"exact_e4m3_fp16_operands\":2,"

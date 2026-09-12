@@ -9,6 +9,8 @@
 //! strictly sequential legacy-row8 and gfx1201-WMMA worker processes. Each
 //! worker repeats the complete dataset and must release every resident and the
 //! session with zero cleanup before the next provider can start.
+//! The `production` worker captures MXFP8 or MXFP6 logits on either RDNA target
+//! without forcing a provider, for comparisons between separately built binaries.
 
 use std::env;
 use std::fs::{self, OpenOptions};
@@ -171,6 +173,7 @@ struct ArtifactIdentity {
 enum ProviderMode {
     LegacyRow8,
     WmmaCandidate,
+    Production,
 }
 
 impl ProviderMode {
@@ -178,6 +181,7 @@ impl ProviderMode {
         match self {
             Self::LegacyRow8 => "legacy-row8",
             Self::WmmaCandidate => "gfx1201-wmma-scoped-default",
+            Self::Production => "production",
         }
     }
 
@@ -189,6 +193,7 @@ impl ProviderMode {
         match self {
             Self::LegacyRow8 => MXFP8_ROW8_ENV,
             Self::WmmaCandidate => MXFP8_SCOPED_DEFAULT_ENV,
+            Self::Production => "",
         }
     }
 
@@ -196,6 +201,7 @@ impl ProviderMode {
         match value {
             "legacy-row8" => Ok(Self::LegacyRow8),
             "gfx1201-wmma-scoped-default" => Ok(Self::WmmaCandidate),
+            "production" => Ok(Self::Production),
             _ => Err(format!("unknown MXFP8 provider worker mode: {value}")),
         }
     }
@@ -222,6 +228,7 @@ struct WorkerCleanup {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProviderWorkerOutput {
+    kv_encoding: String,
     provider_label: String,
     selector_environment: String,
     selector_value: String,
@@ -535,6 +542,7 @@ fn build_graph(
     source: &VerifiedGgufWeightSource,
     token_count: u64,
     state_capacity: u64,
+    kv_encoding: KvCacheEncoding,
 ) -> Result<sllm_core::QwenGraph, String> {
     if source.has_mx_weight_activation_recipe() {
         build_qwen35_gguf_mx_weight_activation_graph(
@@ -543,7 +551,7 @@ fn build_graph(
             source,
             token_count,
             state_capacity,
-            KvCacheEncoding::Fp16,
+            kv_encoding,
         )
     } else if source.has_quantized_linear_recipe() {
         return Err("quality runner accepts only BF16 or OCP MX GGUF artifacts".to_owned());
@@ -553,7 +561,7 @@ fn build_graph(
             plan,
             token_count,
             state_capacity,
-            KvCacheEncoding::Fp16,
+            kv_encoding,
         )
     }
     .map_err(|error| format!("build graph: {error}"))
@@ -568,6 +576,7 @@ fn execute_artifact(
     cases: &[PreparedCase],
     target: &str,
     require_mx: bool,
+    kv_encoding: KvCacheEncoding,
 ) -> Result<ArtifactRun, String> {
     if session.memory_snapshot().current_bytes() != 0 {
         return Err("session was not empty before resident creation".to_owned());
@@ -608,6 +617,7 @@ fn execute_artifact(
         source.as_ref(),
         maximum as u64,
         maximum as u64 + 1,
+        kv_encoding,
     )?;
     let resident = QwenResidentModel::new_gguf(
         Arc::clone(session),
@@ -648,6 +658,7 @@ fn execute_artifact(
             source.as_ref(),
             case.tokens.len() as u64,
             case.tokens.len() as u64 + 1,
+            kv_encoding,
         )
         .map_err(|error| format!("{} case {}: {error}", weight_encoding, case.id))?;
         let mut request = resident
@@ -928,6 +939,12 @@ fn validate_provider_dispatch(
     let valid = match provider {
         ProviderMode::LegacyRow8 => dispatch.mxfp8_wmma_dispatch_count == 0,
         ProviderMode::WmmaCandidate => dispatch.mxfp8_wmma_dispatch_count > 0,
+        ProviderMode::Production => {
+            dispatch.selected_backend == "hip"
+                && dispatch.all_dispatches_hip
+                && !dispatch.fallback_used
+                && dispatch.kernel_dispatch_count > 0
+        }
     };
     if !valid {
         return Err(format!(
@@ -942,9 +959,9 @@ fn validate_provider_dispatch(
 }
 
 fn run_provider_worker(arguments: &[String]) -> Result<(ProviderWorkerOutput, PathBuf), String> {
-    if arguments.len() != 8 {
+    if !matches!(arguments.len(), 8 | 9) {
         return Err(
-            "internal usage: --provider-worker MODEL_LOCK DATASET_JSON DEVICE_INDEX TARGET MX_GGUF MX_DERIVED_LOCK PROVIDER OUTPUT_JSON"
+            "internal usage: --provider-worker MODEL_LOCK DATASET_JSON DEVICE_INDEX TARGET MX_GGUF MX_DERIVED_LOCK PROVIDER OUTPUT_JSON [fp16|kv-mxfp8-e4]"
                 .to_owned(),
         );
     }
@@ -954,12 +971,23 @@ fn run_provider_worker(arguments: &[String]) -> Result<(ProviderWorkerOutput, Pa
         .parse::<u32>()
         .map_err(|_| "device index must be u32".to_owned())?;
     let target = arguments[3].clone();
-    if target != "gfx1201" {
-        return Err("provider comparison requires exact gfx1201".to_owned());
-    }
     let gguf_path = PathBuf::from(&arguments[4]);
     let derived_lock_path = PathBuf::from(&arguments[5]);
     let provider = ProviderMode::parse(&arguments[6])?;
+    let kv_name = arguments.get(8).map(String::as_str).unwrap_or("fp16");
+    let kv_encoding = match kv_name {
+        "fp16" => KvCacheEncoding::Fp16,
+        "kv-mxfp8-e4" if provider == ProviderMode::Production => KvCacheEncoding::Mxfp8E4,
+        _ => {
+            return Err("KV selection requires production mode and fp16 or kv-mxfp8-e4".to_owned());
+        }
+    };
+    if !valid_target(&target) || (provider != ProviderMode::Production && target != "gfx1201") {
+        return Err(
+            "legacy provider comparison requires gfx1201; production accepts gfx1030 or gfx1201"
+                .to_owned(),
+        );
+    }
     let output_path = PathBuf::from(&arguments[7]);
     if output_path.exists() {
         return Err("provider worker output already exists".to_owned());
@@ -984,6 +1012,7 @@ fn run_provider_worker(arguments: &[String]) -> Result<(ProviderWorkerOutput, Pa
             &cases,
             &target,
             true,
+            kv_encoding,
         )?;
         if session.memory_snapshot().current_bytes() != 0 {
             return Err("primary provider resident remained before repeat".to_owned());
@@ -996,6 +1025,7 @@ fn run_provider_worker(arguments: &[String]) -> Result<(ProviderWorkerOutput, Pa
             &cases,
             &target,
             true,
+            kv_encoding,
         )?;
         if session.memory_snapshot().current_bytes() != 0 {
             return Err("repeat provider resident remained after measurement".to_owned());
@@ -1004,7 +1034,7 @@ fn run_provider_worker(arguments: &[String]) -> Result<(ProviderWorkerOutput, Pa
             || primary.artifact_sha256 != repeated.artifact_sha256
             || primary.artifact_size_bytes != repeated.artifact_size_bytes
         {
-            return Err("provider repeat did not use the same MXFP8 artifact".to_owned());
+            return Err("provider repeat did not use the same OCP MX artifact".to_owned());
         }
         validate_provider_dispatch(provider, &primary.dispatch)?;
         validate_provider_dispatch(provider, &repeated.dispatch)?;
@@ -1040,9 +1070,15 @@ fn run_provider_worker(arguments: &[String]) -> Result<(ProviderWorkerOutput, Pa
             dispatch_identity_repeated,
         };
         Ok(ProviderWorkerOutput {
+            kv_encoding: kv_name.to_owned(),
             provider_label: provider.label().to_owned(),
             selector_environment: provider.selector_environment().to_owned(),
-            selector_value: "1".to_owned(),
+            selector_value: if provider == ProviderMode::Production {
+                ""
+            } else {
+                "1"
+            }
+            .to_owned(),
             artifact: primary,
             repeat,
             cleanup: WorkerCleanup {
@@ -1129,7 +1165,9 @@ fn spawn_provider_worker(
     for name in PROVIDER_ENVIRONMENTS {
         command.env_remove(name);
     }
-    command.env(provider.selector_environment(), "1");
+    if provider != ProviderMode::Production {
+        command.env(provider.selector_environment(), "1");
+    }
     let mut child = command
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -1168,8 +1206,14 @@ fn spawn_provider_worker(
     let output: ProviderWorkerOutput = serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse {} provider worker output: {error}", provider.label()))?;
     if output.provider_label != provider.label()
+        || output.kv_encoding != "fp16"
         || output.selector_environment != provider.selector_environment()
-        || output.selector_value != "1"
+        || output.selector_value
+            != if provider == ProviderMode::Production {
+                ""
+            } else {
+                "1"
+            }
         || !output.cleanup.final_cleanup_empty
         || output.cleanup.retryable_cleanup != 0
         || output.cleanup.durable_quarantine != 0
@@ -1251,6 +1295,7 @@ fn run_provider_comparison(arguments: &[String]) -> Result<(ProviderReport, Path
     );
 
     let ProviderWorkerOutput {
+        kv_encoding: _,
         provider_label: reference_label,
         selector_environment: reference_selector,
         selector_value: reference_selector_value,
@@ -1259,6 +1304,7 @@ fn run_provider_comparison(arguments: &[String]) -> Result<(ProviderReport, Path
         cleanup: reference_cleanup,
     } = reference_worker;
     let ProviderWorkerOutput {
+        kv_encoding: _,
         provider_label: candidate_label,
         selector_environment: candidate_selector,
         selector_value: candidate_selector_value,
@@ -1415,6 +1461,7 @@ fn run_artifact_comparison(arguments: &[String]) -> Result<(Report, PathBuf), St
             &cases,
             &target,
             false,
+            KvCacheEncoding::Fp16,
         )?;
         if session.memory_snapshot().current_bytes() != 0 {
             return Err("reference resident remained before candidate provisioning".to_owned());
@@ -1427,6 +1474,7 @@ fn run_artifact_comparison(arguments: &[String]) -> Result<(Report, PathBuf), St
             &cases,
             &target,
             true,
+            KvCacheEncoding::Fp16,
         )?;
         if session.memory_snapshot().current_bytes() != 0 {
             return Err("candidate resident remained after measurement".to_owned());
@@ -1624,6 +1672,30 @@ mod tests {
             "SLLM_MXFP8_PREFILL_SCOPED_DEFAULT_GFX1201"
         );
         assert!(ProviderMode::parse("default").is_err());
+    }
+
+    #[test]
+    fn production_capture_requires_real_hip_dispatch() {
+        let mut dispatch = DispatchAuditSummary {
+            selected_backend: "hip".to_owned(),
+            target: "gfx1030".to_owned(),
+            submission_count: 1,
+            kernel_dispatch_count: 1,
+            fallback_used: false,
+            all_dispatches_hip: true,
+            segment_count: 1,
+            boundary_count: 1,
+            mxfp8_wmma_dispatch_count: 0,
+        };
+        assert!(validate_provider_dispatch(ProviderMode::Production, &dispatch).is_ok());
+        dispatch.kernel_dispatch_count = 0;
+        assert!(validate_provider_dispatch(ProviderMode::Production, &dispatch).is_err());
+        dispatch.kernel_dispatch_count = 1;
+        dispatch.fallback_used = true;
+        assert!(validate_provider_dispatch(ProviderMode::Production, &dispatch).is_err());
+        dispatch.fallback_used = false;
+        dispatch.all_dispatches_hip = false;
+        assert!(validate_provider_dispatch(ProviderMode::Production, &dispatch).is_err());
     }
 
     #[test]

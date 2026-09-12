@@ -13,7 +13,7 @@ use sllm_core::{
     KvCacheSelectionSource, KvFp8PhysicalVariant, MINISTRAL3_GRAPH_MAX_CONTEXT,
     MINISTRAL3_MODEL_ALIAS, MINISTRAL3_MODEL_LOCK_FINGERPRINT, Ministral3ModelLock,
     Ministral3ResidentModel, ModelLock, OsSamplingRandom, QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
-    QwenComponentSelection, QwenExecutionRequest, QwenMultimodalImageEmbedding,
+    QWEN35_4B_REPO_ID, QwenComponentSelection, QwenExecutionRequest, QwenMultimodalImageEmbedding,
     QwenMultimodalPrompt, QwenResidentModel, QwenVisionExecutionInput, QwenVisionResidentModel,
     ReviewedModelLock, SamplingParametersV1, SessionCheckpoint, VerifiedCache,
     VerifiedGgufGemma4Moe, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe,
@@ -301,6 +301,44 @@ fn resolve_cli_kv_cache_selection(
         head_dim,
     ))
     .map_err(|error| error.to_string())
+}
+
+fn validate_cli_mx_weight_kv_compatibility(
+    model_repo_id: &str,
+    target: &str,
+    kv_cache_encoding: KvCacheEncoding,
+    has_sidecar: bool,
+    embedded_quantized: bool,
+    embedded_mx_encoding: Option<&str>,
+) -> Result<(), String> {
+    if kv_cache_encoding.is_kv_fp8_block16() {
+        return Err("block-scaled KV FP8 block16 is retired; use kv-mxfp8-e4 or fp16".to_owned());
+    }
+    if !kv_cache_encoding.is_kv_mxfp8() {
+        return Ok(());
+    }
+    if has_sidecar || (embedded_quantized && embedded_mx_encoding.is_none()) {
+        return Err(
+            "block-scaled KV FP8 is currently scoped to reviewed BF16 or MX weight recipes"
+                .to_owned(),
+        );
+    }
+    let Some(embedded_mx_encoding) = embedded_mx_encoding else {
+        // The existing BF16 + MXFP8 KV policy is validated by the shared KV
+        // selector before this helper is reached.
+        return Ok(());
+    };
+    if kv_cache_encoding != KvCacheEncoding::Mxfp8E4
+        || model_repo_id != QWEN35_4B_REPO_ID
+        || !matches!(target, "gfx1030" | "gfx1201")
+        || !matches!(embedded_mx_encoding, "mxfp8-e4m3-w8a8" | "mxfp6-e3m2-w6a6")
+    {
+        return Err(
+            "MX weight + block-scaled KV FP8 is limited to reviewed Qwen3.5-4B MXFP8/MXFP6 on exact gfx1030/gfx1201 with OCP MXFP8 E4 KV"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 const fn kv_selection_source_name(source: KvCacheSelectionSource) -> &'static str {
@@ -5291,14 +5329,14 @@ impl ModelFrontendBackend for ProductionBackend {
             _ => return Err("FP8 generation requires both manifest and artifact".to_owned()),
         };
         let has_sidecar = sidecar.is_some() || nvfp4_sidecar.is_some();
-        if (kv_cache_encoding.is_kv_fp8_block16() || kv_cache_encoding.is_kv_mxfp8())
-            && (has_sidecar || embedded_quantized)
-        {
-            return Err(
-                "block-scaled KV FP8 is currently scoped to Qwen3.5-4B BF16 text weights"
-                    .to_owned(),
-            );
-        }
+        validate_cli_mx_weight_kv_compatibility(
+            self.lock.model().repo_id.as_str(),
+            &request.target,
+            kv_cache_encoding,
+            has_sidecar,
+            embedded_quantized,
+            embedded_mx_encoding,
+        )?;
         if !processed_images.is_empty()
             && (has_sidecar || kv_cache_encoding != KvCacheEncoding::Fp16)
         {
@@ -5985,14 +6023,14 @@ impl ModelFrontendBackend for ProductionBackend {
             _ => return Err("FP8 benchmark requires both manifest and artifact".to_owned()),
         };
         let has_sidecar = sidecar.is_some() || nvfp4_sidecar.is_some();
-        if (kv_cache_encoding.is_kv_fp8_block16() || kv_cache_encoding.is_kv_mxfp8())
-            && (has_sidecar || embedded_quantized)
-        {
-            return Err(
-                "block-scaled KV FP8 is currently scoped to Qwen3.5-4B BF16 text weights"
-                    .to_owned(),
-            );
-        }
+        validate_cli_mx_weight_kv_compatibility(
+            self.lock.model().repo_id.as_str(),
+            &request.target,
+            kv_cache_encoding,
+            has_sidecar,
+            embedded_quantized,
+            embedded_mx_encoding,
+        )?;
         let fp8_provider =
             select_cli_fp8_provider(has_sidecar, request.fp8_provider, &request.target)?;
         let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
@@ -10383,5 +10421,123 @@ mod tests {
         ] {
             assert!(validate_gemma4_moe_chat_kv_cache_encoding(Some(encoding)).is_err());
         }
+    }
+
+    #[test]
+    fn cli_mx_weight_kv_scope_accepts_only_reviewed_mx_e4_combinations() {
+        assert!(
+            validate_cli_mx_weight_kv_compatibility(
+                QWEN35_4B_REPO_ID,
+                "gfx1030",
+                KvCacheEncoding::Mxfp8E4,
+                false,
+                false,
+                None,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_cli_mx_weight_kv_compatibility(
+                QWEN35_4B_REPO_ID,
+                "gfx1030",
+                KvCacheEncoding::Mxfp8E4,
+                false,
+                true,
+                Some("mxfp8-e4m3-w8a8"),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_cli_mx_weight_kv_compatibility(
+                QWEN35_4B_REPO_ID,
+                "gfx1201",
+                KvCacheEncoding::Mxfp8E4,
+                false,
+                true,
+                Some("mxfp6-e3m2-w6a6"),
+            )
+            .is_ok()
+        );
+
+        for (model, target, kv, sidecar, quantized, encoding) in [
+            (
+                QWEN35_4B_REPO_ID,
+                "gfx1030",
+                KvCacheEncoding::Mxfp8E4,
+                true,
+                true,
+                Some("mxfp8-e4m3-w8a8"),
+            ),
+            (
+                QWEN35_4B_REPO_ID,
+                "gfx1030",
+                KvCacheEncoding::Mxfp8E4,
+                false,
+                true,
+                None,
+            ),
+            (
+                "Qwen/Qwen3.5-9B",
+                "gfx1201",
+                KvCacheEncoding::Mxfp8E4,
+                false,
+                true,
+                Some("mxfp8-e4m3-w8a8"),
+            ),
+            (
+                QWEN35_4B_REPO_ID,
+                "gfx942",
+                KvCacheEncoding::Mxfp8E4,
+                false,
+                true,
+                Some("mxfp8-e4m3-w8a8"),
+            ),
+            (
+                QWEN35_4B_REPO_ID,
+                "gfx1030",
+                KvCacheEncoding::Mxfp8E5,
+                false,
+                true,
+                Some("mxfp8-e4m3-w8a8"),
+            ),
+            (
+                QWEN35_4B_REPO_ID,
+                "gfx1030",
+                KvCacheEncoding::Mxfp8E4,
+                false,
+                true,
+                Some("mixed-mxfp-invalid"),
+            ),
+        ] {
+            assert!(
+                validate_cli_mx_weight_kv_compatibility(
+                    model, target, kv, sidecar, quantized, encoding,
+                )
+                .is_err()
+            );
+        }
+
+        assert!(
+            validate_cli_mx_weight_kv_compatibility(
+                QWEN35_4B_REPO_ID,
+                "gfx1030",
+                KvCacheEncoding::Fp8E4M3Fn,
+                true,
+                true,
+                None,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_cli_mx_weight_kv_compatibility(
+                QWEN35_4B_REPO_ID,
+                "gfx1030",
+                KvCacheEncoding::Fp8E4M3Block16,
+                false,
+                true,
+                Some("mxfp8-e4m3-w8a8"),
+            )
+            .is_err()
+        );
     }
 }

@@ -652,3 +652,40 @@ proposal/acceptance counts and separate prefix/proposal wall times. An encoding
 being selectable does not imply a throughput or full-model quality improvement.
 See [conversion, CLI/API usage and evaluation limits](../development/mtp-companion-quantization.md)
 and the [Phase84 measurements](../history/2026/09/11-20/phase84-mtp-weight-quantization.md).
+
+## Phase85 Qwen3.5-4B MX weight and KV compatibility scope (2026-09-13)
+
+The existing Chat Completions, non-stream, SSE, cancellation, usage, and
+cleanup contracts also cover the reviewed Qwen3.5-4B weight/KV combinations on
+exact `gfx1030` and `gfx1201`. The [reviewed BF16 source lock](../models/locks/qwen3.5-4b-bf16.json)
+is paired with each converted GGUF's verified derived lock.
+These body artifacts use GGUF plus their derived lock directly; adapters and
+quantization sidecars are not part of this body compatibility scope.
+
+The accepted body combinations are BF16 or reviewed MXFP8/MXFP6 W/A weights
+with explicit FP16 KV, and BF16 or reviewed MXFP8/MXFP6 W/A weights with
+standard OCP MXFP8 E4 KV. The KV resolver runs before the weight/KV guard, so
+an omitted KV option resolves to the existing `kv-mxfp8-e4` value for this
+reviewed 4B recipe and reaches the same allowed combination; explicit `fp16`
+remains available. The selector value and its resolver policy did not change;
+the compatibility guard now accepts the reviewed MX body plus MXFP8 E4 KV
+combination. MXFP8 E5 retains its existing scope. The MXFP8/MXFP6 body plus MXFP8 E4 KV combination on
+`gfx942` is unverified/rejected and is not promoted by this entry.
+
+Final r6 API evidence passed all 10 body configurations across the two exact
+targets, with five requests per configuration covering non-stream, SSE,
+cancellation, recovery, and a separate request. The compact source report is
+`.local-artifacts/phase85/final-api-summary.json`; the detailed records remain
+under `.local-artifacts/phase85/final-api-gfx*-body-*/`. The eight same-format
+quality comparisons (20 logit rows each) were exact before/after: top-1 was
+`20/20`, maximum absolute difference and KLD were zero. This is an
+optimization-before/after statement and does not claim equality versus BF16.
+
+The 12 full inference comparison rows per target kept generated token sequences
+and VRAM equal. On R9700 `gfx1201`, MXFP8/MXFP6 body decode improved by about
+`3.8–4.6%`/`4.7–5.6%`, including about `4.4%`/`5.5%` with MXFP8 E4 KV; the
+V620 `gfx1030` rows were approximately flat (about `-0.4%` to `+1.5%`).
+These are scoped comparison results, not a quality or completion claim for all
+Qwen3.5 artifacts. See the [Phase85 history](../history/2026/09/11-20/phase85-mxfp8-mxfp6-common-kernels.md#最終採用と結論)
+and the ignored quality reports `.local-artifacts/phase85/compare-final-quality-report.json`
+and `.local-artifacts/phase85/compare-final-quality-report.md`.

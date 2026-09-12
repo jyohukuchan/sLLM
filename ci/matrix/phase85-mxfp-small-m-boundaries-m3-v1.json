@@ -1,0 +1,32 @@
+{
+  "schema_version": "phase85-mxfp-shapes-v1",
+  "state": "frozen-for-r6-prep",
+  "purpose": "M=3 representative selector boundaries for the Phase85 small-M default-A predicate; measurement not run by preparation task.",
+  "oracle_policy": "BoundarySample reuses the existing Phase85 oracle and repeat/cleanup contract.",
+  "cases": [
+    {"case_id":"mxfp8-m3-k2016-n1023","format":"mxfp8","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2016,"n":1023,"phase":2700,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2016-n1024","format":"mxfp8","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2016,"n":1024,"phase":2701,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2016-n1025","format":"mxfp8","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2016,"n":1025,"phase":2702,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2048-n1023","format":"mxfp8","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2048,"n":1023,"phase":2703,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2048-n1024","format":"mxfp8","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2048,"n":1024,"phase":2704,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2048-n1025","format":"mxfp8","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2048,"n":1025,"phase":2705,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2080-n1023","format":"mxfp8","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2080,"n":1023,"phase":2706,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2080-n1024","format":"mxfp8","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2080,"n":1024,"phase":2707,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2080-n1025","format":"mxfp8","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2080,"n":1025,"phase":2708,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2048-n2047","format":"mxfp8","tags":["small-m","mtp","selector-boundary","k-n-ratio-boundary"],"role":"mtp","m":3,"k":2048,"n":2047,"phase":2709,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2048-n2048","format":"mxfp8","tags":["small-m","mtp","selector-boundary","k-n-ratio-boundary"],"role":"mtp","m":3,"k":2048,"n":2048,"phase":2710,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2048-n2049","format":"mxfp8","tags":["small-m","mtp","selector-boundary","k-n-ratio-boundary"],"role":"mtp","m":3,"k":2048,"n":2049,"phase":2711,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2016-n1023","format":"mxfp6","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2016,"n":1023,"phase":2720,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2016-n1024","format":"mxfp6","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2016,"n":1024,"phase":2721,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2016-n1025","format":"mxfp6","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2016,"n":1025,"phase":2722,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2048-n1023","format":"mxfp6","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2048,"n":1023,"phase":2723,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2048-n1024","format":"mxfp6","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2048,"n":1024,"phase":2724,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2048-n1025","format":"mxfp6","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2048,"n":1025,"phase":2725,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2080-n1023","format":"mxfp6","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2080,"n":1023,"phase":2726,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2080-n1024","format":"mxfp6","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2080,"n":1024,"phase":2727,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2080-n1025","format":"mxfp6","tags":["small-m","mtp","selector-boundary","n-tail","k-boundary"],"role":"mtp","m":3,"k":2080,"n":1025,"phase":2728,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2048-n2047","format":"mxfp6","tags":["small-m","mtp","selector-boundary","k-n-ratio-boundary"],"role":"mtp","m":3,"k":2048,"n":2047,"phase":2729,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2048-n2048","format":"mxfp6","tags":["small-m","mtp","selector-boundary","k-n-ratio-boundary"],"role":"mtp","m":3,"k":2048,"n":2048,"phase":2730,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2048-n2049","format":"mxfp6","tags":["small-m","mtp","selector-boundary","k-n-ratio-boundary"],"role":"mtp","m":3,"k":2048,"n":2049,"phase":2731,"oracle":"boundary"}
+  ]
+}

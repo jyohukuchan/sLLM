@@ -27,14 +27,14 @@ use sllm_core::{
     MirostatModeV1, MirostatSamplingConfigV1 as CoreMirostatSamplingConfigV1, ModelLock,
     NgramDraftProviderV1, OsSamplingRandom, PrefixCacheConfigV1, PrefixCacheKeyV1, PrefixCacheV1,
     PrefixCacheValueV1, PrefixEntryIdV1, PrefixKvLayoutV1, PrefixLeaseV1, PrefixLookupKind,
-    PrefixStateIdentityV1, QWEN35_HIDDEN_SIZE, QWEN35_RECOMMENDED_CONTEXT_TOKENS,
-    QWEN38_MTP_DRAFT_WIDTH, QuantizedTensorEncoding, QwenComponentSelection, QwenExecutionRequest,
-    QwenGraph, QwenGraphStateDescriptor, QwenMultimodalImageEmbedding, QwenMultimodalPrompt,
-    QwenPrefixForkAuditV1, QwenPrefixStateV1, QwenResidentModel, QwenVisionExecutionInput,
-    QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock, SamplerChainConfigV1,
-    SamplerChainV1, SessionCheckpoint, SpeculativeAccountingV1, VerifiedCache,
-    VerifiedControlVectorPayloadV1, VerifiedFp8Sidecar, VerifiedGgufGemma4Moe,
-    VerifiedGgufGemma4Mtp, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe,
+    PrefixStateIdentityV1, QWEN35_4B_FINGERPRINT, QWEN35_HIDDEN_SIZE,
+    QWEN35_RECOMMENDED_CONTEXT_TOKENS, QWEN38_MTP_DRAFT_WIDTH, QuantizedTensorEncoding,
+    QwenComponentSelection, QwenExecutionRequest, QwenGraph, QwenGraphStateDescriptor,
+    QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenPrefixForkAuditV1, QwenPrefixStateV1,
+    QwenResidentModel, QwenVisionExecutionInput, QwenVisionManifest, QwenVisionResidentModel,
+    ReviewedModelLock, SamplerChainConfigV1, SamplerChainV1, SessionCheckpoint,
+    SpeculativeAccountingV1, VerifiedCache, VerifiedControlVectorPayloadV1, VerifiedFp8Sidecar,
+    VerifiedGgufGemma4Moe, VerifiedGgufGemma4Mtp, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe,
     VerifiedGgufWeightSource, VerifiedLoraPayloadV1, VerifiedMinistral3WeightSource,
     VerifiedNvfp4Sidecar, VerifiedQwen35Moe, VerifiedQwen38MtpQuantizedSidecar,
     VerifiedUnslothQwen38Nvfp4, WeightClassification, WeightLoadPlan,
@@ -4529,6 +4529,48 @@ impl ChatGenerationBackendV1 for Ministral3ChatBackendV1 {
 }
 
 impl QwenChatBackendV1 {
+    fn validate_mx_weight_kv_compatibility(
+        lock_fingerprint: &str,
+        target: &str,
+        kv_cache_encoding: KvCacheEncoding,
+        has_quantized_linear_recipe: bool,
+        mx_weight_encoding: Option<&str>,
+        adapter_catalog_present: bool,
+    ) -> Result<(), BackendErrorV1> {
+        if kv_cache_encoding.is_kv_fp8_block16() {
+            if has_quantized_linear_recipe || adapter_catalog_present {
+                return Err(BackendErrorV1::new(
+                    "block-scaled KV FP8 block16 is retired; use kv-mxfp8-e4 or fp16",
+                ));
+            }
+            return Ok(());
+        }
+        if !kv_cache_encoding.is_kv_mxfp8() {
+            return Ok(());
+        }
+        if adapter_catalog_present || (has_quantized_linear_recipe && mx_weight_encoding.is_none())
+        {
+            return Err(BackendErrorV1::new(
+                "block-scaled KV FP8 is currently scoped to reviewed BF16 or MX weight recipes",
+            ));
+        }
+        let Some(mx_weight_encoding) = mx_weight_encoding else {
+            // The existing BF16 + MXFP8 KV policy is validated by the shared
+            // server KV selector before this helper is reached.
+            return Ok(());
+        };
+        if kv_cache_encoding != KvCacheEncoding::Mxfp8E4
+            || lock_fingerprint != QWEN35_4B_FINGERPRINT
+            || !matches!(target, "gfx1030" | "gfx1201")
+            || !matches!(mx_weight_encoding, "mxfp8-e4m3-w8a8" | "mxfp6-e3m2-w6a6")
+        {
+            return Err(BackendErrorV1::new(
+                "MX weight + block-scaled KV FP8 is limited to reviewed Qwen3.5-4B MXFP8/MXFP6 on exact gfx1030/gfx1201 with OCP MXFP8 E4 KV",
+            ));
+        }
+        Ok(())
+    }
+
     fn is_unsloth_qwen38_nvfp4(&self) -> bool {
         self.identity.model_fingerprint
             == format!("sha256:{}", sllm_core::UNSLOTH_QWEN38_NVFP4_MODEL_SHA256)
@@ -4813,13 +4855,14 @@ impl QwenChatBackendV1 {
         })?;
         let adapter_catalog =
             load_qwen_adapter_catalog(config.adapter_catalog.as_ref(), &lock, &plan)?;
-        if (config.kv_cache_encoding.is_kv_fp8_block16() || config.kv_cache_encoding.is_kv_mxfp8())
-            && (source.has_quantized_linear_recipe() || adapter_catalog.is_some())
-        {
-            return Err(BackendErrorV1::new(
-                "block-scaled KV FP8 is currently scoped to the unadapted Qwen3.5-4B BF16 text model",
-            ));
-        }
+        Self::validate_mx_weight_kv_compatibility(
+            lock.fingerprint(),
+            &config.target,
+            config.kv_cache_encoding,
+            source.has_quantized_linear_recipe(),
+            source.mx_weight_activation_encoding_name(),
+            adapter_catalog.is_some(),
+        )?;
         if source.has_quantized_linear_recipe() && adapter_catalog.is_some() {
             return Err(BackendErrorV1::new(
                 "Qwen adapter catalog requires the dense BF16 GGUF artifact",
@@ -10858,6 +10901,106 @@ mod tests {
             for right in (left + 1)..digests.len() {
                 assert_ne!(digests[left], digests[right]);
             }
+        }
+    }
+
+    #[test]
+    fn qwen_mx_weight_kv_guard_accepts_only_reviewed_mx_e4_combinations() {
+        assert!(
+            QwenChatBackendV1::validate_mx_weight_kv_compatibility(
+                QWEN35_4B_FINGERPRINT,
+                "gfx1030",
+                KvCacheEncoding::Mxfp8E4,
+                false,
+                None,
+                false,
+            )
+            .is_ok()
+        );
+        assert!(
+            QwenChatBackendV1::validate_mx_weight_kv_compatibility(
+                QWEN35_4B_FINGERPRINT,
+                "gfx1030",
+                KvCacheEncoding::Mxfp8E4,
+                true,
+                Some("mxfp8-e4m3-w8a8"),
+                false,
+            )
+            .is_ok()
+        );
+        assert!(
+            QwenChatBackendV1::validate_mx_weight_kv_compatibility(
+                QWEN35_4B_FINGERPRINT,
+                "gfx1201",
+                KvCacheEncoding::Mxfp8E4,
+                true,
+                Some("mxfp6-e3m2-w6a6"),
+                false,
+            )
+            .is_ok()
+        );
+
+        for (fingerprint, target, kv, quantized, encoding, adapter) in [
+            (
+                QWEN35_4B_FINGERPRINT,
+                "gfx1030",
+                KvCacheEncoding::Mxfp8E4,
+                true,
+                Some("mxfp8-e4m3-w8a8"),
+                true,
+            ),
+            (
+                QWEN35_4B_FINGERPRINT,
+                "gfx1030",
+                KvCacheEncoding::Mxfp8E4,
+                true,
+                None,
+                false,
+            ),
+            (
+                "sha256:other-model",
+                "gfx1201",
+                KvCacheEncoding::Mxfp8E4,
+                true,
+                Some("mxfp8-e4m3-w8a8"),
+                false,
+            ),
+            (
+                QWEN35_4B_FINGERPRINT,
+                "gfx942",
+                KvCacheEncoding::Mxfp8E4,
+                true,
+                Some("mxfp8-e4m3-w8a8"),
+                false,
+            ),
+            (
+                QWEN35_4B_FINGERPRINT,
+                "gfx1030",
+                KvCacheEncoding::Mxfp8E5,
+                true,
+                Some("mxfp8-e4m3-w8a8"),
+                false,
+            ),
+            (
+                QWEN35_4B_FINGERPRINT,
+                "gfx1030",
+                KvCacheEncoding::Mxfp8E4,
+                true,
+                Some("mixed-mxfp-invalid"),
+                false,
+            ),
+        ] {
+            assert!(
+                QwenChatBackendV1::validate_mx_weight_kv_compatibility(
+                    fingerprint,
+                    target,
+                    kv,
+                    quantized,
+                    encoding,
+                    adapter,
+                )
+                .is_err()
+            );
         }
     }
 

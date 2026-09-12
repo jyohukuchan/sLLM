@@ -61,6 +61,37 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### 2026-09-13 Phase85 共通MXFP8／MXFP6 kernel
+
+- scope: canonical `gfx1030`／`gfx1201`、MXFP8 E4M3 W8A8／MXFP6 E3M2 W6A6、block32／E8M0。
+  model名による分岐は追加しない。最終採用範囲・artifact・oracle・前後値は
+  [集約結果](../../ci/matrix/phase85-mxfp-common-kernel-results-v1.json)と
+  [履歴](../history/2026/09/11-20/phase85-mxfp8-mxfp6-common-kernels.md)を参照する。
+- N0（確認範囲）: Rows4/Columns8は既存MMQの各出力の計算を保持し、M2..4の演算子比較と通常CLIのchunk末尾M3で
+  出力を照合した。MXFP6の2-load／legacy24 readerは同じ6 bitを抽出し、全64 code×4 slotを両GPUで照合した。
+  scalar reductionはgfx1201で2-load、他targetではlegacy24、tiled16はlegacy24、MMQは2-loadとする。
+  readerの性能差を数値差や別quantization recipeとして扱わない。
+- N0（有限値）: gfx1201のMXFP8 M1 wave loaderは、旧`inner=threadIdx.x; inner+=256`と同じ項を
+  `block=wave; block+=8`で読み、8-waveの還元順を保持する。旧normal fast pathの直接bit構成と
+  `decode(value) * decode(E8M0)`の2冪乗算は同じ有限FP32値を与える。境界は既存fallbackと同じ演算であり、
+  NaN位置の意味も維持する。NaN payload／sign bitの一致までは主張しない。
+- N1継承: gfx1030 MXFP8のN上限拡張は既存Phase75 half2 ID55、gfx1201のN tail対応は既存Phase63 staged WMMA ID31へ
+  送るscopeの拡張である。dtype、FP32 accumulation、丸め、K方向の計算を新設せず、各出力に独立なN方向の
+  範囲／zero paddingを変更する。既存kernelの誤差解析をこの同じ計算へ継承し、旧row8との差は加算順差として扱う。
+  新shapeは独立FP32 oracleと旧providerへ照合し、全出力のfinite／repeatを確認した。大shapeの境界sampleを
+  全要素oracle成功へ拡張しない。strict direct WMMAのalignment条件は維持する。
+- outputs: Qwen3.5-4Bの同形式・同KVの8構成×20 logits行は前後一致し、top-1一致1.0、最大absolute差／KLDは0。
+  本体・KV・MTP・chunk末尾の固定生成比較も記録する。BF16比の量子化品質改善や全model同等性は主張しない。
+- state: V620の量子化MTP通常経路で採用0/1/2後のKVと次計算を照合した。R9700では既存のtarget M3/M1 attention差を
+  normal FAILとして残し、同一prompt／prefill hidden／draft列のattention-only対照で状態と次計算の一致を確認した。
+  mainのattention実装とsampling規則は変更しない。BF16 MTP既定を維持する。
+- failed attempt: 初期gfx1030 ID57のrepeat4 digest差は未特定の観測として保持する。該当kernel／quantizerの命令列は
+  対照と同じで、追加のbaseline/candidate各32反復および最終4×32反復では再現しなかった。未特定の差をN1へ分類したり、
+  失敗を成功へ変更したりしない。今回変更していないID57を原因と断定せず、長時間安定性の保証にも使わない。
+- rollback: 起点 `c2667ad885512329977d5883f3ea7b55dcfe2838` の演算順・providerを対照に保持する。
+  比較用baseline／row8／tiled16／MMQ指定の優先順位を維持し、実行失敗後のsilent fallbackは追加しない。
+
+
 ### OUT-2026-09-10-P835-ONEWAVE: small-Mのone-wave Kahan（N1候補・性能棄却）
 
 - scope／change: gfx1201 M2/3/4、既存2tuple。ID89 StageK32をone-wave M16/N64へ縮小し、ID94の32lane分割FMA＋treeと比較した。finite K16項はE2M1/E4係数最大518,400でFP32 exact、Kahan候補は標準集約boundを増やさない方向だが、pointwise改善／出力完全一致の一般保証ではない。

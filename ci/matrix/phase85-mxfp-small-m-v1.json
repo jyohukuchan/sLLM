@@ -1,0 +1,763 @@
+{
+  "schema_version": "phase85-mxfp-shapes-v1",
+  "state": "frozen-before-final-candidate",
+  "purpose": "M1 scope boundaries and actual MTP small-M roles; same inputs for control/candidate.",
+  "cases": [
+    {
+      "case_id": "mxfp8-m1-boundary-k2016-n1023",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2016,
+      "n": 1023,
+      "phase": 2600,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2016-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2016,
+      "n": 1024,
+      "phase": 2601,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2016-n1025",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2016,
+      "n": 1025,
+      "phase": 2602,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2048-n1023",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2048,
+      "n": 1023,
+      "phase": 2603,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2048-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2048,
+      "n": 1024,
+      "phase": 2604,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2048-n1025",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2048,
+      "n": 1025,
+      "phase": 2605,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2080-n1023",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2080,
+      "n": 1023,
+      "phase": 2606,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2080-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2080,
+      "n": 1024,
+      "phase": 2607,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2080-n1025",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2080,
+      "n": 1025,
+      "phase": 2608,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m2-k5120-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 2,
+      "k": 5120,
+      "n": 1024,
+      "phase": 2609,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m2-k5120-n12288",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 2,
+      "k": 5120,
+      "n": 12288,
+      "phase": 2610,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m2-k5120-n17408",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 2,
+      "k": 5120,
+      "n": 17408,
+      "phase": 2611,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m2-k10240-n5120",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 2,
+      "k": 10240,
+      "n": 5120,
+      "phase": 2612,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m2-k17408-n5120",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 2,
+      "k": 17408,
+      "n": 5120,
+      "phase": 2613,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m2-k6144-n5120",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 2,
+      "k": 6144,
+      "n": 5120,
+      "phase": 2614,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m3-k5120-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 3,
+      "k": 5120,
+      "n": 1024,
+      "phase": 2615,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m3-k5120-n12288",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 3,
+      "k": 5120,
+      "n": 12288,
+      "phase": 2616,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m3-k5120-n17408",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 3,
+      "k": 5120,
+      "n": 17408,
+      "phase": 2617,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m3-k10240-n5120",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 3,
+      "k": 10240,
+      "n": 5120,
+      "phase": 2618,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m3-k17408-n5120",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 3,
+      "k": 17408,
+      "n": 5120,
+      "phase": 2619,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m3-k6144-n5120",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 3,
+      "k": 6144,
+      "n": 5120,
+      "phase": 2620,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m4-k5120-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 4,
+      "k": 5120,
+      "n": 1024,
+      "phase": 2621,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m4-k5120-n12288",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 4,
+      "k": 5120,
+      "n": 12288,
+      "phase": 2622,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m4-k5120-n17408",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 4,
+      "k": 5120,
+      "n": 17408,
+      "phase": 2623,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m4-k10240-n5120",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 4,
+      "k": 10240,
+      "n": 5120,
+      "phase": 2624,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m4-k17408-n5120",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 4,
+      "k": 17408,
+      "n": 5120,
+      "phase": 2625,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp8-mtp-m4-k6144-n5120",
+      "format": "mxfp8",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 4,
+      "k": 6144,
+      "n": 5120,
+      "phase": 2626,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2016-n1023",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2016,
+      "n": 1023,
+      "phase": 2627,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2016-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2016,
+      "n": 1024,
+      "phase": 2628,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2016-n1025",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2016,
+      "n": 1025,
+      "phase": 2629,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2048-n1023",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2048,
+      "n": 1023,
+      "phase": 2630,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2048-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2048,
+      "n": 1024,
+      "phase": 2631,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2048-n1025",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2048,
+      "n": 1025,
+      "phase": 2632,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2080-n1023",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2080,
+      "n": 1023,
+      "phase": 2633,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2080-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2080,
+      "n": 1024,
+      "phase": 2634,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2080-n1025",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "selector-boundary"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2080,
+      "n": 1025,
+      "phase": 2635,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m2-k5120-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 2,
+      "k": 5120,
+      "n": 1024,
+      "phase": 2636,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m2-k5120-n12288",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 2,
+      "k": 5120,
+      "n": 12288,
+      "phase": 2637,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m2-k5120-n17408",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 2,
+      "k": 5120,
+      "n": 17408,
+      "phase": 2638,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m2-k10240-n5120",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 2,
+      "k": 10240,
+      "n": 5120,
+      "phase": 2639,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m2-k17408-n5120",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 2,
+      "k": 17408,
+      "n": 5120,
+      "phase": 2640,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m2-k6144-n5120",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 2,
+      "k": 6144,
+      "n": 5120,
+      "phase": 2641,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m3-k5120-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 3,
+      "k": 5120,
+      "n": 1024,
+      "phase": 2642,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m3-k5120-n12288",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 3,
+      "k": 5120,
+      "n": 12288,
+      "phase": 2643,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m3-k5120-n17408",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 3,
+      "k": 5120,
+      "n": 17408,
+      "phase": 2644,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m3-k10240-n5120",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 3,
+      "k": 10240,
+      "n": 5120,
+      "phase": 2645,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m3-k17408-n5120",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 3,
+      "k": 17408,
+      "n": 5120,
+      "phase": 2646,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m3-k6144-n5120",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 3,
+      "k": 6144,
+      "n": 5120,
+      "phase": 2647,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m4-k5120-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 4,
+      "k": 5120,
+      "n": 1024,
+      "phase": 2648,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m4-k5120-n12288",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 4,
+      "k": 5120,
+      "n": 12288,
+      "phase": 2649,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m4-k5120-n17408",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 4,
+      "k": 5120,
+      "n": 17408,
+      "phase": 2650,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m4-k10240-n5120",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 4,
+      "k": 10240,
+      "n": 5120,
+      "phase": 2651,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m4-k17408-n5120",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 4,
+      "k": 17408,
+      "n": 5120,
+      "phase": 2652,
+      "oracle": "boundary"
+    },
+    {
+      "case_id": "mxfp6-mtp-m4-k6144-n5120",
+      "format": "mxfp6",
+      "tags": [
+        "small-m",
+        "mtp"
+      ],
+      "role": "mtp",
+      "m": 4,
+      "k": 6144,
+      "n": 5120,
+      "phase": 2653,
+      "oracle": "boundary"
+    }
+  ]
+}

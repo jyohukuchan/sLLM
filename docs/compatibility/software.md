@@ -704,6 +704,34 @@ MTP 113候補／70採用、HIP-only、正常終了を確認し、r26の対話も
 診断と検証の詳細は[Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)と
 [数値変更台帳](numerical-output-changes.md)に記録する。
 
+### 2026-09-13 Phase85 Qwen3.5-4B MX weight／MXFP8 E4 KV tuple
+
+同じUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm
+7.14.0、HIP `7.14.60850`、LLVM 23、Code Object V6、wave32 tupleで、
+reviewed Qwen3.5-4BのBF16、MXFP8 W8A8、MXFP6 W6A6 bodyと、FP16または
+standard OCP MXFP8 E4 KVをcanonical V620 exact `gfx1030`／R9700 exact
+`gfx1201`から通常CLI/APIへ接続した。GGUFとderived lockの組を固定し、adapterや
+MTP sidecarをbody経路へ持ち込んでいない。
+
+KV resolverはweight compatibility guardの前に走る。reviewed 4BでKV指定を
+省略すると既存の`kv-mxfp8-e4`へ解決され、MXFP8/MXFP6 body＋MXFP8 E4 KVが
+guardを通る。明示`fp16`は比較・rollbackとして残る。selector値を変更した
+記録ではなく、resolver後のguardがreviewed combinationを受理する範囲の拡張である。
+MXFP8 E5 scopeは変更せず、exact `gfx942`のMXFP8／MXFP6 body＋MXFP8 E4 KVは
+未検証／rejectとする。
+
+通常APIは2 target合計10構成を各5要求でPASSした。before/after
+qualityは8構成×20 logits rowsでexact（top-1 `20/20`、最大absolute差とKLDは0）だが、
+BF16相対品質の同等性は主張しない。完全推論の12比較行は両targetで生成token列とVRAMが
+一致し、R9700 decodeはMXFP8/MXFP6で約`3.8–4.6%`／`4.7–5.6%`、MXFP8 E4 KV併用で
+約`4.4%`／`5.5%`改善、V620はおおむね横ばい（decode約`-0.4%`〜`+1.5%`）だった。
+これらは固定tuple／artifactの検証範囲であり、Phase85全体の完了を意味しない。
+
+実行結果は`.local-artifacts/phase85/final-api-summary.json`、品質比較は
+`.local-artifacts/phase85/compare-final-quality-report.json`（表形式は
+`.local-artifacts/phase85/compare-final-quality-report.md`）、履歴と未測定範囲は
+[Phase85履歴](../history/2026/09/11-20/phase85-mxfp8-mxfp6-common-kernels.md#最終採用と結論)を参照する。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

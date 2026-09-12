@@ -1,0 +1,11 @@
+{
+  "schema_version": "phase85-mxfp-shapes-v1",
+  "state": "frozen-for-r6-prep",
+  "purpose": "M=3 MXFP8 gfx1030 K/N ratio-two selector boundary; measurement not run by preparation task.",
+  "oracle_policy": "BoundarySample reuses the existing Phase85 oracle and repeat/cleanup contract.",
+  "cases": [
+    {"case_id":"mxfp8-m3-k4096-n2047","format":"mxfp8","tags":["small-m","mtp","selector-boundary","k-n-ratio-boundary"],"role":"mtp","m":3,"k":4096,"n":2047,"phase":2740,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k4096-n2048","format":"mxfp8","tags":["small-m","mtp","selector-boundary","k-n-ratio-boundary"],"role":"mtp","m":3,"k":4096,"n":2048,"phase":2741,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k4096-n2049","format":"mxfp8","tags":["small-m","mtp","selector-boundary","k-n-ratio-boundary"],"role":"mtp","m":3,"k":4096,"n":2049,"phase":2742,"oracle":"boundary"}
+  ]
+}

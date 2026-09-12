@@ -1,10 +1,11 @@
 //! Model-free OCP MXFP8 E4M3 W8A8 and MXFP6 E3M2 W6A6 GPU oracle.
 
+use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sllm_core::{
     AccessMode, Backend, BoundSemanticOp, DType, DispatchEvidence, Encoding,
@@ -80,6 +81,13 @@ const PHASE75_MXFP6_HALF2_IDENTITIES: &[(u32, &str, &str, &str, usize, usize)] =
     128,
     64,
 )];
+const PHASE85_MXFP8_SMALL_M_KERNEL_ID: u32 = 97;
+const PHASE85_MXFP8_SMALL_M_KERNEL_SYMBOL: &str = "matmul.mxfp8.w8a8.mmq.rows4.col8.v1";
+const PHASE85_MXFP8_SMALL_M_DEVICE_SYMBOL: &str = "sllm_mxfp8_w8a8_mmq_rows4_col8_v1";
+const PHASE85_MXFP6_SMALL_M_KERNEL_ID: u32 = 98;
+const PHASE85_MXFP6_SMALL_M_KERNEL_SYMBOL: &str = "matmul.mxfp6.w6a6.mmq.rows4.col8.v1";
+const PHASE85_MXFP6_SMALL_M_DEVICE_SYMBOL: &str = "sllm_mxfp6_w6a6_mmq_rows4_col8_v1";
+const PHASE85_SMALL_M_FORCE_ENV: &str = "SLLM_PHASE85_MX_WA_FORCE_SMALL_M";
 const MXFP8_FORCE_ENVIRONMENTS: &[&str] = &[
     "SLLM_MX_WA_PREFILL_FORCE_BASELINE",
     "SLLM_MXFP8_PREFILL_FORCE_ROW8",
@@ -92,6 +100,7 @@ const MXFP8_FORCE_ENVIRONMENTS: &[&str] = &[
     PHASE66_CANDIDATE_FORCE_ENV,
     PHASE69_CANDIDATE_FORCE_ENV,
     PHASE75_MXFP8_FORCE_ENV,
+    PHASE85_SMALL_M_FORCE_ENV,
 ];
 const MXFP6_FORCE_ENVIRONMENTS: &[&str] = &[
     "SLLM_MX_WA_PREFILL_FORCE_BASELINE",
@@ -101,6 +110,7 @@ const MXFP6_FORCE_ENVIRONMENTS: &[&str] = &[
     PHASE70_CANDIDATE_FORCE_ENV,
     PHASE74_CANDIDATE_FORCE_ENV,
     PHASE75_MXFP6_FORCE_ENV,
+    PHASE85_SMALL_M_FORCE_ENV,
 ];
 const GFX1201_WMMA_CANDIDATE_IDENTITIES: &[(u32, &str, &str, u32)] = &[
     (
@@ -462,6 +472,79 @@ impl Format {
         };
         TensorView::with_encoding(dtype, encoding, &[n, k]).map_err(|error| error.to_string())
     }
+}
+
+const PHASE85_SCHEMA_VERSION: &str = "phase85-mxfp-shapes-v1";
+const PHASE85_MAX_CASES: usize = 256;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Phase85FormatSelection {
+    Mxfp8,
+    Mxfp6,
+    Both,
+}
+
+impl Phase85FormatSelection {
+    fn accepts(self, format: Format) -> bool {
+        matches!(
+            (self, format),
+            (Self::Mxfp8, Format::Mxfp8) | (Self::Mxfp6, Format::Mxfp6) | (Self::Both, _)
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Phase85Provider {
+    Baseline,
+    Forced {
+        environment: &'static str,
+        value: &'static str,
+    },
+}
+
+impl Phase85Provider {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline-current-selector",
+            Self::Forced { environment, .. } => environment,
+        }
+    }
+
+    fn force(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Baseline => None,
+            Self::Forced { environment, value } => Some((environment, value)),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct Phase85Manifest {
+    schema_version: String,
+    cases: Vec<Phase85ManifestCase>,
+}
+
+#[derive(Deserialize)]
+struct Phase85ManifestCase {
+    case_id: String,
+    format: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    role: Option<String>,
+    m: usize,
+    k: usize,
+    n: usize,
+    #[serde(default)]
+    phase: Option<usize>,
+    oracle: String,
+}
+
+#[derive(Clone, Copy)]
+struct Phase85CaseSpec {
+    case: CaseSpec,
+    tags: &'static str,
+    role: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -863,6 +946,12 @@ enum EvidenceMode {
         repeats: usize,
         format: Format,
     },
+    Phase85 {
+        repeats: usize,
+        specs: &'static [Phase85CaseSpec],
+        manifest: &'static str,
+        provider: Phase85Provider,
+    },
 }
 
 impl EvidenceMode {
@@ -877,6 +966,7 @@ impl EvidenceMode {
             Self::Phase74 { repeats, .. } => repeats,
             Self::Phase75 { repeats, .. } => repeats,
             Self::Phase84 { repeats, .. } => repeats,
+            Self::Phase85 { repeats, .. } => repeats,
         }
     }
 
@@ -891,6 +981,7 @@ impl EvidenceMode {
             Self::Phase74 { .. } => "sllm-phase74-rdna-mxfp6-provider-gpu-v1",
             Self::Phase75 { .. } => "sllm-phase75-gfx1030-shared-half2-provider-gpu-v1",
             Self::Phase84 { .. } => "sllm-phase84-qwen38-mtp-mx-provider-gpu-v1",
+            Self::Phase85 { .. } => PHASE85_SCHEMA_VERSION,
         }
     }
 
@@ -901,6 +992,7 @@ impl EvidenceMode {
             Self::Phase74 { .. } => 1,
             Self::Phase75 { .. } => 1,
             Self::Phase84 { .. } => 1,
+            Self::Phase85 { .. } => 3,
             _ => 0,
         }
     }
@@ -916,6 +1008,7 @@ impl EvidenceMode {
             Self::Phase74 { .. } => Some("phase74-provider"),
             Self::Phase75 { .. } => Some("phase75-provider"),
             Self::Phase84 { .. } => Some("phase84"),
+            Self::Phase85 { .. } => Some("phase85-shapes"),
         }
     }
 
@@ -960,12 +1053,23 @@ impl EvidenceMode {
             _ => None,
         }
     }
+
+    fn phase85_provider(self) -> Option<Phase85Provider> {
+        match self {
+            Self::Phase85 { provider, .. } => Some(provider),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize)]
 struct CaseReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     case_id: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase85_tags: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase85_role: Option<&'static str>,
     format: &'static str,
     m: usize,
     k: usize,
@@ -1059,6 +1163,8 @@ struct Report {
     evidence_mode: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_role: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase85_manifest: Option<&'static str>,
     target: String,
     device_index: u32,
     block_size: usize,
@@ -1299,6 +1405,53 @@ struct OracleStats {
     nonfinite_mismatch_count: usize,
 }
 
+fn phase85_small_m_shape(m: usize, k: usize, n: usize) -> bool {
+    (2..=4).contains(&m) && k >= 2048 && k % 32 == 0 && (1024..=32768).contains(&n)
+}
+
+fn phase85_small_m_forced_shape(m: usize, k: usize, n: usize) -> bool {
+    (2..=4).contains(&m) && k != 0 && k % 32 == 0 && n != 0
+}
+
+fn phase85_legacy_prefill_shape(m: usize, k: usize, n: usize) -> bool {
+    m > 1 && k != 0 && k % 32 == 0 && n != 0
+}
+
+fn phase85_small_m_adopted_shape(
+    format: Format,
+    m: usize,
+    k: usize,
+    n: usize,
+    target: &str,
+) -> bool {
+    if !phase85_small_m_shape(m, k, n) {
+        return false;
+    }
+    match format {
+        Format::Mxfp8 => match target {
+            "gfx1030" => k / n != 1,
+            "gfx1201" => true,
+            _ => false,
+        },
+        Format::Mxfp6 => target == "gfx1030" || target == "gfx1201",
+    }
+}
+
+fn phase85_small_m_identity(format: Format) -> (u32, &'static str, &'static str) {
+    match format {
+        Format::Mxfp8 => (
+            PHASE85_MXFP8_SMALL_M_KERNEL_ID,
+            PHASE85_MXFP8_SMALL_M_KERNEL_SYMBOL,
+            PHASE85_MXFP8_SMALL_M_DEVICE_SYMBOL,
+        ),
+        Format::Mxfp6 => (
+            PHASE85_MXFP6_SMALL_M_KERNEL_ID,
+            PHASE85_MXFP6_SMALL_M_KERNEL_SYMBOL,
+            PHASE85_MXFP6_SMALL_M_DEVICE_SYMBOL,
+        ),
+    }
+}
+
 fn validate_actual_dispatch(
     format: Format,
     m: usize,
@@ -1315,11 +1468,11 @@ fn validate_actual_dispatch(
         (Format::Mxfp6, 1) => dispatch.kernel_id == 20,
         (Format::Mxfp8, _) => matches!(
             dispatch.kernel_id,
-            19 | 22 | 24 | 26 | 27 | 30 | 31 | 34 | 36 | 37 | 41 | 55
+            19 | 22 | 24 | 26 | 27 | 30 | 31 | 34 | 36 | 37 | 41 | 55 | 97
         ),
         (Format::Mxfp6, _) => matches!(
             dispatch.kernel_id,
-            21 | 23 | 25 | 28 | 29 | 44 | 45 | 47 | 48 | 57
+            21 | 23 | 25 | 28 | 29 | 44 | 45 | 47 | 48 | 57 | 98
         ),
     };
     let format_fragment = match format {
@@ -1344,6 +1497,30 @@ fn validate_actual_dispatch(
             "unexpected {} actual dispatch: {dispatch:?}",
             format.name(),
         ));
+    }
+    if dispatch.kernel_id == PHASE85_MXFP8_SMALL_M_KERNEL_ID
+        || dispatch.kernel_id == PHASE85_MXFP6_SMALL_M_KERNEL_ID
+    {
+        let (expected_id, expected_kernel_symbol, expected_device_symbol) =
+            phase85_small_m_identity(format);
+        let expected_grid_size_x = m
+            .div_ceil(4)
+            .checked_mul(n.div_ceil(8))
+            .ok_or_else(|| "Phase 85 small-M grid size overflowed usize".to_owned())?;
+        let expected_grid_size_x = u32::try_from(expected_grid_size_x)
+            .map_err(|_| "Phase 85 small-M grid size exceeds u32".to_owned())?;
+        if dispatch.kernel_id != expected_id
+            || !phase85_small_m_adopted_shape(format, m, k, n, target)
+            || dispatch.kernel_symbol != expected_kernel_symbol
+            || dispatch.device_symbol != expected_device_symbol
+            || dispatch.workgroup_size_x != 128
+            || dispatch.grid_size_x != expected_grid_size_x
+        {
+            return Err(format!(
+                "Phase 85 small-M kernel {} escaped its adopted scope: {dispatch:?}",
+                dispatch.kernel_id
+            ));
+        }
     }
     if dispatch.kernel_id == PHASE63_CANDIDATE_KERNEL_ID
         && (format != Format::Mxfp8
@@ -1617,6 +1794,225 @@ fn validate_phase75_provider_dispatch(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum Phase85Grid {
+    Linear,
+    ColumnsOnly { columns: usize },
+    Tiled { rows: usize, columns: usize },
+}
+
+#[derive(Clone, Copy)]
+struct Phase85ForcedContract {
+    kernel_id: u32,
+    kernel_symbol: &'static str,
+    device_symbol: &'static str,
+    workgroup_size_x: u32,
+    grid: Phase85Grid,
+    target: Option<&'static str>,
+}
+
+fn phase85_forced_contract(
+    format: Format,
+    environment: &str,
+    value: &str,
+) -> Result<Phase85ForcedContract, String> {
+    let contract = match (format, environment, value) {
+        (Format::Mxfp8, PHASE85_SMALL_M_FORCE_ENV, "1") => Phase85ForcedContract {
+            kernel_id: PHASE85_MXFP8_SMALL_M_KERNEL_ID,
+            kernel_symbol: PHASE85_MXFP8_SMALL_M_KERNEL_SYMBOL,
+            device_symbol: PHASE85_MXFP8_SMALL_M_DEVICE_SYMBOL,
+            workgroup_size_x: 128,
+            grid: Phase85Grid::Tiled {
+                rows: 4,
+                columns: 8,
+            },
+            target: None,
+        },
+        (Format::Mxfp6, PHASE85_SMALL_M_FORCE_ENV, "1") => Phase85ForcedContract {
+            kernel_id: PHASE85_MXFP6_SMALL_M_KERNEL_ID,
+            kernel_symbol: PHASE85_MXFP6_SMALL_M_KERNEL_SYMBOL,
+            device_symbol: PHASE85_MXFP6_SMALL_M_DEVICE_SYMBOL,
+            workgroup_size_x: 128,
+            grid: Phase85Grid::Tiled {
+                rows: 4,
+                columns: 8,
+            },
+            target: None,
+        },
+        (Format::Mxfp8, "SLLM_MX_WA_PREFILL_FORCE_BASELINE", "1") => Phase85ForcedContract {
+            kernel_id: 19,
+            kernel_symbol: "matmul.mxfp8.w8a8.e4m3.block32.prefill.v1",
+            device_symbol: "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_v1",
+            workgroup_size_x: 256,
+            grid: Phase85Grid::Linear,
+            target: None,
+        },
+        (Format::Mxfp6, "SLLM_MX_WA_PREFILL_FORCE_BASELINE", "1") => Phase85ForcedContract {
+            kernel_id: 21,
+            kernel_symbol: "matmul.mxfp6.w6a6.e3m2.block32.prefill.v1",
+            device_symbol: "sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_v1",
+            workgroup_size_x: 256,
+            grid: Phase85Grid::Linear,
+            target: None,
+        },
+        (Format::Mxfp8, "SLLM_MXFP8_PREFILL_FORCE_ROW8", "1") => Phase85ForcedContract {
+            kernel_id: 22,
+            kernel_symbol: "matmul.mxfp8.w8a8.e4m3.block32.prefill.row8.v2",
+            device_symbol: "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_row8_v2",
+            workgroup_size_x: 256,
+            grid: Phase85Grid::Tiled {
+                rows: 8,
+                columns: 1,
+            },
+            target: None,
+        },
+        (Format::Mxfp6, "SLLM_MXFP6_PREFILL_FORCE_ROW8", "1") => Phase85ForcedContract {
+            kernel_id: 23,
+            kernel_symbol: "matmul.mxfp6.w6a6.e3m2.block32.prefill.row8.v2",
+            device_symbol: "sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_row8_v2",
+            workgroup_size_x: 256,
+            grid: Phase85Grid::Tiled {
+                rows: 8,
+                columns: 1,
+            },
+            target: None,
+        },
+        (Format::Mxfp8, "SLLM_MXFP8_PREFILL_FORCE_TILED16", "1") => Phase85ForcedContract {
+            kernel_id: 24,
+            kernel_symbol: "matmul.mxfp8.w8a8.e4m3.block32.prefill.tiled16.v3",
+            device_symbol: "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_tiled16_v3",
+            workgroup_size_x: 256,
+            grid: Phase85Grid::ColumnsOnly { columns: 16 },
+            target: None,
+        },
+        (Format::Mxfp6, "SLLM_MXFP6_PREFILL_FORCE_TILED16", "1") => Phase85ForcedContract {
+            kernel_id: 25,
+            kernel_symbol: "matmul.mxfp6.w6a6.e3m2.block32.prefill.tiled16.v3",
+            device_symbol: "sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_tiled16_v3",
+            workgroup_size_x: 256,
+            grid: Phase85Grid::ColumnsOnly { columns: 16 },
+            target: None,
+        },
+        (Format::Mxfp8, "SLLM_MX_WA_PREFILL_FORCE_MMQ_COLUMNS", "4") => Phase85ForcedContract {
+            kernel_id: 26,
+            kernel_symbol: "matmul.mxfp8.w8a8.e4m3.block32.prefill.mmq-col4.v4",
+            device_symbol: "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_mmq_col4_v4",
+            workgroup_size_x: 256,
+            grid: Phase85Grid::Tiled {
+                rows: 8,
+                columns: 4,
+            },
+            target: None,
+        },
+        (Format::Mxfp8, "SLLM_MX_WA_PREFILL_FORCE_MMQ_COLUMNS", "8") => Phase85ForcedContract {
+            kernel_id: 27,
+            kernel_symbol: "matmul.mxfp8.w8a8.e4m3.block32.prefill.mmq-col8.v4",
+            device_symbol: "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_mmq_col8_v4",
+            workgroup_size_x: 256,
+            grid: Phase85Grid::Tiled {
+                rows: 8,
+                columns: 8,
+            },
+            target: None,
+        },
+        (Format::Mxfp6, "SLLM_MX_WA_PREFILL_FORCE_MMQ_COLUMNS", "4") => Phase85ForcedContract {
+            kernel_id: 28,
+            kernel_symbol: "matmul.mxfp6.w6a6.e3m2.block32.prefill.mmq-col4.v4",
+            device_symbol: "sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_mmq_col4_v4",
+            workgroup_size_x: 256,
+            grid: Phase85Grid::Tiled {
+                rows: 8,
+                columns: 4,
+            },
+            target: None,
+        },
+        (Format::Mxfp6, "SLLM_MX_WA_PREFILL_FORCE_MMQ_COLUMNS", "8") => Phase85ForcedContract {
+            kernel_id: 29,
+            kernel_symbol: "matmul.mxfp6.w6a6.e3m2.block32.prefill.mmq-col8.v4",
+            device_symbol: "sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_mmq_col8_v4",
+            workgroup_size_x: 256,
+            grid: Phase85Grid::Tiled {
+                rows: 8,
+                columns: 8,
+            },
+            target: None,
+        },
+        _ => {
+            return Err(format!(
+                "unsupported Phase 85 forced provider {environment}={value} for {}",
+                format.name()
+            ));
+        }
+    };
+    Ok(contract)
+}
+
+fn validate_phase85_dispatch(
+    provider: Phase85Provider,
+    format: Format,
+    m: usize,
+    k: usize,
+    n: usize,
+    target: &str,
+    dispatch: &DispatchEvidence,
+) -> Result<(), String> {
+    let normalized_size = m
+        .checked_mul(n)
+        .ok_or_else(|| "Phase 85 output element count overflowed usize".to_owned())?;
+    let Phase85Provider::Forced { environment, value } = provider else {
+        return Err("Phase 85 dispatch validation requires a forced provider".to_owned());
+    };
+    let contract = phase85_forced_contract(format, environment, value)?;
+    let expected_grid_size_x = match contract.grid {
+        Phase85Grid::Linear => m
+            .checked_mul(n)
+            .ok_or_else(|| "Phase 85 output grid size overflowed usize".to_owned())?,
+        Phase85Grid::ColumnsOnly { columns } => n.div_ceil(columns),
+        Phase85Grid::Tiled { rows, columns } => {
+            m.div_ceil(rows)
+                .checked_mul(n.div_ceil(columns))
+                .ok_or_else(|| "Phase 85 output grid size overflowed usize".to_owned())?
+        }
+    };
+    let expected_grid_size_x = u32::try_from(expected_grid_size_x)
+        .map_err(|_| "Phase 85 output grid size exceeds u32".to_owned())?;
+    let format_fragment = match format {
+        Format::Mxfp8 => "mxfp8",
+        Format::Mxfp6 => "mxfp6",
+    };
+    if dispatch.abi_version != 1
+        || dispatch.info_version != 1
+        || dispatch.dispatch_id == 0
+        || dispatch.dispatch_count != 2
+        || dispatch.kernel_id != contract.kernel_id
+        || if environment == PHASE85_SMALL_M_FORCE_ENV {
+            !phase85_small_m_forced_shape(m, k, n)
+        } else {
+            !phase85_legacy_prefill_shape(m, k, n)
+        }
+        || (target != "gfx1030" && target != "gfx1201")
+        || dispatch.row_count != m as u64
+        || dispatch.normalized_size != normalized_size as u64
+        || dispatch.backend != 1
+        || !dispatch.kernel_symbol.contains(format_fragment)
+        || !dispatch.device_symbol.contains(format_fragment)
+        || dispatch.kernel_symbol != contract.kernel_symbol
+        || dispatch.device_symbol != contract.device_symbol
+        || dispatch.workgroup_size_x != contract.workgroup_size_x
+        || dispatch.grid_size_x != expected_grid_size_x
+        || contract.target.is_some_and(|expected| expected != target)
+        || dispatch.target != target
+        || dispatch.fallback_allowed
+        || dispatch.fallback_used
+    {
+        return Err(format!(
+            "unexpected {} Phase 85 candidate dispatch: {dispatch:?}",
+            format.name()
+        ));
+    }
+    Ok(())
+}
+
 fn compare_oracle(
     spec: CaseSpec,
     activation: &[f32],
@@ -1710,6 +2106,40 @@ fn sampled_row_top1(output: &[u8], n: usize, indices: &[usize]) -> Vec<RowTop1> 
         .collect()
 }
 
+fn upload_in_transfer_chunks(
+    session: &sllm_core::ExecutionSession,
+    queue: &sllm_core::ExecutionQueue,
+    buffer: &sllm_core::ExecutionBuffer,
+    bytes: &[u8],
+    label: &str,
+) -> Result<(), String> {
+    let max_transfer = usize::try_from(
+        session
+            .max_transfer_bytes()
+            .map_err(|error| format!("{label}: query transfer limit: {error}"))?,
+    )
+    .map_err(|_| format!("{label}: transfer limit does not fit host usize"))?;
+    if max_transfer == 0 {
+        return Err(format!("{label}: backend transfer limit is zero"));
+    }
+    let mut offset = 0_usize;
+    while offset < bytes.len() {
+        let chunk_len = (bytes.len() - offset).min(max_transfer);
+        let end = offset
+            .checked_add(chunk_len)
+            .ok_or_else(|| format!("{label}: chunk range overflow"))?;
+        let range = buffer
+            .range(offset as u64, chunk_len as u64)
+            .map_err(|error| format!("{label} range {offset}..{end}: {error}"))?;
+        let mut upload = session
+            .upload(queue, range, Arc::<[u8]>::from(&bytes[offset..end]))
+            .map_err(|error| format!("{label} chunk {offset}..{end}: {error}"))?;
+        wait_ok(upload.wait(WAIT), &format!("{label} chunk {offset}..{end}"))?;
+        offset = end;
+    }
+    Ok(())
+}
+
 fn run_case(
     session: &sllm_core::ExecutionSession,
     queue: &sllm_core::ExecutionQueue,
@@ -1769,25 +2199,14 @@ fn run_case(
     let output_buffer = session
         .allocate(output_len as u64)
         .map_err(|error| error.to_string())?;
-    for (label, buffer, bytes) in [
-        (
-            "activation upload",
-            &activation_buffer,
-            activation_bytes.as_slice(),
-        ),
-        ("weight upload", &weight_buffer, resident.as_slice()),
-    ] {
-        let mut upload = session
-            .upload(
-                queue,
-                buffer
-                    .range(0, bytes.len() as u64)
-                    .map_err(|e| e.to_string())?,
-                Arc::<[u8]>::from(bytes),
-            )
-            .map_err(|error| error.to_string())?;
-        wait_ok(upload.wait(WAIT), label)?;
-    }
+    upload_in_transfer_chunks(
+        session,
+        queue,
+        &activation_buffer,
+        &activation_bytes,
+        "activation upload",
+    )?;
+    upload_in_transfer_chunks(session, queue, &weight_buffer, &resident, "weight upload")?;
     let activation_view =
         TensorView::contiguous(DType::Bf16, &[m, k]).map_err(|e| e.to_string())?;
     let weight_view = format.view(n, k)?;
@@ -1836,7 +2255,7 @@ fn run_case(
     let mut elapsed_repeats = Vec::with_capacity(repeats);
     let mut output_digests = Vec::with_capacity(repeats);
     let mut dispatch_ids = Vec::with_capacity(repeats);
-    let mut first_output = None;
+    let mut first_output: Option<Vec<u8>> = None;
     for warmup in 0..mode.warmup_count() {
         let mut submission = session
             .submit(&prepared, queue)
@@ -1852,8 +2271,17 @@ fn run_case(
             "Phase 69 warmup"
         };
         wait_ok(submission.wait(WAIT), warmup_label)?;
-        validate_actual_dispatch(format, m, k, n, target, &dispatch)
-            .map_err(|error| format!("warmup {warmup}: {error}"))?;
+        if let EvidenceMode::Phase85 {
+            provider: forced_provider @ Phase85Provider::Forced { .. },
+            ..
+        } = mode
+        {
+            validate_phase85_dispatch(forced_provider, format, m, k, n, target, &dispatch)
+                .map_err(|error| format!("warmup {warmup}: {error}"))?;
+        } else {
+            validate_actual_dispatch(format, m, k, n, target, &dispatch)
+                .map_err(|error| format!("warmup {warmup}: {error}"))?;
+        }
         if let EvidenceMode::Phase74 { provider, .. } = mode {
             validate_phase74_provider_dispatch(provider, m, n, target, &dispatch)
                 .map_err(|error| format!("warmup {warmup}: {error}"))?;
@@ -1869,7 +2297,15 @@ fn run_case(
             .map_err(|error| error.to_string())?;
         let dispatch = submission.dispatch().clone();
         wait_ok(submission.wait(WAIT), format.name())?;
-        validate_actual_dispatch(format, m, k, n, target, &dispatch)?;
+        if let EvidenceMode::Phase85 {
+            provider: forced_provider @ Phase85Provider::Forced { .. },
+            ..
+        } = mode
+        {
+            validate_phase85_dispatch(forced_provider, format, m, k, n, target, &dispatch)?;
+        } else {
+            validate_actual_dispatch(format, m, k, n, target, &dispatch)?;
+        }
         if let EvidenceMode::Phase74 { provider, .. } = mode {
             validate_phase74_provider_dispatch(provider, m, n, target, &dispatch)?;
         }
@@ -1928,8 +2364,37 @@ fn run_case(
         let output_digest = digest(&output);
         if let Some(first_digest) = output_digests.first() {
             if first_digest != &output_digest {
+                let first = first_output
+                    .as_ref()
+                    .expect("first digest has output bytes");
+                let differences = first
+                    .chunks_exact(2)
+                    .zip(output.chunks_exact(2))
+                    .enumerate()
+                    .filter(|(_, (left, right))| left != right)
+                    .map(|(index, (left, right))| {
+                        (
+                            index,
+                            u16::from_le_bytes([left[0], left[1]]),
+                            u16::from_le_bytes([right[0], right[1]]),
+                        )
+                    });
+                let changed_elements = differences.clone().count();
+                let first_differences: Vec<_> = differences.take(16).collect();
+                // A second read without another kernel submission distinguishes
+                // a persistent device output change from a readback anomaly.
+                drop(readback);
+                let reread = (|| -> Result<String, String> {
+                    let mut task = submission
+                        .start_output_readback(0)
+                        .map_err(|e| e.to_string())?;
+                    wait_ok(task.wait(WAIT), "mismatch diagnostic readback")?;
+                    let mut bytes = vec![0_u8; output_len];
+                    task.read_into(&mut bytes).map_err(|e| e.to_string())?;
+                    Ok(digest(&bytes))
+                })();
                 return Err(format!(
-                    "{} repeat {repeat} output digest differs: first={first_digest} actual={output_digest}",
+                    "{} repeat {repeat} output digest differs: first={first_digest} actual={output_digest}; changed_elements={changed_elements} first_differences={first_differences:?} reread={reread:?}",
                     format.name()
                 ));
             }
@@ -1980,6 +2445,8 @@ fn run_case(
     };
     Ok(CaseReport {
         case_id,
+        phase85_tags: None,
+        phase85_role: None,
         format: format.name(),
         m,
         k,
@@ -2831,6 +3298,120 @@ fn phase84_cases(format: Format) -> Vec<CaseSpec> {
     .collect()
 }
 
+fn leak_phase85_string(value: String) -> &'static str {
+    Box::leak(value.into_boxed_str())
+}
+
+fn parse_phase85_format(value: &str) -> Result<Format, String> {
+    match value {
+        "mxfp8" | "mx8" | "mxfp8-e4m3-w8a8" => Ok(Format::Mxfp8),
+        "mxfp6" | "mx6" | "mxfp6-e3m2-w6a6" => Ok(Format::Mxfp6),
+        _ => Err(format!(
+            "invalid Phase 85 format {value}; expected mxfp8 or mxfp6"
+        )),
+    }
+}
+
+fn parse_phase85_oracle(value: &str) -> Result<OracleSelection, String> {
+    match value {
+        "full" => Ok(OracleSelection::Full),
+        "boundary" | "boundary-sample" => Ok(OracleSelection::BoundarySample),
+        _ => Err(format!(
+            "invalid Phase 85 oracle {value}; expected full or boundary"
+        )),
+    }
+}
+
+fn load_phase85_manifest(
+    path: &PathBuf,
+    format_selection: Phase85FormatSelection,
+    filters: &[String],
+    case_ids: &[String],
+) -> Result<(&'static [Phase85CaseSpec], &'static str), String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("read Phase 85 manifest {}: {error}", path.display()))?;
+    let manifest: Phase85Manifest = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse Phase 85 manifest {}: {error}", path.display()))?;
+    if manifest.schema_version != PHASE85_SCHEMA_VERSION {
+        return Err(format!(
+            "Phase 85 manifest schema differs: expected {PHASE85_SCHEMA_VERSION}, observed {}",
+            manifest.schema_version
+        ));
+    }
+    if manifest.cases.is_empty() || manifest.cases.len() > PHASE85_MAX_CASES {
+        return Err(format!(
+            "Phase 85 manifest must contain 1..={PHASE85_MAX_CASES} cases"
+        ));
+    }
+    let mut seen_ids = std::collections::HashSet::with_capacity(manifest.cases.len());
+    let mut selected = Vec::with_capacity(manifest.cases.len());
+    for (index, entry) in manifest.cases.into_iter().enumerate() {
+        if entry.case_id.is_empty() || !seen_ids.insert(entry.case_id.clone()) {
+            return Err(format!(
+                "Phase 85 manifest case_id is empty or duplicated: {}",
+                entry.case_id
+            ));
+        }
+        if entry.m == 0 || entry.k == 0 || entry.n == 0 {
+            return Err(format!(
+                "Phase 85 case {} has a zero matrix dimension",
+                entry.case_id
+            ));
+        }
+        if entry.k % 32 != 0 {
+            return Err(format!(
+                "Phase 85 case {} has K={} which is not a block-32 shape",
+                entry.case_id, entry.k
+            ));
+        }
+        let format = parse_phase85_format(&entry.format)?;
+        let tags = entry.tags.iter().map(String::as_str).collect::<Vec<_>>();
+        let role = entry.role.as_deref().unwrap_or("matmul");
+        let filter_match = filters.is_empty()
+            || filters
+                .iter()
+                .any(|filter| filter == role || entry.tags.iter().any(|tag| tag == filter));
+        let case_match = case_ids.is_empty() || case_ids.iter().any(|id| id == &entry.case_id);
+        if !format_selection.accepts(format) || !filter_match || !case_match {
+            continue;
+        }
+        let tags = leak_phase85_string(tags.join("|"));
+        let role = leak_phase85_string(role.to_owned());
+        let case_id = leak_phase85_string(entry.case_id);
+        selected.push(Phase85CaseSpec {
+            case: CaseSpec {
+                case_id: Some(case_id),
+                format,
+                m: entry.m,
+                k: entry.k,
+                n: entry.n,
+                phase: entry.phase.unwrap_or(2000 + index),
+                oracle: parse_phase85_oracle(&entry.oracle)?,
+            },
+            tags,
+            role,
+        });
+    }
+    if selected.is_empty() {
+        return Err("Phase 85 selection matched no manifest cases".to_owned());
+    }
+    let manifest_name = leak_phase85_string(path.display().to_string());
+    Ok((Box::leak(selected.into_boxed_slice()), manifest_name))
+}
+
+fn configure_phase85_provider(provider: Phase85Provider) {
+    let mut environments = MXFP8_FORCE_ENVIRONMENTS.to_vec();
+    environments.extend_from_slice(MXFP6_FORCE_ENVIRONMENTS);
+    environments.sort_unstable();
+    environments.dedup();
+    for environment in environments {
+        unsafe { std::env::remove_var(environment) };
+    }
+    if let Some((environment, value)) = provider.force() {
+        unsafe { std::env::set_var(environment, value) };
+    }
+}
+
 fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, String> {
     match mode {
         EvidenceMode::Phase62 { .. } if !matches!(target.as_str(), "gfx1030" | "gfx1201") => {
@@ -2885,6 +3466,9 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         }
         EvidenceMode::Phase84 { .. } if !matches!(target.as_str(), "gfx1030" | "gfx1201") => {
             return Err("Phase 84 mode requires exact gfx1030 or gfx1201".to_owned());
+        }
+        EvidenceMode::Phase85 { .. } if !matches!(target.as_str(), "gfx1030" | "gfx1201") => {
+            return Err("Phase 85 mode requires exact gfx1030 or gfx1201".to_owned());
         }
         _ => {}
     }
@@ -2971,6 +3555,25 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             }
         }
     }
+    if let EvidenceMode::Phase85 { provider, .. } = mode {
+        let mut environments = MXFP8_FORCE_ENVIRONMENTS.to_vec();
+        environments.extend_from_slice(MXFP6_FORCE_ENVIRONMENTS);
+        environments.sort_unstable();
+        environments.dedup();
+        for environment in environments {
+            let value = std::env::var(environment).ok();
+            let expected = provider
+                .force()
+                .filter(|(expected, _)| *expected == environment)
+                .map(|(_, value)| value);
+            if value.as_deref() != expected {
+                return Err(format!(
+                    "Phase 85 {} environment isolation failed for {environment}: expected={expected:?} actual={value:?}",
+                    provider.name()
+                ));
+            }
+        }
+    }
     let device = Context::query_device(device_index).map_err(|error| error.to_string())?;
     if device.gcn_arch_name != target {
         return Err(format!(
@@ -3009,10 +3612,23 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
                 ..
             } => phase75_cases(production_shape, provider),
             EvidenceMode::Phase84 { format, .. } => phase84_cases(format),
+            EvidenceMode::Phase85 { .. } => Vec::new(),
         };
-        let mut cases = Vec::with_capacity(specs.len());
-        for spec in specs {
-            cases.push(run_case(&session, &queue, &target, spec, mode)?);
+        let mut cases = Vec::with_capacity(match mode {
+            EvidenceMode::Phase85 { specs, .. } => specs.len(),
+            _ => specs.len(),
+        });
+        if let EvidenceMode::Phase85 { specs, .. } = mode {
+            for phase85_spec in specs {
+                let mut case = run_case(&session, &queue, &target, phase85_spec.case, mode)?;
+                case.phase85_tags = Some(phase85_spec.tags);
+                case.phase85_role = Some(phase85_spec.role);
+                cases.push(case);
+            }
+        } else {
+            for spec in specs {
+                cases.push(run_case(&session, &queue, &target, spec, mode)?);
+            }
         }
         Ok::<_, String>(cases)
     })();
@@ -3040,6 +3656,7 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         EvidenceMode::Phase74 { provider, .. } => Some(provider.kernel_id()),
         EvidenceMode::Phase75 { provider, .. } => Some(provider.kernel_id()),
         EvidenceMode::Phase84 { .. } => None,
+        EvidenceMode::Phase85 { .. } => None,
     };
     let candidate_case_count = cases
         .iter()
@@ -3117,6 +3734,7 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             production_shape, ..
         } => (Some(production_shape), None, Some(true)),
         EvidenceMode::Phase84 { .. } => (Some(true), None, None),
+        EvidenceMode::Phase85 { .. } => (Some(true), None, None),
     };
     Ok(Report {
         schema_version: mode.schema_version(),
@@ -3129,7 +3747,12 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             .or_else(|| mode.phase69_provider().map(Phase69Provider::name))
             .or_else(|| mode.phase70_provider().map(Phase70Provider::name))
             .or_else(|| mode.phase74_provider().map(Phase74Provider::name))
-            .or_else(|| mode.phase75_provider().map(Phase75Provider::name)),
+            .or_else(|| mode.phase75_provider().map(Phase75Provider::name))
+            .or_else(|| mode.phase85_provider().map(Phase85Provider::name)),
+        phase85_manifest: match mode {
+            EvidenceMode::Phase85 { manifest, .. } => Some(manifest),
+            _ => None,
+        },
         target,
         device_index,
         block_size: 32,
@@ -3408,7 +4031,17 @@ fn run_phase66_comparison(
 
 enum RequestedMode {
     Direct(EvidenceMode),
-    Phase66Comparison { repeats: usize },
+    Phase66Comparison {
+        repeats: usize,
+    },
+    Phase85 {
+        repeats: usize,
+        manifest: PathBuf,
+        format: Phase85FormatSelection,
+        filters: Vec<String>,
+        case_ids: Vec<String>,
+        provider: Phase85Provider,
+    },
 }
 
 fn main() -> ExitCode {
@@ -3775,6 +4408,123 @@ fn main() -> ExitCode {
             }
             RequestedMode::Direct(EvidenceMode::Phase84 { repeats, format })
         }
+        Some("phase85") => {
+            let mut repeats = 3_usize;
+            let mut repeat_seen = false;
+            let mut manifest = PathBuf::from("ci/matrix/phase85-mxfp-shapes-v1.json");
+            let mut manifest_seen = false;
+            let mut format = Phase85FormatSelection::Both;
+            let mut format_seen = false;
+            let mut filters = Vec::new();
+            let mut case_ids = Vec::new();
+            let mut provider = Phase85Provider::Baseline;
+            while let Some(argument) = arguments.next() {
+                match argument.as_str() {
+                    "--repeats" if !repeat_seen => {
+                        repeat_seen = true;
+                        let Some(value) = arguments.next() else {
+                            eprintln!("--repeats requires a value");
+                            return ExitCode::FAILURE;
+                        };
+                        repeats = match value.parse::<usize>() {
+                            Ok(value @ 2..=32) => value,
+                            Ok(_) => {
+                                eprintln!("Phase 85 repeats must be between 2 and 32");
+                                return ExitCode::FAILURE;
+                            }
+                            Err(error) => {
+                                eprintln!("invalid Phase 85 repeat count: {error}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    }
+                    "--manifest" if !manifest_seen => {
+                        manifest_seen = true;
+                        let Some(value) = arguments.next() else {
+                            eprintln!("--manifest requires a path");
+                            return ExitCode::FAILURE;
+                        };
+                        manifest = PathBuf::from(value);
+                    }
+                    "--format" if !format_seen => {
+                        format_seen = true;
+                        let Some(value) = arguments.next() else {
+                            eprintln!("--format requires mxfp8, mxfp6, or both");
+                            return ExitCode::FAILURE;
+                        };
+                        format = match value.as_str() {
+                            "mxfp8" | "mx8" => Phase85FormatSelection::Mxfp8,
+                            "mxfp6" | "mx6" => Phase85FormatSelection::Mxfp6,
+                            "both" | "all" => Phase85FormatSelection::Both,
+                            _ => {
+                                eprintln!(
+                                    "invalid Phase 85 format {value}; expected mxfp8, mxfp6, or both"
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    }
+                    "--filter" => {
+                        let Some(value) = arguments.next() else {
+                            eprintln!("--filter requires a tag or role");
+                            return ExitCode::FAILURE;
+                        };
+                        if value.is_empty() {
+                            eprintln!("--filter must not be empty");
+                            return ExitCode::FAILURE;
+                        }
+                        filters.push(value);
+                    }
+                    "--case" => {
+                        let Some(value) = arguments.next() else {
+                            eprintln!("--case requires a case_id");
+                            return ExitCode::FAILURE;
+                        };
+                        if value.is_empty() {
+                            eprintln!("--case must not be empty");
+                            return ExitCode::FAILURE;
+                        }
+                        case_ids.push(value);
+                    }
+                    "--force-env" => {
+                        if !matches!(provider, Phase85Provider::Baseline) {
+                            eprintln!("Phase 85 accepts at most one --force-env");
+                            return ExitCode::FAILURE;
+                        }
+                        let Some(value) = arguments.next() else {
+                            eprintln!("--force-env requires NAME=VALUE");
+                            return ExitCode::FAILURE;
+                        };
+                        let Some((name, force_value)) = value.split_once('=') else {
+                            eprintln!("--force-env requires NAME=VALUE");
+                            return ExitCode::FAILURE;
+                        };
+                        if name.is_empty() {
+                            eprintln!("--force-env name must not be empty");
+                            return ExitCode::FAILURE;
+                        }
+                        provider = Phase85Provider::Forced {
+                            environment: leak_phase85_string(name.to_owned()),
+                            value: leak_phase85_string(force_value.to_owned()),
+                        };
+                    }
+                    _ => {
+                        eprintln!(
+                            "invalid Phase 85 argument {argument}; expected --manifest PATH, --format mxfp8|mxfp6|both, --filter TAG, --case ID, --force-env NAME=VALUE, or --repeats N"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            RequestedMode::Phase85 {
+                repeats,
+                manifest,
+                format,
+                filters,
+                case_ids,
+                provider,
+            }
+        }
         Some("phase70-provider") => {
             let provider = match arguments.next().as_deref() {
                 Some("id45-gfx1201-pack4-n64-default") => Phase70Provider::Gfx1201Default,
@@ -3838,7 +4588,7 @@ fn main() -> ExitCode {
         }
         Some(value) => {
             eprintln!(
-                "invalid profile {value}; expected production, phase63, phase66, phase67-provider, phase69-provider, phase70-provider, phase74-provider, phase75-provider, or phase84"
+                "invalid profile {value}; expected production, phase63, phase66, phase67-provider, phase69-provider, phase70-provider, phase74-provider, phase75-provider, phase84, or phase85"
             );
             return ExitCode::FAILURE;
         }
@@ -3849,6 +4599,33 @@ fn main() -> ExitCode {
         RequestedMode::Phase66Comparison { repeats } => {
             run_phase66_comparison(device_index, target, repeats)
                 .and_then(|report| serde_json::to_value(report).map_err(|error| error.to_string()))
+        }
+        RequestedMode::Phase85 {
+            repeats,
+            manifest,
+            format,
+            filters,
+            case_ids,
+            provider,
+        } => {
+            configure_phase85_provider(provider);
+            load_phase85_manifest(&manifest, format, &filters, &case_ids).and_then(
+                |(specs, manifest_name)| {
+                    run(
+                        device_index,
+                        target,
+                        EvidenceMode::Phase85 {
+                            repeats,
+                            specs,
+                            manifest: manifest_name,
+                            provider,
+                        },
+                    )
+                    .and_then(|report| {
+                        serde_json::to_value(report).map_err(|error| error.to_string())
+                    })
+                },
+            )
         }
     };
     match result {
@@ -4010,6 +4787,144 @@ mod tests {
                 validate_actual_dispatch(Format::Mxfp8, m, 2560, 9216, target, &candidate(target),)
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn phase85_forced_row8_rejects_small_m_candidate_misrouting() {
+        let provider = Phase85Provider::Forced {
+            environment: "SLLM_MXFP8_PREFILL_FORCE_ROW8",
+            value: "1",
+        };
+        let contract =
+            phase85_forced_contract(Format::Mxfp8, "SLLM_MXFP8_PREFILL_FORCE_ROW8", "1").unwrap();
+        let expected = DispatchEvidence {
+            abi_version: 1,
+            info_version: 1,
+            dispatch_id: 1,
+            dispatch_count: 2,
+            kernel_id: contract.kernel_id,
+            workgroup_size_x: contract.workgroup_size_x,
+            grid_size_x: 1024,
+            row_count: 2,
+            normalized_size: 2 * 1024,
+            backend: 1,
+            fallback_allowed: false,
+            fallback_used: false,
+            kernel_symbol: contract.kernel_symbol.to_owned(),
+            device_symbol: contract.device_symbol.to_owned(),
+            target: "gfx1201".to_owned(),
+        };
+        assert!(validate_phase85_dispatch(
+            provider,
+            Format::Mxfp8,
+            2,
+            2048,
+            1024,
+            "gfx1201",
+            &expected,
+        )
+        .is_ok());
+
+        let misrouted = DispatchEvidence {
+            kernel_id: PHASE85_MXFP8_SMALL_M_KERNEL_ID,
+            workgroup_size_x: 128,
+            grid_size_x: 128,
+            kernel_symbol: PHASE85_MXFP8_SMALL_M_KERNEL_SYMBOL.to_owned(),
+            device_symbol: PHASE85_MXFP8_SMALL_M_DEVICE_SYMBOL.to_owned(),
+            ..expected
+        };
+        assert!(
+            validate_phase85_dispatch(
+                provider,
+                Format::Mxfp8,
+                2,
+                2048,
+                1024,
+                "gfx1201",
+                &misrouted,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn phase85_forced_grid_geometry_matches_native_contracts() {
+        let check = |format, environment, value, m, n, expected_grid| {
+            let provider = Phase85Provider::Forced { environment, value };
+            let contract = phase85_forced_contract(format, environment, value).unwrap();
+            let dispatch = DispatchEvidence {
+                abi_version: 1,
+                info_version: 1,
+                dispatch_id: 1,
+                dispatch_count: 2,
+                kernel_id: contract.kernel_id,
+                workgroup_size_x: contract.workgroup_size_x,
+                grid_size_x: expected_grid,
+                row_count: m as u64,
+                normalized_size: (m * n) as u64,
+                backend: 1,
+                fallback_allowed: false,
+                fallback_used: false,
+                kernel_symbol: contract.kernel_symbol.to_owned(),
+                device_symbol: contract.device_symbol.to_owned(),
+                target: "gfx1201".to_owned(),
+            };
+            assert!(
+                validate_phase85_dispatch(provider, format, m, 2048, n, "gfx1201", &dispatch,)
+                    .is_ok()
+            );
+        };
+        for format in [Format::Mxfp8, Format::Mxfp6] {
+            check(
+                format,
+                "SLLM_MX_WA_PREFILL_FORCE_BASELINE",
+                "1",
+                3,
+                1024,
+                3 * 1024,
+            );
+            check(
+                format,
+                "SLLM_MX_WA_PREFILL_FORCE_BASELINE",
+                "1",
+                17,
+                1024,
+                17 * 1024,
+            );
+            check(
+                format,
+                if format == Format::Mxfp8 {
+                    "SLLM_MXFP8_PREFILL_FORCE_ROW8"
+                } else {
+                    "SLLM_MXFP6_PREFILL_FORCE_ROW8"
+                },
+                "1",
+                3,
+                1024,
+                1024,
+            );
+            check(
+                format,
+                if format == Format::Mxfp8 {
+                    "SLLM_MXFP8_PREFILL_FORCE_TILED16"
+                } else {
+                    "SLLM_MXFP6_PREFILL_FORCE_TILED16"
+                },
+                "1",
+                3,
+                1024,
+                64,
+            );
+            check(
+                format,
+                "SLLM_MX_WA_PREFILL_FORCE_MMQ_COLUMNS",
+                "4",
+                17,
+                1024,
+                3 * 256,
+            );
+            check(format, PHASE85_SMALL_M_FORCE_ENV, "1", 3, 1024, 128);
         }
     }
 
@@ -4539,5 +5454,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn phase85_manifest_is_finite_and_covers_both_formats_and_roles() {
+        let manifest: Phase85Manifest = serde_json::from_str(include_str!(
+            "../../../../ci/matrix/phase85-mxfp-shapes-v1.json"
+        ))
+        .expect("Phase 85 manifest parses");
+        assert_eq!(manifest.schema_version, PHASE85_SCHEMA_VERSION);
+        assert!(manifest.cases.len() <= PHASE85_MAX_CASES);
+        assert!(manifest.cases.iter().any(|case| case.format == "mxfp8"));
+        assert!(manifest.cases.iter().any(|case| case.format == "mxfp6"));
+        for tag in [
+            "decode",
+            "small-m",
+            "large-m",
+            "rectangular",
+            "selector-boundary",
+            "model",
+            "mtp",
+        ] {
+            assert!(
+                manifest
+                    .cases
+                    .iter()
+                    .any(|case| case.tags.iter().any(|candidate| candidate == tag)),
+                "manifest tag {tag}"
+            );
+        }
+        assert!(manifest.cases.iter().any(|case| {
+            case.format == "mxfp8" && case.m == 1 && case.k == 5120 && case.n == 248320
+        }));
+        assert!(
+            manifest
+                .cases
+                .iter()
+                .all(|case| { case.m > 0 && case.k > 0 && case.n > 0 && case.k % 32 == 0 })
+        );
+        assert!(
+            manifest
+                .cases
+                .iter()
+                .filter(|case| case.oracle == "full")
+                .all(|case| case.m <= 16 && case.n <= 2560)
+        );
     }
 }

@@ -587,6 +587,10 @@ constexpr const char *kMxfp6W6A6PrefillPhase75Environment =
     "SLLM_MXFP6_PREFILL_FORCE_PHASE75";
 constexpr const char *kMxfp6W6A6PrefillTiled16Environment =
     "SLLM_MXFP6_PREFILL_FORCE_TILED16";
+// Phase85 comparison control. The existing 97/98 KernelVariant identities are
+// also used by the bounded default-adopted M=2..4 shape family below.
+constexpr const char *kPhase85MxfpSmallMEnvironment =
+    "SLLM_PHASE85_MX_WA_FORCE_SMALL_M";
 static_assert(sizeof("matmul.mxfp6.w6a6.gfx1201.wmma128x64.via-e4m3.v1") <=
               64U);
 static_assert(sizeof("matmul.mxfp6.w6a6.gfx1030.half2.32x32.v1") <= 64U);
@@ -602,6 +606,21 @@ static_assert(sizeof("matmul.mxfp6.w6a6.gfx1201.wmma128x64.pack4-swar.v1") <=
 static_assert(sizeof("sllm_mxfp6_w6a6_gfx1201_wmma128x64_pack4_v2") <= 64U);
 static_assert(sizeof("sllm_mxfp6_w6a6_gfx1201_wmma128x64_pack4_swar_v1") <=
               64U);
+constexpr uint32_t kPhase85MxfpSmallMWorkgroupSize = 128U;
+constexpr uint32_t kPhase85MxfpSmallMRowsPerWorkgroup = 4U;
+constexpr uint32_t kPhase85MxfpSmallMColumnsPerWorkgroup = 8U;
+constexpr const char *kMxfp8W8A8PrefillPhase85SmallMLogicalKernelId =
+    "matmul.mxfp8.w8a8.mmq.rows4.col8.v1";
+constexpr const char *kMxfp8W8A8PrefillPhase85SmallMDeviceSymbol =
+    "sllm_mxfp8_w8a8_mmq_rows4_col8_v1";
+constexpr const char *kMxfp6W6A6PrefillPhase85SmallMLogicalKernelId =
+    "matmul.mxfp6.w6a6.mmq.rows4.col8.v1";
+constexpr const char *kMxfp6W6A6PrefillPhase85SmallMDeviceSymbol =
+    "sllm_mxfp6_w6a6_mmq_rows4_col8_v1";
+static_assert(sizeof("matmul.mxfp8.w8a8.mmq.rows4.col8.v1") <= 64U);
+static_assert(sizeof("matmul.mxfp6.w6a6.mmq.rows4.col8.v1") <= 64U);
+static_assert(sizeof("sllm_mxfp8_w8a8_mmq_rows4_col8_v1") <= 64U);
+static_assert(sizeof("sllm_mxfp6_w6a6_mmq_rows4_col8_v1") <= 64U);
 static_assert(sizeof("matmul.nvfp4.w4a4.block16.prefill.row8_tiled256.v1") <=
               64U);
 static_assert(
@@ -614,6 +633,79 @@ static_assert(
 static_assert(sizeof("matmul.nvfp4.w4a4.block16.prefill.dp4a64x64.v1") <= 64U);
 static_assert(sizeof("sllm_matmul_nvfp4_w4a4_block16_prefill_dp4a_64x64_v1") <=
               64U);
+
+// Candidate A covers companion verification rows (M=2..4) and the bounded
+// default-adopted shape family while preserving M=1 decode.
+constexpr bool phase85_mxfp_small_m_shape(const uint64_t m, const uint64_t k,
+                                          const uint64_t n) noexcept {
+  return m >= 2U && m <= 4U && n != 0U && k >= 2048U && n >= 1024U &&
+         n <= 32768U && (k % kMxfp8W8A8PrefillWmmaBlockK) == 0U;
+}
+
+constexpr bool phase85_mxfp_small_m_force_shape(const uint64_t m,
+                                                const uint64_t k,
+                                                const uint64_t n) noexcept {
+  return m >= 2U && m <= 4U && n != 0U && k != 0U &&
+         (k % kMxfp8W8A8PrefillWmmaBlockK) == 0U;
+}
+
+// Candidate A's default scope is target-specific because the small-M MMQ
+// crossover differs between the two RDNA code objects.  The force helper
+// below intentionally retains the broader pre-adoption contract for isolated
+// comparison runs.
+constexpr bool
+phase85_mxfp8_gfx1030_small_m_adopted_shape(const uint64_t m, const uint64_t k,
+                                            const uint64_t n) noexcept {
+  return phase85_mxfp_small_m_shape(m, k, n) && (k / n) != 1U;
+}
+
+constexpr bool
+phase85_mxfp8_gfx1201_small_m_adopted_shape(const uint64_t m, const uint64_t k,
+                                            const uint64_t n) noexcept {
+  return phase85_mxfp_small_m_shape(m, k, n);
+}
+
+constexpr bool phase85_mxfp6_small_m_adopted_shape(const uint64_t m,
+                                                   const uint64_t k,
+                                                   const uint64_t n) noexcept {
+  return phase85_mxfp_small_m_shape(m, k, n);
+}
+
+// The M1 WaveBlock32 loader is compiled only into gfx1201 code objects and is
+// selected by shape inside the existing ID18 symbol. Keep toy/small shapes on
+// the baseline BlockCodec tree until they have independent evidence.
+constexpr bool phase85_mxfp8_gfx1201_m1_wave_shape(const uint64_t m,
+                                                   const uint64_t k,
+                                                   const uint64_t n) noexcept {
+  return m == 1U && k >= 2048U && n >= 1024U &&
+         (k % kMxfp8W8A8PrefillWmmaBlockK) == 0U;
+}
+
+inline bool phase85_mxfp_small_m_forced(const uint64_t m, const uint64_t k,
+                                        const uint64_t n) noexcept {
+  const char *const value = std::getenv(kPhase85MxfpSmallMEnvironment);
+  return value != nullptr && std::strcmp(value, "1") == 0 &&
+         phase85_mxfp_small_m_force_shape(m, k, n);
+}
+
+static_assert(!phase85_mxfp_small_m_shape(1U, 5120U, 1024U));
+static_assert(phase85_mxfp_small_m_shape(2U, 5120U, 1024U));
+static_assert(phase85_mxfp_small_m_shape(4U, 5120U, 1024U));
+static_assert(!phase85_mxfp_small_m_shape(5U, 5120U, 1024U));
+static_assert(!phase85_mxfp_small_m_shape(3U, 2016U, 1024U));
+static_assert(!phase85_mxfp_small_m_shape(3U, 5120U, 1023U));
+static_assert(!phase85_mxfp_small_m_shape(3U, 5120U, 32769U));
+static_assert(!phase85_mxfp_small_m_shape(3U, 5120U, 0U));
+static_assert(phase85_mxfp_small_m_force_shape(2U, 64U, 5U));
+static_assert(!phase85_mxfp_small_m_force_shape(1U, 64U, 5U));
+static_assert(!phase85_mxfp8_gfx1030_small_m_adopted_shape(2U, 2048U, 2048U));
+static_assert(phase85_mxfp8_gfx1030_small_m_adopted_shape(2U, 4096U, 2048U));
+static_assert(phase85_mxfp8_gfx1201_small_m_adopted_shape(2U, 2048U, 1024U));
+static_assert(phase85_mxfp6_small_m_adopted_shape(2U, 2048U, 1024U));
+static_assert(!phase85_mxfp8_gfx1201_m1_wave_shape(1U, 2016U, 1024U));
+static_assert(!phase85_mxfp8_gfx1201_m1_wave_shape(1U, 2048U, 1023U));
+static_assert(phase85_mxfp8_gfx1201_m1_wave_shape(1U, 2048U, 1024U));
+static_assert(phase85_mxfp8_gfx1201_m1_wave_shape(1U, 2080U, 1025U));
 
 enum class KernelVariant : uint32_t {
   Baseline = 1U,
@@ -681,6 +773,8 @@ enum class KernelVariant : uint32_t {
   Bf16PrefillGfx1030_64x64 = 91U,
   Fp8OuterDecodeGfx1030FusedM2_4 = 92U,
   Nvfp4W4A4SmallMVgprReuse = 94U,
+  Mxfp8W8A8PrefillPhase85SmallM = 97U,
+  Mxfp6W6A6PrefillPhase85SmallM = 98U,
 };
 
 // Selector state is intentionally kept inside the native runtime.  The
@@ -830,15 +924,13 @@ inline KernelVariant select_mxfp8_variant(const uint64_t m) noexcept {
 }
 
 // Phase 63's production candidate is intentionally a shape-family rule rather
-// than a model-name table. It starts with large-M, wide projections; the
-// user-approved upper bound includes model-independent shapes through N=32768
-// while preserving the existing alignment and M/K admission conditions.
+// than a model-name table. It starts with large-M, wide projections; staged
+// WMMA is safe for N tails, while direct variants retain their aligned-N gates.
 constexpr bool phase63_gfx1201_mxfp8_wmma_shape(const uint64_t m,
                                                 const uint64_t k,
                                                 const uint64_t n) noexcept {
   return m >= 128U && k >= 2048U && n >= 1024U && n <= 32768U &&
-         (k % kMxfp8W8A8PrefillWmmaBlockK) == 0U &&
-         (n % kMxfp8W8A8PrefillWmmaN64ColumnsPerWorkgroup) == 0U;
+         (k % kMxfp8W8A8PrefillWmmaBlockK) == 0U;
 }
 
 constexpr bool phase63_mxfp8_wmma_supported_shape(const uint64_t m,
@@ -873,7 +965,7 @@ constexpr bool phase67_gfx1030_mxfp8_mmq_col8_shape(const uint64_t m,
                                                     const uint64_t n) noexcept {
   return phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n) && m >= 128U &&
          k >= 2048U &&
-         ((n >= 2560U && n <= 16384U) || (m >= 512U && n == 1024U));
+         ((n >= 2560U && n <= 32768U) || (m >= 512U && n == 1024U));
 }
 
 static_assert(!phase67_gfx1030_mxfp8_mmq_col8_shape(127U, 2560U, 9216U));
@@ -886,7 +978,8 @@ static_assert(!phase67_gfx1030_mxfp8_mmq_col8_shape(511U, 2560U, 1024U));
 static_assert(phase67_gfx1030_mxfp8_mmq_col8_shape(512U, 2560U, 1024U));
 static_assert(!phase67_gfx1030_mxfp8_mmq_col8_shape(512U, 2560U, 1025U));
 static_assert(phase67_gfx1030_mxfp8_mmq_col8_shape(512U, 2560U, 16384U));
-static_assert(!phase67_gfx1030_mxfp8_mmq_col8_shape(512U, 2560U, 16385U));
+static_assert(phase67_gfx1030_mxfp8_mmq_col8_shape(512U, 2560U, 32768U));
+static_assert(!phase67_gfx1030_mxfp8_mmq_col8_shape(512U, 2560U, 32769U));
 static_assert(!phase67_gfx1030_mxfp8_mmq_col8_shape(512U, 2560U, 248320U));
 
 // Direct activation fragments cannot safely read a partial final 128-row
@@ -923,8 +1016,8 @@ phase65_gfx1201_mxfp8_wmma_direct_both_shape(const uint64_t m, const uint64_t k,
 
 // Phase 66 adopts the wider output tile only inside the measured Phase 65
 // production family. This excludes the short-K operator boundary where N128
-// was slower, preserves N=64 on the established provider, and leaves tails
-// and shapes wider than N=32768 on their existing fail-closed routes.
+// was slower, preserves N=64 on the established provider, and leaves N tails
+// to the staged N64 provider while shapes wider than N=32768 stay fail-closed.
 constexpr bool phase66_gfx1201_mxfp8_wmma_n128_direct_both_shape(
     const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
   return phase65_gfx1201_mxfp8_wmma_direct_both_shape(m, k, n) &&
@@ -940,6 +1033,7 @@ constexpr bool phase66_gfx1201_mxfp8_wmma_n128_direct_both_shape(
 constexpr bool phase64_gfx1201_mxfp8_wmma_direct_weight_shape(
     const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
   return phase63_gfx1201_mxfp8_wmma_shape(m, k, n) && k != 0U &&
+         (n % kMxfp8W8A8PrefillWmmaN64ColumnsPerWorkgroup) == 0U &&
          (n / k >= 3U || (k == 12288U && n == 4096U));
 }
 
@@ -979,6 +1073,14 @@ inline KernelVariant select_mxfp8_variant(const uint64_t m, const uint64_t k,
         std::strcmp(force_gfx1030_phase69, "vector32") == 0) {
       return KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Vector32;
     }
+  }
+  if ((exact_gfx1030 || exact_gfx1201) &&
+      phase85_mxfp_small_m_forced(m, k, n)) {
+    return KernelVariant::Mxfp8W8A8PrefillPhase85SmallM;
+  }
+  if ((exact_gfx1030 && phase85_mxfp8_gfx1030_small_m_adopted_shape(m, k, n)) ||
+      (exact_gfx1201 && phase85_mxfp8_gfx1201_small_m_adopted_shape(m, k, n))) {
+    return KernelVariant::Mxfp8W8A8PrefillPhase85SmallM;
   }
   if (exact_gfx1030 && phase67_gfx1030_mxfp8_mmq_col8_shape(m, k, n)) {
     return force_gfx1030_phase69 != nullptr &&
@@ -1054,7 +1156,9 @@ static_assert(phase63_gfx1201_mxfp8_wmma_shape(128U, 2560U, 9216U));
 static_assert(phase63_gfx1201_mxfp8_wmma_shape(129U, 9216U, 2560U));
 static_assert(!phase63_gfx1201_mxfp8_wmma_shape(128U, 2559U, 9216U));
 static_assert(phase63_gfx1201_mxfp8_wmma_shape(128U, 2560U, 1024U));
+static_assert(phase63_gfx1201_mxfp8_wmma_shape(128U, 2560U, 1025U));
 static_assert(phase63_gfx1201_mxfp8_wmma_shape(128U, 4096U, 32768U));
+static_assert(!phase63_gfx1201_mxfp8_wmma_shape(128U, 4096U, 32769U));
 static_assert(!phase63_gfx1201_mxfp8_wmma_shape(128U, 4096U, 32832U));
 static_assert(!phase63_gfx1201_mxfp8_wmma_shape(128U, 2560U, 248320U));
 static_assert(!phase63_mxfp8_wmma_supported_shape(1U, 2560U, 9216U));
@@ -1110,6 +1214,8 @@ static_assert(!phase65_gfx1201_mxfp8_wmma_direct_both_shape(128U, 2560U,
                                                             248320U));
 static_assert(phase64_gfx1201_mxfp8_wmma_direct_weight_shape(128U, 2048U,
                                                              6144U));
+static_assert(!phase64_gfx1201_mxfp8_wmma_direct_weight_shape(128U, 2048U,
+                                                              6145U));
 static_assert(phase64_gfx1201_mxfp8_wmma_direct_weight_shape(128U, 2560U,
                                                              9216U));
 static_assert(phase64_gfx1201_mxfp8_wmma_direct_weight_shape(128U, 4096U,
@@ -1237,6 +1343,14 @@ inline KernelVariant select_mxfp6_variant(const uint64_t m, const uint64_t k,
       std::getenv(kMxfp6W6A6PrefillTiled16Environment);
   if (force_tiled16 != nullptr && std::strcmp(force_tiled16, "1") == 0) {
     return KernelVariant::Mxfp6W6A6PrefillTiled16;
+  }
+  if ((target_is(target, "gfx1030") || target_is(target, "gfx1201")) &&
+      phase85_mxfp_small_m_forced(m, k, n)) {
+    return KernelVariant::Mxfp6W6A6PrefillPhase85SmallM;
+  }
+  if ((target_is(target, "gfx1030") || target_is(target, "gfx1201")) &&
+      phase85_mxfp6_small_m_adopted_shape(m, k, n)) {
+    return KernelVariant::Mxfp6W6A6PrefillPhase85SmallM;
   }
   if (target_is(target, "gfx1030") &&
       phase74_gfx1030_mxfp6_half2_dot2_default_shape(m, k, n)) {
@@ -2720,6 +2834,12 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
   if (variant == KernelVariant::Bf16PrefillGfx1030_64x64) {
     return kBf16PrefillGfx1030_64x64LogicalKernelId;
   }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillPhase85SmallM) {
+    return kMxfp8W8A8PrefillPhase85SmallMLogicalKernelId;
+  }
+  if (variant == KernelVariant::Mxfp6W6A6PrefillPhase85SmallM) {
+    return kMxfp6W6A6PrefillPhase85SmallMLogicalKernelId;
+  }
   if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double) {
     return kMxfp8W8A8PrefillGfx1030Half2_128x64K32DoubleLogicalKernelId;
   }
@@ -2861,6 +2981,12 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
 constexpr const char *device_symbol(const KernelVariant variant) noexcept {
   if (variant == KernelVariant::Bf16PrefillGfx1030_64x64) {
     return kBf16PrefillGfx1030_64x64DeviceSymbol;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillPhase85SmallM) {
+    return kMxfp8W8A8PrefillPhase85SmallMDeviceSymbol;
+  }
+  if (variant == KernelVariant::Mxfp6W6A6PrefillPhase85SmallM) {
+    return kMxfp6W6A6PrefillPhase85SmallMDeviceSymbol;
   }
   if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double) {
     return kMxfp8W8A8PrefillGfx1030Half2_128x64K32DoubleDeviceSymbol;
@@ -3112,6 +3238,14 @@ inline const char *device_symbol_for_target(const KernelVariant variant,
 constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
                                const uint64_t n,
                                const uint64_t k = 0U) noexcept {
+  if (variant == KernelVariant::Mxfp8W8A8PrefillPhase85SmallM ||
+      variant == KernelVariant::Mxfp6W6A6PrefillPhase85SmallM) {
+    return static_cast<uint32_t>(
+        ((m + kPhase85MxfpSmallMRowsPerWorkgroup - 1U) /
+         kPhase85MxfpSmallMRowsPerWorkgroup) *
+        ((n + kPhase85MxfpSmallMColumnsPerWorkgroup - 1U) /
+         kPhase85MxfpSmallMColumnsPerWorkgroup));
+  }
   if (variant == KernelVariant::Nvfp4W4A4PrefillCompensated64x64 &&
       phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(m, k, n)) {
     return static_cast<uint32_t>(((m + 127U) / 128U) * ((n + 63U) / 64U));
@@ -3270,7 +3404,10 @@ constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
 }
 
 constexpr uint32_t workgroup_size_x(const KernelVariant variant) noexcept {
-  return variant == KernelVariant::Mxfp8W8A8PrefillWmmaN16 ||
+  return variant == KernelVariant::Mxfp8W8A8PrefillPhase85SmallM ||
+                 variant == KernelVariant::Mxfp6W6A6PrefillPhase85SmallM
+             ? kPhase85MxfpSmallMWorkgroupSize
+         : variant == KernelVariant::Mxfp8W8A8PrefillWmmaN16 ||
                  variant == KernelVariant::Mxfp8W8A8PrefillWmmaN64 ||
                  variant == KernelVariant::Mxfp8W8A8PrefillWmmaDirectWeight ||
                  variant == KernelVariant::Mxfp8W8A8PrefillWmmaDirectBoth ||
@@ -3313,6 +3450,10 @@ constexpr uint32_t workgroup_size_x(const KernelVariant variant) noexcept {
 
 static_assert(workgroup_size_x(KernelVariant::Mxfp8W8A8PrefillWmmaN16) == 256U);
 static_assert(workgroup_size_x(KernelVariant::Mxfp8W8A8PrefillWmmaN64) == 256U);
+static_assert(workgroup_size_x(KernelVariant::Mxfp8W8A8PrefillPhase85SmallM) ==
+              128U);
+static_assert(workgroup_size_x(KernelVariant::Mxfp6W6A6PrefillPhase85SmallM) ==
+              128U);
 static_assert(workgroup_size_x(
                   KernelVariant::Mxfp8W8A8PrefillWmmaN128DirectBoth) == 256U);
 static_assert(
@@ -3362,6 +3503,10 @@ static_assert(grid_size_x(KernelVariant::Mxfp8W8A8PrefillWmmaN128DirectBoth,
                           128U, 128U) == 1U);
 static_assert(grid_size_x(KernelVariant::Mxfp8W8A8PrefillWmmaN128DirectBoth,
                           128U, 256U) == 2U);
+static_assert(grid_size_x(KernelVariant::Mxfp8W8A8PrefillPhase85SmallM, 2U,
+                          1024U) == 128U);
+static_assert(grid_size_x(KernelVariant::Mxfp6W6A6PrefillPhase85SmallM, 4U,
+                          1025U) == 129U);
 static_assert(grid_size_x(KernelVariant::Nvfp4W4A4Decode, 1U, 7U) == 7U);
 static_assert(grid_size_x(KernelVariant::Nvfp4W4A4DecodeWave4Column32, 1U,
                           31U) == 1U);

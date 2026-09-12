@@ -346,11 +346,11 @@
       },
       {
         "path": "native/hip/src/low_precision_block_codec.hpp",
-        "sha256": "7a424062e4ca1d8e0e3022a32af3830a65a7127c9acccdee8499eab32340d9cd"
+        "sha256": "967dcae6d2e331641324ae8fda9d9e0ce06644ac761348d5d45b5a42514298c5"
       },
       {
         "path": "native/hip/src/low_precision_matmul_provider.hpp",
-        "sha256": "daf859b619665066e28790baddd5ac11864c4c5d07d72d7f8a4d220c7eeae41b"
+        "sha256": "bc5866300606ddcc08c5d928954fb49e6b71453e2846a5951b634de406c3e2b6"
       },
       {
         "path": "native/hip/src/matmul_api.cpp",
@@ -362,15 +362,15 @@
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
-        "sha256": "d153a7cca535656a4722febae74ab5bd00d0a9b156dcb6c4742fdfc02436dbed"
+        "sha256": "f00d914e4040fbfc4ca205c91fb96991c30916f80b71f4638b7c68fcdaa3abcf"
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "82b7b0dc6d6305ce0219ec20586f3ca2f0c932533beec9955077d00962bf6513"
+        "sha256": "f1c0addc100f4158671c3d2d3482f4ca202a41f9e1d0a9a2866e22b888bbbb44"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
-        "sha256": "6c3f573ac8529b8667727b843e36958a7d8f7b76cdc45c6ea47724136a2c2bcc"
+        "sha256": "d2e6a044a0617b6d1d8cee3b62a4d2638036fdda5134c06fb2bb6ec1971fe546"
       },
       {
         "path": "native/hip/src/minimax_m3_moe_route_api.cpp",
@@ -597,7 +597,7 @@
         "sha256": "e6d480204c7f49f0385ca511cdb2080372e114d2befa5f345a97b7d5bd0eb8f1"
       }
     ],
-    "source_set_sha256": "8271070450aed6952e0fcd383b4a269c8e82a1ce546358462d06205f37d57017"
+    "source_set_sha256": "d4f9a56ed2a39fdda08d5f841231150fa8b337d9dd966956ef8c17495185c689"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",

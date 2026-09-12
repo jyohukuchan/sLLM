@@ -83,6 +83,35 @@ bool wait_release(sllm_completion_t **const completion,
   return waited && released;
 }
 
+bool wait_release_timed(sllm_completion_t **const completion,
+                        const char *const operation,
+                        uint64_t *const elapsed_ns) {
+  if (completion == nullptr || *completion == nullptr || elapsed_ns == nullptr)
+    return false;
+  Error error;
+  sllm_completion_result_t result{};
+  result.struct_size = sizeof(result);
+  result.abi_version = SLLM_HIP_ABI_VERSION;
+  const bool waited = expect(sllm_completion_wait(*completion, kTimeoutMs,
+                                                  &result, &error.sink),
+                             SLLM_STATUS_OK, operation, error) &&
+                      result.state == SLLM_COMPLETION_STATE_SUCCESS;
+  sllm_completion_timing_t timing{};
+  timing.struct_size = sizeof(timing);
+  timing.abi_version = SLLM_HIP_ABI_VERSION;
+  const bool timed =
+      waited &&
+      expect(sllm_completion_timing(*completion, &timing, &error.sink),
+             SLLM_STATUS_OK, "completion timing", error) &&
+      timing.valid != 0U && timing.elapsed_ns != 0U;
+  const bool released = expect(sllm_completion_release(completion, &error.sink),
+                               SLLM_STATUS_OK, "completion release", error) &&
+                        *completion == nullptr;
+  if (timed)
+    *elapsed_ns = timing.elapsed_ns;
+  return waited && timed && released;
+}
+
 bool upload(const sllm_queue_t *const queue, const sllm_buffer_t *const buffer,
             const void *const source, const uint64_t bytes) {
   sllm_transfer_desc_t transfer{};
@@ -432,6 +461,44 @@ struct DispatchMetadata final {
   std::string arch_name;
 };
 
+struct TimingStats final {
+  uint32_t warmups = 0U;
+  uint32_t measured = 0U;
+  std::vector<uint64_t> append_ns;
+  std::vector<uint64_t> attention_ns;
+  uint64_t output_digest = 0U;
+};
+
+uint64_t fnv1a64(const std::vector<uint16_t> &values) {
+  uint64_t digest = UINT64_C(1469598103934665603);
+  for (const uint16_t value : values) {
+    const uint8_t bytes[2] = {static_cast<uint8_t>(value & 0xffU),
+                              static_cast<uint8_t>(value >> 8U)};
+    for (const uint8_t byte : bytes) {
+      digest ^= byte;
+      digest *= UINT64_C(1099511628211);
+    }
+  }
+  return digest;
+}
+
+uint64_t median_ns(const std::vector<uint64_t> &values) {
+  if (values.empty())
+    return 0U;
+  std::vector<uint64_t> ordered = values;
+  std::sort(ordered.begin(), ordered.end());
+  return ordered[ordered.size() / 2U];
+}
+
+uint64_t mad_ns(const std::vector<uint64_t> &values) {
+  const uint64_t median = median_ns(values);
+  std::vector<uint64_t> deviations;
+  deviations.reserve(values.size());
+  for (const uint64_t value : values)
+    deviations.push_back(value >= median ? value - median : median - value);
+  return median_ns(deviations);
+}
+
 Metrics compare(const std::vector<uint16_t> &expected,
                 const std::vector<uint16_t> &actual) {
   Metrics result{};
@@ -537,7 +604,8 @@ bool execute_attention(const sllm_context_t *const context,
                        const sllm_buffer_t *const output, const uint64_t prefix,
                        const uint64_t context_tokens, const uint32_t rows,
                        std::vector<uint16_t> *const result,
-                       DispatchMetadata *const dispatch) {
+                       DispatchMetadata *const dispatch,
+                       uint64_t *const elapsed_ns = nullptr) {
   sllm_causal_attention_desc_t descriptor{};
   descriptor.struct_size = sizeof(descriptor);
   descriptor.abi_version = SLLM_HIP_ABI_VERSION;
@@ -554,12 +622,20 @@ bool execute_attention(const sllm_context_t *const context,
   info.info_version = SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION;
   sllm_completion_t *completion = nullptr;
   Error error;
-  if (!expect(sllm_causal_attention_execute(context, queue, &descriptor,
-                                            &completion, &info, &error.sink),
-              SLLM_STATUS_OK, "MXFP8 prefill", error) ||
-      completion == nullptr || info.dispatch_count != 1U ||
-      info.fallback_allowed != 0U || info.fallback_used != 0U ||
-      !wait_release(&completion, "MXFP8 prefill wait"))
+  const bool execute_ok =
+      expect(sllm_causal_attention_execute(context, queue, &descriptor,
+                                           &completion, &info, &error.sink),
+             SLLM_STATUS_OK, "MXFP8 prefill", error);
+  // The split providers publish two physical launches but one completion.
+  // Always drain that completion before rejecting metadata so the append's
+  // in-flight snapshot and live state can be cleaned up on every error path.
+  const bool completion_ok =
+      completion != nullptr &&
+      (elapsed_ns == nullptr
+           ? wait_release(&completion, "MXFP8 prefill wait")
+           : wait_release_timed(&completion, "MXFP8 prefill wait", elapsed_ns));
+  if (!execute_ok || !completion_ok || info.fallback_allowed != 0U ||
+      info.fallback_used != 0U)
     return false;
   dispatch->dispatch_count = info.dispatch_count;
   dispatch->workgroup_size = info.workgroup_size_x;
@@ -586,7 +662,8 @@ bool run_case(const sllm_context_t *const context,
               const std::vector<uint16_t> &query,
               const std::vector<uint16_t> &expected, Metrics *const metrics,
               DispatchMetadata *const dispatch,
-              std::vector<uint16_t> *const actual_output) {
+              std::vector<uint16_t> *const actual_output,
+              TimingStats *const timing = nullptr) {
   const uint64_t context_tokens = prefix + rows;
   const uint64_t kv_bytes =
       context_tokens * kKvHeads * kHeadDim * sizeof(uint16_t);
@@ -602,27 +679,34 @@ bool run_case(const sllm_context_t *const context,
             upload(queue, buffers[0], key.data(), kv_bytes) &&
             upload(queue, buffers[1], value.data(), kv_bytes) &&
             upload(queue, buffers[2], query.data(), query_bytes);
-  if (ok) {
+
+  uint64_t iteration = 0U;
+  auto create_state = [&]() -> bool {
     sllm_kv_state_create_info_v2_t create{};
     create.struct_size = sizeof(create);
     create.abi_version = SLLM_HIP_ABI_VERSION;
     create.create_info_version = SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION;
-    create.session_id = UINT64_C(0x8303) + prefix + rows;
+    create.session_id = UINT64_C(0x8303) + prefix + rows + iteration++;
     create.layer_id = 83U;
     create.capacity_tokens = context_tokens;
     create.head_count = kKvHeads;
     create.head_dim = kHeadDim;
-    create.memory_kind = SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
+    create.memory_kind =
+        timing != nullptr &&
+                std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0
+            ? SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
+            : SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
     create.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
     create.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
     create.encoding = SLLM_HIP_KV_ENCODING_MXFP8_E4_V1;
     create.block_size = kBlockSize;
     create.scale_dtype = SLLM_TENSOR_DTYPE_U8;
-    ok = expect(sllm_kv_state_create_v2(context, &create, &state, &error.sink),
-                SLLM_STATUS_OK, "MXFP8 state create", error) &&
-         state != nullptr;
-  }
-  if (ok) {
+    return expect(
+               sllm_kv_state_create_v2(context, &create, &state, &error.sink),
+               SLLM_STATUS_OK, "MXFP8 state create", error) &&
+           state != nullptr;
+  };
+  auto append_state = [&](uint64_t *const elapsed_ns) -> bool {
     sllm_kv_append_desc_t append{};
     append.struct_size = sizeof(append);
     append.abi_version = SLLM_HIP_ABI_VERSION;
@@ -638,19 +722,37 @@ bool run_case(const sllm_context_t *const context,
     append_info.struct_size = sizeof(append_info);
     append_info.abi_version = SLLM_HIP_ABI_VERSION;
     append_info.info_version = SLLM_HIP_KV_APPEND_INFO_VERSION;
-    ok = expect(sllm_kv_state_append(state, queue, &append, &append_completion,
-                                     &append_info, &error.sink),
-                SLLM_STATUS_OK, "MXFP8 prefill append", error) &&
-         append_completion != nullptr &&
-         wait_release(&append_completion, "MXFP8 prefill append wait");
+    const bool appended =
+        expect(sllm_kv_state_append(state, queue, &append, &append_completion,
+                                    &append_info, &error.sink),
+               SLLM_STATUS_OK, "MXFP8 prefill append", error) &&
+        append_completion != nullptr &&
+        (elapsed_ns == nullptr
+             ? wait_release(&append_completion, "MXFP8 prefill append wait")
+             : wait_release_timed(&append_completion,
+                                  "MXFP8 prefill append wait", elapsed_ns));
     if (append_completion != nullptr)
       (void)sllm_completion_release(&append_completion, &error.sink);
-  }
-  std::vector<uint16_t> actual;
-  if (ok) {
+    return appended;
+  };
+  auto run_iteration = [&](uint64_t *const append_elapsed,
+                           uint64_t *const attention_elapsed,
+                           std::vector<uint16_t> *const actual) -> bool {
+    if (!create_state())
+      return false;
     Environment::set(qtile4);
-    ok = execute_attention(context, queue, state, buffers[2], buffers[3],
-                           prefix, context_tokens, rows, &actual, dispatch);
+    const bool appended = append_state(append_elapsed);
+    const bool attended =
+        appended && execute_attention(context, queue, state, buffers[2],
+                                      buffers[3], prefix, context_tokens, rows,
+                                      actual, dispatch, attention_elapsed);
+    const bool released = release_state(&state);
+    return appended && attended && released;
+  };
+
+  if (ok && timing == nullptr) {
+    std::vector<uint16_t> actual;
+    ok = run_iteration(nullptr, nullptr, &actual);
     if (ok) {
       *metrics = compare(expected, actual);
       if (actual_output != nullptr)
@@ -663,8 +765,60 @@ bool run_case(const sllm_context_t *const context,
           metrics->max_abs, metrics->max_relative,
           static_cast<unsigned long long>(metrics->over_tolerance));
     }
+  } else if (ok && timing != nullptr) {
+    timing->append_ns.clear();
+    timing->attention_ns.clear();
+    const uint32_t total = timing->warmups + timing->measured;
+    uint64_t first_digest = 0U;
+    for (uint32_t sample = 0U; sample != total && ok; ++sample) {
+      uint64_t append_elapsed = 0U;
+      uint64_t attention_elapsed = 0U;
+      std::vector<uint16_t> actual;
+      ok = run_iteration(&append_elapsed, &attention_elapsed, &actual);
+      if (!ok)
+        break;
+      const Metrics observed = compare(expected, actual);
+      const uint64_t digest = fnv1a64(actual);
+      if (observed.over_tolerance != 0U ||
+          (sample != 0U && digest != first_digest)) {
+        std::fprintf(
+            stderr,
+            "phase85 KV repeat failed prefix=%llu query_count=%u "
+            "sample=%u over_tolerance=%llu digest=%016llx first=%016llx\n",
+            static_cast<unsigned long long>(prefix), rows, sample,
+            static_cast<unsigned long long>(observed.over_tolerance),
+            static_cast<unsigned long long>(digest),
+            static_cast<unsigned long long>(first_digest));
+        ok = false;
+        break;
+      }
+      first_digest = digest;
+      if (sample >= timing->warmups) {
+        timing->append_ns.push_back(append_elapsed);
+        timing->attention_ns.push_back(attention_elapsed);
+        timing->output_digest = digest;
+        *metrics = observed;
+        if (actual_output != nullptr)
+          *actual_output = actual;
+      }
+    }
+    if (ok && timing->append_ns.size() == timing->measured &&
+        timing->attention_ns.size() == timing->measured) {
+      std::printf(
+          "phase85_timing provider=%s prefix=%llu query_count=%u "
+          "warmups=%u measured=%u append_median_ns=%llu "
+          "attention_median_ns=%llu append_mad_ns=%llu attention_mad_ns=%llu "
+          "output_fnv64=%016llx\n",
+          qtile4 ? "qtile4" : "default",
+          static_cast<unsigned long long>(prefix), rows, timing->warmups,
+          timing->measured,
+          static_cast<unsigned long long>(median_ns(timing->append_ns)),
+          static_cast<unsigned long long>(median_ns(timing->attention_ns)),
+          static_cast<unsigned long long>(mad_ns(timing->append_ns)),
+          static_cast<unsigned long long>(mad_ns(timing->attention_ns)),
+          static_cast<unsigned long long>(timing->output_digest));
+    }
   }
-  ok = release_state(&state) && ok;
   for (auto iterator = buffers.rbegin(); iterator != buffers.rend(); ++iterator)
     ok = release_buffer(&*iterator) && ok;
   return ok;
@@ -675,28 +829,55 @@ bool dispatch_matches(const uint64_t prefix, const uint32_t rows,
   const bool target_has_qtile8 =
       std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0 ||
       std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0;
+  const char *const staged_opt_in =
+      std::getenv("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_STAGED");
+  const char *const staged32_opt_in =
+      std::getenv("SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32");
+  const bool expected_wave8_staged =
+      std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0 &&
+      staged_opt_in != nullptr && std::strcmp(staged_opt_in, "1") == 0 &&
+      rows >= 1U && rows <= 4U &&
+      prefix <= UINT64_MAX - static_cast<uint64_t>(rows) &&
+      prefix + static_cast<uint64_t>(rows) >= 1024U;
   const bool expected_qtile8 =
       !qtile4 && target_has_qtile8 && rows >= 128U && prefix >= 1024U;
+  const bool expected_wave32_staged =
+      target_has_qtile8 && rows >= 1U && rows <= 4U &&
+      prefix <= UINT64_MAX - static_cast<uint64_t>(rows) &&
+      prefix + static_cast<uint64_t>(rows) >= 1024U &&
+      ((staged32_opt_in == nullptr && !expected_wave8_staged) ||
+       (staged32_opt_in != nullptr && std::strcmp(staged32_opt_in, "1") == 0));
+  const bool expected_staged = expected_wave8_staged || expected_wave32_staged;
   const bool expected_qtile4 = rows >= 128U && !expected_qtile8;
   const bool target_has_gfx1201_packed =
       std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0;
   const bool expected_gfx1201_wave =
       target_has_gfx1201_packed && (rows == 1U || rows >= 32U);
   const char *const expected_logical =
-      expected_qtile8   ? "causal_attention.prefill.gqa6_qtile8_w16.mxfp8.v1"
+      expected_wave32_staged ? "causal_attention.decode.wave32_split.staged.v1"
+      : expected_wave8_staged
+          ? "causal_attention.decode.wave8_split.staged.gfx1030.v1"
+      : expected_qtile8 ? "causal_attention.prefill.gqa6_qtile8_w16.mxfp8.v1"
       : expected_qtile4 ? "causal_attention.prefill.gqa6_qtile4.v1"
       : expected_gfx1201_wave
           ? "causal_attention.online_softmax_gqa.packed_kv.gfx1201_wave.v4"
           : "causal_attention.online_softmax_gqa.packed_kv.v3";
   const char *const expected_device =
-      expected_qtile8 ? "sllm_causal_attention_prefill_gqa6_qtile8_w16_mxfp8_v1"
+      expected_wave32_staged
+          ? "sllm_causal_attention_decode_wave32_split_staged_v1"
+      : expected_wave8_staged
+          ? "sllm_causal_attention_decode_wave8_split_staged_gfx1030_v1"
+      : expected_qtile8
+          ? "sllm_causal_attention_prefill_gqa6_qtile8_w16_mxfp8_v1"
       : expected_qtile4 ? "sllm_causal_attention_prefill_gqa6_qtile4_v1"
       : expected_gfx1201_wave
           ? "sllm_causal_attention_packed_gfx1201_wave_v4"
           : "sllm_causal_attention_online_softmax_gqa_packed_kv_v3";
   const uint32_t expected_workgroup = expected_qtile8 ? 512U : 256U;
   const uint32_t expected_grid =
-      expected_qtile8
+      expected_wave32_staged  ? rows * 24U * 32U
+      : expected_wave8_staged ? rows * 24U * 8U
+      : expected_qtile8
           ? static_cast<uint32_t>((static_cast<uint64_t>(rows) + 7U) / 8U) *
                 kKvHeads
       : expected_qtile4
@@ -704,7 +885,7 @@ bool dispatch_matches(const uint64_t prefix, const uint32_t rows,
                 kKvHeads
           : rows * kQueryHeads;
   const bool matches =
-      actual.dispatch_count == 1U &&
+      actual.dispatch_count == (expected_staged ? 2U : 1U) &&
       actual.workgroup_size == expected_workgroup &&
       actual.grid_size == expected_grid && actual.query_count == rows &&
       actual.start_position == prefix &&
@@ -717,12 +898,13 @@ bool dispatch_matches(const uint64_t prefix, const uint32_t rows,
     std::fprintf(
         stderr,
         "dispatch metadata mismatch prefix=%llu query_count=%u provider=%s "
-        "expected=(logical=%s device=%s workgroup=%u grid=%u) "
-        "actual=(logical=%s device=%s workgroup=%u grid=%u start=%llu "
+        "expected=(count=%u logical=%s device=%s workgroup=%u grid=%u) "
+        "actual=(count=%u logical=%s device=%s workgroup=%u grid=%u start=%llu "
         "committed=%llu arch=%s fallback=%u/%u)\n",
         static_cast<unsigned long long>(prefix), rows,
-        qtile4 ? "qtile4" : "default", expected_logical, expected_device,
-        expected_workgroup, expected_grid, actual.logical_symbol.c_str(),
+        qtile4 ? "qtile4" : "default", expected_staged ? 2U : 1U,
+        expected_logical, expected_device, expected_workgroup, expected_grid,
+        actual.dispatch_count, actual.logical_symbol.c_str(),
         actual.device_symbol.c_str(), actual.workgroup_size, actual.grid_size,
         static_cast<unsigned long long>(actual.start_position),
         static_cast<unsigned long long>(actual.committed_kv_length),
@@ -824,15 +1006,17 @@ bool run_decode_block_parity(const sllm_context_t *const context,
 int main(int argc, char **argv) {
   const bool decode_block_parity =
       argc == 2 && std::strcmp(argv[1], "--decode-block-parity") == 0;
-  if (argc > 1 && !decode_block_parity) {
-    std::fprintf(stderr, "usage: %s [--decode-block-parity]\n", argv[0]);
+  const bool phase85 = argc == 2 && std::strcmp(argv[1], "--phase85") == 0;
+  if (argc > 1 && !decode_block_parity && !phase85) {
+    std::fprintf(stderr, "usage: %s [--decode-block-parity|--phase85]\n",
+                 argv[0]);
     return EXIT_FAILURE;
   }
   Environment environment;
   sllm_context_t *context = nullptr;
   sllm_queue_t *queue = nullptr;
   bool success = create_context(&context, &queue);
-  if (success && !decode_block_parity) {
+  if (success && !decode_block_parity && !phase85) {
     constexpr std::array<std::array<uint64_t, 2>, 13> cases = {
         {{{0U, 127U}},
          {{0U, 128U}},
@@ -895,6 +1079,68 @@ int main(int argc, char **argv) {
         break;
     }
   }
+  if (success && phase85) {
+    constexpr std::array<std::array<uint64_t, 2>, 21> cases = {
+        {{{31U, 1U}},   {{31U, 3U}},   {{31U, 17U}},   {{32U, 1U}},
+         {{33U, 1U}},   {{127U, 1U}},  {{127U, 3U}},   {{127U, 17U}},
+         {{128U, 1U}},  {{129U, 1U}},  {{129U, 3U}},   {{129U, 17U}},
+         {{1023U, 1U}}, {{1023U, 3U}}, {{1023U, 17U}}, {{1024U, 1U}},
+         {{1025U, 1U}}, {{8191U, 1U}}, {{8191U, 3U}},  {{8193U, 1U}},
+         {{8193U, 3U}}}};
+    for (const auto &test_case : cases) {
+      const uint64_t prefix = test_case[0];
+      const uint32_t rows = static_cast<uint32_t>(test_case[1]);
+      const uint64_t context_tokens = prefix + rows;
+      const std::vector<uint16_t> key = make_kv(context_tokens, false);
+      const std::vector<uint16_t> value = make_kv(context_tokens, true);
+      const std::vector<uint16_t> query = make_query(rows, prefix);
+      const std::vector<uint16_t> expected =
+          oracle(key, value, query, prefix, rows);
+      Metrics default_metrics{};
+      Metrics qtile_metrics{};
+      Metrics provider_metrics{};
+      DispatchMetadata default_dispatch{};
+      DispatchMetadata qtile_dispatch{};
+      TimingStats default_timing{};
+      TimingStats qtile_timing{};
+      default_timing.warmups = 3U;
+      default_timing.measured = 13U;
+      qtile_timing.warmups = 3U;
+      qtile_timing.measured = 13U;
+      std::vector<uint16_t> default_actual;
+      std::vector<uint16_t> qtile_actual;
+      success = run_case(context, queue, prefix, rows, false, key, value, query,
+                         expected, &default_metrics, &default_dispatch,
+                         &default_actual, &default_timing) &&
+                run_case(context, queue, prefix, rows, true, key, value, query,
+                         expected, &qtile_metrics, &qtile_dispatch,
+                         &qtile_actual, &qtile_timing);
+      if (success) {
+        success = dispatch_matches(prefix, rows, false, default_dispatch) &&
+                  dispatch_matches(prefix, rows, true, qtile_dispatch);
+        provider_metrics = compare(default_actual, qtile_actual);
+        std::printf(
+            "phase85_case prefix=%llu query_count=%u default=%s qtile4=%s "
+            "default_dispatch_count=%u default_workgroup=%u default_grid=%u "
+            "qtile4_dispatch_count=%u qtile4_workgroup=%u qtile4_grid=%u "
+            "provider_max_bf16_ulp=%u provider_over_tolerance=%llu\n",
+            static_cast<unsigned long long>(prefix), rows,
+            default_dispatch.logical_symbol.c_str(),
+            qtile_dispatch.logical_symbol.c_str(),
+            default_dispatch.dispatch_count, default_dispatch.workgroup_size,
+            default_dispatch.grid_size, qtile_dispatch.dispatch_count,
+            qtile_dispatch.workgroup_size, qtile_dispatch.grid_size,
+            provider_metrics.max_ulp,
+            static_cast<unsigned long long>(provider_metrics.over_tolerance));
+        if (default_metrics.over_tolerance != 0U ||
+            qtile_metrics.over_tolerance != 0U ||
+            provider_metrics.over_tolerance != 0U)
+          success = false;
+      }
+      if (!success)
+        break;
+    }
+  }
   if (success && decode_block_parity) {
     if (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") != 0) {
       std::fprintf(stderr,
@@ -924,6 +1170,8 @@ int main(int argc, char **argv) {
     std::printf(
         decode_block_parity
             ? "phase83 MXFP8 decode block parity public GPU PASS target=%s\n"
+        : phase85
+            ? "phase85 MXFP8 KV timing/oracle public GPU PASS target=%s\n"
             : "phase83 MXFP8 prefill qtile8/w16 public GPU PASS target=%s\n",
         SLLM_TEST_EXPECTED_TARGET);
   return success ? EXIT_SUCCESS : EXIT_FAILURE;

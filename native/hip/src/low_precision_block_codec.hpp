@@ -677,13 +677,30 @@ mxfp4_even_scale_code(const float maximum) noexcept {
 
 __device__ __forceinline__ uint8_t
 packed_e3m2_at(const uint8_t *const row, const uint64_t index) noexcept {
+  const uint32_t slot = static_cast<uint32_t>(index & UINT64_C(3));
+  const uint32_t bit = slot * 6U;
+  const uint32_t shift = bit & 7U;
+  const uint64_t byte = (index / UINT64_C(4)) * UINT64_C(3) + (bit >> 3U);
+  // Only slots 1/2 straddle two bytes. For slots 0/3 repeat the first
+  // address: the redundant high bits are masked away. This uses two loads
+  // without a divergent four-way switch or a read past the final group.
+  const uint64_t next_byte = byte + (shift >> 2U);
+  const uint32_t packed = static_cast<uint32_t>(row[byte]) |
+                          (static_cast<uint32_t>(row[next_byte]) << 8U);
+  return static_cast<uint8_t>((packed >> shift) & UINT32_C(0x3f));
+}
+
+// Reference 24-bit reader retained for scalar consumers whose measured
+// traffic favors the original three-byte group load.  MMQ and other packed
+// four-lane consumers continue to use packed_e3m2_at above.
+__device__ __forceinline__ uint8_t packed_e3m2_at_legacy24(
+    const uint8_t *const row, const uint64_t index) noexcept {
+  const uint32_t shift = static_cast<uint32_t>(index & UINT64_C(3)) * 6U;
   const uint64_t byte = (index / UINT64_C(4)) * UINT64_C(3);
   const uint32_t packed = static_cast<uint32_t>(row[byte]) |
                           (static_cast<uint32_t>(row[byte + 1U]) << 8U) |
                           (static_cast<uint32_t>(row[byte + 2U]) << 16U);
-  return static_cast<uint8_t>(
-      (packed >> static_cast<uint32_t>((index & UINT64_C(3)) * UINT64_C(6))) &
-      UINT32_C(0x3f));
+  return static_cast<uint8_t>((packed >> shift) & UINT32_C(0x3f));
 }
 
 __device__ __forceinline__ uint32_t packed_e3m2x4_at(
@@ -790,6 +807,65 @@ template <typename BlockFormat> struct MutableBlockScaledView {
   uint64_t scale_stride;
 };
 
+// A wave whose lanes cover one logical block can load the block scale once
+// from lane zero and broadcast its code.  The view is intentionally small so
+// callers can keep one value group in registers while preserving the existing
+// scalar codec and block-scale semantics.
+template <typename BlockFormat> struct WaveBlock32 {
+  const uint8_t *value_base;
+  uint8_t scale_code;
+  uint32_t valid_elements;
+};
+
+template <typename BlockFormat>
+__device__ __forceinline__ WaveBlock32<BlockFormat>
+make_wave_block32(const BlockScaledView<BlockFormat> &view, const uint64_t row,
+                  const uint32_t block, const uint32_t lane) noexcept {
+  static_assert(BlockFormat::kBlockSize == 32U);
+  uint32_t scale_code = 0U;
+  if (lane == 0U) {
+    scale_code = static_cast<uint32_t>(
+        view.block_scales[row * view.scale_stride + block]);
+  }
+  scale_code = __shfl(scale_code, 0U, BlockFormat::kBlockSize);
+  const uint64_t first_element =
+      static_cast<uint64_t>(block) * BlockFormat::kBlockSize;
+  const uint64_t value_offset =
+      BlockFormat::kPacked ? (BlockFormat::kBitsPerElement == 6U
+                                  ? (static_cast<uint64_t>(block) * 24U)
+                                  : (static_cast<uint64_t>(block) * 16U))
+                           : first_element;
+  const uint64_t available_elements =
+      first_element >= view.logical_columns
+          ? 0U
+          : view.logical_columns - first_element;
+  const uint32_t valid_elements = static_cast<uint32_t>(
+      available_elements < BlockFormat::kBlockSize ? available_elements
+                                                   : BlockFormat::kBlockSize);
+  return {view.values + row * view.value_stride + value_offset,
+          static_cast<uint8_t>(scale_code), valid_elements};
+}
+
+template <typename BlockFormat>
+__device__ __forceinline__ float
+load_wave_block32(const WaveBlock32<BlockFormat> &block,
+                  const uint32_t local_element) noexcept {
+  if (local_element >= block.valid_elements) {
+    return 0.0F;
+  }
+  uint8_t value = 0U;
+  if constexpr (BlockFormat::kPacked && BlockFormat::kBitsPerElement == 6U) {
+    value = packed_e3m2_at(block.value_base, local_element);
+  } else if constexpr (BlockFormat::kPacked &&
+                       BlockFormat::kBitsPerElement == 4U) {
+    value = packed_nibble_at(block.value_base, local_element);
+  } else {
+    value = block.value_base[local_element];
+  }
+  return ScalarCodec<typename BlockFormat::Element>::decode(value) *
+         ScalarCodec<E8M0>::decode(block.scale_code);
+}
+
 template <typename BlockFormat> struct BlockCodec;
 
 template <> struct BlockCodec<Mxfp8E4Block32> {
@@ -830,14 +906,29 @@ template <> struct BlockCodec<Mxfp6E3Block32> {
   scale_code(const float maximum, const bool has_nan = false) noexcept {
     return ocp_mx_scale_code(has_nan ? NAN : maximum, Format::kElementPower);
   }
+  template <bool UsePairLoad>
   __device__ __forceinline__ static float
-  load(const BlockScaledView<Format> &view, const uint64_t row,
-       const uint32_t element) noexcept {
+  load_policy(const BlockScaledView<Format> &view, const uint64_t row,
+              const uint32_t element) noexcept {
     const uint8_t *const values = view.values + row * view.value_stride;
-    const uint8_t value = packed_e3m2_at(values, element);
+    const uint8_t value = UsePairLoad
+                              ? packed_e3m2_at(values, element)
+                              : packed_e3m2_at_legacy24(values, element);
     const uint8_t scale = view.block_scales[row * view.scale_stride +
                                             element / Format::kBlockSize];
     return ScalarCodec<E3M2>::decode(value) * ScalarCodec<E8M0>::decode(scale);
+  }
+
+  __device__ __forceinline__ static float
+  load(const BlockScaledView<Format> &view, const uint64_t row,
+       const uint32_t element) noexcept {
+    return load_policy<false>(view, row, element);
+  }
+
+  __device__ __forceinline__ static float
+  load_pair(const BlockScaledView<Format> &view, const uint64_t row,
+            const uint32_t element) noexcept {
+    return load_policy<true>(view, row, element);
   }
 };
 

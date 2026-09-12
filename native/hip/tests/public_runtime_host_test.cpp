@@ -5568,6 +5568,8 @@ bool matmul_mxfp_prefill_selector_contract() {
       "SLLM_MXFP8_PREFILL_FORCE_WMMA_DIRECT_BOTH_GFX1201";
   constexpr const char *const mxfp8_wmma_n128_direct_both =
       "SLLM_MXFP8_PREFILL_FORCE_WMMA_N128_DIRECT_BOTH_GFX1201";
+  constexpr const char *const phase85_small_m =
+      "SLLM_PHASE85_MX_WA_FORCE_SMALL_M";
   const char *const old_baseline = std::getenv(baseline);
   const bool had_baseline = old_baseline != nullptr;
   const std::string old_baseline_value = had_baseline ? old_baseline : "";
@@ -5633,6 +5635,10 @@ bool matmul_mxfp_prefill_selector_contract() {
       old_mxfp8_wmma_n128_direct_both != nullptr;
   const std::string old_mxfp8_wmma_n128_direct_both_value =
       had_mxfp8_wmma_n128_direct_both ? old_mxfp8_wmma_n128_direct_both : "";
+  const char *const old_phase85_small_m = std::getenv(phase85_small_m);
+  const bool had_phase85_small_m = old_phase85_small_m != nullptr;
+  const std::string old_phase85_small_m_value =
+      had_phase85_small_m ? old_phase85_small_m : "";
   const auto restore_environment = [&]() {
     if (had_baseline) {
       setenv(baseline, old_baseline_value.c_str(), 1);
@@ -5717,6 +5723,11 @@ bool matmul_mxfp_prefill_selector_contract() {
     } else {
       unsetenv(mxfp8_wmma_n128_direct_both);
     }
+    if (had_phase85_small_m) {
+      setenv(phase85_small_m, old_phase85_small_m_value.c_str(), 1);
+    } else {
+      unsetenv(phase85_small_m);
+    }
   };
 
   unsetenv(baseline);
@@ -5735,6 +5746,7 @@ bool matmul_mxfp_prefill_selector_contract() {
   unsetenv(mxfp8_wmma_direct_weight);
   unsetenv(mxfp8_wmma_direct_both);
   unsetenv(mxfp8_wmma_n128_direct_both);
+  unsetenv(phase85_small_m);
   bool valid =
       sllm_matmul_kernel::select_mxfp8_variant(1U) ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Decode &&
@@ -5748,6 +5760,30 @@ bool matmul_mxfp_prefill_selector_contract() {
           sllm_matmul_kernel::KernelVariant::Nvfp4W4A4Decode &&
       sllm_matmul_kernel::select_nvfp4_w4a4_variant(2U) ==
           sllm_matmul_kernel::KernelVariant::Nvfp4W4A4PrefillRow8Tiled256 &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 2048U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillPhase85SmallM &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 4096U, 2048U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillPhase85SmallM &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 2048U, 2048U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 6144U, 5120U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 2048U, 1024U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillPhase85SmallM &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 2048U, 32768U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillPhase85SmallM &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 2048U, 32769U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp6_variant(2U, 2048U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillPhase85SmallM &&
+      sllm_matmul_kernel::select_mxfp6_variant(2U, 2048U, 1024U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillPhase85SmallM &&
+      sllm_matmul_kernel::select_mxfp6_variant(2U, 2048U, 32769U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 2048U, 1024U, "gfx1200") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp6_variant(2U, 2048U, 1024U, "gfx942") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
       sllm_matmul_kernel::select_fp8_outer_variant(17U, 5120U, 17408U,
                                                    "gfx1030") ==
           sllm_matmul_kernel::KernelVariant::
@@ -5798,6 +5834,13 @@ bool matmul_mxfp_prefill_selector_contract() {
                                                "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::
               Mxfp8W8A8PrefillWmmaN128DirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 4096U, 32767U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaN64 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 4096U, 1023U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 4096U, 1025U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaN64 &&
       sllm_matmul_kernel::select_mxfp8_variant(128U, 4096U, 32769U,
                                                "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
@@ -5809,6 +5852,46 @@ bool matmul_mxfp_prefill_selector_contract() {
       sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 248320U,
                                                "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
+
+  setenv(phase85_small_m, "1", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 2048U, 2048U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillPhase85SmallM;
+  setenv(mxfp8_row8, "1", 1);
+  valid = valid && sllm_matmul_kernel::select_mxfp8_variant(2U, 2048U, 2048U,
+                                                            "gfx1030") ==
+                       sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
+  unsetenv(mxfp8_row8);
+  setenv(baseline, "1", 1);
+  valid = valid && sllm_matmul_kernel::select_mxfp8_variant(2U, 2048U, 2048U,
+                                                            "gfx1030") ==
+                       sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Prefill;
+  unsetenv(baseline);
+  unsetenv(phase85_small_m);
+
+  setenv(mxfp6_row8, "1", 1);
+  valid = valid && sllm_matmul_kernel::select_mxfp6_variant(2U, 2048U, 1024U,
+                                                            "gfx1030") ==
+                       sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillRow8;
+  unsetenv(mxfp6_row8);
+  setenv(mxfp6_tiled16, "1", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp6_variant(2U, 2048U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
+  unsetenv(mxfp6_tiled16);
+  setenv(mmq_columns, "4", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp6_variant(2U, 2048U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillMmqCol4;
+  setenv(mmq_columns, "8", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp6_variant(2U, 2048U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillMmqCol8;
+  unsetenv(mmq_columns);
 
   setenv(mxfp6_phase70, "gfx1201-n64", 1);
   valid =
@@ -6017,6 +6100,8 @@ bool matmul_mxfp_prefill_selector_contract() {
     valid =
         valid &&
         sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, target) ==
+            sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+        sllm_matmul_kernel::select_mxfp8_variant(128U, 4096U, 32768U, target) ==
             sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
   }
   valid =
@@ -6051,6 +6136,14 @@ bool matmul_mxfp_prefill_selector_contract() {
           sllm_matmul_kernel::KernelVariant::
               Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double &&
       sllm_matmul_kernel::select_mxfp8_variant(512U, 2560U, 16385U,
+                                               "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double &&
+      sllm_matmul_kernel::select_mxfp8_variant(512U, 2560U, 32768U,
+                                               "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double &&
+      sllm_matmul_kernel::select_mxfp8_variant(512U, 2560U, 32769U,
                                                "gfx1030") ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
       sllm_matmul_kernel::select_mxfp8_variant(512U, 2560U, 248320U,

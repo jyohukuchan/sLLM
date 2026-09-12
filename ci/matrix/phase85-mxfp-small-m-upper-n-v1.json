@@ -1,0 +1,14 @@
+{
+  "schema_version": "phase85-mxfp-shapes-v1",
+  "state": "frozen-for-r7-prep",
+  "purpose": "Independent M=3 upper-N boundary coverage for Phase85 small-M selector review; measurement not run by preparation task.",
+  "oracle_policy": "BoundarySample reuses the existing Phase85 oracle and repeat/cleanup contract.",
+  "cases": [
+    {"case_id":"mxfp8-m3-k2048-n32767","format":"mxfp8","tags":["small-m","mtp","selector-boundary","upper-n","n-tail"],"role":"mtp","m":3,"k":2048,"n":32767,"phase":2760,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2048-n32768","format":"mxfp8","tags":["small-m","mtp","selector-boundary","upper-n","n-tail"],"role":"mtp","m":3,"k":2048,"n":32768,"phase":2761,"oracle":"boundary"},
+    {"case_id":"mxfp8-m3-k2048-n32769","format":"mxfp8","tags":["small-m","mtp","selector-boundary","upper-n","n-tail"],"role":"mtp","m":3,"k":2048,"n":32769,"phase":2762,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2048-n32767","format":"mxfp6","tags":["small-m","mtp","selector-boundary","upper-n","n-tail"],"role":"mtp","m":3,"k":2048,"n":32767,"phase":2770,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2048-n32768","format":"mxfp6","tags":["small-m","mtp","selector-boundary","upper-n","n-tail"],"role":"mtp","m":3,"k":2048,"n":32768,"phase":2771,"oracle":"boundary"},
+    {"case_id":"mxfp6-m3-k2048-n32769","format":"mxfp6","tags":["small-m","mtp","selector-boundary","upper-n","n-tail"],"role":"mtp","m":3,"k":2048,"n":32769,"phase":2772,"oracle":"boundary"}
+  ]
+}

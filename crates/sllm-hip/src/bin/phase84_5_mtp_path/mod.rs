@@ -55,6 +55,7 @@ struct Report {
     device_index: u32,
     kv_encoding: &'static str,
     mtp_encoding: &'static str,
+    mtp_companion_digest: Option<String>,
     sampling: &'static str,
     draft_width: usize,
     thresholds: ThresholdReport,
@@ -1148,9 +1149,6 @@ fn run_diagnostic() -> Result<Report, String> {
             .map_err(|error| error.to_string())
         })
         .transpose()?;
-    if companion.is_some() {
-        return Err("Phase84.5 diagnostic requires BF16 MTP companion; unset SLLM_PHASE84_MTP_COMPANION_PATH".to_owned());
-    }
     let graph = build_qwen35_unsloth_qwen38_nvfp4_graph(
         &lock,
         &plan,
@@ -1167,7 +1165,7 @@ fn run_diagnostic() -> Result<Report, String> {
         state_capacity,
         kv,
         MTP_GRAPH_CAPACITY,
-        None,
+        companion.as_deref(),
     )
     .map_err(|error| error.to_string())?;
     let backend = HipBackend::connect().map_err(|error| error.to_string())?;
@@ -1190,7 +1188,7 @@ fn run_diagnostic() -> Result<Report, String> {
         mtp_graph.clone(),
         mtp_plan,
         Arc::clone(&artifact),
-        None,
+        companion.clone(),
     )?;
     let prompts = prompt_cases(&artifact)?;
     let mut cases = Vec::with_capacity(prompts.len());
@@ -1249,7 +1247,13 @@ fn run_diagnostic() -> Result<Report, String> {
         target,
         device_index,
         kv_encoding: kv.canonical_name(),
-        mtp_encoding: "bf16",
+        mtp_encoding: companion
+            .as_ref()
+            .map(|sidecar| sidecar.encoding().manifest_name())
+            .unwrap_or("bf16"),
+        mtp_companion_digest: companion
+            .as_ref()
+            .map(|sidecar| sidecar.combined_recipe_digest(artifact.recipe_digest())),
         sampling: "temperature=1.0 top_p=0.95 top_k=20; GPU selector plus CPU oracle observation",
         draft_width: DRAFT_WIDTH,
         thresholds: ThresholdReport {

@@ -81,6 +81,9 @@ enum class TilePolicy : uint8_t {
   // Phase 78 ID71 short-M FP8 specialization with a 32x64 output tile.
   // Appended to preserve the numeric values of the existing audit ABI.
   BlockRow32Column64,
+  // Phase85 companion verification candidate: four active rows and eight
+  // output columns. Appended to preserve existing provider audit values.
+  BlockRow4Column8,
 };
 
 enum class ActivationPack : uint8_t {
@@ -410,11 +413,13 @@ with_execution_semantics(const PreparedProviderPlan &plan,
 
 constexpr bool
 gfx1201_mxfp8_wmma_n64_shape(const ProviderRequest &request) noexcept {
+  // The staged N64 WMMA body zero-pads N tails. Direct variants keep their
+  // separate aligned-N predicates in the native selector.
   const bool phase63_wide_family = request.n >= 1024U;
   const bool phase65_complete_row_family =
-      (request.m % 128U) == 0U && request.n >= 64U;
+      (request.m % 128U) == 0U && request.n >= 64U && (request.n % 64U) == 0U;
   return request.target == ExactTarget::Gfx1201 && request.m >= 128U &&
-         request.k >= 2048U && request.n <= 32768U && (request.n % 64U) == 0U &&
+         request.k >= 2048U && request.n <= 32768U &&
          (phase63_wide_family || phase65_complete_row_family);
 }
 

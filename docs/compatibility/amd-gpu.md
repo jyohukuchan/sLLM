@@ -845,3 +845,31 @@ exact `gfx942`は全capacityという既存resident policyを維持する。dire
 V620 r26でもCLI/APIの8,192入力／128出力と対話が成功し、遅延観測でVRAM／GTTのbaseline復帰を確認した。公開結果は当該commitのGitHub Checksで確認する。lifecycleは`experimental`を維持し、この結果を別SKU、別driver/runtime tuple、sliding／direct ABI VMM、
 別modelへ一般化しない。詳細は[Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)と
 [数値変更台帳](numerical-output-changes.md)に記録する。
+
+### 2026-09-13 Phase85 Qwen3.5-4B MX weight／MXFP8 E4 KV scope
+
+Phase85のfinal r6通常経路では、reviewed Qwen3.5-4BのBF16、MXFP8 W8A8、
+MXFP6 W6A6 bodyと、FP16またはstandard OCP MXFP8 E4 KVを、canonical V620
+exact `gfx1030`とR9700 exact `gfx1201`で検証した。対象はsource lockと各
+derived GGUF lockを直接組にしたbodyで、adapterやMTP sidecarを含まない。
+MXFP8 E5の既存scopeは変更しない。
+
+KV resolverはweight guardより先に実行される。reviewed 4B recipeでKVを
+省略した場合は既存の`kv-mxfp8-e4`へ解決され、MXFP8/MXFP6 body＋MXFP8 E4
+KVがguardを通過する。明示`fp16`も引き続き使用できる。この変更はselector
+値の変更ではなく、resolver後に適用されるreviewed MX body＋MXFP8 E4 KVの
+compatibility guard受理範囲を追加したものである。exact `gfx942`のMXFP8／MXFP6 body＋MXFP8 E4 KVは
+未検証／reject scopeで、RDNA2／RDNA4全体やCDNAへ一般化しない。
+
+通常APIは2 target合計10構成を各5要求でPASSした。品質は8構成×
+20 logits rowsでbefore/after exact、top-1 `20/20`、最大absolute差とKLDは0だった。
+これは同形式の最適化前後比較であり、BF16相対品質の同等性を主張しない。完全推論の
+12比較行は両targetで生成token列とVRAMが一致し、R9700ではMXFP8/MXFP6 body decodeが
+約`3.8–4.6%`／`4.7–5.6%`、MXFP8 E4 KV併用が約`4.4%`／`5.5%`改善した。V620は
+おおむね横ばい（decode約`-0.4%`〜`+1.5%`）だった。
+
+API evidenceは`.local-artifacts/phase85/final-api-summary.json`、quality evidenceは
+`.local-artifacts/phase85/compare-final-quality-report.json`（表形式は
+`.local-artifacts/phase85/compare-final-quality-report.md`）、詳細な比較履歴は
+[Phase85履歴](../history/2026/09/11-20/phase85-mxfp8-mxfp6-common-kernels.md#最終採用と結論)を参照する。
+この記録は検証済みscopeの追加であり、Phase85全体の完了を意味しない。
