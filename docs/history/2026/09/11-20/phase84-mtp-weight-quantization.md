@@ -1,6 +1,6 @@
 # Phase84: MTP重み量子化の実装・測定
 
-状態: 実装・ローカル検証完了（公開後CIは当該commitのchecksで確認する）。MXFP8の速度退行によりBF16既定を維持する。MXFP6の包括的な採用率・性能比較は移行条件未成立のため保留し、接続済み経路の限定的な正しさ検査を行う。
+状態: 実装・ローカル検証完了（公開後CIは当該commitのchecksで確認する）。MXFP8の速度退行によりBF16既定を維持する。MXFP6の採用率・性能比較は完了時には保留したが、下記のユーザー追加指示による計測を完了した。BF16既定は維持する。
 
 ## 初期実装
 
@@ -97,3 +97,33 @@ CI事前検査で新converter binのtarget台帳漏れを修正した。依存pa
 初回commit `9af13362` のGitHub H1で、既存の `client_disconnect_cancels_active_generation` が失敗した。HTTP headerを受信してもbackendの生成開始は保証されず、CIでは開始前の切断が先行し得た。この場合にbackend内のcancel観測flagを要求していたことが競合の原因だった。
 
 テストにbackend開始の通知と切断許可の同期を加え、active generationを確認してから切断する。キャンセルのassertionと2秒の待機上限は維持し、runtimeは変更していない。該当testは10回、HTTP契約全12件も成功した。公開CIの最終結果は修正commitのchecksを正とする。production source・GPU binary・量子化成果物は変わらないため、このhost test修正を理由としたGPUの再計測は行わない。
+
+## MXFP6の追加計測（2026-09-11）
+
+ユーザーの「採用しない前提で良いので計測」により、Phase84完了時の条件付き保留を解除し、最適化や既定変更を伴わない比較を実施した。8192入力／128出力、seed123、T1/P.95/K20、MTP幅2、KV MXFP8 E4、chunk2048/state8320、1 warmup＋3 measuredの中央値である。各GPUで前回r4と同一binaryのSHA-256を確認して使用した。BF16/MXFP8は前回r4の実測値で、今回同時に取り直したcontrolではない。言語suiteのBF16/MXFP8は従来r1の証拠を用いる。
+
+| GPU | MTP形式 | prefill tok/s | decode tok/s | E2E秒 | proposal wall ms | accepted/proposed |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| V620 | BF16（前回） | 215.229 | 25.063 | 43.152 | 673.71 | 74/106 |
+| V620 | MXFP8（前回） | 220.666 | 20.743 | 43.276 | 1208.61 | 70/115 |
+| V620 | MXFP6 | 223.218 | 22.436 | 42.739 | 925.78 | 71/111 |
+| R9700 | BF16（前回） | 528.521 | 35.054 | 19.153 | 503.17 | 78/100 |
+| R9700 | MXFP8（前回） | 539.785 | 31.639 | 19.258 | 747.47 | 77/102 |
+| R9700 | MXFP6 | 539.968 | 29.915 | 19.443 | 749.13 | 71/112 |
+
+MXFP6 decodeはBF16比でV620 −10.48%、R9700 −14.66%。V620ではMXFP8より速いが、両GPUともBF16を下回る。decode MADは0.037／0.005 tok/s。採用数は各GPUの全3 measuredで一致した。proposal wallは128出力要求全体の合計で、提案数の差も含む。prefix primingは412.47／159.62ms。V620のE2Eは前回BF16より短いが、採否を目的としない今回の測定であり、小さい差を恒常的な優位とは判断しない。
+
+英語・日本語・中国語×coding/reasoning/summary/creativeの12条件×3 seed、各128出力、warmupを除く集計は以下。
+
+| GPU | BF16採用率（前回） | MXFP8採用率（前回） | MXFP6 accepted/proposed | BF16との差 |
+| --- | ---: | ---: | ---: | ---: |
+| V620 | 66.59% | 66.56% | 2609/3953（66.00%） | −0.590 percentage points |
+| R9700 | 67.06% | 67.68% | 2597/3972（65.38%） | −1.675 percentage points |
+
+codingだけではV620がBF16 75.74%→MXFP6 77.25%、R9700が78.72%→73.49%。言語・タスクで方向が変わり、全体でも今回はV620がR9700を上回る。GPU間の採用率の大小を固定的な関係とはしない。形式やGPUで生成履歴が変わるため、採用率差を量子化誤差だけに帰属しない。
+
+両GPUとも速度行と全36要求は実HIP、非zero dispatch、fallbackなし、正常終了、資源解放を確認した。R9700の既存serviceはunit/binary/configを変更せず復元し、health/ready 200を確認した。性能測定中に新たなbuildや最適化は行っていない。BF16既定とPhase84完了状態は維持する。
+
+追加生成72件をBF16の既存出力と点検し、明白な反復・言語崩壊は見られなかった。V620 reasoning-en/seed789には依存関係の矢印と説明が一致しない箇所が1件あり、対応BF16は整合していた。生成履歴が異なるため量子化による体系的な品質低下とは断定しない。128tokenによる途中終了もあり、完全なタスク品質やBF16 full-model同等性は認定しない。
+
+追跡済みの数値・ばらつき・入力条件・digest: [MXFP6追加計測](phase84-mxfp6-measurement-followup.json)。生の生成文・model payload・binaryは追跡しない。
