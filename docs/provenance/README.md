@@ -77,6 +77,28 @@ not enough when individual files carry different terms.
 
 ## Required record
 
+### 作業中の取込み一覧
+
+2026-09-12のユーザー承認により、AIは個別の記録指示を待たず、取込みと同じ作業中に
+[THIRD_PARTY_NOTICES.mdの取込み一覧](../../THIRD_PARTY_NOTICES.md#import-log)へ概算日時（JST）、
+流用元プロジェクトとパス、流用先パス、流用区分・概要、詳細noticeへのリンクを追記する。
+運用ルールは[AGENTS.md](../../AGENTS.md#external-code-and-provenance)を正本とする。
+一覧は運用開始後を対象とし、既存の詳細記録の遡及転記は要求しない。
+
+2026-09-13のユーザー指示により、Git管理外・ignore対象のscratch copy、実験kernel、probeも、
+実際にcopy／adapt／portした場合は一覧と詳細noticeへ記録する。Git追跡や配布予定の有無で除外しない。
+記録は追跡対象の文書へ置き、コピーしたコードや生成物自体をGitへ追加する必要はない。
+import commitが存在しない場合は適用外と理由を明示し、確認時点のhash・確認日を記録する。
+取込み日時が不明なら不明とし、確認日や確認時hashを取込み時点の情報として代用しない。
+単なる参照checkoutの閲覧と通常の依存パッケージ利用は、従来どおりコード取込みと区別する。
+今回の監査で確認した既存のGit管理外コピーは、ユーザー指示に基づく補記として記録する。
+
+一覧と詳細noticeを同じファイルに置き、SHA、hash、ライセンス等の詳細はnoticeへ集約する。
+開発中は詳細noticeの未確定項目を明示したまま一覧からリンクでき、完全な記録を取込み前の条件にはしない。
+以下の公開・配布時の詳細記録要件と、開発中のpending import commitの扱いは維持する。
+
+### Detailed notice
+
 Use one stable ID per imported upstream source unit. A record may cover several
 local files only when they share the same upstream revision, licensing conclusion,
 and reuse mode. Keep the record machine-readable inside the corresponding
@@ -118,6 +140,13 @@ updated after ordinary maintenance edits. Subsequent content and provenance are
 tracked by Git history. A later import of additional upstream expression, or an
 update to a newer upstream revision, receives a new provenance event rather than
 overwriting the original import hash.
+
+For an ignored-only copy with no import commit, use an explicitly inapplicable
+`import.commit` with a reason and record `observed_sha256` and `observed_on`
+instead of claiming an import-time hash. Identify the local file as untracked
+and retain the upstream identity, license, reuse mode, and known modifications.
+If that code is later imported into tracked source, record the tracked import
+and its actual commit/hash separately; preserve the earlier scratch record.
 
 For an import commit that is not known until the commit is created, use a clearly
 marked pending value in the working tree and replace it with the full commit SHA

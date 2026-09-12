@@ -326,6 +326,7 @@
   独自契約をフェーズ18で実装・検証した。
 - 直接流用する場合は、著作権・ライセンス表示を保持し、upstream URL、完全commit SHA、upstream/local path、hash、exact/adapted/ported区分、変更内容、取込みcommitを記録する。
 - 実際に取り込んだ時点で`THIRD_PARTY_NOTICES.md`を作成・更新し、コピー先から参照できるようにする。
+- 2026-09-13のユーザー指示により、Git管理外・ignore対象のscratch copyや実験コードも、実際に流用した場合は記録する。取込みcommitがない場合は適用外とし、確認時hash・確認日と不明な取込み日時を区別する。コード自体をGitへ追加する必要はない。
 - 詳細は `docs/provenance/README.md` を正とする。
 
 ## 開発・最適化の優先順位

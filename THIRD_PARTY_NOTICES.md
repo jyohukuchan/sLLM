@@ -1,5 +1,73 @@
 # Third-party notices
 
+## Import log
+
+2026-09-12の運用開始以降、他プロジェクトのコードを取り込んだ作業中にAIが追記する一覧。
+過去の取込みは下記の詳細記録に保持し、この一覧への遡及記録は要求しない。
+Git管理外・ignore対象のscratch copyや実験コードも、実際の流用は記録対象とする。
+2026-09-13のユーザー指示により、監査で確認した既存のGit管理外コピーを補記した。
+
+| 取込み日時（概算・JST） | 元プロジェクト／元パス | sLLM側パス | 流用区分・概要 | 詳細記録 |
+| --- | --- | --- | --- | --- |
+| 不明（2026-09-13に確認・補記） | llama.cpp / `ggml/src/ggml-cuda/fattn-vec.cuh` | `.local-artifacts/phase83-5/qtile8-softmax-ilp/fattn-vec.pinned.cuh` | `exact`：Phase 83.5実験用の固定参照コピー。Git管理外 | [詳細](#llama-cpp-phase83-5-fattn-vec-scratch-001) |
+
+- 日時は取込み時点について分かる精度で記す（例: `2026-09-12 午後頃`、日付のみも可）。
+  不明な場合は`不明`とし、記録日やcommit時刻を取込み日時として推測で埋めない。
+- 元パスは元プロジェクト内、sLLM側パスはこのrepository内の相対パスとする。
+  流用区分は`exact`、`adapted`、`ported`を使い、詳細記録欄から同じファイルのnotice見出しへリンクする。
+- 同じ作業内の同じ取込みはまとめ、追加の外部コード取込みやupstream revision更新は新しい行にする。
+  単なる調査・参照、依存パッケージの通常利用、新しい外部コード取込みを伴わない通常保守では行を追加しない。
+- SHA、hash、ライセンス、変更内容の詳細は既存のnoticeへ集約する。開発中の未確定項目は明示し、
+  [来歴管理方針](docs/provenance/README.md#required-record)に従って公開前に確定する。
+  一覧への記録は流用許可範囲を拡張しない。
+
+## llama-cpp-phase83-5-fattn-vec-scratch-001
+
+Phase 83.5の実験用ディレクトリに保持されていたllama.cppの固定参照コピー。
+2026-09-13の監査で611行・全バイトの一致を確認し、同日のユーザー指示により記録を補記した。
+取込み日時は不明であり、確認日を取込み日とはみなさない。
+Git管理外のためimport commitは存在せず、下記local hashは確認時点の値である。
+参照checkoutの確認時HEADをupstream identityとして固定する。旧revision
+`f5919bf458ef190468b5c329bb293f8a54a1e69c`でも同じバイト列のため、
+一致だけから過去の取込み元revisionや取込み日時は特定しない。
+
+```yaml
+schema_version: 1
+id: llama-cpp-phase83-5-fattn-vec-scratch-001
+component: Phase 83.5 Q_TILE=8 softmax ILP scratch reference
+upstream:
+  repository: https://github.com/ggml-org/llama.cpp
+  commit: 3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70
+  sources:
+    - path: ggml/src/ggml-cuda/fattn-vec.cuh
+      git_blob: 69dd9368624301117ebed35b09c008a51c65b705
+      sha256: f6305c9a667f438565ee0afff0e854cce335ddbd67e30fbee466cbc5672a9577
+      url: https://github.com/ggml-org/llama.cpp/blob/3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70/ggml/src/ggml-cuda/fattn-vec.cuh
+local:
+  files:
+    - path: .local-artifacts/phase83-5/qtile8-softmax-ilp/fattn-vec.pinned.cuh
+      tracked: false
+      ignored: true
+      observed_sha256: f6305c9a667f438565ee0afff0e854cce335ddbd67e30fbee466cbc5672a9577
+      observed_on: "2026-09-13"
+copyright:
+  - Copyright (c) 2023-2026 The ggml authors
+license:
+  spdx: MIT
+  file: docs/provenance/licenses/llama.cpp-MIT-f5919bf4.txt
+  upstream_blob: e7dca554bcb802f98408383a864404e3aa4eacca
+  sha256: 94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d
+reuse:
+  mode: exact
+  modifications: []
+import:
+  commit: null
+  commit_status: not-applicable-untracked
+  imported_at: null
+  imported_at_status: unknown
+  recorded_on: "2026-09-13"
+```
+
 ## llama-cpp-phase9-mmvf-001
 
 The Phase 9 BF16 M=1 matvec fast path adapts llama.cpp's paired-load and

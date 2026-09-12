@@ -142,6 +142,27 @@
 
 - Consider llama.cpp direct reuse before implementing clean-room code; it is
   allowed under `docs/provenance/README.md`.
+- Whenever external project code is copied, adapted, or ported, proactively
+  append to the [import log](THIRD_PARTY_NOTICES.md#import-log) during the same
+  task without waiting for a separate user instruction. Include the approximate
+  import time in JST, upstream project and source paths, repository-relative
+  destination paths, reuse mode and summary, and a link to the detailed notice.
+  Record only the known time precision; mark unknown times instead of guessing.
+- This recording requirement also applies to untracked or ignored code,
+  including scratch copies, experimental kernels, and probes under
+  `.local-artifacts/` or other temporary directories. Git tracking and planned
+  distribution do not determine whether an actual copy, adaptation, or port
+  must be recorded. Keep the provenance record in tracked documentation without
+  adding the ignored code or generated artifacts to Git. For copies with no
+  import commit, record that the commit is not applicable, the observed file
+  hash and observation date, and any unknown import time explicitly; do not
+  invent a commit or treat an observation hash as an import-time hash.
+- Record additional upstream code imports and upstream revision updates as new
+  events. Consolidate the same import within one task; the main agent also
+  checks that subagent imports are recorded. Mere inspection/reference, normal
+  package dependency use, and ordinary maintenance without a new external code
+  import do not add log rows. The log starts with the 2026-09-12 adoption of this
+  rule; earlier imports do not require backfilling.
 - Provenance is required for release/distribution, not as a human-review gate
   or a provenance-only follow-up commit at each checkpoint. A pending import
   commit is acceptable in development and must be resolved for release.
