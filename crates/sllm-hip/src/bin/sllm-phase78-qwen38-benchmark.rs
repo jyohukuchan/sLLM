@@ -38,6 +38,9 @@ use sllm_frontend::{
 use sllm_hip::HipBackend;
 use tokenizers::Tokenizer;
 
+#[path = "phase84_5_mtp_path/mod.rs"]
+mod phase84_5_mtp_path;
+
 const MODEL_ENV: &str = "SLLM_PHASE78_MODEL_PATH";
 const COMPAT_MODEL_ENV: &str = "SLLM_QWEN38_NVFP4_CACHE";
 const TARGET_ENV: &str = "SLLM_PHASE78_TARGET";
@@ -772,6 +775,9 @@ struct FailureReport {
 }
 
 fn main() -> ExitCode {
+    if env::var("SLLM_PHASE84_5_DIAGNOSTIC").as_deref() == Ok("1") {
+        return phase84_5_mtp_path::run();
+    }
     if env::args_os().len() != 1 {
         return emit_failure("this benchmark accepts environment variables only".to_owned());
     }

@@ -424,6 +424,12 @@ gfx1201のVMM growによる別live KV破損は通常stateのresident選択で回
 
 Phase84は実装・ローカル検証を完了した。MXFP8の採用率はV620 66.56%／R9700 67.68%と基準を概ね維持したが、matched decodeはBF16 25.063／35.054に対しMXFP8 20.743／31.639 tok/sで、BF16既定を維持する。MXFP6は変換・接続と両GPUの数値/API限定検証まで実施し、包括的比較は速度条件未成立のため保留した。追加kernel候補は撤去した。[実装・採否・検証範囲](../history/2026/09/11-20/phase84-mtp-weight-quantization.md)、[利用手順](../development/mtp-companion-quantization.md)を参照する。公開後CIは当該commitのchecksで確認する。
 
+2026-09-11の追加指示により、既定採用を目的とせずMXFP6の8192/128・1 warmup＋3 measuredと12条件×3 seedの採用率比較を両GPUで追加実施する。Phase84完了とBF16既定は維持し、最適化実装は追加しない。計測を完了し、MXFP6 decodeはV620 22.436／R9700 29.915 tok/s、採用率は66.00%／65.38%だった。両GPUともdecodeはBF16を下回った。結果は[Phase84履歴の追加計測](../history/2026/09/11-20/phase84-mtp-weight-quantization.md#mxfp6の追加計測2026-09-11)へ記録した。
+
+### Phase84.5: MTP経路の限定診断（2026-09-12完了）
+
+2026-09-12に[Phase84.5](archive/2026/09/11-20/phase84-5-mtp-path-correctness.md)の限定診断を完了した。両GPUのMTP接続・固定sampling・状態復元に不整合を検出しなかった。R9700のtarget M3/M1差はattentionの加算順序へ切り分け、同じ演算ではKVと次計算まで一致した。通常attentionの独立oracleも8/8 PASS。既定の演算・BF16 MTPは維持し、BF16比のfull-model品質や採用率の全原因は未証明とする。[条件・失敗を含む履歴](../history/2026/09/11-20/phase84-5-mtp-path-correctness.md)を参照する。次はPhase85とし、85・86の番号と内容は維持する。完了時のcommit・push・CI確認と必要な修正を行う。
+
 ### 最適化の共通化と既定採用の方針
 
 2026-09-10の追加指示により、Phase83・83.5の採用済み変更をモデル方向へ共通化し、MTPをモデルアーキテクチャではなく投機的デコーディングの提案方式として整理する。モデル固有のhead・hidden・状態処理はadapterへ残し、適用判断と実行制御を演算契約・能力に基づく共通経路へ接続する。次のPhase84に先立つ[追加共通化](archive/2026/09/1-10/phase83-common-speculation.md)は実装・検証を完了した。Qwen/Ministralの残差融合、Gemma NVFP4 decode共有、MTP方式とmodel adapterの分離を通常経路へ接続した。形状・状態に必要な制限と非適用範囲は対応履歴に記録する。
@@ -632,8 +638,9 @@ Phase 79の共通化内容は[Phase 79計画](archive/2026/09/1-10/phase79-commo
 | 完了 | 82 | 不採用最適化の削除・試行と失敗理由の記録、データ不足候補の条件付き既定採用 |
 | 完了・実装検証済み | 83 | MXFP8 E4 KV・固定sampling／MTP・CLI/API統合、両GPU長文・対話・lifecycleを確認。速度改善は83.5 |
 | 完了・公開CI成功 | 83.5 | 共通演算とMTPを最適化。速度条件緩和を記録し、最終反復値は旧目標も達成。モデル方向の追加共通化も実装・検証完了 |
-| 完了 | 84 | MTP sidecarと通常CLI/APIを接続。MXFP8のdecode退行によりBF16既定を維持。MXFP6は限定検証済み、包括的比較は移行条件未成立で保留 |
-| 計画済み | 85 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了（旧84） |
+| 完了 | 84 | MTP sidecarと通常CLI/APIを接続。MXFP8のdecode退行によりBF16既定を維持。MXFP6も追加比較を完了し、BF16既定を維持 |
+| 完了 | 84.5 | MTP接続・固定p/q・採否後の状態を限定照合。R9700のtarget差はattention演算順へ切り分け。本番既定は維持 |
+| 計画済み・次Phase | 85 | MXFP8／MXFP6 decode、MXFP4 W4A8、NVFP4 W4A16残差の順に他精度を完了（旧84） |
 | 計画済み | 86 | NVFP4のGPU batching最適化（旧85） |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |

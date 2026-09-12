@@ -311,10 +311,13 @@ std::vector<uint16_t> make_kv(const uint64_t tokens, const bool value_plane) {
   return result;
 }
 
-std::vector<uint16_t> make_query(const uint32_t rows, const uint64_t prefix) {
+std::vector<uint16_t> make_query_with_row_offset(const uint32_t rows,
+                                                 const uint64_t prefix,
+                                                 const uint32_t row_offset) {
   std::vector<uint16_t> result(static_cast<size_t>(
       rows * kQueryHeads * static_cast<uint64_t>(kHeadDim)));
   for (uint32_t row = 0U; row != rows; ++row) {
+    const uint32_t absolute_row = row_offset + row;
     for (uint32_t head = 0U; head != kQueryHeads; ++head) {
       for (uint32_t dimension = 0U; dimension != kHeadDim; ++dimension) {
         float value = 0.032F +
@@ -322,7 +325,7 @@ std::vector<uint16_t> make_query(const uint32_t rows, const uint64_t prefix) {
                       0.0011F * static_cast<float>(head) +
                       0.00037F * static_cast<float>(dimension % 17U) +
                       0.0009F * static_cast<float>((prefix + row) % 7U);
-        if ((row + head + dimension) % 7U == 0U)
+        if ((absolute_row + head + dimension) % 7U == 0U)
           value = -value;
         result[static_cast<size_t>(
             (static_cast<uint64_t>(row) * kQueryHeads + head) * kHeadDim +
@@ -331,6 +334,10 @@ std::vector<uint16_t> make_query(const uint32_t rows, const uint64_t prefix) {
     }
   }
   return result;
+}
+
+std::vector<uint16_t> make_query(const uint32_t rows, const uint64_t prefix) {
+  return make_query_with_row_offset(rows, prefix, 0U);
 }
 
 std::vector<uint16_t> oracle(const std::vector<uint16_t> &key,
@@ -673,16 +680,18 @@ bool dispatch_matches(const uint64_t prefix, const uint32_t rows,
   const bool expected_qtile4 = rows >= 128U && !expected_qtile8;
   const bool target_has_gfx1201_packed =
       std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0;
+  const bool expected_gfx1201_wave =
+      target_has_gfx1201_packed && (rows == 1U || rows >= 32U);
   const char *const expected_logical =
       expected_qtile8   ? "causal_attention.prefill.gqa6_qtile8_w16.mxfp8.v1"
       : expected_qtile4 ? "causal_attention.prefill.gqa6_qtile4.v1"
-      : target_has_gfx1201_packed
+      : expected_gfx1201_wave
           ? "causal_attention.online_softmax_gqa.packed_kv.gfx1201_wave.v4"
           : "causal_attention.online_softmax_gqa.packed_kv.v3";
   const char *const expected_device =
       expected_qtile8 ? "sllm_causal_attention_prefill_gqa6_qtile8_w16_mxfp8_v1"
       : expected_qtile4 ? "sllm_causal_attention_prefill_gqa6_qtile4_v1"
-      : target_has_gfx1201_packed
+      : expected_gfx1201_wave
           ? "sllm_causal_attention_packed_gfx1201_wave_v4"
           : "sllm_causal_attention_online_softmax_gqa_packed_kv_v3";
   const uint32_t expected_workgroup = expected_qtile8 ? 512U : 256U;
@@ -723,14 +732,107 @@ bool dispatch_matches(const uint64_t prefix, const uint32_t rows,
   return matches;
 }
 
+bool run_decode_block_parity(const sllm_context_t *const context,
+                             const sllm_queue_t *const queue,
+                             const uint64_t prefix) {
+  constexpr uint32_t kBlockRows = 3U;
+  const uint64_t block_tokens = prefix + kBlockRows;
+  const std::vector<uint16_t> block_key = make_kv(block_tokens, false);
+  const std::vector<uint16_t> block_value = make_kv(block_tokens, true);
+  const std::vector<uint16_t> block_query = make_query(kBlockRows, prefix);
+  const std::vector<uint16_t> block_expected =
+      oracle(block_key, block_value, block_query, prefix, kBlockRows);
+  Metrics block_metrics{};
+  DispatchMetadata block_dispatch{};
+  std::vector<uint16_t> block_actual;
+  bool success = run_case(context, queue, prefix, kBlockRows, false, block_key,
+                          block_value, block_query, block_expected,
+                          &block_metrics, &block_dispatch, &block_actual) &&
+                 dispatch_matches(prefix, kBlockRows, false, block_dispatch);
+  std::printf("decode_block_oracle prefix=%llu rows=%u max_bf16_ulp=%u "
+              "max_abs=%g max_relative=%g over_tolerance=%llu\n",
+              static_cast<unsigned long long>(prefix), kBlockRows,
+              block_metrics.max_ulp, block_metrics.max_abs,
+              block_metrics.max_relative,
+              static_cast<unsigned long long>(block_metrics.over_tolerance));
+  if (block_metrics.over_tolerance != 0U) {
+    std::fprintf(stderr,
+                 "decode block oracle mismatch prefix=%llu rows=%u "
+                 "over_tolerance=%llu\n",
+                 static_cast<unsigned long long>(prefix), kBlockRows,
+                 static_cast<unsigned long long>(block_metrics.over_tolerance));
+    success = false;
+  }
+
+  const size_t row_elements =
+      static_cast<size_t>(kQueryHeads) * static_cast<size_t>(kHeadDim);
+  for (uint32_t row = 0U; row != kBlockRows; ++row) {
+    const uint64_t row_prefix = prefix + row;
+    const uint64_t row_tokens = row_prefix + 1U;
+    const std::vector<uint16_t> row_key = make_kv(row_tokens, false);
+    const std::vector<uint16_t> row_value = make_kv(row_tokens, true);
+    const std::vector<uint16_t> row_query =
+        make_query_with_row_offset(1U, row_prefix, row);
+    const std::vector<uint16_t> row_expected =
+        oracle(row_key, row_value, row_query, row_prefix, 1U);
+    Metrics row_metrics{};
+    DispatchMetadata row_dispatch{};
+    std::vector<uint16_t> row_actual;
+    const bool row_success =
+        run_case(context, queue, row_prefix, 1U, false, row_key, row_value,
+                 row_query, row_expected, &row_metrics, &row_dispatch,
+                 &row_actual) &&
+        dispatch_matches(row_prefix, 1U, false, row_dispatch);
+    success = row_success && success;
+    std::printf("decode_row_oracle prefix=%llu row=%u max_bf16_ulp=%u "
+                "max_abs=%g max_relative=%g over_tolerance=%llu\n",
+                static_cast<unsigned long long>(prefix), row,
+                row_metrics.max_ulp, row_metrics.max_abs,
+                row_metrics.max_relative,
+                static_cast<unsigned long long>(row_metrics.over_tolerance));
+    if (row_metrics.over_tolerance != 0U) {
+      std::fprintf(stderr,
+                   "decode row oracle mismatch prefix=%llu row=%u "
+                   "over_tolerance=%llu\n",
+                   static_cast<unsigned long long>(row_prefix), row,
+                   static_cast<unsigned long long>(row_metrics.over_tolerance));
+      success = false;
+    }
+    if (!row_success || row_actual.size() != row_elements ||
+        block_actual.size() < static_cast<size_t>(row + 1U) * row_elements) {
+      continue;
+    }
+    const auto block_row_begin =
+        block_actual.begin() + static_cast<size_t>(row) * row_elements;
+    const std::vector<uint16_t> block_row(block_row_begin,
+                                          block_row_begin + row_elements);
+    const Metrics parity = compare(row_actual, block_row);
+    std::printf("decode_block_parity prefix=%llu row=%u m1_provider=%s "
+                "m3_provider=%s m1_vs_m3_max_bf16_ulp=%u max_abs=%g "
+                "max_relative=%g pair_over_reference_tolerance=%llu\n",
+                static_cast<unsigned long long>(prefix), row,
+                row_dispatch.logical_symbol.c_str(),
+                block_dispatch.logical_symbol.c_str(), parity.max_ulp,
+                parity.max_abs, parity.max_relative,
+                static_cast<unsigned long long>(parity.over_tolerance));
+  }
+  return success;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+  const bool decode_block_parity =
+      argc == 2 && std::strcmp(argv[1], "--decode-block-parity") == 0;
+  if (argc > 1 && !decode_block_parity) {
+    std::fprintf(stderr, "usage: %s [--decode-block-parity]\n", argv[0]);
+    return EXIT_FAILURE;
+  }
   Environment environment;
   sllm_context_t *context = nullptr;
   sllm_queue_t *queue = nullptr;
   bool success = create_context(&context, &queue);
-  if (success) {
+  if (success && !decode_block_parity) {
     constexpr std::array<std::array<uint64_t, 2>, 13> cases = {
         {{{0U, 127U}},
          {{0U, 128U}},
@@ -793,6 +895,22 @@ int main() {
         break;
     }
   }
+  if (success && decode_block_parity) {
+    if (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") != 0) {
+      std::fprintf(stderr,
+                   "--decode-block-parity requires SLLM_TEST_EXPECTED_TARGET="
+                   "gfx1201\n");
+      success = false;
+    } else {
+      constexpr std::array<uint64_t, 2> prefixes = {127U, 129U};
+      for (const uint64_t prefix : prefixes) {
+        if (!run_decode_block_parity(context, queue, prefix)) {
+          success = false;
+          break;
+        }
+      }
+    }
+  }
   Error error;
   if (queue != nullptr)
     success = expect(sllm_queue_release(&queue, &error.sink), SLLM_STATUS_OK,
@@ -803,7 +921,10 @@ int main() {
                      SLLM_STATUS_OK, "context release", error) &&
               context == nullptr && success;
   if (success)
-    std::printf("phase83 MXFP8 prefill qtile8/w16 public GPU PASS target=%s\n",
-                SLLM_TEST_EXPECTED_TARGET);
+    std::printf(
+        decode_block_parity
+            ? "phase83 MXFP8 decode block parity public GPU PASS target=%s\n"
+            : "phase83 MXFP8 prefill qtile8/w16 public GPU PASS target=%s\n",
+        SLLM_TEST_EXPECTED_TARGET);
   return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -1,0 +1,140 @@
+{
+  "purpose": "Phase84.5 native evidence reuse map; no GPU rerun",
+  "source_equivalence": "docs/history/2026/09/1-10/phase83-5-closeout-evidence.json",
+  "current_build_identity": {
+    "gfx1030": ".local-artifacts/phase84/candidate-gfx1030-r5/identity.json",
+    "gfx1201": ".local-artifacts/phase84/candidate-gfx1201-r5/identity.json",
+    "relevant_current_source_map_matches": true
+  },
+  "pq_fixed_k20": {
+    "reuse_record": ".local-artifacts/phase83-5/r32-pq-test-only-reuse.json",
+    "source": {
+      "test": {
+        "path": "native/hip/tests/phase83_5_token_selector_pq_gpu_test.cpp",
+        "current_sha256": "6c533650dee88eda27391c676477eede8f0add0fe66b0f4a05a5be5131222432",
+        "probe_source_sha256": "6c533650dee88eda27391c676477eede8f0add0fe66b0f4a05a5be5131222432",
+        "prior_build_sha256": "2398853842ec6dfcba3b79273e4658e55da752f27c69fdd9f4f387bd7238011f",
+        "change_record": "alignment_bytes16_to0 test-only correction"
+      },
+      "algorithm": {
+        "path": "native/hip/src/token_selector_pq_algorithm.hpp",
+        "prior_sha256": "34886d477823ac0dfd1c33ebdacb944a612cbc5ba42f8f9d58b76395118060eb",
+        "current_sha256": "c141955cdea26ecff96c93b5727df0a6788ed8550844a008fe9f6e79a669154c",
+        "source_equivalence": "whitespace_only"
+      },
+      "native_inputs_current": {
+        "native/hip/src/token_selector_pq_internal.hpp": "5852a9119c4d0c34023b404109feb628fac9141c298b8eb062fbdf01070ba1d2",
+        "native/hip/src/token_selector_pq_kernel.hip.cpp": "05fad081552b0084a6a463d5d1dabe88f8761a926806603c043a2e78d8482488",
+        "native/hip/src/token_selector_pq_runtime.inc": "3a271fef09493f00a9604334ab7bc3f8c897cb0542ca9106a6e0dac702c1f490",
+        "native/hip/src/token_selector_support_internal.hpp": "d663b19ba18ee614ae49d7d897336bb2f5e3d9d763e712ae55b8faa660908816"
+      }
+    },
+    "gpu_evidence": [
+      {
+        "target": "gfx1030",
+        "device": "GPU-76a08c022586fed6",
+        "directory": ".local-artifacts/phase83-5/pq-public-gfx1030-r32-r2",
+        "identity": "identity.json",
+        "build_identity": ".local-artifacts/phase83-5/candidate-gfx1030-r32-pq-r36-r2/identity.json",
+        "gpu_log": "gpu.log",
+        "execution": "execution.json",
+        "probe": "probe",
+        "probe_sha256": "5a849a18316c2eb4b7d1c0b327c28963078fe134b8d926144ce3d467599456a1",
+        "archive_sha256": "96ce28a02efd988ffecd86283d1b87763023976d35c19e206d915df187da117d",
+        "gpu_log_sha256": "ccd4ffdc39a9d9c4dd88420a793f9392f6bf632452e664c2692a8487e4fe267c",
+        "execution_sha256": "0d58583bbe0a03d7deb065a44516577414c16efc224124c8f499d392711d99b7"
+      },
+      {
+        "target": "gfx1201",
+        "device": "GPU-a8e9ddefa2d60f55",
+        "directory": ".local-artifacts/phase83-5/pq-public-gfx1201-r32-r2",
+        "identity": "identity.json",
+        "build_identity": ".local-artifacts/phase83-5/candidate-gfx1201-r32-pq-r36-r2/identity.json",
+        "gpu_log": "gpu.log",
+        "execution": "execution.json",
+        "probe": "probe",
+        "probe_sha256": "9eb7e4ebcac256781d7a34fbae1bbb9ed1ff152456e7ebe4060d11333415f644",
+        "archive_sha256": "7fbd53697a513704dcf1b39af4018bc3cf1397624b371993079b630ff9c5932b",
+        "gpu_log_sha256": "d2e957f7b3923c33ffdb4bed6edfb0563124906a253f9e9b2ef88ca44fa2af26",
+        "execution_sha256": "333f45e8d86a7c27d84932ec1282a1710ab4778595645b7d5598fb2be9fdddd6"
+      }
+    ],
+    "result": "both targets PASS; widths 1,2,3,8; valid 10, device errors 15, wrapper errors 10; independent dense long-double oracle; fallback 0"
+  },
+  "linear_checkpoint": {
+    "source": {
+      "test": {
+        "path": "native/hip/tests/phase83_5_linear_checkpoint_gpu_test.cpp",
+        "current_sha256": "4a17fcaa87f4c6096490d97eecd33cbbf375e3651fdce1952cd97a1b8b1e9b4e",
+        "probe_source_sha256": "4a17fcaa87f4c6096490d97eecd33cbbf375e3651fdce1952cd97a1b8b1e9b4e",
+        "prior_closeout_sha256": "acf1f0333ebb362cf86865712aaada421c4c373404d08281ac23ab9246d1222a",
+        "source_equivalence": "whitespace_only"
+      },
+      "native_inputs_current": {
+        "native/hip/src/linear_attention_api.cpp": "00147b492eb13ed08d1407272ed4eae4ad4b39af623385c59edd0e4518d0882b",
+        "native/hip/src/linear_attention_api.hpp": "90d293f4f883bc4a4ffb0963b32f3eb9f64325b8000e7c87a5727c9a81311c8d",
+        "native/hip/src/linear_attention_kernel.hip.cpp": {
+          "current_sha256": "8ba372c08692643a0c2f7f98131fab04efdd562845d952f5793eac2bc1309418",
+          "prior_sha256": "0602b895716ab0616f700e21414889544640e74328c53880cf6bfa653f2a28d1",
+          "source_equivalence": "whitespace_only"
+        },
+        "native/hip/src/linear_attention_kernel_internal.hpp": "083a0236de119226d2c482fc2f5dfc26442dfecb33357e3b0e41af56a339a754",
+        "native/hip/src/linear_attention_register_state.hpp": "9f2b871522b8eeaf0b495cdd3b4f69e75d48290727b9e41c1ce8e007c42590a0"
+      }
+    },
+    "gpu_evidence": [
+      {
+        "target": "gfx1030",
+        "device": "GPU-76a08c022586fed6",
+        "directory": ".local-artifacts/phase83-5/r10-public-checkpoint-gfx1030-r3",
+        "identity": "identity.json",
+        "build_identity": ".local-artifacts/phase83-5/candidate-gfx1030-r10-mtp-checkpoint/identity.json",
+        "gpu_log": "gpu.log",
+        "execution": "execution.json",
+        "probe": "probe",
+        "probe_sha256": "0eb5db75e82e223e60e61fff0dbbe7ebf20fdf20ae803666f032866f8a3e8b57",
+        "archive_sha256": "3f6a8d3c18c4c5d74dac48890be9cf16b40179abdcb5c774a3ae7dcbd4789cc2",
+        "gpu_log_sha256": "01d610442f090f2058469203c5f7c86e7f9a75c00ae3e0e66b0e64d1a4167139",
+        "execution_sha256": "620d6632277f2e3b0ffad179f815d8261af9ca22009b5778226c28e6615a88da"
+      },
+      {
+        "target": "gfx1201",
+        "device": "GPU-a8e9ddefa2d60f55",
+        "directory": ".local-artifacts/phase83-5/r10-public-checkpoint-gfx1201-r3",
+        "identity": "identity.json",
+        "build_identity": ".local-artifacts/phase83-5/candidate-gfx1201-r10-mtp-checkpoint/identity.json",
+        "gpu_log": "gpu.log",
+        "execution": "execution.json",
+        "probe": "probe",
+        "probe_sha256": "1b0b3ecad4b18d01c37bc6223fa640783f7526898d3305ea9968e6672af53c5e",
+        "archive_sha256": "4e568330f35e823277a608dd22fecc4e8501b08d84b7580512415b7b3afd5950",
+        "gpu_log_sha256": "ce48081d0f252acb8a36e62336a1a76f73cb9f27dce054901384f97c7ad7ce1a",
+        "execution_sha256": "949c515d5d080991bdbf39eb1c15c788cbd3ed6af760ab352e31624f1ecf16b2"
+      }
+    ],
+    "result": "both targets PASS; M3 target includes pending token, so prefix1/2/full3 correspond to 0/1/2 accepted draft tokens; next M1, rearm, batch preflight and rewind also PASS"
+  },
+  "independent_topk_topp_support_oracle": {
+    "source": "native/hip/tests/phase83_5_token_selector_support_gpu_test.cpp",
+    "evidence": ".local-artifacts/phase83-5/r32-support-production-r1/gpu-gfx1030.log",
+    "target": "gfx1030",
+    "binary": ".local-artifacts/phase83-5/r32-support-production-r1/phase83_5_token_selector_support_gpu_test.gfx1030",
+    "binary_sha256": "874628c9c426bc340daa95e1f9642094c6d152738e7ef34e01b7b7dcc6600859",
+    "source_sha256": "6b97e2c2d7fd9c254797bf3bec48ec6f7fcbf69f2171b8a5421a79b3e85e5f9a",
+    "result": "6/6 PASS; independent host top-k=20/top-p=.95 support construction matched GPU IDs/probabilities and repeat output",
+    "scope_caveat": "existing gfx1030 support oracle only; no gfx1201 claim"
+  },
+  "reuse_caveat": "The four pq/checkpoint probes are immutable historical GPU binaries. Their source mappings reach current native code (with recorded whitespace-only changes), but their old archive hashes do not establish a fresh Phase84 current-build end-to-end MTP run.",
+  "additional_gfx1201_support_oracle": {
+    "exit_code": 0,
+    "binary_sha256": "432fe15eb1e3bf14ec2462012551684f3b08c70fb9fef02379efc7cfb92b3fdb",
+    "target": "gfx1201",
+    "device_uuid": "GPU-a8e9ddefa2d60f55",
+    "scope": "model-free support oracle, no performance claim",
+    "timestamp": 1789205192.951585,
+    "gpu_log_sha256": "3f43855bc2bf778988ffc84cdb7ca90eb053a3491aedad7284436db5b704d342",
+    "result": "6/6 PASS independent top20/top_p.95 support oracle; nonaligned1023/1025/2049 and1024, masks, additive, ties, rejection of allmasked/nonfinite",
+    "kernel_source_sha256": "8b2aec0aefcdea2d90f3291a151430a13630083c0cbdb9c604901a8926805d05",
+    "kernel_source_matches_archived_build": true
+  }
+}
