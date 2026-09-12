@@ -705,6 +705,8 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_token_selector_fixed_topp_token_block_prefix_v1",
             "sllm_token_selector_fixed_topp_weight_prefix_v1",
             "sllm_matmul_bf16_fp32_prefill_gfx1030_64x64_k32_transposed_v1",
+            "sllm_mxfp6_w6a6_mmq_rows4_col8_v1",
+            "sllm_mxfp8_w8a8_mmq_rows4_col8_v1",
             "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n10240_v1",
             "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n248320_v1",
             "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n6144_v1",
@@ -731,10 +733,10 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n17408_v1",
             "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k6144n5120_v1",
         }
-        self.assertEqual(len(KERNEL_SYMBOLS), 176)
+        self.assertEqual(len(KERNEL_SYMBOLS), 178)
         self.assertEqual(tuple(sorted(KERNEL_SYMBOLS)), KERNEL_SYMBOLS)
         self.assertTrue(expected_additions <= set(KERNEL_SYMBOLS))
-        self.assertEqual(len(expected_additions), 73)
+        self.assertEqual(len(expected_additions), 75)
 
     def test_causal_attention_stub_allowlist_is_exact_and_duplicate_free(self) -> None:
         expected = (

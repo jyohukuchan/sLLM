@@ -2437,6 +2437,27 @@ Sections [
             with patch.object(runner, "readobj", return_value=host_text + compiler_stub_text):
                 compiler_stub_report = runner.inspect_host(path, Path("/fake/llvm-readobj"), row, expected_bundles)
             self.assertEqual(compiler_stub_report["stub_symbols"], [])
+            phase85_symbols = (
+                "sllm_mxfp6_w6a6_mmq_rows4_col8_v1",
+                "sllm_mxfp8_w8a8_mmq_rows4_col8_v1",
+            )
+            phase85_text = "\n".join(
+                host_symbol(name, "Function (0x2)", ".text") for name in phase85_symbols
+            )
+            with patch.object(runner, "readobj", return_value=host_text + phase85_text):
+                phase85_report = runner.inspect_host(path, Path("/fake/llvm-readobj"), row, expected_bundles)
+            self.assertEqual(
+                phase85_report["public_symbols"],
+                [{"name": name, "defined": True} for name in sorted(runner.PUBLIC_SYMBOLS)],
+            )
+            for name in phase85_symbols:
+                with self.subTest(near_prefix=name):
+                    with patch.object(
+                        runner,
+                        "readobj",
+                        return_value=host_text + host_symbol(name + "_extra", "Function (0x2)", ".text"),
+                    ), self.assertRaises(runner.RuntimeContractError):
+                        runner.inspect_host(path, Path("/fake/llvm-readobj"), row, expected_bundles)
             causal_stub_text = "\n".join(
                 f"  Symbol {{\n    Name: {name}\n    Binding: Local (0x0)\n    Type: Function (0x2)\n    Other: 0\n    Section: .text\n  }}"
                 for name in runner.CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS

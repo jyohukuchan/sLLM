@@ -178,6 +178,9 @@ CPU検証はH0の書式／Clippy／manifest等、H1 1,570件、H2 38件と関連
 両targetのHIP build、codec、新旧reader、演算子と推論を実機確認し、gfx942は3翻訳単位のcompile-onlyに限定した。
 既存R9700 serviceは元のunit／binary／設定へ復帰し、health／readyを確認した。raw profile、binary、modelはGitへ追加しない。
 公開前のJSON検査で、public-runtime manifestを参照するRMSNorm CI契約のhashも同期し、検査を再実行した。
+最初の公開commit `298ba729`のpublic-runtime H3は、Rows4の新2symbolが検査一覧に未登録のため
+linked host ELFの検査で失敗した。compile/link失敗やGPU数値失敗ではない。新2名と契約test、参照hashを同期し、
+未知symbolを拒否する検査を維持したまま修正commitのCIで再確認する。
 公開CIの成否は本変更のGitHub Checksで確認し、ローカル測定の成功へ混ぜない。
 
 残差はPhase86へ引き継ぐ。MTPのtarget検証・sampling等の費用は今回のMX kernel改善では変えず、
