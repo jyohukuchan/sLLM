@@ -540,8 +540,9 @@ pub use moe::{
     reference_sparse_moe_route,
 };
 pub use mtp_quantized_sidecar::{
-    MtpQuantizedSidecarError, MtpQuantizedSidecarTensor, MtpWeightEncoding,
-    VerifiedQwen38MtpQuantizedSidecar, convert_qwen38_mtp_quantized_sidecar,
+    Bf16RoundtripDiagnostics, MtpBf16RoundtripEncoding, MtpQuantizedSidecarError,
+    MtpQuantizedSidecarTensor, MtpWeightEncoding, VerifiedQwen38MtpQuantizedSidecar,
+    convert_qwen38_mtp_bf16_roundtrip_sidecar, convert_qwen38_mtp_quantized_sidecar,
     verify_qwen38_mtp_quantized_sidecar,
 };
 pub use mxfp::{

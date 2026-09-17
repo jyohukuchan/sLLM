@@ -20,12 +20,51 @@ re-quantized by this feature.
 
 ## Encodings and current status
 
-The converter supports these two sidecar recipes:
+The converter supports these two packed MX sidecar recipes:
 
 | encoding | value/activation | scale and accumulation |
 | --- | --- | --- |
 | MXFP8 | E4M3 W8A8 | K-axis block 32, E8M0 scale, FP32 accumulation, BF16 output |
 | MXFP6 | E3M2 W6A6 | K-axis block 32, E8M0 scale, FP32 accumulation, BF16 output |
+
+For the Phase85 activation-error ablation, it also accepts
+`--encoding bf16-roundtrip-mxfp8` and `--encoding bf16-roundtrip-mxfp6`.
+These diagnostic recipes quantize the same eight matrices, dequantize their
+values, and store them as BF16. The runtime consequently uses the existing
+BF16 matrix and activation path. This isolates weight quantization from the
+packed MX activation path; it is not an implementation of a packed W8A16 or
+W6A16 kernel, and its BF16 execution also applies during prefix priming.
+
+Each diagnostic tensor records the all-element BF16 roundtrip result,
+nonfinite values, underflow, overflow, bit mismatches, and the first affected
+positions. The two recipe names and combined digests remain distinct even
+though both use BF16 payloads. The existing packed MX payloads and recipe
+names are unchanged. Shared embedding/head and norms are still excluded.
+These recipes do not change the BF16 default companion selection.
+
+The Phase85 native M=1 A16 path is a separate opt-in:
+`SLLM_MX_WA_M1_A16=1` keeps BF16 activations for single-row MXFP8/MXFP6
+matmuls while reading the existing packed sidecar. It selects kernel ID101
+(W8A16) or ID102 (W6A16) and omits the activation quantizer and its workspace.
+The runtime reads the switch when preparing the operation. Multi-row
+operations retain W8A8/W6A6, including the existing WMMA selection.
+Unset or `0` restores the ordinary activation path;
+`SLLM_MX_WA_M1_FORCE_BASELINE=1` takes precedence and selects the legacy
+baseline. No sidecar reconversion is needed.
+
+A16 changes numerical results relative to A8/A6 and can change MTP proposal
+acceptance and the generated sequence. Both exact GPUs passed the six real
+matrix shapes and boundary cases against sampled independent FP32 oracles.
+The full-model speed benefit depends on the GPU, format, and priming setup;
+the BF16 companion remains the default. See the
+[experiment plan](../plans/archive/2026/09/11-20/phase85-m1-a16-mtp.md)
+and [measurement summary](../../ci/matrix/phase85-a16-mtp-results-v1.json).
+
+For the bounded Phase85 benchmark, `SLLM_PHASE85_MTP_PRIMING_TIMING=1`
+records per-call prefix row counts and host wall times. It is disabled by
+default and does not change arithmetic or kernel routing. The final ABBA
+comparison found practically equal prefix time; the earlier small positive
+difference remains in the experiment history.
 
 The sidecar is opt-in. Omitting `--mtp-weights` keeps the bundled BF16 MTP
 companion and is the comparison and rollback path. The Qwen3.8 KV default is

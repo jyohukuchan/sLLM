@@ -27,11 +27,19 @@ bool matmul_lowp_format(const sllm_matmul::DescriptorMetadata &metadata,
     return false;
   }
   if (metadata.mxfp8_w8a8) {
-    *format = sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8;
+    *format = metadata.m == 1U &&
+                      sllm_matmul_kernel::phase85_mxfp_m1_a16_enabled() &&
+                      !sllm_matmul_kernel::phase85_mxfp_m1_force_baseline()
+                  ? sllm_lowp::MatmulFormat::Mxfp8E4M3W8A16
+                  : sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8;
     return true;
   }
   if (metadata.mxfp6_w6a6) {
-    *format = sllm_lowp::MatmulFormat::Mxfp6E3M2W6A6;
+    *format = metadata.m == 1U &&
+                      sllm_matmul_kernel::phase85_mxfp_m1_a16_enabled() &&
+                      !sllm_matmul_kernel::phase85_mxfp_m1_force_baseline()
+                  ? sllm_lowp::MatmulFormat::Mxfp6E3M2W6A16
+                  : sllm_lowp::MatmulFormat::Mxfp6E3M2W6A6;
     return true;
   }
   if (metadata.nvfp4_w4a4) {
@@ -53,6 +61,55 @@ bool matmul_lowp_path(
     const sllm_matmul::DescriptorMetadata &metadata) noexcept {
   sllm_lowp::MatmulFormat unused{};
   return matmul_lowp_format(metadata, &unused);
+}
+
+sllm_status_t write_nvfp4_w4a4_baseline_scope_error(
+    sllm_error_sink_t *const error_sink) noexcept {
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_UNSUPPORTED,
+      "NVFP4 W4A4 FORCE_BASELINE reference shape/target is outside the "
+      "supported scope (exact gfx1030/gfx1201, M<=4096, K<=17408, N<=65536)");
+}
+
+sllm_status_t validate_nvfp4_w4a4_baseline_descriptor_scope(
+    const sllm_matmul_desc_t &descriptor,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (descriptor.op_version != SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION ||
+      !sllm_matmul_kernel::selector_env_is_one(
+          "SLLM_NVFP4_W4A4_FORCE_BASELINE") ||
+      sllm_matmul_kernel::nvfp4_w4a4_baseline_shape(
+          descriptor.activation.shape[0], descriptor.activation.shape[1],
+          descriptor.weight.shape[0])) {
+    return SLLM_STATUS_OK;
+  }
+  return write_nvfp4_w4a4_baseline_scope_error(error_sink);
+}
+
+sllm_status_t validate_nvfp4_w4a4_baseline_target_scope(
+    const sllm_matmul::DescriptorMetadata &metadata,
+    const char *const arch_name, sllm_error_sink_t *const error_sink) noexcept {
+  if (!metadata.nvfp4_w4a4 ||
+      !sllm_matmul_kernel::selector_env_is_one(
+          "SLLM_NVFP4_W4A4_FORCE_BASELINE") ||
+      (arch_name != nullptr &&
+       (matches_runtime_gcn_arch(arch_name, "gfx1030") ||
+        matches_runtime_gcn_arch(arch_name, "gfx1201")))) {
+    return SLLM_STATUS_OK;
+  }
+  return write_nvfp4_w4a4_baseline_scope_error(error_sink);
+}
+
+sllm_status_t validate_nvfp4_w4a4_baseline_scope(
+    const sllm_matmul::DescriptorMetadata &metadata,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (!metadata.nvfp4_w4a4 ||
+      !sllm_matmul_kernel::selector_env_is_one(
+          "SLLM_NVFP4_W4A4_FORCE_BASELINE") ||
+      sllm_matmul_kernel::nvfp4_w4a4_baseline_shape(metadata.m, metadata.k,
+                                                    metadata.n)) {
+    return SLLM_STATUS_OK;
+  }
+  return write_nvfp4_w4a4_baseline_scope_error(error_sink);
 }
 
 sllm_lowp::ExactTarget
@@ -95,6 +152,10 @@ matmul_lowp_selector_decision(const sllm_matmul::DescriptorMetadata &metadata,
         ::sllm_matmul_kernel::select_mxfp8_variant(metadata.m, metadata.k,
                                                    metadata.n, selector_target),
         true, true, true, ::sllm_matmul_kernel::kSelectorReasonAdopted);
+  case sllm_lowp::ProviderKind::Mxfp8A16Block32:
+    return ::sllm_matmul_kernel::make_selector_decision(
+        ::sllm_matmul_kernel::KernelVariant::Mxfp8W8A16M1Col2, true, true, true,
+        ::sllm_matmul_kernel::kSelectorReasonAdopted);
   case sllm_lowp::ProviderKind::Mxfp6Block32:
   case sllm_lowp::ProviderKind::Mxfp6Gfx1030Half2Dot2:
   case sllm_lowp::ProviderKind::Mxfp6Gfx1201WmmaViaE4M3:
@@ -102,6 +163,10 @@ matmul_lowp_selector_decision(const sllm_matmul::DescriptorMetadata &metadata,
         ::sllm_matmul_kernel::select_mxfp6_variant(metadata.m, metadata.k,
                                                    metadata.n, selector_target),
         true, true, true, ::sllm_matmul_kernel::kSelectorReasonAdopted);
+  case sllm_lowp::ProviderKind::Mxfp6A16Block32:
+    return ::sllm_matmul_kernel::make_selector_decision(
+        ::sllm_matmul_kernel::KernelVariant::Mxfp6W6A16M1Col2, true, true, true,
+        ::sllm_matmul_kernel::kSelectorReasonAdopted);
   case sllm_lowp::ProviderKind::Nvfp4W4A16Block16:
     return ::sllm_matmul_kernel::make_selector_decision(
         ::sllm_matmul_kernel::select_nvfp4_variant(metadata.m), true, true,
@@ -316,6 +381,30 @@ matmul_lowp_concrete_provider_plan(
     concrete_tile = TilePolicy::DecodeRowReduction;
     concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
     break;
+  case KernelVariant::Mxfp8W8A8M1Col2:
+    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8 ||
+        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
+         provider.target != sllm_lowp::ExactTarget::Gfx1201) ||
+        !::sllm_matmul_kernel::phase85_mxfp_m1_col2_shape(
+            provider.m, provider.k, provider.n)) {
+      return std::nullopt;
+    }
+    concrete_provider = ProviderKind::Mxfp8Block32;
+    concrete_tile = TilePolicy::DecodeRowReduction;
+    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
+    break;
+  case KernelVariant::Mxfp8W8A16M1Col2:
+    if (provider.format != MatmulFormat::Mxfp8E4M3W8A16 ||
+        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
+         provider.target != sllm_lowp::ExactTarget::Gfx1201) ||
+        !::sllm_matmul_kernel::phase85_mxfp_m1_a16_shape(provider.m, provider.k,
+                                                         provider.n)) {
+      return std::nullopt;
+    }
+    concrete_provider = ProviderKind::Mxfp8A16Block32;
+    concrete_tile = TilePolicy::DecodeRowReduction;
+    concrete_inner_product = InnerProduct::E4M3Bf16Fp32;
+    break;
   case KernelVariant::Mxfp8W8A8Prefill:
     if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
       return std::nullopt;
@@ -417,6 +506,30 @@ matmul_lowp_concrete_provider_plan(
     concrete_provider = ProviderKind::Mxfp6Block32;
     concrete_tile = TilePolicy::DecodeRowReduction;
     concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
+    break;
+  case KernelVariant::Mxfp6W6A6M1Col2:
+    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6 ||
+        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
+         provider.target != sllm_lowp::ExactTarget::Gfx1201) ||
+        !::sllm_matmul_kernel::phase85_mxfp_m1_col2_shape(
+            provider.m, provider.k, provider.n)) {
+      return std::nullopt;
+    }
+    concrete_provider = ProviderKind::Mxfp6Block32;
+    concrete_tile = TilePolicy::DecodeRowReduction;
+    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
+    break;
+  case KernelVariant::Mxfp6W6A16M1Col2:
+    if (provider.format != MatmulFormat::Mxfp6E3M2W6A16 ||
+        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
+         provider.target != sllm_lowp::ExactTarget::Gfx1201) ||
+        !::sllm_matmul_kernel::phase85_mxfp_m1_a16_shape(provider.m, provider.k,
+                                                         provider.n)) {
+      return std::nullopt;
+    }
+    concrete_provider = ProviderKind::Mxfp6A16Block32;
+    concrete_tile = TilePolicy::DecodeRowReduction;
+    concrete_inner_product = InnerProduct::E3M2Bf16Fp32;
     break;
   case KernelVariant::Mxfp6W6A6Prefill:
     if (provider.format != MatmulFormat::Mxfp6E3M2W6A6) {
@@ -897,6 +1010,17 @@ sllm_status_t select_matmul_workspace_footprint(
         error_sink, SLLM_STATUS_INVALID_ARGUMENT,
         "matmul workspace footprint selection input is null");
   }
+  const sllm_status_t baseline_scope_status =
+      validate_nvfp4_w4a4_baseline_scope(metadata, error_sink);
+  if (baseline_scope_status != SLLM_STATUS_OK) {
+    return baseline_scope_status;
+  }
+  const sllm_status_t baseline_target_status =
+      validate_nvfp4_w4a4_baseline_target_scope(metadata, arch_name,
+                                                error_sink);
+  if (baseline_target_status != SLLM_STATUS_OK) {
+    return baseline_target_status;
+  }
 
   const bool quantized_weight_path =
       metadata.fp8_outer || metadata.nvfp4 || metadata.nvfp4_w4a4 ||
@@ -1220,6 +1344,16 @@ extern "C" sllm_status_t sllm_hip_matmul_workspace_footprint(
           error_sink, SLLM_STATUS_INVALID_ARGUMENT,
           "matmul workspace footprint input or output is null");
     }
+    const sllm_status_t prefix_status =
+        sllm_matmul::validate_descriptor_prefix(descriptor, error_sink);
+    if (prefix_status != SLLM_STATUS_OK) {
+      return prefix_status;
+    }
+    const sllm_status_t baseline_descriptor_status =
+        validate_nvfp4_w4a4_baseline_descriptor_scope(*descriptor, error_sink);
+    if (baseline_descriptor_status != SLLM_STATUS_OK) {
+      return baseline_descriptor_status;
+    }
     sllm_matmul::DescriptorMetadata metadata{};
     const sllm_status_t descriptor_status =
         sllm_matmul::validate_and_copy_unbound_descriptor(descriptor, &metadata,
@@ -1294,12 +1428,23 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
       return prefix_status;
     }
     const sllm_matmul_desc_t descriptor_copy = *descriptor;
+    const sllm_status_t baseline_descriptor_status =
+        validate_nvfp4_w4a4_baseline_descriptor_scope(descriptor_copy,
+                                                      error_sink);
+    if (baseline_descriptor_status != SLLM_STATUS_OK) {
+      return baseline_descriptor_status;
+    }
     sllm_matmul::DescriptorMetadata metadata{};
     const sllm_status_t descriptor_status =
         sllm_matmul::validate_and_copy_descriptor(&descriptor_copy, &metadata,
                                                   error_sink);
     if (descriptor_status != SLLM_STATUS_OK) {
       return descriptor_status;
+    }
+    const sllm_status_t baseline_scope_status =
+        validate_nvfp4_w4a4_baseline_scope(metadata, error_sink);
+    if (baseline_scope_status != SLLM_STATUS_OK) {
+      return baseline_scope_status;
     }
 
     std::unique_ptr<ElementwisePlan> candidate;
@@ -1489,6 +1634,15 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
                   context->accounting, activation->accounting,
                   weight->accounting, output->accounting);
               return property_status;
+            }
+            const sllm_status_t baseline_target_status =
+                validate_nvfp4_w4a4_baseline_target_scope(
+                    metadata, properties.gcnArchName, error_sink);
+            if (baseline_target_status != SLLM_STATUS_OK) {
+              (void)sllm_public_runtime::AccountingState::release_prepared_plan(
+                  context->accounting, activation->accounting,
+                  weight->accounting, output->accounting);
+              return baseline_target_status;
             }
             sllm_lowp::MatmulFormat format{};
             if (!matmul_lowp_format(metadata, &format)) {
@@ -1820,6 +1974,16 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
             "matmul execute owner graph is releasing or already in flight");
       }
       const auto &metadata = plan->matmul_metadata;
+      if (metadata.nvfp4_w4a4 &&
+          plan->matmul_kernel_variant ==
+              sllm_matmul_kernel::KernelVariant::Nvfp4W4A4Packed &&
+          !sllm_matmul_kernel::nvfp4_w4a4_baseline_shape(metadata.m, metadata.k,
+                                                         metadata.n)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_UNSUPPORTED,
+            "NVFP4 W4A4 FORCE_BASELINE reference shape is outside the "
+            "supported scope (M<=4096, K<=17408, N<=65536)");
+      }
       if (metadata.m == 0U || metadata.k == 0U || metadata.n == 0U ||
           metadata.m > SLLM_HIP_MATMUL_MAX_M ||
           metadata.k > SLLM_HIP_MATMUL_MAX_K ||
@@ -1896,6 +2060,17 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
           "HIP gcnArchName is not NUL terminated or is too long");
+    }
+    const sllm_status_t baseline_target_status =
+        validate_nvfp4_w4a4_baseline_target_scope(plan->matmul_metadata,
+                                                  arch_name, error_sink);
+    if (baseline_target_status != SLLM_STATUS_OK) {
+      if (!rollback_reserved_elementwise_submission(plan, queue, error_sink)) {
+        execute_guard.disarm();
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
+      execute_guard.disarm();
+      return baseline_target_status;
     }
 #if defined(SLLM_HIP_COMPILE_TARGET)
     if (!matches_runtime_gcn_arch(arch_name, SLLM_HIP_COMPILE_TARGET)) {
@@ -2075,29 +2250,40 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
           !matches_runtime_gcn_arch(arch_name, "gfx1030")) {
         launch_status = hipErrorNotSupported;
       } else {
-        const uint64_t activation_value_bytes =
-            plan->matmul_metadata.m * plan->matmul_metadata.k;
-        const uint64_t activation_scale_bytes =
-            plan->matmul_metadata.m * plan->matmul_metadata.k / UINT64_C(32);
-        if (matmul_workspace == nullptr ||
-            matmul_workspace_bytes <
-                activation_value_bytes + activation_scale_bytes) {
-          launch_status = hipErrorOutOfMemory;
+        const bool a16 = plan->matmul_provider_plan.has_value() &&
+                         plan->matmul_provider_plan->format ==
+                             sllm_lowp::MatmulFormat::Mxfp8E4M3W8A16;
+        const auto *const fp8_weight =
+            static_cast<const uint8_t *>(weight_storage);
+        const auto *const weight_scales =
+            fp8_weight + plan->matmul_metadata.weight_value_bytes;
+        if (a16) {
+          launch_status = ::sllm_matmul_kernel::launch_mxfp8_w8a16(
+              activation, fp8_weight, weight_scales, output,
+              plan->matmul_metadata.m, plan->matmul_metadata.k,
+              plan->matmul_metadata.n, variant, queue->stream);
         } else {
-          auto *const quantized = static_cast<uint8_t *>(matmul_workspace);
-          auto *const activation_scales = quantized + activation_value_bytes;
-          const auto *const fp8_weight =
-              static_cast<const uint8_t *>(weight_storage);
-          const auto *const weight_scales =
-              fp8_weight + plan->matmul_metadata.weight_value_bytes;
-          launch_status = ::sllm_matmul_kernel::launch_mxfp8_quantize(
-              activation, quantized, activation_scales, plan->matmul_metadata.m,
-              plan->matmul_metadata.k, queue->stream);
-          if (launch_status == hipSuccess) {
-            launch_status = ::sllm_matmul_kernel::launch_mxfp8_w8a8(
-                quantized, activation_scales, fp8_weight, weight_scales, output,
+          const uint64_t activation_value_bytes =
+              plan->matmul_metadata.m * plan->matmul_metadata.k;
+          const uint64_t activation_scale_bytes =
+              plan->matmul_metadata.m * plan->matmul_metadata.k / UINT64_C(32);
+          if (matmul_workspace == nullptr ||
+              matmul_workspace_bytes <
+                  activation_value_bytes + activation_scale_bytes) {
+            launch_status = hipErrorOutOfMemory;
+          } else {
+            auto *const quantized = static_cast<uint8_t *>(matmul_workspace);
+            auto *const activation_scales = quantized + activation_value_bytes;
+            launch_status = ::sllm_matmul_kernel::launch_mxfp8_quantize(
+                activation, quantized, activation_scales,
                 plan->matmul_metadata.m, plan->matmul_metadata.k,
-                plan->matmul_metadata.n, variant, queue->stream);
+                queue->stream);
+            if (launch_status == hipSuccess) {
+              launch_status = ::sllm_matmul_kernel::launch_mxfp8_w8a8(
+                  quantized, activation_scales, fp8_weight, weight_scales,
+                  output, plan->matmul_metadata.m, plan->matmul_metadata.k,
+                  plan->matmul_metadata.n, variant, queue->stream);
+            }
           }
         }
       }
@@ -2110,30 +2296,40 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
           !matches_runtime_gcn_arch(arch_name, "gfx1030")) {
         launch_status = hipErrorNotSupported;
       } else {
-        const uint64_t activation_value_bytes =
-            plan->matmul_metadata.m *
-            (plan->matmul_metadata.k * UINT64_C(3) / UINT64_C(4));
-        const uint64_t activation_scale_bytes =
-            plan->matmul_metadata.m * plan->matmul_metadata.k / UINT64_C(32);
-        if (matmul_workspace == nullptr ||
-            matmul_workspace_bytes <
-                activation_value_bytes + activation_scale_bytes) {
-          launch_status = hipErrorOutOfMemory;
+        const bool a16 = plan->matmul_provider_plan.has_value() &&
+                         plan->matmul_provider_plan->format ==
+                             sllm_lowp::MatmulFormat::Mxfp6E3M2W6A16;
+        const auto *const packed_weight =
+            static_cast<const uint8_t *>(weight_storage);
+        const auto *const weight_scales =
+            packed_weight + plan->matmul_metadata.weight_value_bytes;
+        if (a16) {
+          launch_status = ::sllm_matmul_kernel::launch_mxfp6_w6a16(
+              activation, packed_weight, weight_scales, output,
+              plan->matmul_metadata.m, plan->matmul_metadata.k,
+              plan->matmul_metadata.n, variant, queue->stream);
         } else {
-          auto *const packed = static_cast<uint8_t *>(matmul_workspace);
-          auto *const activation_scales = packed + activation_value_bytes;
-          const auto *const packed_weight =
-              static_cast<const uint8_t *>(weight_storage);
-          const auto *const weight_scales =
-              packed_weight + plan->matmul_metadata.weight_value_bytes;
-          launch_status = ::sllm_matmul_kernel::launch_mxfp6_quantize(
-              activation, packed, activation_scales, plan->matmul_metadata.m,
-              plan->matmul_metadata.k, queue->stream);
-          if (launch_status == hipSuccess) {
-            launch_status = ::sllm_matmul_kernel::launch_mxfp6_w6a6(
-                packed, activation_scales, packed_weight, weight_scales, output,
-                plan->matmul_metadata.m, plan->matmul_metadata.k,
-                plan->matmul_metadata.n, variant, queue->stream);
+          const uint64_t activation_value_bytes =
+              plan->matmul_metadata.m *
+              (plan->matmul_metadata.k * UINT64_C(3) / UINT64_C(4));
+          const uint64_t activation_scale_bytes =
+              plan->matmul_metadata.m * plan->matmul_metadata.k / UINT64_C(32);
+          if (matmul_workspace == nullptr ||
+              matmul_workspace_bytes <
+                  activation_value_bytes + activation_scale_bytes) {
+            launch_status = hipErrorOutOfMemory;
+          } else {
+            auto *const packed = static_cast<uint8_t *>(matmul_workspace);
+            auto *const activation_scales = packed + activation_value_bytes;
+            launch_status = ::sllm_matmul_kernel::launch_mxfp6_quantize(
+                activation, packed, activation_scales, plan->matmul_metadata.m,
+                plan->matmul_metadata.k, queue->stream);
+            if (launch_status == hipSuccess) {
+              launch_status = ::sllm_matmul_kernel::launch_mxfp6_w6a6(
+                  packed, activation_scales, packed_weight, weight_scales,
+                  output, plan->matmul_metadata.m, plan->matmul_metadata.k,
+                  plan->matmul_metadata.n, variant, queue->stream);
+            }
           }
         }
       }

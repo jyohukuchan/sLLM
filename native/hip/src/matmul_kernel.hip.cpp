@@ -2334,8 +2334,9 @@ __launch_bounds__(256, 1) void sllm_matmul_nvfp4_w4a4_block16_packed_v1(
     const uint8_t *const weight_block_scales,
     const float *const weight_tensor_scale,
     const float *const input_tensor_scale, uint16_t *const output,
-    const uint64_t m, const uint64_t k, const uint64_t n) {
-  const uint64_t output_index = blockIdx.x;
+    const uint64_t m, const uint64_t k, const uint64_t n,
+    const uint64_t output_begin) {
+  const uint64_t output_index = output_begin + blockIdx.x;
   if (output_index >= m * n) {
     return;
   }
@@ -4399,6 +4400,199 @@ __device__ __forceinline__ void sllm_matmul_mxfp8_w8a8_block32_body(
   }
 }
 
+// Phase85 M1 Columns2: one workgroup computes two adjacent output columns.
+// Each lane keeps the baseline K assignment and reduction tree, while the
+// activation value is decoded once and reused for both weight columns.
+__device__ __forceinline__ void sllm_matmul_mxfp8_w8a8_m1_col2_body(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  if (m != 1U) {
+    return;
+  }
+  const uint64_t column0 = static_cast<uint64_t>(blockIdx.x) * UINT64_C(2);
+  if (column0 >= n) {
+    return;
+  }
+  const uint64_t column1 = column0 + UINT64_C(1);
+  const bool has_column1 = column1 < n;
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+
+#if defined(__gfx1201__)
+  const sllm_lowp::BlockScaledView<sllm_lowp::Mxfp8E4Block32> activation_view{
+      activation, activation_scales, nullptr, k, k, blocks_per_row};
+  const sllm_lowp::BlockScaledView<sllm_lowp::Mxfp8E4Block32> weight_view{
+      weight, weight_scales, nullptr, k, k, blocks_per_row};
+  const uint32_t lane = threadIdx.x & UINT32_C(31);
+  const uint32_t wave = threadIdx.x >> 5U;
+  float partial0 = 0.0F;
+  float partial1 = 0.0F;
+  for (uint32_t block = wave; block < blocks_per_row; block += 8U) {
+    const auto activation_block =
+        sllm_lowp::make_wave_block32(activation_view, 0U, block, lane);
+    const float activation_value =
+        sllm_lowp::load_wave_block32(activation_block, lane);
+    const auto weight_block0 =
+        sllm_lowp::make_wave_block32(weight_view, column0, block, lane);
+    partial0 +=
+        activation_value * sllm_lowp::load_wave_block32(weight_block0, lane);
+    if (has_column1) {
+      const auto weight_block1 =
+          sllm_lowp::make_wave_block32(weight_view, column1, block, lane);
+      partial1 +=
+          activation_value * sllm_lowp::load_wave_block32(weight_block1, lane);
+    }
+  }
+#else
+  const sllm_lowp::BlockScaledView<sllm_lowp::Mxfp8E4Block32> activation_view{
+      activation, activation_scales, nullptr, k, k, blocks_per_row};
+  const sllm_lowp::BlockScaledView<sllm_lowp::Mxfp8E4Block32> weight_view{
+      weight, weight_scales, nullptr, k, k, blocks_per_row};
+  float partial0 = 0.0F;
+  float partial1 = 0.0F;
+  for (uint64_t inner = threadIdx.x; inner < k; inner += blockDim.x) {
+    const float activation_value =
+        sllm_lowp::BlockCodec<sllm_lowp::Mxfp8E4Block32>::load(
+            activation_view, 0U, static_cast<uint32_t>(inner));
+    partial0 += activation_value *
+                sllm_lowp::BlockCodec<sllm_lowp::Mxfp8E4Block32>::load(
+                    weight_view, column0, static_cast<uint32_t>(inner));
+    if (has_column1) {
+      partial1 += activation_value *
+                  sllm_lowp::BlockCodec<sllm_lowp::Mxfp8E4Block32>::load(
+                      weight_view, column1, static_cast<uint32_t>(inner));
+    }
+  }
+  const uint32_t lane = threadIdx.x & UINT32_C(31);
+  const uint32_t wave = threadIdx.x >> 5U;
+#endif
+
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    partial0 += __shfl_down(partial0, offset, 32U);
+    partial1 += __shfl_down(partial1, offset, 32U);
+  }
+  __shared__ float wave_sums[8][2];
+  if (lane == 0U) {
+    wave_sums[wave][0] = partial0;
+    wave_sums[wave][1] = partial1;
+  }
+  __syncthreads();
+  if (wave == 0U) {
+    partial0 = lane < 8U ? wave_sums[lane][0] : 0.0F;
+    partial1 = lane < 8U ? wave_sums[lane][1] : 0.0F;
+#pragma unroll
+    for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+      partial0 += __shfl_down(partial0, offset, 32U);
+      partial1 += __shfl_down(partial1, offset, 32U);
+    }
+    if (lane == 0U) {
+      output[column0] = float_to_bf16_rne_bits(partial0);
+      if (has_column1) {
+        output[column1] = float_to_bf16_rne_bits(partial1);
+      }
+    }
+  }
+}
+
+template <bool UsePairLoad>
+__device__ __forceinline__ void sllm_matmul_mxfp6_w6a6_m1_col2_body_impl(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  if (m != 1U) {
+    return;
+  }
+  const uint64_t column0 = static_cast<uint64_t>(blockIdx.x) * UINT64_C(2);
+  if (column0 >= n) {
+    return;
+  }
+  const uint64_t column1 = column0 + UINT64_C(1);
+  const bool has_column1 = column1 < n;
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  const uint64_t row_bytes = k * UINT64_C(3) / UINT64_C(4);
+  const sllm_lowp::BlockScaledView<sllm_lowp::Mxfp6E3Block32> activation_view{
+      activation, activation_scales, nullptr, k, row_bytes, blocks_per_row};
+  const sllm_lowp::BlockScaledView<sllm_lowp::Mxfp6E3Block32> weight_view{
+      weight, weight_scales, nullptr, k, row_bytes, blocks_per_row};
+  float partial0 = 0.0F;
+  float partial1 = 0.0F;
+  for (uint64_t inner = threadIdx.x; inner < k; inner += blockDim.x) {
+    float activation_value = 0.0F;
+    float weight_value0 = 0.0F;
+    if constexpr (UsePairLoad) {
+      activation_value =
+          sllm_lowp::BlockCodec<sllm_lowp::Mxfp6E3Block32>::load_pair(
+              activation_view, 0U, static_cast<uint32_t>(inner));
+      weight_value0 =
+          sllm_lowp::BlockCodec<sllm_lowp::Mxfp6E3Block32>::load_pair(
+              weight_view, column0, static_cast<uint32_t>(inner));
+    } else {
+      activation_value = sllm_lowp::BlockCodec<sllm_lowp::Mxfp6E3Block32>::load(
+          activation_view, 0U, static_cast<uint32_t>(inner));
+      weight_value0 = sllm_lowp::BlockCodec<sllm_lowp::Mxfp6E3Block32>::load(
+          weight_view, column0, static_cast<uint32_t>(inner));
+    }
+    partial0 += activation_value * weight_value0;
+    if (has_column1) {
+      float weight_value1 = 0.0F;
+      if constexpr (UsePairLoad) {
+        weight_value1 =
+            sllm_lowp::BlockCodec<sllm_lowp::Mxfp6E3Block32>::load_pair(
+                weight_view, column1, static_cast<uint32_t>(inner));
+      } else {
+        weight_value1 = sllm_lowp::BlockCodec<sllm_lowp::Mxfp6E3Block32>::load(
+            weight_view, column1, static_cast<uint32_t>(inner));
+      }
+      partial1 += activation_value * weight_value1;
+    }
+  }
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    partial0 += __shfl_down(partial0, offset, 32U);
+    partial1 += __shfl_down(partial1, offset, 32U);
+  }
+  __shared__ float wave_sums[8][2];
+  const uint32_t lane = threadIdx.x & UINT32_C(31);
+  const uint32_t wave = threadIdx.x >> 5U;
+  if (lane == 0U) {
+    wave_sums[wave][0] = partial0;
+    wave_sums[wave][1] = partial1;
+  }
+  __syncthreads();
+  if (wave == 0U) {
+    partial0 = lane < 8U ? wave_sums[lane][0] : 0.0F;
+    partial1 = lane < 8U ? wave_sums[lane][1] : 0.0F;
+#pragma unroll
+    for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+      partial0 += __shfl_down(partial0, offset, 32U);
+      partial1 += __shfl_down(partial1, offset, 32U);
+    }
+    if (lane == 0U) {
+      output[column0] = float_to_bf16_rne_bits(partial0);
+      if (has_column1) {
+        output[column1] = float_to_bf16_rne_bits(partial1);
+      }
+    }
+  }
+}
+
+__device__ __forceinline__ void sllm_matmul_mxfp6_w6a6_m1_col2_body(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+#if defined(__gfx1201__)
+  sllm_matmul_mxfp6_w6a6_m1_col2_body_impl<true>(
+      activation, activation_scales, weight, weight_scales, output, m, k, n);
+#else
+  sllm_matmul_mxfp6_w6a6_m1_col2_body_impl<false>(
+      activation, activation_scales, weight, weight_scales, output, m, k, n);
+#endif
+}
+
 template <bool UsePairLoad>
 __device__ __forceinline__ void sllm_matmul_mxfp6_w6a6_block32_body_impl(
     const uint8_t *const activation, const uint8_t *const activation_scales,
@@ -4468,6 +4662,171 @@ __device__ __forceinline__ void sllm_matmul_mxfp6_w6a6_block32_body(
 #endif
 }
 
+// Phase85 M1 W8A16: preserve the Columns2 weight traversal and reduction tree
+// while reading the original BF16 activation directly. The activation has no
+// MX value/scale plane in this path.
+__device__ __forceinline__ void sllm_matmul_mxfp8_w8a16_m1_col2_body(
+    const uint16_t *const activation, const uint8_t *const weight,
+    const uint8_t *const weight_scales, uint16_t *const output,
+    const uint64_t m, const uint64_t k, const uint64_t n) {
+  if (m != 1U) {
+    return;
+  }
+  const uint64_t column0 = static_cast<uint64_t>(blockIdx.x) * UINT64_C(2);
+  if (column0 >= n) {
+    return;
+  }
+  const uint64_t column1 = column0 + UINT64_C(1);
+  const bool has_column1 = column1 < n;
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  const sllm_lowp::BlockScaledView<sllm_lowp::Mxfp8E4Block32> weight_view{
+      weight, weight_scales, nullptr, k, k, blocks_per_row};
+  float partial0 = 0.0F;
+  float partial1 = 0.0F;
+#if defined(__gfx1201__)
+  const uint32_t lane = threadIdx.x & UINT32_C(31);
+  const uint32_t wave = threadIdx.x >> 5U;
+  for (uint64_t block64 = wave; block64 < blocks_per_row; block64 += 8U) {
+    const uint32_t block = static_cast<uint32_t>(block64);
+    const uint64_t inner = block64 * UINT64_C(32) + lane;
+    const uint16_t activation_bits = activation[inner];
+    const float activation_value = bf16_to_float(activation_bits);
+    const auto weight_block0 =
+        sllm_lowp::make_wave_block32(weight_view, column0, block, lane);
+    partial0 +=
+        activation_value * sllm_lowp::load_wave_block32(weight_block0, lane);
+    if (has_column1) {
+      const auto weight_block1 =
+          sllm_lowp::make_wave_block32(weight_view, column1, block, lane);
+      partial1 +=
+          activation_value * sllm_lowp::load_wave_block32(weight_block1, lane);
+    }
+  }
+#else
+  for (uint64_t inner = threadIdx.x; inner < k; inner += blockDim.x) {
+    const float activation_value = bf16_to_float(activation[inner]);
+    partial0 += activation_value *
+                sllm_lowp::BlockCodec<sllm_lowp::Mxfp8E4Block32>::load(
+                    weight_view, column0, static_cast<uint32_t>(inner));
+    if (has_column1) {
+      partial1 += activation_value *
+                  sllm_lowp::BlockCodec<sllm_lowp::Mxfp8E4Block32>::load(
+                      weight_view, column1, static_cast<uint32_t>(inner));
+    }
+  }
+  const uint32_t lane = threadIdx.x & UINT32_C(31);
+  const uint32_t wave = threadIdx.x >> 5U;
+#endif
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    partial0 += __shfl_down(partial0, offset, 32U);
+    partial1 += __shfl_down(partial1, offset, 32U);
+  }
+  __shared__ float wave_sums[8][2];
+  if (lane == 0U) {
+    wave_sums[wave][0] = partial0;
+    wave_sums[wave][1] = partial1;
+  }
+  __syncthreads();
+  if (wave == 0U) {
+    partial0 = lane < 8U ? wave_sums[lane][0] : 0.0F;
+    partial1 = lane < 8U ? wave_sums[lane][1] : 0.0F;
+#pragma unroll
+    for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+      partial0 += __shfl_down(partial0, offset, 32U);
+      partial1 += __shfl_down(partial1, offset, 32U);
+    }
+    if (lane == 0U) {
+      output[column0] = float_to_bf16_rne_bits(partial0);
+      if (has_column1) {
+        output[column1] = float_to_bf16_rne_bits(partial1);
+      }
+    }
+  }
+}
+
+template <bool UsePairLoad>
+__device__ __forceinline__ void sllm_matmul_mxfp6_w6a16_m1_col2_body_impl(
+    const uint16_t *const activation, const uint8_t *const weight,
+    const uint8_t *const weight_scales, uint16_t *const output,
+    const uint64_t m, const uint64_t k, const uint64_t n) {
+  if (m != 1U) {
+    return;
+  }
+  const uint64_t column0 = static_cast<uint64_t>(blockIdx.x) * UINT64_C(2);
+  if (column0 >= n) {
+    return;
+  }
+  const uint64_t column1 = column0 + UINT64_C(1);
+  const bool has_column1 = column1 < n;
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  const uint64_t row_bytes = k * UINT64_C(3) / UINT64_C(4);
+  const sllm_lowp::BlockScaledView<sllm_lowp::Mxfp6E3Block32> weight_view{
+      weight, weight_scales, nullptr, k, row_bytes, blocks_per_row};
+  float partial0 = 0.0F;
+  float partial1 = 0.0F;
+  for (uint64_t inner = threadIdx.x; inner < k; inner += blockDim.x) {
+    const float activation_value = bf16_to_float(activation[inner]);
+    const float weight_value0 =
+        UsePairLoad
+            ? sllm_lowp::BlockCodec<sllm_lowp::Mxfp6E3Block32>::load_pair(
+                  weight_view, column0, static_cast<uint32_t>(inner))
+            : sllm_lowp::BlockCodec<sllm_lowp::Mxfp6E3Block32>::load(
+                  weight_view, column0, static_cast<uint32_t>(inner));
+    partial0 += activation_value * weight_value0;
+    if (has_column1) {
+      const float weight_value1 =
+          UsePairLoad
+              ? sllm_lowp::BlockCodec<sllm_lowp::Mxfp6E3Block32>::load_pair(
+                    weight_view, column1, static_cast<uint32_t>(inner))
+              : sllm_lowp::BlockCodec<sllm_lowp::Mxfp6E3Block32>::load(
+                    weight_view, column1, static_cast<uint32_t>(inner));
+      partial1 += activation_value * weight_value1;
+    }
+  }
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    partial0 += __shfl_down(partial0, offset, 32U);
+    partial1 += __shfl_down(partial1, offset, 32U);
+  }
+  __shared__ float wave_sums[8][2];
+  const uint32_t lane = threadIdx.x & UINT32_C(31);
+  const uint32_t wave = threadIdx.x >> 5U;
+  if (lane == 0U) {
+    wave_sums[wave][0] = partial0;
+    wave_sums[wave][1] = partial1;
+  }
+  __syncthreads();
+  if (wave == 0U) {
+    partial0 = lane < 8U ? wave_sums[lane][0] : 0.0F;
+    partial1 = lane < 8U ? wave_sums[lane][1] : 0.0F;
+#pragma unroll
+    for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+      partial0 += __shfl_down(partial0, offset, 32U);
+      partial1 += __shfl_down(partial1, offset, 32U);
+    }
+    if (lane == 0U) {
+      output[column0] = float_to_bf16_rne_bits(partial0);
+      if (has_column1) {
+        output[column1] = float_to_bf16_rne_bits(partial1);
+      }
+    }
+  }
+}
+
+__device__ __forceinline__ void sllm_matmul_mxfp6_w6a16_m1_col2_body(
+    const uint16_t *const activation, const uint8_t *const weight,
+    const uint8_t *const weight_scales, uint16_t *const output,
+    const uint64_t m, const uint64_t k, const uint64_t n) {
+#if defined(__gfx1201__)
+  sllm_matmul_mxfp6_w6a16_m1_col2_body_impl<true>(
+      activation, weight, weight_scales, output, m, k, n);
+#else
+  sllm_matmul_mxfp6_w6a16_m1_col2_body_impl<false>(
+      activation, weight, weight_scales, output, m, k, n);
+#endif
+}
+
 #define SLLM_DEFINE_MX_WA_KERNEL(symbol, body)                                 \
   extern "C" __global__ __launch_bounds__(256, 1) void symbol(                 \
       const uint8_t *const activation, const uint8_t *const activation_scales, \
@@ -4480,14 +4839,33 @@ __device__ __forceinline__ void sllm_matmul_mxfp6_w6a6_block32_body(
 
 SLLM_DEFINE_MX_WA_KERNEL(sllm_matmul_mxfp8_w8a8_e4m3_block32_decode_v1,
                          sllm_matmul_mxfp8_w8a8_block32_body)
+SLLM_DEFINE_MX_WA_KERNEL(sllm_mxfp8_w8a8_m1_col2_v1,
+                         sllm_matmul_mxfp8_w8a8_m1_col2_body)
 SLLM_DEFINE_MX_WA_KERNEL(sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_v1,
                          sllm_matmul_mxfp8_w8a8_block32_body)
 SLLM_DEFINE_MX_WA_KERNEL(sllm_matmul_mxfp6_w6a6_e3m2_block32_decode_v1,
                          sllm_matmul_mxfp6_w6a6_block32_body)
+SLLM_DEFINE_MX_WA_KERNEL(sllm_mxfp6_w6a6_m1_col2_v1,
+                         sllm_matmul_mxfp6_w6a6_m1_col2_body)
 SLLM_DEFINE_MX_WA_KERNEL(sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_v1,
                          sllm_matmul_mxfp6_w6a6_block32_body)
 
 #undef SLLM_DEFINE_MX_WA_KERNEL
+
+#define SLLM_DEFINE_MX_WA_A16_KERNEL(symbol, body)                             \
+  extern "C" __global__ __launch_bounds__(256, 1) void symbol(                 \
+      const uint16_t *const activation, const uint8_t *const weight,           \
+      const uint8_t *const weight_scales, uint16_t *const output,              \
+      const uint64_t m, const uint64_t k, const uint64_t n) {                  \
+    body(activation, weight, weight_scales, output, m, k, n);                  \
+  }
+
+SLLM_DEFINE_MX_WA_A16_KERNEL(sllm_mxfp8_w8a16_m1_col2_v1,
+                             sllm_matmul_mxfp8_w8a16_m1_col2_body)
+SLLM_DEFINE_MX_WA_A16_KERNEL(sllm_mxfp6_w6a16_m1_col2_v1,
+                             sllm_matmul_mxfp6_w6a16_m1_col2_body)
+
+#undef SLLM_DEFINE_MX_WA_A16_KERNEL
 
 extern "C" __global__
 __launch_bounds__(256, 1) void sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_row8_v2(
@@ -7253,6 +7631,32 @@ hipError_t launch_nvfp4_w4a4(const uint8_t *const packed_activation,
       variant != KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid) {
     return hipErrorInvalidValue;
   }
+  if (variant == KernelVariant::Nvfp4W4A4Packed) {
+    if (!sllm_matmul_kernel::nvfp4_w4a4_baseline_shape(m, k, n) ||
+        m > UINT64_MAX / n) {
+      return hipErrorInvalidValue;
+    }
+    const uint64_t output_elements = m * n;
+    for (uint64_t output_begin = 0U; output_begin < output_elements;) {
+      const uint64_t remaining = output_elements - output_begin;
+      const uint64_t chunk =
+          remaining < sllm_matmul_kernel::kNvfp4W4A4BaselineElementsPerLaunch
+              ? remaining
+              : sllm_matmul_kernel::kNvfp4W4A4BaselineElementsPerLaunch;
+      hipLaunchKernelGGL(sllm_matmul_nvfp4_w4a4_block16_packed_v1,
+                         dim3(static_cast<uint32_t>(chunk)),
+                         dim3(kWorkgroupSize), 0U, stream, packed_activation,
+                         activation_block_scales, packed_weight,
+                         weight_block_scales, weight_tensor_scale,
+                         input_tensor_scale, output, m, k, n, output_begin);
+      const hipError_t launch_status = hipGetLastError();
+      if (launch_status != hipSuccess) {
+        return launch_status;
+      }
+      output_begin += chunk;
+    }
+    return hipSuccess;
+  }
   if (variant == KernelVariant::Nvfp4W4A4Decode) {
     hipLaunchKernelGGL(sllm_matmul_nvfp4_w4a4_block16_decode_v1,
                        dim3(static_cast<uint32_t>(n)), dim3(kWorkgroupSize), 0U,
@@ -7545,12 +7949,6 @@ hipError_t launch_nvfp4_w4a4(const uint8_t *const packed_activation,
                          weight_block_scales, weight_tensor_scale,
                          input_tensor_scale, output, m, k, n);
     }
-  } else {
-    hipLaunchKernelGGL(sllm_matmul_nvfp4_w4a4_block16_packed_v1,
-                       dim3(static_cast<uint32_t>(m * n)), dim3(kWorkgroupSize),
-                       0U, stream, packed_activation, activation_block_scales,
-                       packed_weight, weight_block_scales, weight_tensor_scale,
-                       input_tensor_scale, output, m, k, n);
   }
   return hipGetLastError();
 }
@@ -7699,6 +8097,25 @@ hipError_t launch_mxfp8_quantize(const uint16_t *const activation,
   return hipGetLastError();
 }
 
+hipError_t launch_mxfp8_w8a16(const uint16_t *const activation,
+                              const uint8_t *const weight,
+                              const uint8_t *const weight_scales,
+                              uint16_t *const output, const uint64_t m,
+                              const uint64_t k, const uint64_t n,
+                              const KernelVariant variant,
+                              const hipStream_t stream) noexcept {
+  if (variant != KernelVariant::Mxfp8W8A16M1Col2 ||
+      !phase85_mxfp_m1_a16_shape(m, k, n)) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(
+      sllm_mxfp8_w8a16_m1_col2_v1,
+      dim3(static_cast<uint32_t>((n + UINT64_C(1)) / UINT64_C(2))),
+      dim3(kWorkgroupSize), 0U, stream, activation, weight, weight_scales,
+      output, m, k, n);
+  return hipGetLastError();
+}
+
 hipError_t launch_mxfp8_w8a8(const uint8_t *const activation,
                              const uint8_t *const activation_scales,
                              const uint8_t *const weight,
@@ -7725,6 +8142,15 @@ hipError_t launch_mxfp8_w8a8(const uint8_t *const activation,
         dim3(static_cast<uint32_t>(((m + 3U) / 4U) * ((n + 7U) / 8U))),
         dim3(kPhase85MxfpSmallMWorkgroupSize), 0U, stream, activation,
         activation_scales, weight, weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp8W8A8M1Col2) {
+    if (!phase85_mxfp_m1_col2_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp8_w8a8_m1_col2_v1,
+        dim3(static_cast<uint32_t>((n + UINT64_C(1)) / UINT64_C(2))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
   } else if (variant == KernelVariant::Mxfp8W8A8Decode) {
     hipLaunchKernelGGL(sllm_matmul_mxfp8_w8a8_e4m3_block32_decode_v1,
                        dim3(static_cast<uint32_t>(n)), dim3(kWorkgroupSize), 0U,
@@ -7860,6 +8286,25 @@ hipError_t launch_mxfp6_quantize(const uint16_t *const activation,
   return hipGetLastError();
 }
 
+hipError_t launch_mxfp6_w6a16(const uint16_t *const activation,
+                              const uint8_t *const weight,
+                              const uint8_t *const weight_scales,
+                              uint16_t *const output, const uint64_t m,
+                              const uint64_t k, const uint64_t n,
+                              const KernelVariant variant,
+                              const hipStream_t stream) noexcept {
+  if (variant != KernelVariant::Mxfp6W6A16M1Col2 ||
+      !phase85_mxfp_m1_a16_shape(m, k, n)) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(
+      sllm_mxfp6_w6a16_m1_col2_v1,
+      dim3(static_cast<uint32_t>((n + UINT64_C(1)) / UINT64_C(2))),
+      dim3(kWorkgroupSize), 0U, stream, activation, weight, weight_scales,
+      output, m, k, n);
+  return hipGetLastError();
+}
+
 hipError_t launch_mxfp6_w6a6(const uint8_t *const activation,
                              const uint8_t *const activation_scales,
                              const uint8_t *const weight,
@@ -7874,6 +8319,15 @@ hipError_t launch_mxfp6_w6a6(const uint8_t *const activation,
         dim3(static_cast<uint32_t>(((m + 3U) / 4U) * ((n + 7U) / 8U))),
         dim3(kPhase85MxfpSmallMWorkgroupSize), 0U, stream, activation,
         activation_scales, weight, weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp6W6A6M1Col2) {
+    if (!phase85_mxfp_m1_col2_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp6_w6a6_m1_col2_v1,
+        dim3(static_cast<uint32_t>((n + UINT64_C(1)) / UINT64_C(2))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
   } else if (variant == KernelVariant::Mxfp6W6A6Decode) {
     hipLaunchKernelGGL(sllm_matmul_mxfp6_w6a6_e3m2_block32_decode_v1,
                        dim3(static_cast<uint32_t>(n)), dim3(kWorkgroupSize), 0U,

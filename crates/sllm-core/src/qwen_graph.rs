@@ -2282,19 +2282,17 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_companion(
             ));
         }
         let encoding = match companion.encoding() {
-            crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => Encoding::Mxfp8W8A8 {
+            crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => Some(Encoding::Mxfp8W8A8 {
                 block_size: 32,
                 scale_dtype: DType::U8,
-            },
-            crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => Encoding::Mxfp6W6A6 {
+            }),
+            crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => Some(Encoding::Mxfp6W6A6 {
                 block_size: 32,
                 scale_dtype: DType::U8,
-            },
-            crate::MtpWeightEncoding::Bf16 => {
-                return Err(QwenGraphError::InvalidPlan(
-                    "Qwen3.8 MTP companion encoding must be MXFP8 or MXFP6".to_owned(),
-                ));
-            }
+            }),
+            // Fake-quantized BF16 sidecars use the original BF16 graph layout.
+            // Their replacement bytes are supplied by the resident provisioner.
+            crate::MtpWeightEncoding::Bf16 => None,
         };
         for name in MTP_MATRIX_NAMES {
             let sidecar_tensor = companion.tensor(name).ok_or_else(|| {
@@ -2316,8 +2314,10 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_companion(
                     "Qwen3.8 MTP companion tensor shape or source differs: {name}"
                 )));
             }
-            fp8_tensor_names.insert(name.to_owned());
-            quantized_weight_encodings.insert(name.to_owned(), encoding);
+            if let Some(encoding) = encoding {
+                fp8_tensor_names.insert(name.to_owned());
+                quantized_weight_encodings.insert(name.to_owned(), encoding);
+            }
         }
     }
     let fp8_dtype = if companion.is_some_and(|sidecar| {
@@ -7607,6 +7607,110 @@ mod tests {
                 .iter()
                 .any(|node| node.label() == "tied_lm_head_matmul")
         );
+    }
+
+    #[test]
+    #[ignore = "requires the immutable Qwen3.8 NVFP4 model and generated BF16 MTP sidecar"]
+    fn qwen38_mtp_bf16_sidecar_binds_bf16_matrices_and_fp8_shared_head() {
+        let root = std::env::var_os("SLLM_QWEN38_NVFP4_CACHE")
+            .expect("SLLM_QWEN38_NVFP4_CACHE must name the immutable snapshot");
+        let sidecar_root = std::path::PathBuf::from(
+            std::env::var_os("SLLM_QWEN38_MTP_BF16_SIDECAR")
+                .expect("SLLM_QWEN38_MTP_BF16_SIDECAR must name the generated sidecar"),
+        );
+        let (manifest, payload) = if sidecar_root.is_dir() {
+            (
+                sidecar_root.join("manifest.json"),
+                sidecar_root.join("payload.safetensors"),
+            )
+        } else {
+            (
+                sidecar_root.clone(),
+                sidecar_root
+                    .parent()
+                    .expect("sidecar manifest has a parent")
+                    .join("payload.safetensors"),
+            )
+        };
+        let artifact = crate::verify_unsloth_qwen38_nvfp4(root).expect("Qwen3.8 artifact verifies");
+        let lock =
+            crate::read_model_lock(repository_path("docs/models/locks/qwen3.5-27b-bf16.json"))
+                .expect("reviewed Qwen3.8 lock parses");
+        let sidecar =
+            crate::verify_qwen38_mtp_quantized_sidecar(&lock, &artifact, &manifest, &payload)
+                .expect("generated BF16 MTP sidecar verifies");
+        assert_eq!(sidecar.encoding(), crate::MtpWeightEncoding::Bf16);
+        assert_eq!(sidecar.tensors().len(), 8);
+
+        let plan = crate::build_qwen38_nvfp4_mtp_weight_load_plan(&lock, &artifact)
+            .expect("Qwen3.8 MTP plan builds");
+        let graph = build_qwen38_nvfp4_mtp_graph_with_companion(
+            &lock,
+            &plan,
+            &artifact,
+            17,
+            crate::KvCacheEncoding::Mxfp8E4,
+            17,
+            Some(&sidecar),
+        )
+        .expect("Qwen3.8 BF16 companion graph builds");
+        assert!(graph.is_mtp());
+        assert_eq!(
+            graph.fp8_sidecar_fingerprint(),
+            Some(
+                sidecar
+                    .combined_recipe_digest(artifact.recipe_digest())
+                    .as_str(),
+            )
+        );
+
+        const MTP_MATRIX_NAMES: [&str; 8] = [
+            "mtp.fc.weight",
+            "mtp.layers.0.mlp.down_proj.weight",
+            "mtp.layers.0.mlp.gate_proj.weight",
+            "mtp.layers.0.mlp.up_proj.weight",
+            "mtp.layers.0.self_attn.k_proj.weight",
+            "mtp.layers.0.self_attn.o_proj.weight",
+            "mtp.layers.0.self_attn.q_proj.weight",
+            "mtp.layers.0.self_attn.v_proj.weight",
+        ];
+        for name in MTP_MATRIX_NAMES {
+            let binding = graph
+                .weight_bindings()
+                .iter()
+                .find(|binding| binding.tensor_name() == name)
+                .unwrap_or_else(|| panic!("MTP matrix binding is absent: {name}"));
+            assert_eq!(binding.dtype(), TensorDType::Bf16, "{name}");
+            let tensor = graph
+                .tensor_metadata()
+                .iter()
+                .find(|tensor| tensor.name() == name)
+                .unwrap_or_else(|| panic!("MTP matrix metadata is absent: {name}"));
+            assert_eq!(tensor.view().dtype(), DType::Bf16, "{name}");
+            assert_eq!(tensor.view().encoding(), Encoding::Unquantized, "{name}");
+        }
+
+        let output_binding = graph
+            .weight_bindings()
+            .iter()
+            .find(|binding| {
+                binding.consumer().layer.is_none()
+                    && binding.consumer().role == WeightConsumer::OutputProjection
+            })
+            .expect("untied Qwen3.8 output binding");
+        let output = graph
+            .tensor_metadata()
+            .iter()
+            .find(|tensor| tensor.name() == output_binding.tensor_name())
+            .expect("untied output metadata");
+        assert!(matches!(
+            output.view().encoding(),
+            Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: DType::F32,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            }
+        ));
     }
 
     #[test]

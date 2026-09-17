@@ -2438,7 +2438,9 @@ Sections [
                 compiler_stub_report = runner.inspect_host(path, Path("/fake/llvm-readobj"), row, expected_bundles)
             self.assertEqual(compiler_stub_report["stub_symbols"], [])
             phase85_symbols = (
+                "sllm_mxfp6_w6a6_m1_col2_v1",
                 "sllm_mxfp6_w6a6_mmq_rows4_col8_v1",
+                "sllm_mxfp8_w8a8_m1_col2_v1",
                 "sllm_mxfp8_w8a8_mmq_rows4_col8_v1",
             )
             phase85_text = "\n".join(

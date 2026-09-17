@@ -261,7 +261,8 @@ bool graph_span_qwen38_pack(const ElementwisePlan *const plan,
             variant == ::sllm_matmul_kernel::KernelVariant::
                            Fp8OuterDecodeGfx1030ActivationSharedWave4Col32 ||
             variant == ::sllm_matmul_kernel::KernelVariant::
-                           Fp8OuterDecodeGfx1030ActivationSharedWave8Col64);
+                           Fp8OuterDecodeGfx1030ActivationSharedWave8Col64 ||
+            variant == ::sllm_matmul_kernel::KernelVariant::Fp8Emulation);
   }
   return false;
 }

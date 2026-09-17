@@ -13,12 +13,12 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sllm_core::{
     AllocationSnapshot, Backend, ExecutionSessionRequest, KvCacheEncoding, OsSamplingRandom,
@@ -40,6 +40,8 @@ use tokenizers::Tokenizer;
 
 #[path = "phase84_5_mtp_path/mod.rs"]
 mod phase84_5_mtp_path;
+#[path = "phase86_mtp_catch_up/mod.rs"]
+mod phase86_mtp_catch_up;
 
 const MODEL_ENV: &str = "SLLM_PHASE78_MODEL_PATH";
 const COMPAT_MODEL_ENV: &str = "SLLM_QWEN38_NVFP4_CACHE";
@@ -59,6 +61,17 @@ const PHASE83_FIXTURE_ONLY: &str = "SLLM_PHASE83_FIXTURE_ONLY";
 const PHASE83_MTP_ENV: &str = "SLLM_PHASE83_MTP";
 const PHASE83_MTP_WIDTH_ENV: &str = "SLLM_PHASE83_MTP_WIDTH";
 const PHASE84_MTP_COMPANION_PATH_ENV: &str = "SLLM_PHASE84_MTP_COMPANION_PATH";
+const PHASE85_A16_STAGE0_ENV: &str = "SLLM_PHASE85_A16_STAGE0";
+const PHASE85_A16_GENERATE_ENV: &str = "SLLM_PHASE85_A16_STAGE0_GENERATE";
+const PHASE85_A16_PREFIX_FILE_ENV: &str = "SLLM_PHASE85_A16_PREFIX_FILE";
+const PHASE85_A16_SUITE_FILE_ENV: &str = "SLLM_PHASE85_A16_STAGE0_SUITE_FILE";
+const PHASE85_A16_OUTPUT_DIR_ENV: &str = "SLLM_PHASE85_A16_OUTPUT_DIR";
+const PHASE85_A16_SERIES_ENV: &str = "SLLM_PHASE85_A16_SERIES";
+const PHASE85_A16_PREFIX_OUTPUT_TOKENS_ENV: &str = "SLLM_PHASE85_A16_PREFIX_OUTPUT_TOKENS";
+const PHASE85_A16_SECONDARY_ENV: &str = "SLLM_PHASE85_A16_STAGE0_SECONDARY";
+const PHASE85_A16_SECONDARY_CASES_ENV: &str = "SLLM_PHASE85_A16_SECONDARY_CASES";
+const PHASE85_A16_SECONDARY_SEED_ENV: &str = "SLLM_PHASE85_A16_SECONDARY_SEED";
+const PHASE85_A16_SECONDARY_OUTPUT_TOKENS_ENV: &str = "SLLM_PHASE85_A16_SECONDARY_OUTPUT_TOKENS";
 
 const DEFAULT_WARMUPS: usize = 3;
 const DEFAULT_MEASURED: usize = 10;
@@ -390,6 +403,7 @@ fn build_mtp_run_report(
         draft_fallback_used: false,
         draft_all_dispatches_hip: true,
         mtp_prefix_priming_wall_ns: 0,
+        mtp_prefix_stage_timings: Vec::new(),
         mtp_decode_proposal_wall_ns: 0,
     })
 }
@@ -424,6 +438,7 @@ struct Report {
     protocol: ProtocolReport,
     sampling: SamplingBench,
     mtp: MtpReport,
+    mtp_priming_chunk_capacity_tokens: Option<u64>,
     fixture: FixtureReport,
     tokenizer: TokenizerReport,
     is_phase78_final: bool,
@@ -446,6 +461,12 @@ struct MtpReport {
     timing_contract: &'static str,
     companion_encoding: Option<String>,
     companion_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct PrefixStageTimingReport {
+    row_count: usize,
+    wall_ns: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -472,6 +493,7 @@ struct MtpRunReport {
     /// Host elapsed wall time around MTP prefix priming; this is not a sum of
     /// device kernel timestamps.
     mtp_prefix_priming_wall_ns: u64,
+    mtp_prefix_stage_timings: Vec<PrefixStageTimingReport>,
     /// Host elapsed wall time around MTP draft forward and sampling proposals;
     /// target verification, replay, and waiting are excluded.
     mtp_decode_proposal_wall_ns: u64,
@@ -774,9 +796,155 @@ struct FailureReport {
     error: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct Stage0PrefixInput {
+    case_id: String,
+    seed: u64,
+    prompt_tokens: Vec<i32>,
+    output_prefix_tokens: Vec<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Stage0PrefixFile {
+    schema: String,
+    entries: Vec<Stage0PrefixInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Stage0Suite {
+    seeds: Vec<u64>,
+    cases: Vec<Stage0SuiteCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Stage0SuiteCase {
+    id: String,
+    task: String,
+    language: String,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct Stage0TopLogit {
+    token_id: usize,
+    value: f32,
+}
+
+#[derive(Serialize)]
+struct Stage0FixedEntry {
+    case_id: String,
+    seed: u64,
+    prompt_token_count: usize,
+    output_prefix_token_count: usize,
+    prompt_sha256: String,
+    output_prefix_sha256: String,
+    full_prefix_sha256: String,
+    target_hidden_sha256: String,
+    teacher_forcing_contract: &'static str,
+    row_count: usize,
+    vocab_size: usize,
+    logits_dtype: &'static str,
+    logits_file: String,
+    logits_sha256: String,
+    finite_value_count: usize,
+    nonfinite_value_count: usize,
+    top1: Vec<usize>,
+    top5: Vec<Vec<Stage0TopLogit>>,
+    selected_backend: String,
+    target: String,
+    target_submission_count: u64,
+    target_kernel_dispatch_count: u64,
+    draft_submission_count: u64,
+    draft_kernel_dispatch_count: u64,
+    fallback_used: bool,
+    all_dispatches_hip: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct Stage0GenerationEntry {
+    case_id: String,
+    task: String,
+    language: String,
+    seed: u64,
+    prompt_tokens: Vec<i32>,
+    output_prefix_tokens: Vec<i32>,
+    prompt_sha256: String,
+    output_prefix_sha256: String,
+    full_prefix_sha256: String,
+}
+
+#[derive(Serialize)]
+struct Stage0FixedReport {
+    prefix_file: String,
+    prefix_file_sha256: String,
+    entries: Vec<Stage0FixedEntry>,
+}
+
+#[derive(Serialize)]
+struct Stage0GenerationReport {
+    suite_file: String,
+    suite_file_sha256: String,
+    output_prefix_tokens: usize,
+    entries: Vec<Stage0GenerationEntry>,
+    prefix_output_file: String,
+}
+
+#[derive(Serialize)]
+struct Stage0SecondaryEntry {
+    case_id: String,
+    task: String,
+    language: String,
+    seed: u64,
+    prompt_sha256: String,
+    prompt_token_count: usize,
+    output_tokens: usize,
+    run: RunReport,
+}
+
+#[derive(Serialize)]
+struct Stage0SecondaryReport {
+    suite_file: String,
+    suite_file_sha256: String,
+    selected_cases: Vec<String>,
+    seed: u64,
+    warmups: usize,
+    measured: usize,
+    entries: Vec<Stage0SecondaryEntry>,
+}
+
+#[derive(Serialize)]
+struct Stage0Report {
+    schema_version: &'static str,
+    state: &'static str,
+    benchmark_mode: &'static str,
+    target: String,
+    device_index: u32,
+    series: String,
+    model_root: String,
+    model_sha256: &'static str,
+    companion_encoding: Option<String>,
+    companion_digest: Option<String>,
+    fixed_prefix: Option<Stage0FixedReport>,
+    generation: Option<Stage0GenerationReport>,
+    secondary_mtp: Option<Stage0SecondaryReport>,
+    phase86: Option<phase86_mtp_catch_up::Phase86Report>,
+    resident_current_bytes_before_shutdown: u64,
+    cleanup: CleanupReport,
+}
+
 fn main() -> ExitCode {
     if env::var("SLLM_PHASE84_5_DIAGNOSTIC").as_deref() == Ok("1") {
         return phase84_5_mtp_path::run();
+    }
+    if env::var(phase86_mtp_catch_up::PREPARE_ONLY_ENV).as_deref() == Ok("1") {
+        return emit_phase86_prepare_only();
+    }
+    if env::var(PHASE85_A16_STAGE0_ENV).as_deref() == Ok("1")
+        || env::var(PHASE85_A16_GENERATE_ENV).as_deref() == Ok("1")
+        || env::var(PHASE85_A16_SECONDARY_ENV).as_deref() == Ok("1")
+        || env::var_os(phase86_mtp_catch_up::MODE_ENV).is_some()
+    {
+        return emit_stage0();
     }
     if env::args_os().len() != 1 {
         return emit_failure("this benchmark accepts environment variables only".to_owned());
@@ -1024,6 +1192,15 @@ fn run(config: Config) -> Result<Report, String> {
     } else {
         None
     };
+    let mtp_priming_chunk_capacity = if config.mtp.enabled {
+        let capacity = parse_env_or("SLLM_PHASE85_MTP_PRIMING_CHUNK_CAPACITY", Some(1_024_u64))?;
+        if capacity == 0 || capacity > config.state_capacity {
+            return Err("MTP priming chunk capacity must fit the request state".to_owned());
+        }
+        Some(capacity)
+    } else {
+        None
+    };
     let mtp_graph = if let Some(plan) = mtp_plan.as_ref() {
         Some(
             build_qwen38_nvfp4_mtp_graph_with_companion(
@@ -1032,7 +1209,7 @@ fn run(config: Config) -> Result<Report, String> {
                 &artifact,
                 config.state_capacity,
                 config.kv_cache,
-                1_024,
+                mtp_priming_chunk_capacity.expect("enabled MTP has a priming capacity"),
                 mtp_companion.as_deref(),
             )
             .map_err(|error| format!("Qwen3.8 MTP companion graph failed: {error}"))?,
@@ -1166,6 +1343,7 @@ fn run(config: Config) -> Result<Report, String> {
         mtp: config
             .mtp
             .report(mtp_companion.as_deref(), artifact.recipe_digest()),
+        mtp_priming_chunk_capacity_tokens: mtp_priming_chunk_capacity,
         protocol: ProtocolReport {
             active_requests: 1,
             parallel_requests: 1,
@@ -1225,6 +1403,901 @@ fn run(config: Config) -> Result<Report, String> {
             zero: cleanup_zero,
         },
     })
+}
+
+fn stage0_required_path(name: &str) -> Result<PathBuf, String> {
+    let path = env::var_os(name)
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{name} is required for Phase85 Stage0"))?;
+    if !path.is_absolute() {
+        return Err(format!("{name} must be an absolute path"));
+    }
+    Ok(path)
+}
+
+fn stage0_file_sha256(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+fn stage0_name(value: &str) -> String {
+    let name = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if name.is_empty() {
+        "case".to_owned()
+    } else {
+        name
+    }
+}
+
+fn stage0_top_logits(logits: &[f32], count: usize) -> Vec<Stage0TopLogit> {
+    let mut indices = (0..logits.len()).collect::<Vec<_>>();
+    indices.sort_unstable_by(|left, right| {
+        logits[*right]
+            .total_cmp(&logits[*left])
+            .then_with(|| left.cmp(right))
+    });
+    indices
+        .into_iter()
+        .take(count)
+        .map(|token_id| Stage0TopLogit {
+            token_id,
+            value: logits[token_id],
+        })
+        .collect()
+}
+
+fn stage0_write_logits(path: &Path, rows: &[Vec<f32>]) -> Result<String, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("logits path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent).map_err(|error| format!("create {}: {error}", parent.display()))?;
+    let mut file = fs::File::create(path)
+        .map_err(|error| format!("create logits file {}: {error}", path.display()))?;
+    let mut digest = Sha256::new();
+    for row in rows {
+        let mut bytes = Vec::with_capacity(row.len() * std::mem::size_of::<f32>());
+        for value in row {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        file.write_all(&bytes)
+            .map_err(|error| format!("write logits file {}: {error}", path.display()))?;
+        digest.update(&bytes);
+    }
+    file.flush()
+        .map_err(|error| format!("flush logits file {}: {error}", path.display()))?;
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn stage0_read_prefix_file(path: &Path) -> Result<Stage0PrefixFile, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read prefix file: {error}"))?;
+    let file: Stage0PrefixFile =
+        serde_json::from_slice(&bytes).map_err(|error| format!("decode prefix file: {error}"))?;
+    if file.schema != "phase85-a16-mtp-prefix-v1" {
+        return Err(format!("unsupported Stage0 prefix schema: {}", file.schema));
+    }
+    if file.entries.is_empty() {
+        return Err("Stage0 prefix file has no entries".to_owned());
+    }
+    for entry in &file.entries {
+        if entry.prompt_tokens.is_empty() || entry.output_prefix_tokens.is_empty() {
+            return Err(format!("Stage0 prefix entry {} is empty", entry.case_id));
+        }
+        for token in entry
+            .prompt_tokens
+            .iter()
+            .chain(entry.output_prefix_tokens.iter())
+        {
+            validate_token(*token)?;
+        }
+    }
+    Ok(file)
+}
+
+fn stage0_fixed_entries(
+    target_resident: &QwenResidentModel,
+    target_graph: &sllm_core::QwenGraph,
+    mtp_resident: &QwenResidentModel,
+    mtp_graph: &sllm_core::QwenGraph,
+    prefixes: &Stage0PrefixFile,
+    output_dir: &Path,
+    target: &str,
+) -> Result<Vec<Stage0FixedEntry>, String> {
+    let logits_dir = output_dir.join("logits");
+    fs::create_dir_all(&logits_dir)
+        .map_err(|error| format!("create Stage0 logits directory: {error}"))?;
+    let mut entries = Vec::with_capacity(prefixes.entries.len());
+    for prefix in &prefixes.entries {
+        let mut target_request =
+            target_resident
+                .new_request(target_graph.clone())
+                .map_err(|error| {
+                    format!(
+                        "Stage0 target request creation failed for {}: {error}",
+                        prefix.case_id
+                    )
+                })?;
+        let mut draft_request = mtp_resident
+            .new_request(mtp_graph.clone())
+            .map_err(|error| {
+                format!(
+                    "Stage0 draft request creation failed for {}: {error}",
+                    prefix.case_id
+                )
+            })?;
+        let target_prefill = target_request
+            .prefill_with_mtp_state(&prefix.prompt_tokens)
+            .map_err(|error| {
+                format!(
+                    "Stage0 target prompt prefill failed for {}: {error}",
+                    prefix.case_id
+                )
+            })?;
+        let hidden_rows = target_prefill.hidden_states_bf16().ok_or_else(|| {
+            format!(
+                "Stage0 target prompt omitted hidden rows for {}",
+                prefix.case_id
+            )
+        })?;
+        if prefix.prompt_tokens.is_empty() {
+            return Err(format!("Stage0 prompt is empty for {}", prefix.case_id));
+        }
+        let hidden_width = hidden_rows
+            .len()
+            .checked_div(prefix.prompt_tokens.len())
+            .filter(|width| *width > 0)
+            .ok_or_else(|| {
+                format!(
+                    "Stage0 target hidden width is invalid for {}",
+                    prefix.case_id
+                )
+            })?;
+        if hidden_rows.len() != prefix.prompt_tokens.len() * hidden_width {
+            return Err(format!(
+                "Stage0 target hidden row count is invalid for {}",
+                prefix.case_id
+            ));
+        }
+        let zero_hidden = vec![0_u16; hidden_width];
+        draft_request
+            .prefill_mtp_state_only(prefix.prompt_tokens[0], &zero_hidden)
+            .map_err(|error| {
+                format!(
+                    "Stage0 draft prompt prime failed for {}: {error}",
+                    prefix.case_id
+                )
+            })?;
+        let capacity = usize::try_from(draft_request.prefill_chunk_capacity())
+            .map_err(|_| "Stage0 draft prefill capacity overflowed".to_owned())?
+            .max(1);
+        let mut index = 1;
+        while index < prefix.prompt_tokens.len() {
+            let end = (index + capacity).min(prefix.prompt_tokens.len());
+            let hidden_start = (index - 1) * hidden_width;
+            let hidden_end = (end - 1) * hidden_width;
+            draft_request
+                .decode_mtp_state_only_batch(
+                    &prefix.prompt_tokens[index..end],
+                    &hidden_rows[hidden_start..hidden_end],
+                )
+                .map_err(|error| {
+                    format!(
+                        "Stage0 draft prompt prime failed for {}: {error}",
+                        prefix.case_id
+                    )
+                })?;
+            index = end;
+        }
+        let mut last_hidden =
+            hidden_rows[(prefix.prompt_tokens.len() - 1) * hidden_width..].to_vec();
+        let mut target_hidden_digest = Sha256::new();
+        for value in hidden_rows {
+            target_hidden_digest.update(value.to_le_bytes());
+        }
+        let mut rows = Vec::with_capacity(prefix.output_prefix_tokens.len());
+        for (index, token) in prefix.output_prefix_tokens.iter().copied().enumerate() {
+            let output = draft_request
+                .decode_mtp(token, &last_hidden)
+                .map_err(|error| {
+                    format!(
+                        "Stage0 teacher-forced decode failed for {} row {index}: {error}",
+                        prefix.case_id
+                    )
+                })?;
+            let logits = output.last_logits().ok_or_else(|| {
+                format!(
+                    "Stage0 decode returned no logits for {} row {index}",
+                    prefix.case_id
+                )
+            })?;
+            if logits.len() != QWEN35_VOCAB_SIZE {
+                return Err(format!(
+                    "Stage0 vocabulary size differs for {}: expected={} actual={}",
+                    prefix.case_id,
+                    QWEN35_VOCAB_SIZE,
+                    logits.len()
+                ));
+            }
+            rows.push(logits.to_vec());
+            let target_output = target_request
+                .decode_with_mtp_state(token)
+                .map_err(|error| {
+                    format!(
+                        "Stage0 target teacher-forced decode failed for {} row {index}: {error}",
+                        prefix.case_id
+                    )
+                })?;
+            let target_hidden = target_output.hidden_states_bf16().ok_or_else(|| {
+                format!(
+                    "Stage0 target decode omitted hidden row for {}",
+                    prefix.case_id
+                )
+            })?;
+            if target_hidden.len() != hidden_width {
+                return Err(format!(
+                    "Stage0 target hidden width changed for {}",
+                    prefix.case_id
+                ));
+            }
+            for value in target_hidden {
+                target_hidden_digest.update(value.to_le_bytes());
+            }
+            last_hidden.clear();
+            last_hidden.extend_from_slice(target_hidden);
+        }
+        let target_audit = target_request.audit_snapshot().map_err(|error| {
+            format!("Stage0 target audit failed for {}: {error}", prefix.case_id)
+        })?;
+        let draft_audit = draft_request.audit_snapshot().map_err(|error| {
+            format!("Stage0 draft audit failed for {}: {error}", prefix.case_id)
+        })?;
+        let valid_audit = target_audit.selected_backend() == "hip"
+            && draft_audit.selected_backend() == "hip"
+            && target_audit.target() == target
+            && draft_audit.target() == target
+            && target_audit.submission_count() > 0
+            && target_audit.kernel_dispatch_count() > 0
+            && draft_audit.submission_count() > 0
+            && draft_audit.kernel_dispatch_count() > 0
+            && !target_audit.fallback_used()
+            && !draft_audit.fallback_used()
+            && target_audit.all_dispatches_hip()
+            && draft_audit.all_dispatches_hip();
+        if !valid_audit {
+            return Err(format!(
+                "Stage0 dispatch audit is not HIP-only for {}: target={target_audit:?} draft={draft_audit:?}",
+                prefix.case_id
+            ));
+        }
+        drop(draft_request);
+        drop(target_request);
+        let full_prefix = prefix
+            .prompt_tokens
+            .iter()
+            .chain(prefix.output_prefix_tokens.iter())
+            .copied()
+            .collect::<Vec<_>>();
+        let logits_path = logits_dir.join(format!(
+            "{}-seed-{}.f32",
+            stage0_name(&prefix.case_id),
+            prefix.seed
+        ));
+        let logits_sha256 = stage0_write_logits(&logits_path, &rows)?;
+        let finite_value_count = rows
+            .iter()
+            .flat_map(|row| row.iter())
+            .filter(|value| value.is_finite())
+            .count();
+        let total_values = rows.len() * QWEN35_VOCAB_SIZE;
+        let top1 = rows
+            .iter()
+            .map(|row| stage0_top_logits(row, 1)[0].token_id)
+            .collect::<Vec<_>>();
+        let top5 = rows
+            .iter()
+            .map(|row| stage0_top_logits(row, 5))
+            .collect::<Vec<_>>();
+        entries.push(Stage0FixedEntry {
+            case_id: prefix.case_id.clone(),
+            seed: prefix.seed,
+            prompt_token_count: prefix.prompt_tokens.len(),
+            output_prefix_token_count: prefix.output_prefix_tokens.len(),
+            prompt_sha256: hash_tokens(&prefix.prompt_tokens),
+            output_prefix_sha256: hash_tokens(&prefix.output_prefix_tokens),
+            full_prefix_sha256: hash_tokens(&full_prefix),
+            target_hidden_sha256: format!("sha256:{:x}", target_hidden_digest.finalize()),
+            teacher_forcing_contract:
+                "row i consumes output_prefix_tokens[i] with target hidden after prompt plus output_prefix_tokens[..i]",
+            row_count: rows.len(),
+            vocab_size: QWEN35_VOCAB_SIZE,
+            logits_dtype: "f32-le",
+            logits_file: logits_path.display().to_string(),
+            logits_sha256,
+            finite_value_count,
+            nonfinite_value_count: total_values - finite_value_count,
+            top1,
+            top5,
+            selected_backend: target_audit.selected_backend().to_owned(),
+            target: target_audit.target().to_owned(),
+            target_submission_count: target_audit.submission_count(),
+            target_kernel_dispatch_count: target_audit.kernel_dispatch_count(),
+            draft_submission_count: draft_audit.submission_count(),
+            draft_kernel_dispatch_count: draft_audit.kernel_dispatch_count(),
+            fallback_used: target_audit.fallback_used() || draft_audit.fallback_used(),
+            all_dispatches_hip: target_audit.all_dispatches_hip()
+                && draft_audit.all_dispatches_hip(),
+        });
+        eprintln!(
+            "[phase85-a16] fixed entry complete series={} case={} seed={} rows={}",
+            env::var(PHASE85_A16_SERIES_ENV).unwrap_or_else(|_| "bf16".to_owned()),
+            prefix.case_id,
+            prefix.seed,
+            rows.len()
+        );
+    }
+    Ok(entries)
+}
+
+fn stage0_suite_prompts(
+    artifact: &sllm_core::VerifiedUnslothQwen38Nvfp4,
+    suite: &Stage0Suite,
+) -> Result<Vec<(String, String, String, Vec<i32>)>, String> {
+    let tokenizer = TokenizerFrontendV1::from_unsloth_qwen38_nvfp4(artifact)
+        .map_err(|error| format!("load Stage0 suite tokenizer: {error}"))?;
+    let renderer = Qwen35ChatTemplateV1::from_unsloth_qwen38_nvfp4(artifact)
+        .map_err(|error| format!("load Stage0 suite renderer: {error}"))?;
+    let mut prompts = Vec::with_capacity(suite.cases.len());
+    for case in &suite.cases {
+        let rendered = renderer
+            .render(
+                &[Qwen35ChatMessageV1::user(&case.message)],
+                Qwen35RenderOptionsV1 {
+                    add_generation_prompt: true,
+                    thinking: ThinkingModeV1::Disabled,
+                },
+            )
+            .map_err(|error| format!("render Stage0 suite case {}: {error}", case.id))?;
+        let tokens = tokenizer
+            .encode(&rendered)
+            .map_err(|error| format!("tokenize Stage0 suite case {}: {error}", case.id))?
+            .as_slice()
+            .iter()
+            .copied()
+            .map(|token| i32::try_from(token).map_err(|_| format!("token overflows i32: {token}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        if tokens.is_empty() {
+            return Err(format!(
+                "Stage0 suite case {} rendered to no tokens",
+                case.id
+            ));
+        }
+        prompts.push((
+            case.id.clone(),
+            case.task.clone(),
+            case.language.clone(),
+            tokens,
+        ));
+    }
+    Ok(prompts)
+}
+
+fn stage0_generate_prefixes(
+    artifact: &sllm_core::VerifiedUnslothQwen38Nvfp4,
+    suite_path: &Path,
+    output_dir: &Path,
+    target_resident: &QwenResidentModel,
+    target_graph: &sllm_core::QwenGraph,
+    mtp_resident: &QwenResidentModel,
+    mtp_graph: &sllm_core::QwenGraph,
+    session: &Arc<sllm_core::ExecutionSession>,
+    target: &str,
+    draft_width: usize,
+    output_prefix_tokens: usize,
+) -> Result<Stage0GenerationReport, String> {
+    let suite_bytes =
+        fs::read(suite_path).map_err(|error| format!("read Stage0 suite: {error}"))?;
+    let suite: Stage0Suite = serde_json::from_slice(&suite_bytes)
+        .map_err(|error| format!("decode Stage0 suite: {error}"))?;
+    if suite.seeds.is_empty() || suite.cases.is_empty() || output_prefix_tokens == 0 {
+        return Err("Stage0 suite or output prefix is empty".to_owned());
+    }
+    let prompts = stage0_suite_prompts(artifact, &suite)?;
+    let tokenizer = load_locked_tokenizer(artifact.root())?;
+    let mut entries = Vec::with_capacity(suite.cases.len() * suite.seeds.len());
+    for (case_index, (case_id, task, language, prompt)) in prompts.iter().enumerate() {
+        for (seed_index, seed) in suite.seeds.iter().copied().enumerate() {
+            let sampling = SamplingBench {
+                mode: SamplingMode::GpuFixed,
+                replay_inputs: false,
+                seed,
+            };
+            let run = run_one_mtp(
+                session,
+                target_resident,
+                target_graph,
+                mtp_resident,
+                mtp_graph,
+                prompt,
+                output_prefix_tokens,
+                "stage0-bf16-prefix",
+                case_index * suite.seeds.len() + seed_index,
+                target,
+                &tokenizer.tokenizer,
+                sampling,
+                None,
+                draft_width,
+            )?;
+            if run.generated_tokens.len() != output_prefix_tokens {
+                return Err(format!(
+                    "Stage0 prefix length differs for {case_id} seed {seed}: expected={} actual={}",
+                    output_prefix_tokens,
+                    run.generated_tokens.len()
+                ));
+            }
+            let full_prefix = prompt
+                .iter()
+                .chain(run.generated_tokens.iter())
+                .copied()
+                .collect::<Vec<_>>();
+            entries.push(Stage0GenerationEntry {
+                case_id: case_id.clone(),
+                task: task.clone(),
+                language: language.clone(),
+                seed,
+                prompt_tokens: prompt.clone(),
+                output_prefix_tokens: run.generated_tokens,
+                prompt_sha256: hash_tokens(prompt),
+                output_prefix_sha256: hash_tokens(&full_prefix[prompt.len()..]),
+                full_prefix_sha256: hash_tokens(&full_prefix),
+            });
+            eprintln!(
+                "[phase85-a16] prefix entry complete case={} seed={} output_tokens={}",
+                case_id, seed, output_prefix_tokens
+            );
+        }
+    }
+    let prefix_output_file = output_dir.join("prefixes.json");
+    let prefix_file = serde_json::json!({
+        "schema": "phase85-a16-mtp-prefix-v1",
+        "source": suite_path.display().to_string(),
+        "generated_series": "bf16",
+        "entries": entries.clone(),
+    });
+    let prefix_bytes = serde_json::to_vec_pretty(&prefix_file)
+        .map_err(|error| format!("encode Stage0 prefixes: {error}"))?;
+    fs::create_dir_all(output_dir)
+        .map_err(|error| format!("create Stage0 generation output: {error}"))?;
+    fs::write(&prefix_output_file, &prefix_bytes)
+        .map_err(|error| format!("write Stage0 prefixes: {error}"))?;
+    Ok(Stage0GenerationReport {
+        suite_file: suite_path.display().to_string(),
+        suite_file_sha256: format!("sha256:{:x}", Sha256::digest(suite_bytes)),
+        output_prefix_tokens,
+        entries,
+        prefix_output_file: prefix_output_file.display().to_string(),
+    })
+}
+
+fn stage0_secondary_mtp(
+    artifact: &sllm_core::VerifiedUnslothQwen38Nvfp4,
+    suite_path: &Path,
+    target_resident: &QwenResidentModel,
+    target_graph: &sllm_core::QwenGraph,
+    mtp_resident: &QwenResidentModel,
+    mtp_graph: &sllm_core::QwenGraph,
+    session: &Arc<sllm_core::ExecutionSession>,
+    target: &str,
+    draft_width: usize,
+) -> Result<Stage0SecondaryReport, String> {
+    let suite_bytes =
+        fs::read(suite_path).map_err(|error| format!("read Stage0 secondary suite: {error}"))?;
+    let suite: Stage0Suite = serde_json::from_slice(&suite_bytes)
+        .map_err(|error| format!("decode Stage0 secondary suite: {error}"))?;
+    let selected_case_ids = env::var(PHASE85_A16_SECONDARY_CASES_ENV)
+        .unwrap_or_else(|_| "coding-en,creative-ja".to_owned())
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if selected_case_ids.is_empty() {
+        return Err(format!(
+            "{PHASE85_A16_SECONDARY_CASES_ENV} selected no cases"
+        ));
+    }
+    let seed = parse_env_or(PHASE85_A16_SECONDARY_SEED_ENV, Some(123_u64))?;
+    let output_tokens = parse_env_or(PHASE85_A16_SECONDARY_OUTPUT_TOKENS_ENV, Some(128_usize))?;
+    if output_tokens == 0 {
+        return Err(format!(
+            "{PHASE85_A16_SECONDARY_OUTPUT_TOKENS_ENV} must be positive"
+        ));
+    }
+    let prompts = stage0_suite_prompts(artifact, &suite)?;
+    let tokenizer = load_locked_tokenizer(artifact.root())?;
+    let selected = selected_case_ids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut entries = Vec::with_capacity(selected_case_ids.len());
+    for (case_id, task, language, prompt) in prompts {
+        if !selected.contains(&case_id) {
+            continue;
+        }
+        let run = run_one_mtp(
+            session,
+            target_resident,
+            target_graph,
+            mtp_resident,
+            mtp_graph,
+            &prompt,
+            output_tokens,
+            "stage0-secondary-mtp",
+            entries.len(),
+            target,
+            &tokenizer.tokenizer,
+            SamplingBench {
+                mode: SamplingMode::GpuFixed,
+                replay_inputs: false,
+                seed,
+            },
+            None,
+            draft_width,
+        )?;
+        entries.push(Stage0SecondaryEntry {
+            case_id,
+            task,
+            language,
+            seed,
+            prompt_sha256: hash_tokens(&prompt),
+            prompt_token_count: prompt.len(),
+            output_tokens: run.generated_tokens.len(),
+            run,
+        });
+        eprintln!(
+            "[phase85-a16] secondary entry complete series={} case={} seed={} output_tokens={}",
+            env::var(PHASE85_A16_SERIES_ENV).unwrap_or_else(|_| "bf16".to_owned()),
+            entries
+                .last()
+                .map(|entry| entry.case_id.as_str())
+                .unwrap_or(""),
+            seed,
+            output_tokens
+        );
+    }
+    if entries.len() != selected_case_ids.len() {
+        return Err(format!(
+            "Stage0 secondary suite is missing selected cases: requested={selected_case_ids:?} observed={}",
+            entries.len()
+        ));
+    }
+    Ok(Stage0SecondaryReport {
+        suite_file: suite_path.display().to_string(),
+        suite_file_sha256: format!("sha256:{:x}", Sha256::digest(suite_bytes)),
+        selected_cases: selected_case_ids,
+        seed,
+        warmups: 0,
+        measured: 1,
+        entries,
+    })
+}
+
+fn run_stage0(config: Config) -> Result<Stage0Report, String> {
+    if !config.phase83 || !config.mtp.enabled || config.sampling.mode != SamplingMode::GpuFixed {
+        return Err(
+            "Stage0 requires Phase83 coding mode, MTP on, and gpu-fixed sampling settings"
+                .to_owned(),
+        );
+    }
+    let output_dir = stage0_required_path(PHASE85_A16_OUTPUT_DIR_ENV)?;
+    let artifact = Arc::new(
+        verify_unsloth_qwen38_nvfp4(&config.model_root).map_err(|error| error.to_string())?,
+    );
+    let lock_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/models/locks/qwen3.5-27b-bf16.json");
+    let lock = read_model_lock(&lock_path).map_err(|error| error.to_string())?;
+    let mtp_companion = config
+        .mtp_companion_path
+        .as_ref()
+        .map(|directory| {
+            verify_qwen38_mtp_quantized_sidecar(
+                &lock,
+                &artifact,
+                &directory.join("manifest.json"),
+                &directory.join("payload.safetensors"),
+            )
+            .map(Arc::new)
+            .map_err(|error| format!("Stage0 companion verification failed: {error}"))
+        })
+        .transpose()?;
+    let plan =
+        build_qwen38_nvfp4_weight_load_plan(&lock, &artifact).map_err(|error| error.to_string())?;
+    let plan_digest = plan.digest_hex();
+    let graph = build_qwen35_unsloth_qwen38_nvfp4_graph(
+        &lock,
+        &plan,
+        &artifact,
+        config.chunk_capacity,
+        config.state_capacity,
+        config.kv_cache,
+    )
+    .map_err(|error| error.to_string())?;
+    let mtp_plan = build_qwen38_nvfp4_mtp_weight_load_plan(&lock, &artifact)
+        .map_err(|error| format!("Stage0 companion plan failed: {error}"))?;
+    let mtp_graph = build_qwen38_nvfp4_mtp_graph_with_companion(
+        &lock,
+        &mtp_plan,
+        &artifact,
+        config.state_capacity,
+        config.kv_cache,
+        1_024,
+        mtp_companion.as_deref(),
+    )
+    .map_err(|error| format!("Stage0 companion graph failed: {error}"))?;
+    let backend = HipBackend::connect().map_err(|error| error.to_string())?;
+    let session = backend
+        .open_execution_session(
+            ExecutionSessionRequest::new(config.device_index, config.target.clone())
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    let operation = (|| -> Result<_, String> {
+        let resident = QwenResidentModel::new_unsloth_qwen38_nvfp4(
+            Arc::clone(&session),
+            graph.clone(),
+            plan,
+            Arc::clone(&artifact),
+            COMPLETION_TIMEOUT,
+        )
+        .map_err(|error| format!("Stage0 target provisioning failed: {error}"))?;
+        let mtp_resident = provision_qwen38_mtp_resident(
+            &resident,
+            mtp_graph.clone(),
+            mtp_plan,
+            Arc::clone(&artifact),
+            mtp_companion.clone(),
+        )?;
+        let resident_ready_memory = allocation_report(session.memory_snapshot());
+        if resident_ready_memory.poisoned || resident_ready_memory.model_resident.current_bytes == 0
+        {
+            return Err("Stage0 resident allocation snapshot is invalid".to_owned());
+        }
+        eprintln!(
+            "[phase85-a16] provision complete series={} target={} resident_bytes={}",
+            env::var(PHASE85_A16_SERIES_ENV).unwrap_or_else(|_| "bf16".to_owned()),
+            config.target,
+            resident_ready_memory.model_resident.current_bytes
+        );
+        let secondary = env::var(PHASE85_A16_SECONDARY_ENV).as_deref() == Ok("1");
+        let generation = env::var(PHASE85_A16_GENERATE_ENV).as_deref() == Ok("1");
+        let phase86 = env::var_os(phase86_mtp_catch_up::MODE_ENV).is_some();
+        if (secondary || generation) && phase86 {
+            return Err("Phase85 Stage0 and Phase86 modes are mutually exclusive".to_owned());
+        }
+        if secondary && generation {
+            return Err(
+                "Stage0 secondary and prefix generation modes are mutually exclusive".to_owned(),
+            );
+        }
+        let payload = if phase86 {
+            let report = phase86_mtp_catch_up::run(
+                &resident,
+                &graph,
+                &mtp_resident,
+                &mtp_graph,
+                &output_dir,
+                &config.target,
+            )?;
+            (None, None, None, Some(report))
+        } else if secondary {
+            let suite_path = stage0_required_path(PHASE85_A16_SUITE_FILE_ENV)?;
+            let report = stage0_secondary_mtp(
+                &artifact,
+                &suite_path,
+                &resident,
+                &graph,
+                &mtp_resident,
+                &mtp_graph,
+                &session,
+                &config.target,
+                config.mtp.draft_width,
+            )?;
+            (None, None, Some(report), None)
+        } else if generation {
+            let suite_path = stage0_required_path(PHASE85_A16_SUITE_FILE_ENV)?;
+            let output_prefix_tokens =
+                parse_env_or(PHASE85_A16_PREFIX_OUTPUT_TOKENS_ENV, Some(128_usize))?;
+            let report = stage0_generate_prefixes(
+                &artifact,
+                &suite_path,
+                &output_dir,
+                &resident,
+                &graph,
+                &mtp_resident,
+                &mtp_graph,
+                &session,
+                &config.target,
+                config.mtp.draft_width,
+                output_prefix_tokens,
+            )?;
+            (None, Some(report), None, None)
+        } else {
+            let prefix_path = stage0_required_path(PHASE85_A16_PREFIX_FILE_ENV)?;
+            let prefix_file = stage0_read_prefix_file(&prefix_path)?;
+            let entries = stage0_fixed_entries(
+                &resident,
+                &graph,
+                &mtp_resident,
+                &mtp_graph,
+                &prefix_file,
+                &output_dir,
+                &config.target,
+            )?;
+            (
+                Some(Stage0FixedReport {
+                    prefix_file: prefix_path.display().to_string(),
+                    prefix_file_sha256: stage0_file_sha256(&prefix_path)?,
+                    entries,
+                }),
+                None,
+                None,
+                None,
+            )
+        };
+        let model_fingerprint = resident.model_fingerprint().to_owned();
+        drop(mtp_resident);
+        drop(resident);
+        Ok((
+            payload,
+            resident_ready_memory,
+            model_fingerprint,
+            plan_digest,
+        ))
+    })();
+    let allocation_before_shutdown = allocation_report(session.memory_snapshot());
+    let shutdown = session
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .map_err(|error| format!("Stage0 session shutdown failed: {error}"));
+    let (payload, _resident_ready_memory, _model_fingerprint, _plan_digest) = match operation {
+        Ok(report) => report,
+        Err(error) => {
+            let cleanup = shutdown
+                .map(|report| {
+                    format!(
+                        "current_bytes={} retryable_cleanup={} durable_quarantine={}",
+                        allocation_before_shutdown.current_bytes,
+                        report.retryable_cleanup,
+                        report.durable_quarantine
+                    )
+                })
+                .unwrap_or_else(|cleanup_error| cleanup_error);
+            return Err(format!("{error}; post-error cleanup: {cleanup}"));
+        }
+    };
+    let shutdown = shutdown?;
+    let cleanup_zero = allocation_before_shutdown.current_bytes == 0
+        && !allocation_before_shutdown.poisoned
+        && shutdown.retryable_cleanup == 0
+        && shutdown.durable_quarantine == 0;
+    let fixed_ok = payload.0.as_ref().is_none_or(|report| {
+        report
+            .entries
+            .iter()
+            .all(|entry| entry.nonfinite_value_count == 0)
+    });
+    let phase86_ok = payload.3.as_ref().is_none_or(|report| report.all_valid);
+    let state = if cleanup_zero && fixed_ok && phase86_ok {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    let series = env::var(PHASE85_A16_SERIES_ENV).unwrap_or_else(|_| "bf16".to_owned());
+    Ok(Stage0Report {
+        schema_version: "phase85-a16-mtp-stage0-v1",
+        state,
+        benchmark_mode: if payload.3.is_some() {
+            "phase86-mtp-forced-top1"
+        } else if payload.2.is_some() {
+            "stage0-secondary-mtp"
+        } else if payload.1.is_some() {
+            "stage0-bf16-prefix-generation"
+        } else {
+            "stage0-fixed-prefix-teacher-forcing"
+        },
+        target: config.target,
+        device_index: config.device_index,
+        series,
+        model_root: config.model_root.display().to_string(),
+        model_sha256: UNSLOTH_QWEN38_NVFP4_MODEL_SHA256,
+        companion_encoding: mtp_companion
+            .as_deref()
+            .map(|sidecar| sidecar.encoding().manifest_name().to_owned()),
+        companion_digest: mtp_companion
+            .as_deref()
+            .map(|sidecar| sidecar.combined_recipe_digest(&artifact.recipe_digest())),
+        fixed_prefix: payload.0,
+        generation: payload.1,
+        secondary_mtp: payload.2,
+        phase86: payload.3,
+        resident_current_bytes_before_shutdown: allocation_before_shutdown.current_bytes,
+        cleanup: CleanupReport {
+            allocation_after_resident_drop_before_shutdown: allocation_before_shutdown,
+            retryable_cleanup: shutdown.retryable_cleanup,
+            durable_quarantine: shutdown.durable_quarantine,
+            zero: cleanup_zero,
+        },
+    })
+}
+
+fn emit_stage0() -> ExitCode {
+    if env::args_os().len() != 1 {
+        return emit_failure("Stage0 benchmark accepts environment variables only".to_owned());
+    }
+    match Config::from_env().and_then(run_stage0) {
+        Ok(report) => {
+            let serialized = match serde_json::to_vec_pretty(&report) {
+                Ok(value) => value,
+                Err(error) => {
+                    return emit_failure(format!("Stage0 report serialization failed: {error}"));
+                }
+            };
+            if let Ok(output_dir) = env::var(PHASE85_A16_OUTPUT_DIR_ENV) {
+                let path = PathBuf::from(output_dir).join("report.json");
+                if let Err(error) = fs::write(&path, &serialized) {
+                    return emit_failure(format!(
+                        "write Stage0 report {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+            if let Err(error) = io::stdout()
+                .write_all(&serialized)
+                .and_then(|_| io::stdout().write_all(b"\n"))
+            {
+                return emit_failure(format!("write Stage0 report: {error}"));
+            }
+            if report.state == "PASS" {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(error) => emit_failure(error),
+    }
+}
+
+fn emit_phase86_prepare_only() -> ExitCode {
+    if env::args_os().len() != 1 {
+        return emit_failure(
+            "Phase86 prefix preparation accepts environment variables only".to_owned(),
+        );
+    }
+    match phase86_mtp_catch_up::prepare_prefixes_only() {
+        Ok(report) => {
+            let serialized = match serde_json::to_vec_pretty(&report) {
+                Ok(value) => value,
+                Err(error) => {
+                    return emit_failure(format!(
+                        "Phase86 prefix preparation serialization failed: {error}"
+                    ));
+                }
+            };
+            if let Err(error) = io::stdout()
+                .write_all(&serialized)
+                .and_then(|_| io::stdout().write_all(b"\n"))
+            {
+                return emit_failure(format!("write Phase86 prefix preparation report: {error}"));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => emit_failure(error),
+    }
 }
 
 /// Build the Phase83 fixed-sampler executor against the companion request pair.
@@ -1850,6 +2923,14 @@ fn run_one_mtp(
     mtp_report.draft_all_dispatches_hip = draft_audit.all_dispatches_hip();
     mtp_report.mtp_prefix_priming_wall_ns =
         duration_nanos_u64(executor.mtp_prefix_priming_wall_time());
+    mtp_report.mtp_prefix_stage_timings = executor
+        .mtp_prefix_stage_timings()
+        .iter()
+        .map(|timing| PrefixStageTimingReport {
+            row_count: timing.row_count,
+            wall_ns: timing.wall_ns,
+        })
+        .collect();
     mtp_report.mtp_decode_proposal_wall_ns =
         duration_nanos_u64(executor.mtp_decode_proposal_wall_time());
     let audit = audit_report(&target_audit);
@@ -2776,6 +3857,7 @@ mod tests {
         assert_eq!(report.prefill_selected_tokens, 1);
         assert_eq!(report.committed_decode_tokens, 6);
         assert_eq!(report.committed_output_tokens, 7);
+        assert!(report.mtp_prefix_stage_timings.is_empty());
         // A final all-accept proposal can be truncated after its first
         // published row; accepted-but-unpublished rows stay out of output.
         let truncated = build_mtp_run_report(3, 1, 3, 1, 1, 1, 1, 2, true).unwrap();

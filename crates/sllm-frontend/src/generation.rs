@@ -2,6 +2,7 @@
 
 use core::fmt;
 use std::collections::VecDeque;
+use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -25,6 +26,18 @@ use crate::{
 pub const MAX_STOP_STRINGS_V1: usize = 4;
 pub const MAX_STOP_STRING_BYTES_V1: usize = 1_048_576;
 pub const MAX_GENERATION_CHOICES_V1: usize = 8;
+
+const QWEN_MTP_CATCH_UP_ENV: &str = "SLLM_QWEN_MTP_CATCH_UP";
+
+fn qwen_mtp_separate_catch_up_enabled() -> bool {
+    env::var(QWEN_MTP_CATCH_UP_ENV).ok().as_deref() == Some("separate")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QwenMtpPrefixStageTimingV1 {
+    pub row_count: usize,
+    pub wall_ns: u64,
+}
 
 pub fn gemma4_generation_stop_policy(
     lock: &Gemma4ModelLock,
@@ -1235,9 +1248,17 @@ pub struct QwenMtpGenerationExecutorV1 {
     /// Host wall time spent priming the MTP prefix. This is elapsed wall time
     /// around the prefix calls, not a sum of device kernel timestamps.
     mtp_prefix_priming_wall_time: Duration,
+    prefix_timing_enabled: bool,
+    prefix_stage_timings: Vec<QwenMtpPrefixStageTimingV1>,
     /// Host wall time spent in MTP draft forward and sampling proposals. This
-    /// excludes target verification, replay, and user-visible waiting.
+    /// excludes target verification, replay, and user-visible waiting. When
+    /// opt-in catch-up is enabled, its state-only forward is included.
     mtp_decode_proposal_wall_time: Duration,
+    /// Host wall time spent in the opt-in target-hidden catch-up forward.
+    mtp_catch_up_wall_time: Duration,
+    /// Cached at request construction so one request cannot change its state
+    /// reconciliation mode halfway through generation.
+    separate_catch_up: bool,
     pending_speculative_block: Option<PendingQwenSpeculativeBlockV1>,
     pending_device_block: Option<PendingQwenDeviceBlockV1>,
     queued_device_steps: VecDeque<QueuedSpeculativeDeviceStepV1>,
@@ -1264,7 +1285,12 @@ impl QwenMtpGenerationExecutorV1 {
             accepted_draft_tokens: 0,
             committed_target_rows: 0,
             mtp_prefix_priming_wall_time: Duration::ZERO,
+            prefix_timing_enabled: env::var("SLLM_PHASE85_MTP_PRIMING_TIMING").ok().as_deref()
+                == Some("1"),
+            prefix_stage_timings: Vec::new(),
             mtp_decode_proposal_wall_time: Duration::ZERO,
+            mtp_catch_up_wall_time: Duration::ZERO,
+            separate_catch_up: qwen_mtp_separate_catch_up_enabled(),
             pending_speculative_block: None,
             pending_device_block: None,
             queued_device_steps: VecDeque::new(),
@@ -1292,7 +1318,12 @@ impl QwenMtpGenerationExecutorV1 {
             accepted_draft_tokens: 0,
             committed_target_rows: 0,
             mtp_prefix_priming_wall_time: Duration::ZERO,
+            prefix_timing_enabled: env::var("SLLM_PHASE85_MTP_PRIMING_TIMING").ok().as_deref()
+                == Some("1"),
+            prefix_stage_timings: Vec::new(),
             mtp_decode_proposal_wall_time: Duration::ZERO,
+            mtp_catch_up_wall_time: Duration::ZERO,
+            separate_catch_up: qwen_mtp_separate_catch_up_enabled(),
             pending_speculative_block: None,
             pending_device_block: None,
             queued_device_steps: VecDeque::new(),
@@ -1398,6 +1429,20 @@ impl QwenMtpGenerationExecutorV1 {
         self.mtp_decode_proposal_wall_time
     }
 
+    /// Accumulated host wall time spent rebuilding accepted MTP rows from
+    /// target hidden states under `SLLM_QWEN_MTP_CATCH_UP=separate`.
+    pub const fn mtp_catch_up_wall_time(&self) -> Duration {
+        self.mtp_catch_up_wall_time
+    }
+
+    pub const fn separate_catch_up_enabled(&self) -> bool {
+        self.separate_catch_up
+    }
+
+    pub fn mtp_prefix_stage_timings(&self) -> &[QwenMtpPrefixStageTimingV1] {
+        &self.prefix_stage_timings
+    }
+
     fn prime_mtp_prefix(
         &mut self,
         input: &[i32],
@@ -1413,9 +1458,16 @@ impl QwenMtpGenerationExecutorV1 {
             ));
         }
         let zero = vec![0_u16; self.hidden_width];
+        let started = self.prefix_timing_enabled.then(Instant::now);
         self.mtp
             .prefill_mtp_state_only(input[0], &zero)
             .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        if let Some(started) = started {
+            self.prefix_stage_timings.push(QwenMtpPrefixStageTimingV1 {
+                row_count: 1,
+                wall_ns: u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            });
+        }
         let capacity = usize::try_from(self.mtp.prefill_chunk_capacity())
             .map_err(|_| {
                 GenerationServiceError::Execution("MTP batch capacity overflowed".to_owned())
@@ -1426,12 +1478,19 @@ impl QwenMtpGenerationExecutorV1 {
             let end = (index + capacity).min(input.len());
             let hidden_start = (index - 1) * self.hidden_width;
             let hidden_end = (end - 1) * self.hidden_width;
+            let started = self.prefix_timing_enabled.then(Instant::now);
             self.mtp
                 .decode_mtp_state_only_batch(
                     &input[index..end],
                     &hidden_rows[hidden_start..hidden_end],
                 )
                 .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            if let Some(started) = started {
+                self.prefix_stage_timings.push(QwenMtpPrefixStageTimingV1 {
+                    row_count: end - index,
+                    wall_ns: u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                });
+            }
             index = end;
         }
         Ok(())
@@ -1462,6 +1521,77 @@ impl QwenMtpGenerationExecutorV1 {
             u32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
             None,
         ))
+    }
+
+    fn catch_up_hidden_rows(
+        previous_target_hidden: &[u16],
+        target_hidden_rows: &[u16],
+        hidden_width: usize,
+        committed_rows: usize,
+    ) -> Result<Vec<u16>, GenerationServiceError> {
+        if hidden_width == 0 || previous_target_hidden.len() != hidden_width || committed_rows == 0
+        {
+            return Err(GenerationServiceError::Execution(
+                "MTP catch-up hidden rows have an invalid prefix".to_owned(),
+            ));
+        }
+        let target_rows = committed_rows
+            .checked_sub(1)
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        let target_values = target_rows
+            .checked_mul(hidden_width)
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        if target_hidden_rows.len() < target_values {
+            return Err(GenerationServiceError::Execution(
+                "MTP catch-up target hidden rows are too short".to_owned(),
+            ));
+        }
+        let total_values = committed_rows
+            .checked_mul(hidden_width)
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        let mut hidden = Vec::with_capacity(total_values);
+        hidden.extend_from_slice(previous_target_hidden);
+        hidden.extend_from_slice(&target_hidden_rows[..target_values]);
+        Ok(hidden)
+    }
+
+    fn catch_up_mtp_state(
+        &mut self,
+        block_inputs: &[i32],
+        target_hidden_rows: &[u16],
+        draft_width: usize,
+        committed_rows: usize,
+    ) -> Result<(), GenerationServiceError> {
+        if !self.separate_catch_up {
+            return Err(GenerationServiceError::Execution(
+                "MTP catch-up is disabled for this request".to_owned(),
+            ));
+        }
+        if committed_rows == 0
+            || committed_rows > block_inputs.len()
+            || draft_width == 0
+            || draft_width > block_inputs.len()
+        {
+            return Err(GenerationServiceError::Execution(
+                "MTP catch-up rows do not match the verified block".to_owned(),
+            ));
+        }
+        let hidden = Self::catch_up_hidden_rows(
+            &self.last_target_hidden_bf16,
+            target_hidden_rows,
+            self.hidden_width,
+            committed_rows,
+        )?;
+        let started = Instant::now();
+        self.rewind_mtp_rows(draft_width)?;
+        self.mtp
+            .decode_mtp_state_only_batch(&block_inputs[..committed_rows], &hidden)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let elapsed = started.elapsed();
+        self.mtp_catch_up_wall_time = self.mtp_catch_up_wall_time.saturating_add(elapsed);
+        self.mtp_decode_proposal_wall_time =
+            self.mtp_decode_proposal_wall_time.saturating_add(elapsed);
+        Ok(())
     }
 }
 
@@ -1949,7 +2079,9 @@ impl QwenMtpGenerationExecutorV1 {
             .map(GenerationStepV1::from_device_selection)
             .collect::<Vec<_>>();
 
-        if accepted == width {
+        if self.separate_catch_up {
+            self.catch_up_mtp_state(&block_inputs, hidden, width, committed_rows)?;
+        } else if accepted == width {
             let hidden_start = (width - 1) * self.hidden_width;
             // This row aligns companion state; its next-token prediction is
             // unused because the target already selected the bonus token.
@@ -2186,7 +2318,9 @@ impl QwenMtpGenerationExecutorV1 {
             // The MTP provider already executed one transition per proposed
             // token. Retain only rows accepted by the target, adding the final
             // all-accept row which was not needed to produce a proposal.
-            if accepted != draft_width {
+            if self.separate_catch_up {
+                self.catch_up_mtp_state(&block_inputs, hidden, draft_width, committed_rows)?;
+            } else if accepted != draft_width {
                 for _ in 0..draft_width.saturating_sub(committed_rows) {
                     self.mtp
                         .rewind_last_decode_transition()
@@ -3997,6 +4131,31 @@ mod tests {
             vec![92, 93]
         );
         assert!(committed_hidden_row(Some(&replay[..2]), &cached, 2, 2).is_err());
+    }
+
+    #[test]
+    fn qwen_mtp_catch_up_hidden_rows_follow_target_prefix() {
+        let previous = [10_u16, 11];
+        let target_rows = [20_u16, 21, 30, 31, 40, 41];
+        assert_eq!(
+            QwenMtpGenerationExecutorV1::catch_up_hidden_rows(&previous, &target_rows, 2, 1,)
+                .unwrap(),
+            vec![10, 11]
+        );
+        assert_eq!(
+            QwenMtpGenerationExecutorV1::catch_up_hidden_rows(&previous, &target_rows, 2, 2,)
+                .unwrap(),
+            vec![10, 11, 20, 21]
+        );
+        assert_eq!(
+            QwenMtpGenerationExecutorV1::catch_up_hidden_rows(&previous, &target_rows, 2, 3,)
+                .unwrap(),
+            vec![10, 11, 20, 21, 30, 31]
+        );
+        assert!(
+            QwenMtpGenerationExecutorV1::catch_up_hidden_rows(&previous, &target_rows[..1], 2, 2,)
+                .is_err()
+        );
     }
 
     #[test]

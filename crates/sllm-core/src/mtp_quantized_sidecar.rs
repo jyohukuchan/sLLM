@@ -7,7 +7,7 @@
 //! replacement value and E8M0 scale planes.
 
 use crate::{
-    ModelLock, QuantizedTensorEncoding, UNSLOTH_QWEN38_NVFP4_MTP_SHA256,
+    ModelLock, QuantizedMx, QuantizedTensorEncoding, UNSLOTH_QWEN38_NVFP4_MTP_SHA256,
     UNSLOTH_QWEN38_NVFP4_REPOSITORY, UNSLOTH_QWEN38_NVFP4_REVISION, VerifiedUnslothQwen38Nvfp4,
     quantize_mxfp6_e3m2, quantize_mxfp8_e4m3, validate_qwen38_mtp_artifact,
 };
@@ -66,6 +66,56 @@ pub enum MtpWeightEncoding {
     Mxfp6W6A6Block32E8M0,
 }
 
+/// Stage-0 fake-quant recipe.  The resident payload is BF16 in both cases;
+/// the recipe name remains distinct so MXFP8 and MXFP6 roundtrip evidence
+/// cannot collide in the sidecar identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MtpBf16RoundtripEncoding {
+    Mxfp8,
+    Mxfp6,
+}
+
+impl MtpBf16RoundtripEncoding {
+    pub const fn manifest_name(self) -> &'static str {
+        match self {
+            Self::Mxfp8 => "bf16-roundtrip-mxfp8",
+            Self::Mxfp6 => "bf16-roundtrip-mxfp6",
+        }
+    }
+
+    fn quantize(
+        self,
+        input: &[f32],
+        rows: usize,
+        columns: usize,
+    ) -> Result<QuantizedMx, MtpQuantizedSidecarError> {
+        match self {
+            Self::Mxfp8 => quantize_mxfp8_e4m3(input, rows, columns),
+            Self::Mxfp6 => quantize_mxfp6_e3m2(input, rows, columns),
+        }
+        .map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Bf16RoundtripDiagnostics {
+    pub recipe: String,
+    pub element_count: u64,
+    pub bit_exact: bool,
+    pub source_nonfinite_count: u64,
+    pub dequant_nonfinite_count: u64,
+    pub roundtrip_nonfinite_count: u64,
+    pub underflow_count: u64,
+    pub overflow_count: u64,
+    pub bit_mismatch_count: u64,
+    pub first_source_nonfinite_positions: Vec<u64>,
+    pub first_dequant_nonfinite_positions: Vec<u64>,
+    pub first_roundtrip_nonfinite_positions: Vec<u64>,
+    pub first_underflow_positions: Vec<u64>,
+    pub first_overflow_positions: Vec<u64>,
+    pub first_bit_mismatch_positions: Vec<u64>,
+}
+
 impl MtpWeightEncoding {
     pub const fn manifest_name(self) -> &'static str {
         match self {
@@ -96,6 +146,25 @@ impl MtpWeightEncoding {
 
     const fn scale_dtype(self) -> &'static str {
         "U8"
+    }
+}
+
+fn parse_manifest_encoding(
+    value: &str,
+) -> Result<(MtpWeightEncoding, Option<MtpBf16RoundtripEncoding>), MtpQuantizedSidecarError> {
+    match value {
+        "bf16-roundtrip-mxfp8" => Ok((
+            MtpWeightEncoding::Bf16,
+            Some(MtpBf16RoundtripEncoding::Mxfp8),
+        )),
+        "bf16-roundtrip-mxfp6" => Ok((
+            MtpWeightEncoding::Bf16,
+            Some(MtpBf16RoundtripEncoding::Mxfp6),
+        )),
+        "bf16" => Err(MtpQuantizedSidecarError::invalid(
+            "plain BF16 MTP sidecars are not a verified roundtrip recipe",
+        )),
+        value => Ok((MtpWeightEncoding::parse(value)?, None)),
     }
 }
 
@@ -149,6 +218,8 @@ pub struct VerifiedQwen38MtpQuantizedSidecar {
     source_mtp_sha256: String,
     base_recipe_digest: String,
     manifest_fingerprint: String,
+    manifest_encoding: String,
+    roundtrip_encoding: Option<MtpBf16RoundtripEncoding>,
     encoding: MtpWeightEncoding,
     data_start: u64,
     tensors: BTreeMap<String, MtpQuantizedSidecarTensor>,
@@ -165,6 +236,14 @@ impl VerifiedQwen38MtpQuantizedSidecar {
 
     pub fn encoding(&self) -> MtpWeightEncoding {
         self.encoding
+    }
+
+    pub fn manifest_encoding(&self) -> &str {
+        &self.manifest_encoding
+    }
+
+    pub fn roundtrip_encoding(&self) -> Option<MtpBf16RoundtripEncoding> {
+        self.roundtrip_encoding
     }
 
     pub fn source_lock_fingerprint(&self) -> &str {
@@ -189,7 +268,7 @@ impl VerifiedQwen38MtpQuantizedSidecar {
         combined_recipe_digest(
             base_recipe_digest,
             &self.manifest_fingerprint,
-            self.encoding,
+            &self.manifest_encoding,
         )
     }
 
@@ -261,6 +340,8 @@ struct TensorRecord {
     source_sha256: String,
     value_sha256: String,
     scale_sha256: String,
+    #[serde(default)]
+    roundtrip: Option<Bf16RoundtripDiagnostics>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -304,6 +385,8 @@ struct OutputTensor {
     source_sha256: String,
     value_sha256: String,
     scale_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    roundtrip: Option<Bf16RoundtripDiagnostics>,
 }
 
 struct ConvertedTensor {
@@ -348,10 +431,12 @@ pub fn verify_qwen38_mtp_quantized_sidecar(
             "manifest fingerprint fields differ",
         ));
     }
-    let encoding = MtpWeightEncoding::parse(&manifest.encoding)?;
-    if encoding == MtpWeightEncoding::Bf16
+    let (encoding, roundtrip_encoding) = parse_manifest_encoding(&manifest.encoding)?;
+    if (encoding == MtpWeightEncoding::Bf16 && roundtrip_encoding.is_none())
         || manifest.schema_version != SCHEMA
-        || manifest.converter != "sllm-qwen38-mtp-quantizer-v1"
+        || (roundtrip_encoding.is_none() && manifest.converter != "sllm-qwen38-mtp-quantizer-v1")
+        || (roundtrip_encoding.is_some()
+            && manifest.converter != "sllm-qwen38-mtp-bf16-roundtrip-v1")
         || manifest.source.repository != UNSLOTH_QWEN38_NVFP4_REPOSITORY
         || manifest.source.resolved_revision != UNSLOTH_QWEN38_NVFP4_REVISION
         || manifest.source.lock_fingerprint != lock.fingerprint()
@@ -441,9 +526,22 @@ pub fn verify_qwen38_mtp_quantized_sidecar(
             scale,
             shape,
             encoding,
+            roundtrip_encoding.is_some(),
             &mut payload_file,
             data_start,
         )?;
+        if let Some(roundtrip) = &roundtrip_encoding {
+            let diagnostic = record.roundtrip.as_ref().ok_or_else(|| {
+                MtpQuantizedSidecarError::invalid(
+                    "BF16 roundtrip diagnostic is absent from a roundtrip tensor",
+                )
+            })?;
+            if diagnostic.recipe != roundtrip.manifest_name() {
+                return Err(MtpQuantizedSidecarError::invalid(
+                    "BF16 roundtrip diagnostic recipe differs",
+                ));
+            }
+        }
         let descriptor = artifact
             .tensor(name.as_str())
             .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP source tensor is absent"))?;
@@ -495,6 +593,8 @@ pub fn verify_qwen38_mtp_quantized_sidecar(
         source_mtp_sha256: manifest.source.mtp_sha256,
         base_recipe_digest: manifest.base_recipe_digest,
         manifest_fingerprint: claimed_fingerprint,
+        manifest_encoding: manifest.encoding,
+        roundtrip_encoding,
         encoding,
         data_start,
         tensors,
@@ -539,7 +639,77 @@ pub fn convert_qwen38_mtp_quantized_sidecar(
     }
     fs::create_dir(&temporary)
         .map_err(|error| MtpQuantizedSidecarError::io("create temporary output", error))?;
-    let result = convert_into_directory(lock, artifact, encoding, &temporary).and_then(|()| {
+    let result =
+        convert_into_directory(lock, artifact, encoding, None, &temporary).and_then(|()| {
+            verify_qwen38_mtp_quantized_sidecar(
+                lock,
+                artifact,
+                &temporary.join(MANIFEST_FILE),
+                &temporary.join(PAYLOAD_FILE),
+            )
+            .map(|_| ())?;
+            fs::rename(&temporary, output_dir)
+                .map_err(|error| MtpQuantizedSidecarError::io("publish MTP sidecar", error))
+        });
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&temporary);
+    }
+    result?;
+    let verified = verify_qwen38_mtp_quantized_sidecar(
+        lock,
+        artifact,
+        &output_dir.join(MANIFEST_FILE),
+        &output_dir.join(PAYLOAD_FILE),
+    );
+    if verified.is_err() {
+        let _ = fs::remove_dir_all(output_dir);
+    }
+    verified
+}
+
+/// Convert the verified BF16 MTP matrices through an MXFP8/MXFP6 fake-quant
+/// path and write the BF16 dequantized values.  The sidecar keeps an empty
+/// scale plane so the existing value+scale upload contract remains intact;
+/// its manifest encoding and recipe digest are independent of the normal MX
+/// sidecars.
+pub fn convert_qwen38_mtp_bf16_roundtrip_sidecar(
+    lock: &ModelLock,
+    artifact: &VerifiedUnslothQwen38Nvfp4,
+    roundtrip: MtpBf16RoundtripEncoding,
+    output_dir: &Path,
+) -> Result<VerifiedQwen38MtpQuantizedSidecar, MtpQuantizedSidecarError> {
+    validate_qwen38_mtp_artifact(lock, artifact)
+        .map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))?;
+    if output_dir.exists() {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "MTP sidecar output directory already exists",
+        ));
+    }
+    let parent = output_dir
+        .parent()
+        .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP sidecar output has no parent"))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| MtpQuantizedSidecarError::io("create output parent", error))?;
+    let name = output_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP sidecar output has no basename"))?;
+    let temporary = parent.join(format!(".{name}.tmp-{}", std::process::id()));
+    if temporary.exists() {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "MTP sidecar temporary output already exists",
+        ));
+    }
+    fs::create_dir(&temporary)
+        .map_err(|error| MtpQuantizedSidecarError::io("create temporary output", error))?;
+    let result = convert_into_directory(
+        lock,
+        artifact,
+        MtpWeightEncoding::Bf16,
+        Some(roundtrip),
+        &temporary,
+    )
+    .and_then(|()| {
         verify_qwen38_mtp_quantized_sidecar(
             lock,
             artifact,
@@ -566,12 +736,105 @@ pub fn convert_qwen38_mtp_quantized_sidecar(
     verified
 }
 
+fn f32_to_bf16_rne(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let rounding = 0x7fff_u32 + ((bits >> 16) & 1);
+    ((bits.wrapping_add(rounding)) >> 16) as u16
+}
+
+fn bf16_to_f32(bits: u16) -> f32 {
+    f32::from_bits(u32::from(bits) << 16)
+}
+
+fn push_position(positions: &mut Vec<u64>, index: usize) {
+    if positions.len() < 16 {
+        positions.push(index as u64);
+    }
+}
+
+fn bf16_roundtrip_values(
+    quantized: &QuantizedMx,
+    source: &[f32],
+    recipe: MtpBf16RoundtripEncoding,
+) -> Result<(Vec<u8>, Bf16RoundtripDiagnostics), MtpQuantizedSidecarError> {
+    let dequantized = quantized
+        .dequantize()
+        .map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))?;
+    if dequantized.len() != source.len() {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "BF16 roundtrip dequantized element count differs",
+        ));
+    }
+    let mut output = Vec::with_capacity(source.len() * 2);
+    let mut diagnostics = Bf16RoundtripDiagnostics {
+        recipe: recipe.manifest_name().to_owned(),
+        element_count: source.len() as u64,
+        bit_exact: true,
+        source_nonfinite_count: 0,
+        dequant_nonfinite_count: 0,
+        roundtrip_nonfinite_count: 0,
+        underflow_count: 0,
+        overflow_count: 0,
+        bit_mismatch_count: 0,
+        first_source_nonfinite_positions: Vec::new(),
+        first_dequant_nonfinite_positions: Vec::new(),
+        first_roundtrip_nonfinite_positions: Vec::new(),
+        first_underflow_positions: Vec::new(),
+        first_overflow_positions: Vec::new(),
+        first_bit_mismatch_positions: Vec::new(),
+    };
+    for (index, (&source_value, &dequantized_value)) in source.iter().zip(&dequantized).enumerate()
+    {
+        if !source_value.is_finite() {
+            diagnostics.source_nonfinite_count += 1;
+            push_position(&mut diagnostics.first_source_nonfinite_positions, index);
+        }
+        if !dequantized_value.is_finite() {
+            diagnostics.dequant_nonfinite_count += 1;
+            push_position(&mut diagnostics.first_dequant_nonfinite_positions, index);
+        }
+        let bits = f32_to_bf16_rne(dequantized_value);
+        let roundtrip_value = bf16_to_f32(bits);
+        output.extend_from_slice(&bits.to_le_bytes());
+        if !roundtrip_value.is_finite() {
+            diagnostics.roundtrip_nonfinite_count += 1;
+            push_position(&mut diagnostics.first_roundtrip_nonfinite_positions, index);
+        }
+        if dequantized_value.is_finite() && dequantized_value != 0.0 && roundtrip_value == 0.0 {
+            diagnostics.underflow_count += 1;
+            push_position(&mut diagnostics.first_underflow_positions, index);
+        }
+        if dequantized_value.is_finite() && !roundtrip_value.is_finite() {
+            diagnostics.overflow_count += 1;
+            push_position(&mut diagnostics.first_overflow_positions, index);
+        }
+        if dequantized_value.is_finite() && roundtrip_value.to_bits() != dequantized_value.to_bits()
+        {
+            diagnostics.bit_mismatch_count += 1;
+            push_position(&mut diagnostics.first_bit_mismatch_positions, index);
+        }
+    }
+    diagnostics.bit_exact = diagnostics.source_nonfinite_count == 0
+        && diagnostics.dequant_nonfinite_count == 0
+        && diagnostics.roundtrip_nonfinite_count == 0
+        && diagnostics.underflow_count == 0
+        && diagnostics.overflow_count == 0
+        && diagnostics.bit_mismatch_count == 0;
+    Ok((output, diagnostics))
+}
+
 fn convert_into_directory(
     lock: &ModelLock,
     artifact: &VerifiedUnslothQwen38Nvfp4,
     encoding: MtpWeightEncoding,
+    roundtrip: Option<MtpBf16RoundtripEncoding>,
     directory: &Path,
 ) -> Result<(), MtpQuantizedSidecarError> {
+    if (encoding == MtpWeightEncoding::Bf16) != roundtrip.is_some() {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "BF16 payload requires a roundtrip recipe and MX payloads do not accept one",
+        ));
+    }
     let mut converted = Vec::with_capacity(MTP_MATRIX_NAMES.len());
     for name in MTP_MATRIX_NAMES {
         let descriptor = artifact.tensor(name).ok_or_else(|| {
@@ -605,38 +868,68 @@ fn convert_into_directory(
             .chunks_exact(2)
             .map(|bytes| f32::from_bits(u32::from(u16::from_le_bytes([bytes[0], bytes[1]])) << 16))
             .collect::<Vec<_>>();
-        let quantized = match encoding {
-            MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => quantize_mxfp8_e4m3(&values, rows, columns)
-                .map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))?,
-            MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => quantize_mxfp6_e3m2(&values, rows, columns)
-                .map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))?,
-            MtpWeightEncoding::Bf16 => unreachable!(),
-        };
-        let value_shape = match encoding {
-            MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => vec![rows as u64, columns as u64],
-            MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => {
-                vec![rows as u64, (columns * 3 / 4) as u64]
-            }
-            MtpWeightEncoding::Bf16 => unreachable!(),
-        };
-        let scales = quantized.scales().to_vec();
+        let (values, scales, value_dtype, value_shape, scale_shape, roundtrip_diagnostics) =
+            if let Some(roundtrip) = roundtrip {
+                let quantized = roundtrip.quantize(&values, rows, columns)?;
+                let (values, diagnostics) = bf16_roundtrip_values(&quantized, &values, roundtrip)?;
+                (
+                    values,
+                    Vec::new(),
+                    "BF16",
+                    vec![rows as u64, columns as u64],
+                    vec![rows as u64, 0],
+                    Some(diagnostics),
+                )
+            } else {
+                let quantized = match encoding {
+                    MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => {
+                        quantize_mxfp8_e4m3(&values, rows, columns)
+                            .map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))?
+                    }
+                    MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => {
+                        quantize_mxfp6_e3m2(&values, rows, columns)
+                            .map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))?
+                    }
+                    MtpWeightEncoding::Bf16 => unreachable!(),
+                };
+                let value_shape = match encoding {
+                    MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => vec![rows as u64, columns as u64],
+                    MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => {
+                        vec![rows as u64, (columns * 3 / 4) as u64]
+                    }
+                    MtpWeightEncoding::Bf16 => unreachable!(),
+                };
+                (
+                    quantized.values().to_vec(),
+                    quantized.scales().to_vec(),
+                    encoding.value_dtype(),
+                    value_shape,
+                    vec![rows as u64, (columns / 32) as u64],
+                    None,
+                )
+            };
         converted.push(ConvertedTensor {
             record: OutputTensor {
                 name: name.to_owned(),
                 logical_shape: [rows as u64, columns as u64],
                 source_sha256: sha256_bytes(&source),
-                value_sha256: sha256_bytes(quantized.values()),
+                value_sha256: sha256_bytes(&values),
                 scale_sha256: sha256_bytes(&scales),
+                roundtrip: roundtrip_diagnostics,
             },
-            value_dtype: encoding.value_dtype(),
+            value_dtype,
             value_shape,
-            scale_shape: vec![rows as u64, (columns / 32) as u64],
-            values: quantized.values().to_vec(),
+            scale_shape,
+            values,
             scales,
         });
     }
     let mut data = Vec::new();
     let mut header = Map::new();
+    let manifest_encoding = roundtrip.map_or_else(
+        || encoding.manifest_name(),
+        MtpBf16RoundtripEncoding::manifest_name,
+    );
     for tensor in &converted {
         let value_start = u64::try_from(data.len())
             .map_err(|_| MtpQuantizedSidecarError::invalid("MTP payload offset overflows"))?;
@@ -669,7 +962,7 @@ fn convert_into_directory(
         serde_json::json!({
             "format": "pt",
             "sllm_schema": SCHEMA,
-            "sllm_encoding": encoding.manifest_name(),
+            "sllm_encoding": manifest_encoding,
         }),
     );
     let header_bytes = serde_json::to_vec(&header).map_err(|error| {
@@ -698,6 +991,7 @@ fn convert_into_directory(
             source_sha256: tensor.record.source_sha256,
             value_sha256: tensor.record.value_sha256,
             scale_sha256: tensor.record.scale_sha256,
+            roundtrip: tensor.record.roundtrip,
         })
         .collect::<Vec<_>>();
     let base_recipe = artifact.recipe_digest();
@@ -712,8 +1006,12 @@ fn convert_into_directory(
             lock_fingerprint: &lock_fingerprint,
             mtp_sha256: UNSLOTH_QWEN38_NVFP4_MTP_SHA256,
         },
-        converter: "sllm-qwen38-mtp-quantizer-v1",
-        encoding: encoding.manifest_name(),
+        converter: if roundtrip.is_some() {
+            "sllm-qwen38-mtp-bf16-roundtrip-v1"
+        } else {
+            "sllm-qwen38-mtp-quantizer-v1"
+        },
+        encoding: manifest_encoding,
         base_recipe_digest: base_recipe,
         payload: OutputPayload {
             path: PAYLOAD_FILE,
@@ -746,6 +1044,7 @@ fn validate_record(
     scale: &SafeTensorMetadata,
     logical_shape: [u64; 2],
     encoding: MtpWeightEncoding,
+    roundtrip: bool,
     file: &mut File,
     data_start: u64,
 ) -> Result<(), MtpQuantizedSidecarError> {
@@ -770,15 +1069,23 @@ fn validate_record(
                 .and_then(|elements| elements.checked_mul(3))
                 .map(|bytes| bytes / 4)
                 .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP value shape overflows"))?,
+            MtpWeightEncoding::Bf16 if roundtrip => logical_shape[0]
+                .checked_mul(logical_shape[1])
+                .and_then(|elements| elements.checked_mul(2))
+                .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP value shape overflows"))?,
             MtpWeightEncoding::Bf16 => {
                 return Err(MtpQuantizedSidecarError::invalid(
                     "BF16 sidecar is unsupported",
                 ));
             }
         };
-    let expected_scales = logical_shape[0]
-        .checked_mul(logical_shape[1] / 32)
-        .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP scale shape overflows"))?;
+    let expected_scales = if roundtrip {
+        0
+    } else {
+        logical_shape[0]
+            .checked_mul(logical_shape[1] / 32)
+            .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP scale shape overflows"))?
+    };
     if !is_sha256(&record.source_sha256)
         || !is_sha256(&record.value_sha256)
         || !is_sha256(&record.scale_sha256)
@@ -790,9 +1097,17 @@ fn validate_record(
                 MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => {
                     vec![logical_shape[0], expected_values / logical_shape[0]]
                 }
+                MtpWeightEncoding::Bf16 if roundtrip => {
+                    vec![logical_shape[0], logical_shape[1]]
+                }
                 MtpWeightEncoding::Bf16 => unreachable!(),
             }
-        || scale.shape != vec![logical_shape[0], logical_shape[1] / 32]
+        || scale.shape
+            != if roundtrip {
+                vec![logical_shape[0], 0]
+            } else {
+                vec![logical_shape[0], logical_shape[1] / 32]
+            }
         || values_len != expected_values
         || scales_len != expected_scales
         || data_start.checked_add(value.data_offsets[1]).is_none()
@@ -808,14 +1123,14 @@ fn validate_record(
     Ok(())
 }
 
-fn combined_recipe_digest(base: &str, manifest: &str, encoding: MtpWeightEncoding) -> String {
+fn combined_recipe_digest(base: &str, manifest: &str, encoding: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(DIGEST_DOMAIN);
     digest.update(base.as_bytes());
     digest.update([0]);
     digest.update(manifest.as_bytes());
     digest.update([0]);
-    digest.update(encoding.manifest_name().as_bytes());
+    digest.update(encoding.as_bytes());
     format!("sha256:{:x}", digest.finalize())
 }
 
@@ -1063,6 +1378,7 @@ mod tests {
             &scale,
             [3, columns as u64],
             encoding,
+            false,
             &mut input,
             8,
         );
@@ -1093,6 +1409,7 @@ mod tests {
             source_sha256: sha256_bytes(b"source"),
             value_sha256: sha256_bytes(&values),
             scale_sha256: sha256_bytes(&scales),
+            roundtrip: None,
         };
         let value = SafeTensorMetadata {
             dtype: encoding.value_dtype().to_owned(),
@@ -1140,16 +1457,69 @@ mod tests {
         let base = "sha256:base";
         let manifest = "sha256:manifest";
         assert_ne!(
-            combined_recipe_digest(base, manifest, MtpWeightEncoding::Mxfp8W8A8Block32E8M0),
-            combined_recipe_digest(base, manifest, MtpWeightEncoding::Mxfp6W6A6Block32E8M0)
+            combined_recipe_digest(
+                base,
+                manifest,
+                MtpWeightEncoding::Mxfp8W8A8Block32E8M0.manifest_name(),
+            ),
+            combined_recipe_digest(
+                base,
+                manifest,
+                MtpWeightEncoding::Mxfp6W6A6Block32E8M0.manifest_name(),
+            )
         );
         assert_ne!(
-            combined_recipe_digest(base, manifest, MtpWeightEncoding::Mxfp8W8A8Block32E8M0),
+            combined_recipe_digest(
+                base,
+                manifest,
+                MtpWeightEncoding::Mxfp8W8A8Block32E8M0.manifest_name(),
+            ),
             combined_recipe_digest(
                 "sha256:other",
                 manifest,
-                MtpWeightEncoding::Mxfp8W8A8Block32E8M0
+                MtpWeightEncoding::Mxfp8W8A8Block32E8M0.manifest_name()
             )
+        );
+    }
+
+    #[test]
+    fn bf16_roundtrip_records_bit_exact_finite_mxfp8_and_mxfp6_values() {
+        let input = (0..64)
+            .map(|index| (index as f32 - 31.0) * 0.25)
+            .collect::<Vec<_>>();
+        for recipe in [
+            MtpBf16RoundtripEncoding::Mxfp8,
+            MtpBf16RoundtripEncoding::Mxfp6,
+        ] {
+            let quantized = recipe.quantize(&input, 1, 64).expect("quantize");
+            let (bytes, diagnostics) =
+                bf16_roundtrip_values(&quantized, &input, recipe).expect("roundtrip");
+            assert_eq!(bytes.len(), 64 * 2);
+            assert!(diagnostics.bit_exact, "{recipe:?}: {diagnostics:?}");
+            assert_eq!(diagnostics.source_nonfinite_count, 0);
+            assert_eq!(diagnostics.dequant_nonfinite_count, 0);
+            assert_eq!(diagnostics.underflow_count, 0);
+            assert_eq!(diagnostics.overflow_count, 0);
+            assert_eq!(diagnostics.bit_mismatch_count, 0);
+        }
+    }
+
+    #[test]
+    fn bf16_roundtrip_records_nonfinite_positions_and_withdraws_exact_claim() {
+        let input = vec![f32::NAN; 32];
+        let quantized = MtpBf16RoundtripEncoding::Mxfp8
+            .quantize(&input, 1, 32)
+            .expect("quantize");
+        let (_bytes, diagnostics) =
+            bf16_roundtrip_values(&quantized, &input, MtpBf16RoundtripEncoding::Mxfp8)
+                .expect("roundtrip");
+        assert!(!diagnostics.bit_exact);
+        assert_eq!(diagnostics.source_nonfinite_count, 32);
+        assert_eq!(diagnostics.dequant_nonfinite_count, 32);
+        assert_eq!(diagnostics.roundtrip_nonfinite_count, 32);
+        assert_eq!(
+            diagnostics.first_source_nonfinite_positions,
+            (0..16).collect::<Vec<_>>()
         );
     }
 
@@ -1201,6 +1571,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn validate_record_accepts_bf16_roundtrip_with_empty_scale_plane() {
+        let rows = 3_usize;
+        let columns = 32_usize;
+        let values = vec![0x31_u8; rows * columns * 2];
+        let record = TensorRecord {
+            name: "mtp.test.weight".to_owned(),
+            logical_shape: vec![rows as u64, columns as u64],
+            source_sha256: sha256_bytes(b"source"),
+            value_sha256: sha256_bytes(&values),
+            scale_sha256: sha256_bytes(&[]),
+            roundtrip: Some(Bf16RoundtripDiagnostics {
+                recipe: MtpBf16RoundtripEncoding::Mxfp8.manifest_name().to_owned(),
+                element_count: (rows * columns) as u64,
+                bit_exact: true,
+                source_nonfinite_count: 0,
+                dequant_nonfinite_count: 0,
+                roundtrip_nonfinite_count: 0,
+                underflow_count: 0,
+                overflow_count: 0,
+                bit_mismatch_count: 0,
+                first_source_nonfinite_positions: Vec::new(),
+                first_dequant_nonfinite_positions: Vec::new(),
+                first_roundtrip_nonfinite_positions: Vec::new(),
+                first_underflow_positions: Vec::new(),
+                first_overflow_positions: Vec::new(),
+                first_bit_mismatch_positions: Vec::new(),
+            }),
+        };
+        let value = SafeTensorMetadata {
+            dtype: "BF16".to_owned(),
+            shape: vec![rows as u64, columns as u64],
+            data_offsets: [0, values.len() as u64],
+        };
+        let scale = SafeTensorMetadata {
+            dtype: "U8".to_owned(),
+            shape: vec![rows as u64, 0],
+            data_offsets: [values.len() as u64, values.len() as u64],
+        };
+        let path = temporary_test_path("bf16-roundtrip");
+        {
+            let mut output = File::create(&path).expect("create fixture");
+            output.write_all(&[0_u8; 8]).expect("write prefix");
+            output.write_all(&values).expect("write values");
+            output.sync_all().expect("sync fixture");
+        }
+        let mut input = File::open(&path).expect("open fixture");
+        assert!(
+            validate_record(
+                &record,
+                &value,
+                &scale,
+                [rows as u64, columns as u64],
+                MtpWeightEncoding::Bf16,
+                true,
+                &mut input,
+                8,
+            )
+            .is_ok()
+        );
+        drop(input);
+        std::fs::remove_file(path).expect("remove fixture");
     }
 
     #[test]
@@ -1264,6 +1698,10 @@ mod tests {
             source_mtp_sha256: "mtp".to_owned(),
             base_recipe_digest: "sha256:recipe".to_owned(),
             manifest_fingerprint: "sha256:manifest".to_owned(),
+            manifest_encoding: MtpWeightEncoding::Mxfp8W8A8Block32E8M0
+                .manifest_name()
+                .to_owned(),
+            roundtrip_encoding: None,
             encoding: MtpWeightEncoding::Mxfp8W8A8Block32E8M0,
             data_start: 0,
             tensors,

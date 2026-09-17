@@ -53,9 +53,37 @@ bool qwen38_projection_pack_binding_overlap(
          sllm_matmul::intervals_overlap(left, right);
 }
 
+sllm_status_t write_qwen38_nvfp4_baseline_scope_error(
+    sllm_error_sink_t *const error_sink) noexcept {
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_UNSUPPORTED,
+      "Qwen3.8 projection-pack NVFP4 FORCE_BASELINE reference shape/target "
+      "is outside the supported scope (exact gfx1030/gfx1201, M<=4096, "
+      "K<=17408, N<=65536)");
+}
+
+sllm_status_t validate_qwen38_nvfp4_baseline_descriptor_scope(
+    const sllm_qwen38_projection_pack2_desc_t &descriptor,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (descriptor.role !=
+          SLLM_HIP_QWEN38_PROJECTION_PACK2_ROLE_NVFP4_MLP_GATE_UP ||
+      !sllm_matmul_kernel::selector_env_is_one(
+          "SLLM_NVFP4_W4A4_FORCE_BASELINE") ||
+      descriptor.activation.shape[0] != kQwen38ProjectionPackM ||
+      (sllm_matmul_kernel::nvfp4_w4a4_baseline_shape(
+           descriptor.activation.shape[0], descriptor.activation.shape[1],
+           descriptor.gate_weight.shape[0]) &&
+       sllm_matmul_kernel::nvfp4_w4a4_baseline_shape(
+           descriptor.activation.shape[0], descriptor.activation.shape[1],
+           descriptor.up_weight.shape[0]))) {
+    return SLLM_STATUS_OK;
+  }
+  return write_qwen38_nvfp4_baseline_scope_error(error_sink);
+}
+
 uint32_t qwen38_projection_pack_compute_grid(
-    const sllm_matmul_kernel::KernelVariant variant,
-    const uint64_t m, const uint64_t n) noexcept {
+    const sllm_matmul_kernel::KernelVariant variant, const uint64_t m,
+    const uint64_t n) noexcept {
   const auto ceil_grid = [](const uint64_t width,
                             const uint64_t tile) noexcept -> uint32_t {
     if (width == 0U || tile == 0U || width > UINT64_MAX - (tile - 1U)) {
@@ -111,12 +139,11 @@ uint32_t qwen38_projection_pack_compute_grid(
     const bool short_m32_n32 =
         sllm_matmul_kernel::fp8_outer_prefill_gfx1030_half2_short_m32_n32_shape(
             m, kQwen38ProjectionPackK, n);
-    const uint64_t row_tile = short_m32_n64 || short_m32_n32 ? UINT64_C(32)
-                                                               : UINT64_C(64);
-    const uint64_t column_tile = short_m32_n64
-                                     ? UINT64_C(64)
-                                     : short_m32_n32 ? UINT64_C(32)
-                                                     : UINT64_C(64);
+    const uint64_t row_tile =
+        short_m32_n64 || short_m32_n32 ? UINT64_C(32) : UINT64_C(64);
+    const uint64_t column_tile = short_m32_n64   ? UINT64_C(64)
+                                 : short_m32_n32 ? UINT64_C(32)
+                                                 : UINT64_C(64);
     const uint32_t row_grid = ceil_grid(m, row_tile);
     const uint32_t column_grid = ceil_grid(n, column_tile);
     uint32_t result = 0U;
@@ -178,8 +205,7 @@ bool qwen38_projection_pack_fp8_gdn_workspace_bytes(
 }
 
 bool qwen38_projection_pack_fp8_gdn_quantize_grid(
-    const uint64_t m, const uint64_t k,
-    uint32_t *const grid_size) noexcept {
+    const uint64_t m, const uint64_t k, uint32_t *const grid_size) noexcept {
   if (grid_size == nullptr || m == 0U || k != kQwen38ProjectionPackK ||
       m > static_cast<uint64_t>(UINT32_MAX)) {
     return false;
@@ -208,8 +234,7 @@ bool qwen38_projection_pack_nvfp4_member_compatible(
       (metadata.m >= kQwen38ProjectionPackSmallNvfp4MMin &&
        metadata.m <= kQwen38ProjectionPackSmallNvfp4MMax) ||
       metadata.m >= kQwen38ProjectionPackMinNvfp4M;
-  return supported_rows &&
-         metadata.k != 0U &&
+  return supported_rows && metadata.k != 0U &&
          (metadata.k % UINT64_C(16)) == 0U && metadata.n != 0U &&
          metadata.nvfp4_w4a4 && metadata.weight_value_bytes != 0U &&
          metadata.weight_scale_offset >= metadata.weight.byte_offset &&
@@ -248,23 +273,21 @@ bool qwen38_projection_pack_nvfp4_packed_activation_bytes(
 bool qwen38_projection_pack_nvfp4_workspace_bytes(
     const uint64_t m, const uint64_t k,
     uint64_t *const workspace_bytes) noexcept {
-  const bool supported_rows =
-      m == kQwen38ProjectionPackM ||
-      (m >= kQwen38ProjectionPackSmallNvfp4MMin &&
-       m <= kQwen38ProjectionPackSmallNvfp4MMax) ||
-      m >= kQwen38ProjectionPackMinNvfp4M;
+  const bool supported_rows = m == kQwen38ProjectionPackM ||
+                              (m >= kQwen38ProjectionPackSmallNvfp4MMin &&
+                               m <= kQwen38ProjectionPackSmallNvfp4MMax) ||
+                              m >= kQwen38ProjectionPackMinNvfp4M;
   if (workspace_bytes == nullptr || !supported_rows || m == 0U || k == 0U ||
       (k % UINT64_C(16)) != 0U) {
     return false;
   }
   uint64_t packed_bytes = 0U;
-  if (!qwen38_projection_pack_nvfp4_packed_activation_bytes(
-          m, k, &packed_bytes)) {
+  if (!qwen38_projection_pack_nvfp4_packed_activation_bytes(m, k,
+                                                            &packed_bytes)) {
     return false;
   }
   const uint64_t scale_bytes_per_row = k / UINT64_C(16);
-  if (scale_bytes_per_row == 0U ||
-      m > UINT64_MAX / scale_bytes_per_row) {
+  if (scale_bytes_per_row == 0U || m > UINT64_MAX / scale_bytes_per_row) {
     return false;
   }
   const uint64_t scale_bytes = m * scale_bytes_per_row;
@@ -276,17 +299,41 @@ bool qwen38_projection_pack_nvfp4_workspace_bytes(
 }
 
 bool qwen38_projection_pack_nvfp4_quantize_grid(
-    const uint64_t m, const uint64_t k,
-    uint32_t *const grid_size) noexcept {
-  if (grid_size == nullptr || m == 0U || k == 0U ||
-      (k % UINT64_C(16)) != 0U) {
+    const uint64_t m, const uint64_t k, uint32_t *const grid_size) noexcept {
+  if (grid_size == nullptr || m == 0U || k == 0U || (k % UINT64_C(16)) != 0U) {
     return false;
   }
   const uint64_t blocks = k / UINT64_C(16);
-  if (m > UINT64_MAX / blocks || m * blocks > UINT64_MAX - UINT64_C(7)) {
+  if (m > UINT64_MAX / blocks) {
     return false;
   }
-  const uint64_t grid = (m * blocks + UINT64_C(7)) / UINT64_C(8);
+  const uint64_t work_items = m * blocks;
+  const char *const force_wave8 =
+      std::getenv(sllm_matmul_kernel::kNvfp4ActivationQuantizeWave8Environment);
+  const char *const force_baseline = std::getenv("SLLM_NVFP4_FORCE_BASELINE");
+  const char *const force_w4a4_baseline =
+      std::getenv("SLLM_NVFP4_W4A4_FORCE_BASELINE");
+  bool use_wave8 = false;
+  if (force_wave8 == nullptr) {
+#if defined(SLLM_HIP_COMPILE_TARGET)
+    use_wave8 = std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1030") == 0 ||
+                std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1201") == 0;
+#endif
+  } else {
+    // Match launch_nvfp4_quantize: only literal "1" requests wave8;
+    // explicit 0 and malformed values retain the scalar quantizer.
+    use_wave8 = std::strcmp(force_wave8, "1") == 0;
+  }
+  if ((force_baseline != nullptr && std::strcmp(force_baseline, "1") == 0) ||
+      (force_w4a4_baseline != nullptr &&
+       std::strcmp(force_w4a4_baseline, "1") == 0)) {
+    use_wave8 = false;
+  }
+  if (use_wave8 && work_items > UINT64_MAX - UINT64_C(7)) {
+    return false;
+  }
+  const uint64_t grid =
+      use_wave8 ? (work_items + UINT64_C(7)) / UINT64_C(8) : work_items;
   if (grid == 0U || grid > static_cast<uint64_t>(UINT32_MAX)) {
     return false;
   }
@@ -304,11 +351,11 @@ bool qwen38_projection_pack_nvfp4_adopted_variant(
   if (variant == KernelVariant::Nvfp4W4A4SmallMVgprReuse) {
     return (matches_runtime_gcn_arch(arch_name, "gfx1030") ||
             matches_runtime_gcn_arch(arch_name, "gfx1201")) &&
-           sllm_matmul_kernel::phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(
-               m, k, n);
+           sllm_matmul_kernel::phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(m, k,
+                                                                           n);
   }
   if (!sllm_matmul_kernel::phase83_nvfp4_w4a4_compensated_adopted_shape(m, k,
-                                                                         n)) {
+                                                                        n)) {
     return false;
   }
   if (variant == KernelVariant::Nvfp4W4A4PrefillCompensated64x64)
@@ -444,6 +491,12 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
           error_sink, SLLM_STATUS_RESERVED_NONZERO,
           "Qwen3.8 projection-pack role or reserved fields are invalid");
     }
+    const sllm_status_t baseline_descriptor_status =
+        validate_qwen38_nvfp4_baseline_descriptor_scope(*descriptor,
+                                                        error_sink);
+    if (baseline_descriptor_status != SLLM_STATUS_OK) {
+      return baseline_descriptor_status;
+    }
     float input_global_scale = 0.0F;
     std::memcpy(&input_global_scale, &descriptor->input_global_scale_f32_bits,
                 sizeof(input_global_scale));
@@ -491,13 +544,12 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
             error_sink, SLLM_STATUS_UNSUPPORTED,
             fp8_gdn ? "Qwen3.8 projection-pack FP8 GDN requires "
                       "positive equal M,K=5120,N=10240/6144"
-                      : "Qwen3.8 projection-pack requires paired M=1, M=2..4, "
-                        "or M>=64 NVFP4 W4A4 members with a shared K multiple "
-                        "of 16");
+                    : "Qwen3.8 projection-pack requires paired M=1, M=2..4, "
+                      "or M>=64 NVFP4 W4A4 members with a shared K multiple "
+                      "of 16");
       }
     }
-    if (fp8_gdn &&
-        !qwen38_projection_pack_fp8_gdn_pair_compatible(metadata)) {
+    if (fp8_gdn && !qwen38_projection_pack_fp8_gdn_pair_compatible(metadata)) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_UNSUPPORTED,
           "Qwen3.8 FP8 GDN projection-pack members require equal M,K and "
@@ -508,6 +560,23 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
           error_sink, SLLM_STATUS_UNSUPPORTED,
           "Qwen3.8 projection-pack NVFP4 members require one BF16 M=1, M=2..4, "
           "or M>=64 activation K and compatible block scales");
+    }
+    // The baseline pack path is directly admitted only for the existing M=1
+    // pair. Keep the established M>=64 fallback-to-member behavior intact,
+    // while applying the standalone baseline reference scope to an admitted
+    // M=1 pair before any owner or workspace allocation.
+    if (!fp8_gdn &&
+        sllm_matmul_kernel::selector_env_is_one(
+            "SLLM_NVFP4_W4A4_FORCE_BASELINE") &&
+        metadata[0].m == kQwen38ProjectionPackM &&
+        (!sllm_matmul_kernel::nvfp4_w4a4_baseline_shape(
+             metadata[0].m, metadata[0].k, metadata[0].n) ||
+         !sllm_matmul_kernel::nvfp4_w4a4_baseline_shape(
+             metadata[1].m, metadata[1].k, metadata[1].n))) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "Qwen3.8 projection-pack NVFP4 FORCE_BASELINE reference shape is "
+          "outside the supported scope (M<=4096, K<=17408, N<=65536)");
     }
     if (fp8_gdn) {
       uint64_t workspace_bytes = 0U;
@@ -608,8 +677,19 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
         return property_status;
       char arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME]{};
       if (!copy_property(arch_name, sizeof(arch_name), properties.gcnArchName,
-                         sizeof(properties.gcnArchName)) ||
+                         sizeof(properties.gcnArchName))) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+            "HIP gcnArchName is not NUL terminated or is too long");
+      }
+      if (!fp8_gdn && metadata[0].m == kQwen38ProjectionPackM &&
+          sllm_matmul_kernel::selector_env_is_one(
+              "SLLM_NVFP4_W4A4_FORCE_BASELINE") &&
           !(matches_runtime_gcn_arch(arch_name, "gfx1030") ||
+            matches_runtime_gcn_arch(arch_name, "gfx1201"))) {
+        return write_qwen38_nvfp4_baseline_scope_error(error_sink);
+      }
+      if (!(matches_runtime_gcn_arch(arch_name, "gfx1030") ||
             matches_runtime_gcn_arch(arch_name, "gfx1201"))) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_UNSUPPORTED,
@@ -623,9 +703,9 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
           variants[index] = ::sllm_matmul_kernel::select_fp8_outer_variant(
               metadata[index].m, metadata[index].k, metadata[index].n,
               arch_name, false);
-          if (qwen38_projection_pack_compute_grid(
-                  variants[index], metadata[index].m, metadata[index].n) ==
-              0U) {
+          if (qwen38_projection_pack_compute_grid(variants[index],
+                                                  metadata[index].m,
+                                                  metadata[index].n) == 0U) {
             return sllm_public_runtime::write_error(
                 error_sink, SLLM_STATUS_UNSUPPORTED,
                 "Qwen3.8 projection-pack FP8 GDN provider rejected the exact "
@@ -659,10 +739,10 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
                  arch_name));
         if (!concrete.has_value() || variants[0] != variants[1] ||
             !adopted_pair ||
-            qwen38_projection_pack_compute_grid(
-                variants[0], metadata[0].m, metadata[0].n) == 0U ||
-            qwen38_projection_pack_compute_grid(
-                variants[1], metadata[1].m, metadata[1].n) == 0U) {
+            qwen38_projection_pack_compute_grid(variants[0], metadata[0].m,
+                                                metadata[0].n) == 0U ||
+            qwen38_projection_pack_compute_grid(variants[1], metadata[1].m,
+                                                metadata[1].n) == 0U) {
           return sllm_public_runtime::write_error(
               error_sink, SLLM_STATUS_UNSUPPORTED,
               "Qwen3.8 projection-pack NVFP4 selector is not safe for both "
@@ -689,8 +769,8 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
         if (concrete.has_value())
           candidate->matmul_provider_plan.emplace(*concrete);
         candidate->matmul_kernel_variant = variants[0];
-        const bool queue_workspace = !fp8_gdn &&
-                                      metadata[0].m != kQwen38ProjectionPackM;
+        const bool queue_workspace =
+            !fp8_gdn && metadata[0].m != kQwen38ProjectionPackM;
         if (fp8_gdn) {
           if (!qwen38_projection_pack_fp8_gdn_workspace_bytes(
                   metadata[0].m, metadata[0].k,
@@ -720,11 +800,10 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
         }
         candidate->matmul_queue_workspace = queue_workspace;
         const hipError_t workspace_status =
-            queue_workspace
-                ? hipSuccess
-                : hipMalloc(&candidate->matmul_workspace,
-                            static_cast<std::size_t>(
-                                candidate->matmul_workspace_bytes));
+            queue_workspace ? hipSuccess
+                            : hipMalloc(&candidate->matmul_workspace,
+                                        static_cast<std::size_t>(
+                                            candidate->matmul_workspace_bytes));
         if (workspace_status != hipSuccess) {
           (void)sllm_public_runtime::AccountingState::
               release_five_buffer_prepared_plan(
@@ -1030,15 +1109,13 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
             "Qwen3.8 projection-pack NVFP4 workspace metadata is invalid");
       }
     }
-    const uint64_t projection_m =
-        plan->qwen38_projection_pack2_metadata[0].m;
-    const bool queue_workspace_path =
-        !fp8_gdn && projection_m != kQwen38ProjectionPackM &&
-        plan->matmul_queue_workspace;
+    const uint64_t projection_m = plan->qwen38_projection_pack2_metadata[0].m;
+    const bool queue_workspace_path = !fp8_gdn &&
+                                      projection_m != kQwen38ProjectionPackM &&
+                                      plan->matmul_queue_workspace;
     if (plan->matmul_workspace_bytes != expected_workspace_bytes ||
-        (queue_workspace_path
-             ? plan->matmul_workspace != nullptr
-             : plan->matmul_workspace == nullptr) ||
+        (queue_workspace_path ? plan->matmul_workspace != nullptr
+                              : plan->matmul_workspace == nullptr) ||
         qwen38_projection_pack_compute_grid(
             plan->qwen38_projection_pack2_kernel_variants[0],
             plan->qwen38_projection_pack2_metadata[0].m,
@@ -1140,8 +1217,8 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
           matmul_scratch_lock.unlock();
           return cleanup_failed_submission(
               candidate, token, workspace_status,
-              "queue Qwen3.8 projection-pack NVFP4 workspace allocation",
-              queue, error_sink);
+              "queue Qwen3.8 projection-pack NVFP4 workspace allocation", queue,
+              error_sink);
         }
         workspace = static_cast<uint8_t *>(queue_workspace);
       }
@@ -1160,14 +1237,12 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
       };
       if (fp8_gdn) {
         auto *const quantized_activation = workspace;
-        auto *const activation_scales =
-            reinterpret_cast<float *>(
-                workspace + projection_m *
-                                plan->qwen38_projection_pack2_metadata[0].k);
+        auto *const activation_scales = reinterpret_cast<float *>(
+            workspace +
+            projection_m * plan->qwen38_projection_pack2_metadata[0].k);
         launch_status = ::sllm_matmul_kernel::launch_fp8_quantize(
-            activation, quantized_activation, activation_scales,
-            projection_m, plan->qwen38_projection_pack2_metadata[0].k, false,
-            queue->stream);
+            activation, quantized_activation, activation_scales, projection_m,
+            plan->qwen38_projection_pack2_metadata[0].k, false, queue->stream);
         for (uint32_t index = 0U; launch_status == hipSuccess && index != 2U;
              ++index) {
           const auto &member = plan->qwen38_projection_pack2_metadata[index];
@@ -1192,20 +1267,21 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
                   quantized_activation, fp8_weight, output, queue->stream);
             }
           } else if (variant == sllm_matmul_kernel::KernelVariant::
-                                     Fp8OuterPrefillTiled16) {
-            launch_status = ::sllm_matmul_kernel::launch_fp8_outer_prefill_tiled16(
-                quantized_activation, activation_scales, fp8_weight,
-                weight_scales, output, member.m, member.k, member.n,
-                queue->stream);
+                                    Fp8OuterPrefillTiled16) {
+            launch_status =
+                ::sllm_matmul_kernel::launch_fp8_outer_prefill_tiled16(
+                    quantized_activation, activation_scales, fp8_weight,
+                    weight_scales, output, member.m, member.k, member.n,
+                    queue->stream);
           } else if (variant == sllm_matmul_kernel::KernelVariant::
-                                     Fp8OuterPrefillGfx1030Half2_128x64) {
+                                    Fp8OuterPrefillGfx1030Half2_128x64) {
             launch_status = ::sllm_matmul_kernel::
                 launch_fp8_outer_prefill_gfx1030_half2_128x64(
                     quantized_activation, activation_scales, fp8_weight,
                     weight_scales, output, member.m, member.k, member.n,
                     queue->stream);
           } else if (variant == sllm_matmul_kernel::KernelVariant::
-                                     Fp8OuterPrefillGfx1030Half2_64x64) {
+                                    Fp8OuterPrefillGfx1030Half2_64x64) {
             launch_status = ::sllm_matmul_kernel::
                 launch_fp8_outer_prefill_gfx1030_half2_64x64(
                     quantized_activation, activation_scales, fp8_weight,
@@ -1280,10 +1356,9 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
                                  gate.input_tensor_scale_offset));
           launch_status = ::sllm_matmul_kernel::launch_nvfp4_quantize(
               activation, packed_activation, activation_block_scales,
-              shared_input_tensor_scale, gate.m, gate.k,
-              queue->stream);
-          for (uint32_t index = 0U;
-               launch_status == hipSuccess && index != 2U; ++index) {
+              shared_input_tensor_scale, gate.m, gate.k, queue->stream);
+          for (uint32_t index = 0U; launch_status == hipSuccess && index != 2U;
+               ++index) {
             const auto &member = plan->qwen38_projection_pack2_metadata[index];
             Buffer *const weight = plan->qwen38_projection_pack2_weights[index];
             const auto *const packed_weight =
@@ -1291,8 +1366,8 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
             const auto *const weight_block_scales =
                 packed_weight + member.weight_value_bytes;
             const auto *const weight_tensor_scale =
-                reinterpret_cast<const float *>(weight_pointer(
-                    weight, member.weight_tensor_scale_offset));
+                reinterpret_cast<const float *>(
+                    weight_pointer(weight, member.weight_tensor_scale_offset));
             launch_status = ::sllm_matmul_kernel::launch_nvfp4_w4a4(
                 packed_activation, activation_block_scales, packed_weight,
                 weight_block_scales, weight_tensor_scale,

@@ -335,7 +335,8 @@ Fp8GdnMatmulRun run_fp8_gdn_matmul_plan(const sllm_matmul_plan_t *const plan,
                                         const sllm_buffer_t *const output,
                                         const uint64_t k, const uint64_t n,
                                         const std::vector<uint16_t> &expected,
-                                        const uint64_t m = 1U) {
+                                        const uint64_t m = 1U,
+                                        const bool baseline_oracle = false) {
   constexpr std::size_t kRepeats = 3U;
   std::vector<uint16_t> first(static_cast<std::size_t>(m * n));
   std::vector<uint16_t> observed(static_cast<std::size_t>(m * n));
@@ -361,10 +362,24 @@ Fp8GdnMatmulRun run_fp8_gdn_matmul_plan(const sllm_matmul_plan_t *const plan,
         dispatch.fallback_allowed == 0U && dispatch.fallback_used == 0U &&
         std::strcmp(dispatch.gcn_arch_name, SLLM_TEST_EXPECTED_TARGET) == 0;
     const bool gfx1030 = std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0;
-    // M1 uses the retained forced-LDS control; new rows use default selectors.
+    const bool expected_baseline = baseline_oracle && gfx1030;
+    // M1 uses the retained forced-LDS control in the default suite.  The
+    // explicit baseline oracle selects the byte-decode provider on gfx1030;
+    // gfx1201 keeps its native FP8 provider because the baseline control is a
+    // gfx1030-only selector.
     const uint32_t expected_provider =
-        gfx1030 ? (m == 1U ? 82U : (m <= 4U ? 92U : 71U)) : 5U;
-    result.valid = result.valid && dispatch.kernel_id == expected_provider;
+        gfx1030 ? (expected_baseline ? SLLM_HIP_MATMUL_KERNEL_ID_FP8_BYTE_EMULATION_V1
+                                     : (m == 1U ? 82U : (m <= 4U ? 92U : 71U)))
+                : SLLM_HIP_MATMUL_KERNEL_ID_HIPBLASLT_FP8_OUTER_V1;
+    const uint32_t expected_grid =
+        static_cast<uint32_t>((m * n + 255U) / 256U);
+    result.valid = result.valid && dispatch.kernel_id == expected_provider &&
+                   (!expected_baseline ||
+                    (dispatch.grid_size_x == expected_grid &&
+                     std::strcmp(dispatch.kernel_symbol,
+                                 "matmul.fp8.outer.byte_decode.v1") == 0 &&
+                     std::strcmp(dispatch.device_symbol,
+                                 "sllm_matmul_fp8_outer_emulation_v1") == 0));
     if (!result.valid) {
       std::cerr << "FP8 direct metadata failure M=" << m << " N=" << n
                 << " provider=" << dispatch.kernel_id << " rows=" << dispatch.m
@@ -491,16 +506,29 @@ MatmulRunResult run_matmul_plan(
   return result;
 }
 
-bool run_fp8_gdn_shared_public_gpu_oracle(const uint64_t m = 1U) {
+bool run_fp8_gdn_shared_public_gpu_oracle(const uint64_t m = 1U,
+                                          const bool baseline_oracle = false) {
   constexpr const char *kLdsLutEnvironment =
       "SLLM_FP8_OUTER_DECODE_FORCE_GFX1030_LDS_LUT";
+  constexpr const char *kBaselineEnvironment =
+      "SLLM_FP8_OUTER_DECODE_FORCE_BASELINE";
   const char *const old_lds_lut = std::getenv(kLdsLutEnvironment);
   const std::string old_lds_lut_value =
       old_lds_lut != nullptr ? old_lds_lut : "";
-  if (m == 1U && std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0)
-    setenv(kLdsLutEnvironment, "1", 1);
-  else
+  const char *const old_baseline = std::getenv(kBaselineEnvironment);
+  const std::string old_baseline_value =
+      old_baseline != nullptr ? old_baseline : "";
+  if (baseline_oracle) {
+    setenv(kBaselineEnvironment, "1", 1);
     unsetenv(kLdsLutEnvironment);
+  } else if (m == 1U &&
+             std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0) {
+    setenv(kLdsLutEnvironment, "1", 1);
+    unsetenv(kBaselineEnvironment);
+  } else {
+    unsetenv(kLdsLutEnvironment);
+    unsetenv(kBaselineEnvironment);
+  }
 
   constexpr std::array<uint64_t, 2> kWidths = {kFp8GdnQkvN, kFp8GdnZN};
   std::array<uint64_t, 2> weight_bytes{};
@@ -619,7 +647,7 @@ bool run_fp8_gdn_shared_public_gpu_oracle(const uint64_t m = 1U) {
     for (std::size_t index = 0U; index != kWidths.size(); ++index) {
       direct_runs[index] = run_fp8_gdn_matmul_plan(
           direct_plans[index], queue, direct_outputs[index], kK, kWidths[index],
-          expected_initial[index], m);
+          expected_initial[index], m, baseline_oracle);
       valid = valid && direct_runs[index].valid &&
               direct_runs[index].deterministic &&
               direct_runs[index].max_bf16_ulp == 0U;
@@ -838,6 +866,10 @@ bool run_fp8_gdn_shared_public_gpu_oracle(const uint64_t m = 1U) {
     setenv(kLdsLutEnvironment, old_lds_lut_value.c_str(), 1);
   else
     unsetenv(kLdsLutEnvironment);
+  if (old_baseline != nullptr)
+    setenv(kBaselineEnvironment, old_baseline_value.c_str(), 1);
+  else
+    unsetenv(kBaselineEnvironment);
   if (!valid)
     return false;
   std::cout << "Qwen3.8 FP8 GDN shared projection-pack oracle: PASS target="
@@ -847,6 +879,17 @@ bool run_fp8_gdn_shared_public_gpu_oracle(const uint64_t m = 1U) {
             << " deterministic=" << shared_deterministic
             << " max_bf16_ulp=" << shared_max_ulp
             << " workspace=" << last_shared_dispatch.workspace_bytes
+            << " baseline_oracle=" << baseline_oracle;
+  if (baseline_oracle) {
+    const auto &direct_dispatch = direct_runs[0].dispatch;
+    std::cout << " direct_kernel_id=" << direct_dispatch.kernel_id
+              << " direct_kernel_symbol=" << direct_dispatch.kernel_symbol
+              << " direct_device_symbol=" << direct_dispatch.device_symbol
+              << " direct_grid_size_x=" << direct_dispatch.grid_size_x
+              << " direct_dispatch_count=" << direct_dispatch.dispatch_count
+              << " direct_fallback=" << direct_dispatch.fallback_used;
+  }
+  std::cout
             << " cleanup=0\n";
   return true;
 }
@@ -1428,15 +1471,34 @@ bool run_nvfp4_projection_pack_queue_public_gpu_oracle() {
 } // namespace
 
 int main() {
-  for (const uint64_t m : {1U, 2U, 3U, 4U, 5U, 65U, 2048U}) {
-    if (!run_fp8_gdn_shared_public_gpu_oracle(m)) {
-      std::cerr << "FP8 GDN pair failed M=" << m << '\n';
+  const char *const oracle_env = std::getenv("SLLM_FORCE_BASELINE_ORACLE");
+  const bool baseline_oracle =
+      oracle_env != nullptr && std::strcmp(oracle_env, "1") == 0;
+  const char *const fp8_baseline_env =
+      std::getenv("SLLM_FORCE_BASELINE_FP8_ORACLE");
+  const bool fp8_baseline_oracle =
+      fp8_baseline_env != nullptr && std::strcmp(fp8_baseline_env, "1") == 0;
+  if (fp8_baseline_oracle) {
+    if (!run_fp8_gdn_shared_public_gpu_oracle(1U, true)) {
+      std::cerr << "FP8 GDN baseline pair failed M=1\n";
       return 1;
     }
   }
-  unsetenv("SLLM_NVFP4_W4A4_FORCE_BASELINE");
-  setenv("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4", "1", 1);
-  setenv("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_ACTIVATION_SHARED", "1", 1);
+  if (!baseline_oracle) {
+    if (!fp8_baseline_oracle) {
+      for (const uint64_t m : {1U, 2U, 3U, 4U, 5U, 65U, 2048U}) {
+        if (!run_fp8_gdn_shared_public_gpu_oracle(m)) {
+          std::cerr << "FP8 GDN pair failed M=" << m << '\n';
+          return 1;
+        }
+      }
+    }
+    unsetenv("SLLM_NVFP4_W4A4_FORCE_BASELINE");
+    setenv("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_WAVE4", "1", 1);
+    setenv("SLLM_NVFP4_W4A4_DECODE_FORCE_DP4A_ACTIVATION_SHARED", "1", 1);
+  } else {
+    setenv("SLLM_NVFP4_W4A4_FORCE_BASELINE", "1", 1);
+  }
   std::vector<uint16_t> activation(static_cast<std::size_t>(kK),
                                    f32_to_bf16_rne(6.0F));
   // Positive E2M1 code 2 is 1.0 and code 1 is 0.5.  With E4M3 scale 0x38
@@ -1531,7 +1593,8 @@ int main() {
                SLLM_STATUS_OK, "sllm_qwen38_projection_pack2_execute", error);
     const bool evidence =
         submitted && completion != nullptr && dispatch.dispatch_id != 0U &&
-        dispatch.dispatch_count == 3U && dispatch.grid_size_x == 1128U &&
+        dispatch.dispatch_count == 3U &&
+        dispatch.grid_size_x == (baseline_oracle ? kK / 16U + 2U * kN : 1128U) &&
         dispatch.workspace_bytes ==
             SLLM_HIP_QWEN38_PROJECTION_PACK2_WORKSPACE_BYTES &&
         dispatch.m == kM && dispatch.k == kK && dispatch.n == kN &&
@@ -1602,14 +1665,18 @@ int main() {
                    "sllm_context_release", error) &&
             valid;
   }
-  valid = run_nvfp4_projection_pack_queue_public_gpu_oracle() && valid;
-  valid = run_activation_shared_matmul_oracle() && valid;
-  valid = run_activation_shared_matmul_oracle(true) && valid;
+  if (!baseline_oracle) {
+    valid = run_nvfp4_projection_pack_queue_public_gpu_oracle() && valid;
+    valid = run_activation_shared_matmul_oracle() && valid;
+    valid = run_activation_shared_matmul_oracle(true) && valid;
+  }
   if (!valid)
     return 1;
   std::cout << "Qwen3.8 projection-pack public GPU oracle: PASS target="
             << dispatches.back().gcn_arch_name
             << " dispatch_count=" << dispatches.back().dispatch_count
+            << " grid_size_x=" << dispatches.back().grid_size_x
+            << " baseline_oracle=" << baseline_oracle
             << " repeats=" << dispatches.size()
             << " deterministic=" << deterministic
             << " max_bf16_ulp=" << max_bf16_ulp

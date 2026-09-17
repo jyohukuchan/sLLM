@@ -27,6 +27,7 @@ use sllm_frontend::{GenerationExecutorV1, QwenMtpGenerationExecutorV1, Tokenizer
 use sllm_hip::HipBackend;
 
 mod kv_image;
+mod phase86;
 
 use super::{
     COMPAT_MODEL_ENV, COMPLETION_TIMEOUT, DEVICE_ENV, MODEL_ENV, PHASE83_KV_ENV,
@@ -1357,6 +1358,9 @@ fn run_frontend_executor(
 }
 
 pub(super) fn run() -> ExitCode {
+    if env::var("SLLM_PHASE86_STATE_CHECK").as_deref() == Ok("1") {
+        return phase86::run();
+    }
     match run_diagnostic() {
         Ok(report) => {
             let failed = report.state == "FAIL";

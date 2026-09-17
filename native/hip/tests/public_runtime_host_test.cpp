@@ -4551,6 +4551,149 @@ bool qwen38_projection_pack2_nvfp4_generic_contract() {
   return valid;
 }
 
+bool qwen38_projection_pack2_nvfp4_quantize_grid_contract() {
+  constexpr std::array<const char *, 3> environment_names = {
+      sllm_matmul_kernel::kNvfp4ActivationQuantizeWave8Environment,
+      "SLLM_NVFP4_FORCE_BASELINE", "SLLM_NVFP4_W4A4_FORCE_BASELINE"};
+  std::array<bool, environment_names.size()> was_present{};
+  std::array<std::string, environment_names.size()> old_values{};
+  for (std::size_t index = 0U; index != environment_names.size(); ++index) {
+    const char *const value = std::getenv(environment_names[index]);
+    was_present[index] = value != nullptr;
+    old_values[index] = value != nullptr ? value : "";
+    unsetenv(environment_names[index]);
+  }
+  const auto restore_environment = [&]() {
+    for (std::size_t index = 0U; index != environment_names.size(); ++index) {
+      if (was_present[index]) {
+        setenv(environment_names[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(environment_names[index]);
+      }
+    }
+  };
+
+  constexpr uint64_t m = 1U;
+  constexpr uint64_t k = 5120U;
+  constexpr uint64_t blocks = k / UINT64_C(16);
+  constexpr uint32_t scalar_grid = static_cast<uint32_t>(m * blocks);
+  constexpr uint32_t wave8_grid = static_cast<uint32_t>((m * blocks + 7U) / 8U);
+#if defined(SLLM_HIP_COMPILE_TARGET)
+  const uint32_t default_quantizer_grid =
+      (std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1030") == 0 ||
+       std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1201") == 0)
+          ? wave8_grid
+          : scalar_grid;
+#else
+  const uint32_t default_quantizer_grid = scalar_grid;
+#endif
+  struct QuantizeGridCase final {
+    const char *wave8;
+    const char *nvfp4_baseline;
+    const char *w4a4_baseline;
+    uint32_t quantizer_grid;
+    uint32_t compute_grid;
+  };
+  constexpr uint32_t decode_grid = static_cast<uint32_t>((17408U + 31U) / 32U);
+  constexpr std::array<QuantizeGridCase, 6> grid_cases = {{
+      {nullptr, nullptr, nullptr, default_quantizer_grid, decode_grid},
+      {"1", nullptr, nullptr, wave8_grid, decode_grid},
+      {"0", nullptr, nullptr, scalar_grid, decode_grid},
+      {"invalid", nullptr, nullptr, scalar_grid, decode_grid},
+      {nullptr, "1", nullptr, scalar_grid, decode_grid},
+      {"1", nullptr, "1", scalar_grid, 17408U},
+  }};
+  bool valid = true;
+
+  // Validate each quantizer environment through the public M=1 pack ABI.
+  // Both projection members use N=17408; the baseline aggregate is
+  // scalar_grid+17408+17408 while the production decode grid is 544 per member.
+  constexpr uint64_t n = 17408U;
+  constexpr uint64_t weight_values = n * (k / 2U);
+  constexpr uint64_t weight_scales = n * (k / 16U);
+  constexpr uint64_t weight_size =
+      ((weight_values + weight_scales + UINT64_C(3)) & ~UINT64_C(3)) +
+      UINT64_C(8);
+  for (const QuantizeGridCase &grid_case : grid_cases) {
+    for (std::size_t index = 0U; index != environment_names.size(); ++index) {
+      const char *const value = index == 0U   ? grid_case.wave8
+                                : index == 1U ? grid_case.nvfp4_baseline
+                                              : grid_case.w4a4_baseline;
+      if (value == nullptr)
+        unsetenv(environment_names[index]);
+      else
+        setenv(environment_names[index], value, 1);
+    }
+    const uint32_t expected_grid =
+        grid_case.quantizer_grid + 2U * grid_case.compute_grid;
+    for (const char *const target : {"gfx1030", "gfx1201"}) {
+      fake_hip::reset();
+      fake_hip::set_gcn_arch_name(target);
+      sllm_context_t *context = nullptr;
+      sllm_queue_t *queue = nullptr;
+      sllm_buffer_t *activation = nullptr;
+      std::array<sllm_buffer_t *, 2> weights{};
+      std::array<sllm_buffer_t *, 2> outputs{};
+      sllm_qwen38_projection_pack2_plan_t *plan = nullptr;
+      sllm_completion_t *completion = nullptr;
+      Error error;
+      bool case_valid =
+          create_context_for_arch(target, &context) &&
+          create_queue(context, &queue) &&
+          create_buffer_sized(context, m * k * sizeof(uint16_t), &activation) &&
+          create_buffer_sized(context, weight_size, &weights[0]) &&
+          create_buffer_sized(context, weight_size, &weights[1]) &&
+          create_buffer_sized(context, m * n * sizeof(uint16_t), &outputs[0]) &&
+          create_buffer_sized(context, m * n * sizeof(uint16_t), &outputs[1]);
+      if (case_valid) {
+        const auto descriptor =
+            qwen38_projection_pack2_descriptor(activation, weights, outputs);
+        case_valid =
+            expect_status(sllm_qwen38_projection_pack2_prepare(
+                              context, &descriptor, &plan, &error.sink),
+                          SLLM_STATUS_OK, "Qwen3.8 M1 baseline grid prepare",
+                          error) &&
+            plan != nullptr;
+        if (case_valid) {
+          auto info = qwen38_projection_pack2_dispatch_info();
+          case_valid =
+              expect_status(sllm_qwen38_projection_pack2_execute(
+                                plan, queue, &completion, &info, &error.sink),
+                            SLLM_STATUS_OK, "Qwen3.8 M1 baseline grid execute",
+                            error) &&
+              completion != nullptr && info.dispatch_count == 3U &&
+              info.grid_size_x == expected_grid &&
+              info.fallback_allowed == 0U && info.fallback_used == 0U &&
+              query_completion(completion, SLLM_STATUS_OK) &&
+              release_completion(&completion);
+        }
+      } else {
+        case_valid = false;
+      }
+      if (completion != nullptr)
+        case_valid = release_completion(&completion) && case_valid;
+      if (plan != nullptr)
+        case_valid =
+            expect_status(
+                sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
+                SLLM_STATUS_OK, "Qwen3.8 M1 baseline grid release", error) &&
+            case_valid;
+      for (sllm_buffer_t *&buffer : outputs)
+        case_valid = release_buffer(&buffer) && case_valid;
+      for (sllm_buffer_t *&buffer : weights)
+        case_valid = release_buffer(&buffer) && case_valid;
+      case_valid = release_buffer(&activation) && case_valid;
+      case_valid = release_queue(&queue) && case_valid;
+      case_valid = release_context(&context) && case_valid;
+      valid = case_valid && valid;
+    }
+  }
+  restore_environment();
+  fake_hip::set_gcn_arch_name("gfx1201");
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
 bool qwen38_projection_pack2_nvfp4_m64_queue_contract() {
   constexpr uint64_t k = UINT64_C(5120);
   constexpr uint64_t gate_n = UINT64_C(17408);
@@ -5538,6 +5681,249 @@ bool matmul_mxfp_weight_activation_descriptor_contract() {
          fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
 }
 
+bool matmul_phase85_m1_a16_selector_and_prepare_contract() {
+  constexpr const char *const a16_environment = "SLLM_MX_WA_M1_A16";
+  constexpr const char *const baseline_environment =
+      "SLLM_MX_WA_M1_FORCE_BASELINE";
+  const char *const old_a16 = std::getenv(a16_environment);
+  const char *const old_baseline = std::getenv(baseline_environment);
+  const bool had_a16 = old_a16 != nullptr;
+  const bool had_baseline = old_baseline != nullptr;
+  const std::string old_a16_value = had_a16 ? old_a16 : "";
+  const std::string old_baseline_value = had_baseline ? old_baseline : "";
+  const auto restore_environment = [&]() {
+    if (had_a16) {
+      setenv(a16_environment, old_a16_value.c_str(), 1);
+    } else {
+      unsetenv(a16_environment);
+    }
+    if (had_baseline) {
+      setenv(baseline_environment, old_baseline_value.c_str(), 1);
+    } else {
+      unsetenv(baseline_environment);
+    }
+  };
+  unsetenv(a16_environment);
+  unsetenv(baseline_environment);
+
+  struct A16Case final {
+    sllm_lowp::MatmulFormat a8_format;
+    sllm_lowp::MatmulFormat a16_format;
+    sllm_lowp::ProviderKind a16_provider;
+    sllm_lowp::InnerProduct a16_inner_product;
+    uint32_t op_version;
+    uint32_t weight_dtype;
+    uint32_t weight_encoding;
+    uint32_t a8_kernel_id;
+    uint32_t a16_kernel_id;
+  };
+  constexpr std::array<A16Case, 2> formats = {{
+      {sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8,
+       sllm_lowp::MatmulFormat::Mxfp8E4M3W8A16,
+       sllm_lowp::ProviderKind::Mxfp8A16Block32,
+       sllm_lowp::InnerProduct::E4M3Bf16Fp32,
+       SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION, SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+       SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0, 18U, 101U},
+      {sllm_lowp::MatmulFormat::Mxfp6E3M2W6A6,
+       sllm_lowp::MatmulFormat::Mxfp6E3M2W6A16,
+       sllm_lowp::ProviderKind::Mxfp6A16Block32,
+       sllm_lowp::InnerProduct::E3M2Bf16Fp32,
+       SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION, SLLM_TENSOR_DTYPE_U8,
+       SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0, 20U, 102U},
+  }};
+  constexpr std::array<const char *, 2> targets = {"gfx1030", "gfx1201"};
+  constexpr std::array<uint64_t, 4> boundary_k = {2016U, 2048U, 2080U, 17376U};
+  constexpr std::array<uint64_t, 3> boundary_n = {1023U, 1024U, 1025U};
+
+  bool valid = true;
+
+  // A16 is a M=1-only route. Every M>1 selector result must remain exactly
+  // the same when the A16 request is enabled.
+  for (const char *const target : targets) {
+    for (const uint64_t m : {2U, 16U, 17U, 127U, 128U, 129U}) {
+      const auto before8 =
+          sllm_matmul_kernel::select_mxfp8_variant(m, 2048U, 1024U, target);
+      const auto before6 =
+          sllm_matmul_kernel::select_mxfp6_variant(m, 2048U, 1024U, target);
+      setenv(a16_environment, "1", 1);
+      const auto after8 =
+          sllm_matmul_kernel::select_mxfp8_variant(m, 2048U, 1024U, target);
+      const auto after6 =
+          sllm_matmul_kernel::select_mxfp6_variant(m, 2048U, 1024U, target);
+      valid = valid && before8 == after8 && before6 == after6;
+      unsetenv(a16_environment);
+    }
+  }
+
+  // The internal A16 provider accepts every frozen M=1 K/N boundary on both
+  // exact targets, while the same BF16-input mixed request is rejected for M>1.
+  for (const A16Case &format : formats) {
+    for (const sllm_lowp::ExactTarget target :
+         {sllm_lowp::ExactTarget::Gfx1030, sllm_lowp::ExactTarget::Gfx1201}) {
+      for (const uint64_t k : boundary_k) {
+        for (const uint64_t n : boundary_n) {
+          const auto request = sllm_lowp::make_provider_request(
+              format.a16_format, target, 1U, n, k);
+          const auto prepared = sllm_lowp::prepare_provider_plan(request);
+          const bool case_valid =
+              prepared.supported() &&
+              prepared.provider == format.a16_provider &&
+              prepared.tile == sllm_lowp::TilePolicy::DecodeRowReduction &&
+              prepared.activation_pack == sllm_lowp::ActivationPack::NoneBf16 &&
+              prepared.inner_product == format.a16_inner_product &&
+              prepared.activation_layout == sllm_lowp::BlockLayout::RowMajor &&
+              prepared.block_contract.activation_block ==
+                  sllm_lowp::BlockKind::None &&
+              prepared.block_contract.activation_bits == 16U;
+          valid = case_valid && valid;
+        }
+      }
+      const auto mixed_request = sllm_lowp::make_provider_request(
+          format.a16_format, target, 2U, 1024U, 2048U);
+      const auto mixed_plan = sllm_lowp::prepare_provider_plan(mixed_request);
+      valid = valid && !mixed_plan.supported() &&
+              mixed_plan.rejection ==
+                  sllm_lowp::ProviderRejection::UnsupportedShape;
+    }
+  }
+
+  // Existing WMMA boundaries remain A8/A6 providers when M>1, including the
+  // two plan points used by the A16 non-regression requirement.
+  const auto gfx1201_mxfp8_wmma =
+      sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
+          sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8,
+          sllm_lowp::ExactTarget::Gfx1201, 128U, 1025U, 2048U));
+  const auto gfx1201_mxfp6_wmma =
+      sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
+          sllm_lowp::MatmulFormat::Mxfp6E3M2W6A6,
+          sllm_lowp::ExactTarget::Gfx1201, 17U, 1024U, 2048U));
+  valid = valid &&
+          gfx1201_mxfp8_wmma.provider ==
+              sllm_lowp::ProviderKind::Mxfp8Gfx1201Wmma &&
+          gfx1201_mxfp8_wmma.tile == sllm_lowp::TilePolicy::Wmma128x64x32 &&
+          gfx1201_mxfp6_wmma.provider ==
+              sllm_lowp::ProviderKind::Mxfp6Gfx1201WmmaViaE4M3 &&
+          gfx1201_mxfp6_wmma.tile == sllm_lowp::TilePolicy::Wmma128x64x32;
+
+  setenv(a16_environment, "1", 1);
+  for (const char *const target : targets) {
+    fake_hip::reset();
+    fake_hip::set_gcn_arch_name(target);
+    sllm_context_t *context = nullptr;
+    sllm_queue_t *queue = nullptr;
+    if (!create_context_for_arch(target, &context) ||
+        !create_queue(context, &queue)) {
+      valid = false;
+      release_queue(&queue);
+      release_context(&context);
+      continue;
+    }
+    for (const A16Case &format : formats) {
+      constexpr uint64_t m = 1U;
+      constexpr uint64_t k = 2048U;
+      constexpr uint64_t n = 1024U;
+      const uint64_t blocks = n * (k / 32U);
+      const uint64_t weight_bytes =
+          format.a8_format == sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8
+              ? n * k + blocks
+              : n * k * 3U / 4U + blocks;
+      sllm_buffer_t *activation = nullptr;
+      sllm_buffer_t *weight = nullptr;
+      sllm_buffer_t *output = nullptr;
+      valid =
+          create_buffer_sized(context, m * k * sizeof(uint16_t), &activation) &&
+          create_buffer_sized(context, weight_bytes, &weight) &&
+          create_buffer_sized(context, m * n * sizeof(uint16_t), &output) &&
+          valid;
+      if (activation == nullptr || weight == nullptr || output == nullptr) {
+        valid = false;
+        release_buffer(&activation);
+        release_buffer(&weight);
+        release_buffer(&output);
+        continue;
+      }
+      auto descriptor =
+          matmul_descriptor(activation, 0U, weight, 0U, output, 0U, m, k, n);
+      descriptor.op_version = format.op_version;
+      descriptor.weight.dtype = format.weight_dtype;
+      descriptor.weight.encoding = format.weight_encoding;
+
+      auto unbound = descriptor;
+      unbound.activation.buffer = nullptr;
+      unbound.weight.buffer = nullptr;
+      unbound.output.buffer = nullptr;
+      uint64_t persistent = UINT64_MAX;
+      uint64_t queue_bytes = UINT64_MAX;
+      uint64_t context_bytes = UINT64_MAX;
+      Error error;
+      valid =
+          expect_status(sllm_hip_matmul_workspace_footprint(
+                            context, &unbound, &persistent, &queue_bytes,
+                            &context_bytes, &error.sink),
+                        SLLM_STATUS_OK, "A16 zero-workspace query", error) &&
+          persistent == 0U && queue_bytes == 0U && context_bytes == 0U && valid;
+
+      sllm_matmul_plan_t *a16_plan = nullptr;
+      valid = expect_status(sllm_matmul_prepare(context, &descriptor, &a16_plan,
+                                                &error.sink),
+                            SLLM_STATUS_OK, "A16 prepare", error) &&
+              a16_plan != nullptr && valid;
+      uint32_t provider = 0U;
+      uint32_t tile = 0U;
+      uint32_t inner_product = 0U;
+      valid = valid &&
+              sllm_test_matmul_prepared_kernel_id(a16_plan) ==
+                  format.a16_kernel_id &&
+              sllm_test_matmul_prepared_provider_semantics(
+                  a16_plan, &provider, &tile, &inner_product) == 1U &&
+              provider == static_cast<uint32_t>(format.a16_provider) &&
+              tile == static_cast<uint32_t>(
+                          sllm_lowp::TilePolicy::DecodeRowReduction) &&
+              inner_product == static_cast<uint32_t>(format.a16_inner_product);
+
+      // Force-baseline has priority for a new prepare, but cannot mutate a
+      // plan that was already prepared as A16.
+      setenv(baseline_environment, "1", 1);
+      sllm_matmul_plan_t *baseline_plan = nullptr;
+      valid =
+          expect_status(sllm_matmul_prepare(context, &descriptor,
+                                            &baseline_plan, &error.sink),
+                        SLLM_STATUS_OK, "A16 force-baseline prepare", error) &&
+          baseline_plan != nullptr &&
+          sllm_test_matmul_prepared_kernel_id(baseline_plan) ==
+              format.a8_kernel_id &&
+          valid;
+      if (baseline_plan != nullptr) {
+        valid =
+            expect_status(sllm_matmul_plan_release(&baseline_plan, &error.sink),
+                          SLLM_STATUS_OK, "A16 baseline plan release", error) &&
+            valid;
+      }
+      unsetenv(baseline_environment);
+
+      // The host fake runtime intentionally rejects all quantized execute
+      // calls.  Keep the immutable-plan assertion here; dispatch_count==1,
+      // fallback_used==0, and kernel report fields are verified by the GPU
+      // evidence runner rather than weakening this host-only contract.
+      valid = valid && sllm_test_matmul_prepared_kernel_id(a16_plan) ==
+                           format.a16_kernel_id;
+      if (a16_plan != nullptr) {
+        valid = expect_status(sllm_matmul_plan_release(&a16_plan, &error.sink),
+                              SLLM_STATUS_OK, "A16 plan release", error) &&
+                valid;
+      }
+      release_buffer(&activation);
+      release_buffer(&weight);
+      release_buffer(&output);
+    }
+    valid = release_queue(&queue) && release_context(&context) && valid;
+  }
+  restore_environment();
+  fake_hip::set_gcn_arch_name("gfx1201");
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
 bool matmul_mxfp_prefill_selector_contract() {
   constexpr const char *const baseline = "SLLM_MX_WA_PREFILL_FORCE_BASELINE";
   constexpr const char *const mxfp8_tiled16 =
@@ -5570,6 +5956,8 @@ bool matmul_mxfp_prefill_selector_contract() {
       "SLLM_MXFP8_PREFILL_FORCE_WMMA_N128_DIRECT_BOTH_GFX1201";
   constexpr const char *const phase85_small_m =
       "SLLM_PHASE85_MX_WA_FORCE_SMALL_M";
+  constexpr const char *const m1_force_baseline =
+      "SLLM_MX_WA_M1_FORCE_BASELINE";
   const char *const old_baseline = std::getenv(baseline);
   const bool had_baseline = old_baseline != nullptr;
   const std::string old_baseline_value = had_baseline ? old_baseline : "";
@@ -5639,6 +6027,10 @@ bool matmul_mxfp_prefill_selector_contract() {
   const bool had_phase85_small_m = old_phase85_small_m != nullptr;
   const std::string old_phase85_small_m_value =
       had_phase85_small_m ? old_phase85_small_m : "";
+  const char *const old_m1_force_baseline = std::getenv(m1_force_baseline);
+  const bool had_m1_force_baseline = old_m1_force_baseline != nullptr;
+  const std::string old_m1_force_baseline_value =
+      had_m1_force_baseline ? old_m1_force_baseline : "";
   const auto restore_environment = [&]() {
     if (had_baseline) {
       setenv(baseline, old_baseline_value.c_str(), 1);
@@ -5728,6 +6120,11 @@ bool matmul_mxfp_prefill_selector_contract() {
     } else {
       unsetenv(phase85_small_m);
     }
+    if (had_m1_force_baseline) {
+      setenv(m1_force_baseline, old_m1_force_baseline_value.c_str(), 1);
+    } else {
+      unsetenv(m1_force_baseline);
+    }
   };
 
   unsetenv(baseline);
@@ -5747,6 +6144,7 @@ bool matmul_mxfp_prefill_selector_contract() {
   unsetenv(mxfp8_wmma_direct_both);
   unsetenv(mxfp8_wmma_n128_direct_both);
   unsetenv(phase85_small_m);
+  unsetenv(m1_force_baseline);
   bool valid =
       sllm_matmul_kernel::select_mxfp8_variant(1U) ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Decode &&
@@ -5756,6 +6154,85 @@ bool matmul_mxfp_prefill_selector_contract() {
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
       sllm_matmul_kernel::select_mxfp6_variant(17U) ==
           sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
+      sllm_matmul_kernel::select_mxfp8_variant(1U, 2048U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 2048U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp8_variant(1U, 2048U, 1024U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 2048U, 1024U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 6144U, 5120U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 6144U, 5120U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 6112U, 5120U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 6176U, 5120U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 6144U, 5119U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 6144U, 5121U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 5120U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 5152U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 10208U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 10240U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 5088U, 1024U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 5088U, 1025U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 5120U, 1024U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 5120U, 1025U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 10240U, 5120U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 17408U, 5120U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 5120U, 17408U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 5120U, 12288U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 5120U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 6144U, 5120U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 10240U, 5120U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 17408U, 5120U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 5120U, 17408U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 5120U, 12288U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 5120U, 1024U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 6144U, 5120U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2 &&
+      sllm_matmul_kernel::select_mxfp8_variant(1U, 2048U, 1024U, "gfx1200") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 2048U, 1024U, "gfx942") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp8_variant(1U, 2016U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 2048U, 1023U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      std::strcmp(sllm_matmul_kernel::logical_kernel_id(
+                      sllm_matmul_kernel::KernelVariant::Mxfp8W8A8M1Col2),
+                  "matmul.mxfp8.w8a8.m1.col2.v1") == 0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol(
+                      sllm_matmul_kernel::KernelVariant::Mxfp8W8A8M1Col2),
+                  "sllm_mxfp8_w8a8_m1_col2_v1") == 0 &&
+      sllm_matmul_kernel::grid_size_x(
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8M1Col2, 1U, 1025U) ==
+          513U &&
+      sllm_matmul_kernel::workgroup_size_x(
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2) == 256U &&
       sllm_matmul_kernel::select_nvfp4_w4a4_variant(1U) ==
           sllm_matmul_kernel::KernelVariant::Nvfp4W4A4Decode &&
       sllm_matmul_kernel::select_nvfp4_w4a4_variant(2U) ==
@@ -5852,6 +6329,15 @@ bool matmul_mxfp_prefill_selector_contract() {
       sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 248320U,
                                                "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
+
+  setenv(m1_force_baseline, "1", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp8_variant(1U, 2048U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 2048U, 1024U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode;
+  unsetenv(m1_force_baseline);
 
   setenv(phase85_small_m, "1", 1);
   valid =
@@ -5953,7 +6439,7 @@ bool matmul_mxfp_prefill_selector_contract() {
           sllm_matmul_kernel::KernelVariant::
               Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double &&
       sllm_matmul_kernel::select_mxfp8_variant(1U, 2048U, 1024U, "gfx1030") ==
-          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Decode &&
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8M1Col2 &&
       sllm_matmul_kernel::select_mxfp8_variant(2U, 33U, 1U, "gfx1030") !=
           sllm_matmul_kernel::KernelVariant::
               Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double &&
@@ -6003,7 +6489,7 @@ bool matmul_mxfp_prefill_selector_contract() {
                                                511U, 512U, 513U, 2048U};
   for (const uint64_t m : phase74_m_boundaries) {
     const auto expected =
-        m == 1U ? sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode
+        m == 1U ? sllm_matmul_kernel::KernelVariant::Mxfp6W6A6M1Col2
         : m >= 128U
             ? sllm_matmul_kernel::KernelVariant::
                   Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4
@@ -8197,6 +8683,450 @@ bool matmul_selector_decision_contract() {
 
   restore();
   return valid;
+}
+
+bool matmul_nvfp4_w4a4_baseline_scope_contract() {
+  constexpr const char *const baseline_environment =
+      "SLLM_NVFP4_W4A4_FORCE_BASELINE";
+  const char *const old_baseline = std::getenv(baseline_environment);
+  const bool had_baseline = old_baseline != nullptr;
+  const std::string old_baseline_value = had_baseline ? old_baseline : "";
+  const auto restore_environment = [&]() {
+    if (had_baseline) {
+      setenv(baseline_environment, old_baseline_value.c_str(), 1);
+    } else {
+      unsetenv(baseline_environment);
+    }
+  };
+  setenv(baseline_environment, "1", 1);
+
+  using sllm_matmul_kernel::KernelVariant;
+  bool valid = true;
+  const auto minimum =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1U, 1U, "gfx1030");
+  const auto maximum = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+      4096U, 17408U, 65536U, "gfx1201");
+  const auto outside_m =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(4097U, 1U, 1U, "gfx1030");
+  const auto outside_k =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 17409U, 1U, "gfx1030");
+  const auto outside_n =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1U, 65537U, "gfx1201");
+  const auto unsupported_target =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 1U, 1U, "gfx942");
+  valid = minimum.variant == KernelVariant::Nvfp4W4A4Packed &&
+          minimum.supported && minimum.enabled &&
+          maximum.variant == KernelVariant::Nvfp4W4A4Packed &&
+          maximum.supported && maximum.enabled &&
+          outside_m.variant == KernelVariant::Nvfp4W4A4Packed &&
+          !outside_m.supported &&
+          outside_k.variant == KernelVariant::Nvfp4W4A4Packed &&
+          !outside_k.supported &&
+          outside_n.variant == KernelVariant::Nvfp4W4A4Packed &&
+          !outside_n.supported &&
+          unsupported_target.variant == KernelVariant::Nvfp4W4A4Packed &&
+          !unsupported_target.supported;
+
+  constexpr uint64_t kLaunchLimit =
+      sllm_matmul_kernel::kNvfp4W4A4BaselineElementsPerLaunch;
+  valid = valid &&
+          sllm_matmul_kernel::nvfp4_w4a4_baseline_launch_count(2047U, 8192U) ==
+              1U &&
+          sllm_matmul_kernel::nvfp4_w4a4_baseline_launch_count(2048U, 8192U) ==
+              2U &&
+          sllm_matmul_kernel::nvfp4_w4a4_baseline_launch_count(2049U, 8192U) ==
+              2U &&
+          sllm_matmul_kernel::nvfp4_w4a4_baseline_grid_size(2047U, 8192U) ==
+              UINT64_C(2047) * UINT64_C(8192) &&
+          sllm_matmul_kernel::nvfp4_w4a4_baseline_grid_size(2048U, 8192U) ==
+              kLaunchLimit;
+
+  fake_hip::reset();
+  fake_hip::set_gcn_arch_name("gfx1030");
+  sllm_context_t *context = nullptr;
+  valid = create_context_for_arch("gfx1030", &context) && valid;
+  const auto descriptor_for = [](const uint64_t m, const uint64_t k,
+                                 const uint64_t n) {
+    auto descriptor =
+        matmul_descriptor(nullptr, 0U, nullptr, 0U, nullptr, 0U, m, k, n);
+    descriptor.op_version = SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION;
+    descriptor.weight.dtype = SLLM_TENSOR_DTYPE_U8;
+    descriptor.weight.encoding =
+        SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
+    return descriptor;
+  };
+  const auto query = [&](const uint64_t m, const uint64_t k, const uint64_t n,
+                         const sllm_status_t expected,
+                         const char *const label) {
+    auto descriptor = descriptor_for(m, k, n);
+    uint64_t persistent = UINT64_C(0x1111111111111111);
+    uint64_t queue = UINT64_C(0x2222222222222222);
+    uint64_t context_bytes = UINT64_C(0x3333333333333333);
+    const std::size_t allocations_before = fake_hip::live_allocations();
+    const std::size_t launches_before = fake_hip::matmul_launch_calls();
+    Error error;
+    const bool status_ok =
+        expect_status(sllm_hip_matmul_workspace_footprint(
+                          context, &descriptor, &persistent, &queue,
+                          &context_bytes, &error.sink),
+                      expected, label, error);
+    const bool message_ok =
+        expected == SLLM_STATUS_OK ||
+        std::strstr(error.message, "NVFP4 W4A4 FORCE_BASELINE reference") !=
+            nullptr;
+    const bool side_effects_ok =
+        expected != SLLM_STATUS_OK
+            ? persistent == UINT64_C(0x1111111111111111) &&
+                  queue == UINT64_C(0x2222222222222222) &&
+                  context_bytes == UINT64_C(0x3333333333333333)
+            : persistent != UINT64_C(0x1111111111111111) ||
+                  queue != UINT64_C(0x2222222222222222) ||
+                  context_bytes != UINT64_C(0x3333333333333333);
+    return status_ok && message_ok && side_effects_ok &&
+           fake_hip::live_allocations() == allocations_before &&
+           fake_hip::matmul_launch_calls() == launches_before;
+  };
+  if (context != nullptr) {
+    valid = query(4096U, 1U, 1U, SLLM_STATUS_OK,
+                  "NVFP4 baseline workspace M upper boundary") &&
+            valid;
+    valid = query(1U, 17408U, 1U, SLLM_STATUS_OK,
+                  "NVFP4 baseline workspace K upper boundary") &&
+            valid;
+    valid = query(1U, 1U, 65536U, SLLM_STATUS_OK,
+                  "NVFP4 baseline workspace N upper boundary") &&
+            valid;
+    valid = query(1U, 17U, 33U, SLLM_STATUS_OK,
+                  "NVFP4 baseline workspace nonaligned K/N") &&
+            valid;
+    valid = query(4097U, 1U, 1U, SLLM_STATUS_UNSUPPORTED,
+                  "NVFP4 baseline workspace M outside scope") &&
+            valid;
+    valid = query(1U, 17409U, 1U, SLLM_STATUS_UNSUPPORTED,
+                  "NVFP4 baseline workspace K outside scope") &&
+            valid;
+    valid = query(1U, 1U, 65537U, SLLM_STATUS_UNSUPPORTED,
+                  "NVFP4 baseline workspace N outside scope") &&
+            valid;
+    valid = query(0U, 1U, 1U, SLLM_STATUS_UNSUPPORTED,
+                  "NVFP4 baseline workspace zero M") &&
+            valid;
+    valid = query(1U, 0U, 1U, SLLM_STATUS_UNSUPPORTED,
+                  "NVFP4 baseline workspace zero K") &&
+            valid;
+    valid = query(1U, 1U, 0U, SLLM_STATUS_UNSUPPORTED,
+                  "NVFP4 baseline workspace zero N") &&
+            valid;
+  } else {
+    valid = false;
+  }
+
+  const auto prepare_case = [&](const uint64_t m, const uint64_t k,
+                                const uint64_t n, const sllm_status_t expected,
+                                const char *const label) {
+    sllm_buffer_t *activation = nullptr;
+    sllm_buffer_t *weight = nullptr;
+    sllm_buffer_t *output = nullptr;
+    const uint64_t activation_bytes =
+        std::max<uint64_t>(m * k * sizeof(uint16_t), UINT64_C(1));
+    const uint64_t weight_values = n * ((k + 1U) / 2U);
+    const uint64_t weight_scales = n * ((k + 15U) / 16U);
+    const uint64_t weight_bytes =
+        ((weight_values + weight_scales + UINT64_C(3)) & ~UINT64_C(3)) +
+        UINT64_C(8);
+    const uint64_t output_bytes =
+        std::max<uint64_t>(m * n * sizeof(uint16_t), UINT64_C(1));
+    bool case_valid =
+        create_buffer_sized(context, activation_bytes, &activation) &&
+        create_buffer_sized(context, weight_bytes, &weight) &&
+        create_buffer_sized(context, output_bytes, &output);
+    if (!case_valid) {
+      release_buffer(&activation);
+      release_buffer(&weight);
+      release_buffer(&output);
+      return false;
+    }
+    auto descriptor =
+        matmul_descriptor(activation, 0U, weight, 0U, output, 0U, m, k, n);
+    descriptor.op_version = SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION;
+    descriptor.weight.dtype = SLLM_TENSOR_DTYPE_U8;
+    descriptor.weight.encoding =
+        SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
+    sllm_matmul_plan_t *plan = nullptr;
+    Error error;
+    const std::size_t allocations_before = fake_hip::live_allocations();
+    const std::size_t launches_before = fake_hip::matmul_launch_calls();
+    const std::size_t expected_plan_allocations =
+        expected == SLLM_STATUS_OK && m == 1U ? 1U : 0U;
+    const sllm_status_t actual_status =
+        sllm_matmul_prepare(context, &descriptor, &plan, &error.sink);
+    const bool message_ok =
+        expected == SLLM_STATUS_OK ||
+        std::strstr(error.message, "NVFP4 W4A4 FORCE_BASELINE reference") !=
+            nullptr;
+    case_valid =
+        expect_status(actual_status, expected, label, error) && message_ok &&
+        (expected == SLLM_STATUS_OK ? plan != nullptr : plan == nullptr) &&
+        fake_hip::live_allocations() ==
+            allocations_before + expected_plan_allocations &&
+        fake_hip::matmul_launch_calls() == launches_before;
+    if (plan != nullptr) {
+      case_valid =
+          expect_status(sllm_matmul_plan_release(&plan, &error.sink),
+                        SLLM_STATUS_OK, "NVFP4 baseline plan release", error) &&
+          case_valid;
+    }
+    case_valid = release_buffer(&activation) && release_buffer(&weight) &&
+                 release_buffer(&output) && case_valid;
+    return case_valid;
+  };
+  if (context != nullptr) {
+    valid = prepare_case(4096U, 1U, 1U, SLLM_STATUS_OK,
+                         "NVFP4 baseline prepare M upper boundary") &&
+            valid;
+    valid = prepare_case(1U, 17408U, 1U, SLLM_STATUS_OK,
+                         "NVFP4 baseline prepare K upper boundary") &&
+            valid;
+    valid = prepare_case(1U, 1U, 65536U, SLLM_STATUS_OK,
+                         "NVFP4 baseline prepare N upper boundary") &&
+            valid;
+    valid = prepare_case(4097U, 1U, 1U, SLLM_STATUS_UNSUPPORTED,
+                         "NVFP4 baseline prepare M outside scope") &&
+            valid;
+    valid = prepare_case(1U, 17409U, 1U, SLLM_STATUS_UNSUPPORTED,
+                         "NVFP4 baseline prepare K outside scope") &&
+            valid;
+    valid = prepare_case(1U, 1U, 65537U, SLLM_STATUS_UNSUPPORTED,
+                         "NVFP4 baseline prepare N outside scope") &&
+            valid;
+    valid = prepare_case(0U, 1U, 1U, SLLM_STATUS_UNSUPPORTED,
+                         "NVFP4 baseline prepare zero M") &&
+            valid;
+    valid = prepare_case(1U, 0U, 1U, SLLM_STATUS_UNSUPPORTED,
+                         "NVFP4 baseline prepare zero K") &&
+            valid;
+    valid = prepare_case(1U, 1U, 0U, SLLM_STATUS_UNSUPPORTED,
+                         "NVFP4 baseline prepare zero N") &&
+            valid;
+  }
+
+  // An explicit baseline on an unsupported target must name the diagnostic
+  // scope at both C ABI entry points, rather than exposing a generic provider
+  // rejection.  The tensors stay at M=K=N=1 to keep the fake allocations tiny.
+  sllm_context_t *unsupported_context = nullptr;
+  fake_hip::set_gcn_arch_name("gfx942");
+  if (create_context_for_arch("gfx942", &unsupported_context)) {
+    auto unsupported_descriptor = descriptor_for(1U, 1U, 1U);
+    uint64_t persistent = UINT64_C(0x4444444444444444);
+    uint64_t queue_bytes = UINT64_C(0x5555555555555555);
+    uint64_t context_bytes = UINT64_C(0x6666666666666666);
+    Error error;
+    const bool workspace_status = expect_status(
+        sllm_hip_matmul_workspace_footprint(
+            unsupported_context, &unsupported_descriptor, &persistent,
+            &queue_bytes, &context_bytes, &error.sink),
+        SLLM_STATUS_UNSUPPORTED, "NVFP4 baseline unsupported-target workspace",
+        error);
+    valid = workspace_status &&
+            std::strstr(error.message, "NVFP4 W4A4 FORCE_BASELINE reference") !=
+                nullptr &&
+            persistent == UINT64_C(0x4444444444444444) &&
+            queue_bytes == UINT64_C(0x5555555555555555) &&
+            context_bytes == UINT64_C(0x6666666666666666) && valid;
+
+    sllm_buffer_t *activation = nullptr;
+    sllm_buffer_t *weight = nullptr;
+    sllm_buffer_t *output = nullptr;
+    const uint64_t weight_bytes = UINT64_C(12);
+    valid =
+        create_buffer_sized(unsupported_context, sizeof(uint16_t),
+                            &activation) &&
+        create_buffer_sized(unsupported_context, weight_bytes, &weight) &&
+        create_buffer_sized(unsupported_context, sizeof(uint16_t), &output) &&
+        valid;
+    sllm_matmul_plan_t *plan = nullptr;
+    if (activation != nullptr && weight != nullptr && output != nullptr) {
+      auto descriptor =
+          matmul_descriptor(activation, 0U, weight, 0U, output, 0U, 1U, 1U, 1U);
+      descriptor.op_version = SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION;
+      descriptor.weight.dtype = SLLM_TENSOR_DTYPE_U8;
+      descriptor.weight.encoding =
+          SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
+      Error prepare_error;
+      const bool prepare_status = expect_status(
+          sllm_matmul_prepare(unsupported_context, &descriptor, &plan,
+                              &prepare_error.sink),
+          SLLM_STATUS_UNSUPPORTED, "NVFP4 baseline unsupported-target prepare",
+          prepare_error);
+      valid = prepare_status &&
+              std::strstr(prepare_error.message,
+                          "NVFP4 W4A4 FORCE_BASELINE reference") != nullptr &&
+              plan == nullptr && valid;
+    } else {
+      valid = false;
+    }
+    if (plan != nullptr) {
+      Error cleanup_error;
+      valid = expect_status(
+                  sllm_matmul_plan_release(&plan, &cleanup_error.sink),
+                  SLLM_STATUS_OK, "NVFP4 baseline unsupported-target cleanup",
+                  cleanup_error) &&
+              valid;
+    }
+    valid = release_buffer(&activation) && release_buffer(&weight) &&
+            release_buffer(&output) && valid;
+    valid = release_context(&unsupported_context) && valid;
+  } else {
+    valid = false;
+  }
+  fake_hip::set_gcn_arch_name("gfx1030");
+
+  // Exercise the public dispatch metadata around the 16,777,215-element
+  // split boundary with a tiny K.  The fake runtime does not execute the
+  // device kernel, so the largest output allocation is only about 32 MiB and
+  // no large host matmul is performed.
+  if (context != nullptr) {
+    sllm_queue_t *queue = nullptr;
+    valid = create_queue(context, &queue) && valid;
+    for (const uint64_t m : {2047U, 2048U, 2049U}) {
+      if (!valid)
+        break;
+      constexpr uint64_t k = 1U;
+      constexpr uint64_t n = 8192U;
+      const uint64_t weight_values = n * ((k + 1U) / 2U);
+      const uint64_t weight_scales = n * ((k + 15U) / 16U);
+      const uint64_t weight_bytes =
+          ((weight_values + weight_scales + UINT64_C(3)) & ~UINT64_C(3)) +
+          UINT64_C(8);
+      sllm_buffer_t *activation = nullptr;
+      sllm_buffer_t *weight = nullptr;
+      sllm_buffer_t *output = nullptr;
+      sllm_matmul_plan_t *plan = nullptr;
+      sllm_completion_t *completion = nullptr;
+      valid =
+          create_buffer_sized(context, m * k * sizeof(uint16_t), &activation) &&
+          create_buffer_sized(context, weight_bytes, &weight) &&
+          create_buffer_sized(context, m * n * sizeof(uint16_t), &output) &&
+          valid;
+      if (activation != nullptr && weight != nullptr && output != nullptr) {
+        auto descriptor =
+            matmul_descriptor(activation, 0U, weight, 0U, output, 0U, m, k, n);
+        descriptor.op_version = SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION;
+        descriptor.weight.dtype = SLLM_TENSOR_DTYPE_U8;
+        descriptor.weight.encoding =
+            SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32;
+        Error error;
+        valid =
+            expect_status(
+                sllm_matmul_prepare(context, &descriptor, &plan, &error.sink),
+                SLLM_STATUS_OK, "NVFP4 baseline split prepare", error) &&
+            plan != nullptr && valid;
+        if (valid) {
+          auto info = matmul_dispatch_info();
+          valid =
+              expect_status(sllm_matmul_execute(plan, queue, &completion, &info,
+                                                &error.sink),
+                            SLLM_STATUS_OK, "NVFP4 baseline split execute",
+                            error) &&
+              completion != nullptr && info.kernel_id == 11U &&
+              info.dispatch_count == (m == 2047U ? 2U : 3U) &&
+              info.grid_size_x ==
+                  static_cast<uint32_t>(
+                      m == 2047U ? m * n
+                                 : sllm_matmul_kernel::
+                                       kNvfp4W4A4BaselineElementsPerLaunch) &&
+              info.fallback_allowed == 0U && info.fallback_used == 0U &&
+              query_completion(completion, SLLM_STATUS_OK) &&
+              release_completion(&completion) && valid;
+        }
+      } else {
+        valid = false;
+      }
+      if (plan != nullptr) {
+        Error error;
+        valid = expect_status(sllm_matmul_plan_release(&plan, &error.sink),
+                              SLLM_STATUS_OK, "NVFP4 baseline split release",
+                              error) &&
+                valid;
+      }
+      if (completion != nullptr)
+        valid = release_completion(&completion) && valid;
+      valid = release_buffer(&activation) && release_buffer(&weight) &&
+              release_buffer(&output) && valid;
+    }
+    valid = release_queue(&queue) && valid;
+  }
+
+  // The default selector must remain unchanged when the baseline control is
+  // absent; the exact optimized variant is intentionally target/shape-owned.
+  unsetenv(baseline_environment);
+  const auto default_decision = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+      1U, 5120U, 17408U, "gfx1030");
+  valid = valid && default_decision.variant != KernelVariant::Nvfp4W4A4Packed &&
+          default_decision.supported;
+
+  // Qwen projection-pack M=1 is directly admitted, so its baseline N bound is
+  // checked before any plan/accounting allocation. M>=64 remains covered by
+  // the existing fallback-to-member contract test.
+  setenv(baseline_environment, "1", 1);
+  if (context != nullptr) {
+    constexpr uint64_t m = 1U;
+    constexpr uint64_t k = 16U;
+    constexpr uint64_t n = 65537U;
+    const uint64_t weight_values = n * ((k + 1U) / 2U);
+    const uint64_t weight_scales = n * ((k + 15U) / 16U);
+    const uint64_t weight_bytes =
+        ((weight_values + weight_scales + UINT64_C(3)) & ~UINT64_C(3)) +
+        UINT64_C(8);
+    sllm_buffer_t *activation = nullptr;
+    std::array<sllm_buffer_t *, 2> weights{};
+    std::array<sllm_buffer_t *, 2> outputs{};
+    sllm_qwen38_projection_pack2_plan_t *plan = nullptr;
+    valid =
+        create_buffer_sized(context, m * k * sizeof(uint16_t), &activation) &&
+        create_buffer_sized(context, weight_bytes, &weights[0]) &&
+        create_buffer_sized(context, weight_bytes, &weights[1]) &&
+        create_buffer_sized(context, m * n * sizeof(uint16_t), &outputs[0]) &&
+        create_buffer_sized(context, m * n * sizeof(uint16_t), &outputs[1]) &&
+        valid;
+    if (activation != nullptr && weights[0] != nullptr &&
+        weights[1] != nullptr && outputs[0] != nullptr &&
+        outputs[1] != nullptr) {
+      const auto descriptor = qwen38_projection_pack2_nvfp4_descriptor(
+          activation, weights, outputs, k, n, n, m);
+      const std::size_t allocations_before = fake_hip::live_allocations();
+      const std::size_t launches_before = fake_hip::matmul_launch_calls();
+      Error error;
+      valid = expect_status(sllm_qwen38_projection_pack2_prepare(
+                                context, &descriptor, &plan, &error.sink),
+                            SLLM_STATUS_UNSUPPORTED,
+                            "Qwen3.8 M1 baseline N outside scope", error) &&
+              plan == nullptr &&
+              fake_hip::live_allocations() == allocations_before &&
+              fake_hip::matmul_launch_calls() == launches_before && valid;
+    } else {
+      valid = false;
+    }
+    if (plan != nullptr) {
+      Error error;
+      valid = expect_status(
+                  sllm_qwen38_projection_pack2_plan_release(&plan, &error.sink),
+                  SLLM_STATUS_OK, "Qwen3.8 baseline scope cleanup", error) &&
+              valid;
+    }
+    for (sllm_buffer_t *&buffer : outputs)
+      valid = release_buffer(&buffer) && valid;
+    for (sllm_buffer_t *&buffer : weights)
+      valid = release_buffer(&buffer) && valid;
+    valid = release_buffer(&activation) && valid;
+  }
+
+  if (context != nullptr)
+    valid = release_context(&context) && valid;
+  restore_environment();
+  fake_hip::set_gcn_arch_name("gfx1201");
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
 }
 
 bool matmul_nvfp4_w4a4_activation_shared_lifetime_contract() {
@@ -14290,6 +15220,11 @@ int main() {
     std::cerr << "Qwen3.8 generic NVFP4 projection-pack contract test failed\n";
     return 1;
   }
+  if (!qwen38_projection_pack2_nvfp4_quantize_grid_contract()) {
+    std::cerr
+        << "Qwen3.8 NVFP4 projection-pack quantize-grid contract test failed\n";
+    return 1;
+  }
   if (!qwen38_projection_pack2_nvfp4_m64_baseline_fallback_contract()) {
     std::cerr << "Qwen3.8 M64 NVFP4 baseline fallback contract test failed\n";
     return 1;
@@ -14306,6 +15241,11 @@ int main() {
   }
   if (!matmul_mxfp_weight_activation_descriptor_contract()) {
     std::cerr << "matmul MXFP descriptor contract test failed\n";
+    return 1;
+  }
+  if (!matmul_phase85_m1_a16_selector_and_prepare_contract()) {
+    std::cerr
+        << "matmul Phase85 M1 A16 selector/prepare contract test failed\n";
     return 1;
   }
   if (!matmul_mxfp_prefill_selector_contract()) {
@@ -14326,6 +15266,10 @@ int main() {
   }
   if (!matmul_nvfp4_w4a4_selector_contract()) {
     std::cerr << "matmul NVFP4 W4A4 selector contract test failed\n";
+    return 1;
+  }
+  if (!matmul_nvfp4_w4a4_baseline_scope_contract()) {
+    std::cerr << "matmul NVFP4 W4A4 baseline scope contract test failed\n";
     return 1;
   }
   if (!matmul_selector_decision_contract()) {

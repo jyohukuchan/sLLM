@@ -12,6 +12,10 @@ enum class MatmulFormat : uint8_t {
   Nvfp4W4A4,
   Mxfp4W4A4,
   Fp8OuterE4M3W8A8,
+  // M1-only weight-MX / BF16-activation contracts. Appended to preserve the
+  // existing internal format values used by provider audit records.
+  Mxfp8E4M3W8A16,
+  Mxfp6E3M2W6A16,
 };
 
 enum class ScalarType : uint8_t {
@@ -111,6 +115,8 @@ enum class InnerProduct : uint8_t {
   // NVFP4 W4A4 gfx1201 candidate: decode E2M1 and absorb each E4M3
   // block-16 scale into FP16 WMMA operands at tile ingress.
   E2M1Fp16ScaleWmmaFp32,
+  E4M3Bf16Fp32,
+  E3M2Bf16Fp32,
 };
 
 enum class AccumulationType : uint8_t {
@@ -136,6 +142,8 @@ enum class ProviderKind : uint8_t {
   Nvfp4W4A4Block16,
   Mxfp4W4A4Block32,
   Fp8OuterGfx1030Software,
+  Mxfp8A16Block32,
+  Mxfp6A16Block32,
 };
 
 enum class ProviderRejection : uint8_t {
@@ -146,6 +154,7 @@ enum class ProviderRejection : uint8_t {
   KNotBlockAligned,
   InvalidLayout,
   UnsupportedNumerics,
+  UnsupportedShape,
 };
 
 struct FormatContract {
@@ -317,6 +326,34 @@ constexpr FormatContract format_contract(const MatmulFormat format) noexcept {
             8U,
             false,
             false};
+  case MatmulFormat::Mxfp8E4M3W8A16:
+    return {format,
+            ScalarType::E4M3Fn,
+            ScalarType::Bf16,
+            BlockKind::Mxfp8E4M3Block32,
+            BlockKind::None,
+            BlockScaleType::E8M0,
+            BlockScaleType::None,
+            32U,
+            0U,
+            8U,
+            16U,
+            false,
+            false};
+  case MatmulFormat::Mxfp6E3M2W6A16:
+    return {format,
+            ScalarType::E3M2,
+            ScalarType::Bf16,
+            BlockKind::Mxfp6E3M2Block32,
+            BlockKind::None,
+            BlockScaleType::E8M0,
+            BlockScaleType::None,
+            32U,
+            0U,
+            6U,
+            16U,
+            false,
+            false};
   }
   return {format,
           ScalarType::Bf16,
@@ -336,6 +373,8 @@ constexpr FormatContract format_contract(const MatmulFormat format) noexcept {
 constexpr BlockLayout
 default_activation_layout(const MatmulFormat format) noexcept {
   return format == MatmulFormat::Nvfp4W4A16 ||
+                 format == MatmulFormat::Mxfp8E4M3W8A16 ||
+                 format == MatmulFormat::Mxfp6E3M2W6A16 ||
                  format == MatmulFormat::Fp8OuterE4M3W8A8
              ? BlockLayout::RowMajor
              : BlockLayout::RowMajorBlockScaled;
@@ -449,7 +488,9 @@ prepare_provider_plan(const ProviderRequest &request) noexcept {
   }
   const bool k_requires_complete_blocks =
       request.format == MatmulFormat::Mxfp8E4M3W8A8 ||
-      request.format == MatmulFormat::Mxfp6E3M2W6A6;
+      request.format == MatmulFormat::Mxfp6E3M2W6A6 ||
+      request.format == MatmulFormat::Mxfp8E4M3W8A16 ||
+      request.format == MatmulFormat::Mxfp6E3M2W6A16;
   const bool outer_vector_format =
       request.format == MatmulFormat::Fp8OuterE4M3W8A8;
   if ((!outer_vector_format && contract.weight_block_size == 0U) ||
@@ -465,7 +506,9 @@ prepare_provider_plan(const ProviderRequest &request) noexcept {
       outer_vector_format ? request.weight_layout == BlockLayout::RowMajor
                           : is_block_scaled_layout(request.weight_layout);
   const bool valid_activation_layout =
-      request.format == MatmulFormat::Nvfp4W4A16 || outer_vector_format
+      request.format == MatmulFormat::Nvfp4W4A16 ||
+              request.format == MatmulFormat::Mxfp8E4M3W8A16 ||
+              request.format == MatmulFormat::Mxfp6E3M2W6A16 || outer_vector_format
           ? request.activation_layout == BlockLayout::RowMajor
           : is_block_scaled_layout(request.activation_layout);
   if (!valid_weight_layout || !valid_activation_layout) {
@@ -579,6 +622,46 @@ prepare_provider_plan(const ProviderRequest &request) noexcept {
             base_tile,
             ActivationPack::Mxfp6E3M2Block32,
             InnerProduct::DecodedBlockScaledFp32,
+            request.m,
+            request.n,
+            request.k,
+            request.accumulation,
+            request.output};
+  case MatmulFormat::Mxfp8E4M3W8A16:
+    if (request.m != 1U) {
+      return rejected_plan(request, ProviderRejection::UnsupportedShape);
+    }
+    return {ProviderKind::Mxfp8A16Block32,
+            ProviderRejection::None,
+            request.format,
+            contract,
+            request.weight_layout,
+            request.activation_layout,
+            target_architecture(request.target),
+            request.target,
+            TilePolicy::DecodeRowReduction,
+            ActivationPack::NoneBf16,
+            InnerProduct::E4M3Bf16Fp32,
+            request.m,
+            request.n,
+            request.k,
+            request.accumulation,
+            request.output};
+  case MatmulFormat::Mxfp6E3M2W6A16:
+    if (request.m != 1U) {
+      return rejected_plan(request, ProviderRejection::UnsupportedShape);
+    }
+    return {ProviderKind::Mxfp6A16Block32,
+            ProviderRejection::None,
+            request.format,
+            contract,
+            request.weight_layout,
+            request.activation_layout,
+            target_architecture(request.target),
+            request.target,
+            TilePolicy::DecodeRowReduction,
+            ActivationPack::NoneBf16,
+            InnerProduct::E3M2Bf16Fp32,
             request.m,
             request.n,
             request.k,

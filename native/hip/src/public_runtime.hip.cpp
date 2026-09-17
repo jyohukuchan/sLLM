@@ -276,6 +276,7 @@ hipError_t launch_mxfp6_w6a6(const uint8_t *, const uint8_t *, const uint8_t *,
                              uint64_t, KernelVariant, hipStream_t) noexcept {
   return hipErrorInvalidValue;
 }
+
 } // namespace sllm_matmul_kernel
 
 namespace sllm_moe_route_kernel {
@@ -4353,8 +4354,18 @@ void initialize_matmul_dispatch_info(
         matches_runtime_gcn_arch(arch_name, "gfx1201") &&
         ::sllm_matmul_kernel::phase78_gfx1201_nvfp4_w4a4_split4_shape(
             metadata.m, metadata.k, metadata.n)));
+  const bool mx_a16 =
+      variant == ::sllm_matmul_kernel::KernelVariant::Mxfp8W8A16M1Col2 ||
+      variant == ::sllm_matmul_kernel::KernelVariant::Mxfp6W6A16M1Col2;
+  const bool nvfp4_baseline =
+      metadata.nvfp4_w4a4 &&
+      variant == ::sllm_matmul_kernel::KernelVariant::Nvfp4W4A4Packed;
   info->dispatch_count =
-      nvfp4_split4 ? 3U
+      mx_a16 ? 1U
+      : nvfp4_baseline
+          ? 1U + ::sllm_matmul_kernel::nvfp4_w4a4_baseline_launch_count(
+                     metadata.m, metadata.n)
+      : nvfp4_split4 ? 3U
       : variant == ::sllm_matmul_kernel::KernelVariant::
                        Nvfp4W4A4PrefillGfx1201F16Staging
           ? 5U

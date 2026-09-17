@@ -302,7 +302,7 @@
       },
       {
         "path": "native/hip/src/graph_span_runtime.inc",
-        "sha256": "928788130785852cf14c3c09fa616dd3d2af71f8e220455d28d488bb3496a34d"
+        "sha256": "21025cfd538017a7549faae46d4853b48fee374c90ade29f849816e8bba3bd30"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -350,7 +350,7 @@
       },
       {
         "path": "native/hip/src/low_precision_matmul_provider.hpp",
-        "sha256": "bc5866300606ddcc08c5d928954fb49e6b71453e2846a5951b634de406c3e2b6"
+        "sha256": "2c50cb6cf98173df2944c047b3f3a33e81fe0c3fef815fdf6ca913940e051802"
       },
       {
         "path": "native/hip/src/matmul_api.cpp",
@@ -362,15 +362,15 @@
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
-        "sha256": "f00d914e4040fbfc4ca205c91fb96991c30916f80b71f4638b7c68fcdaa3abcf"
+        "sha256": "6d24dbf5a4991a6dc5cc24e4f2b07ff567cd44f768842b49d02ce6c0828c51f4"
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "f1c0addc100f4158671c3d2d3482f4ca202a41f9e1d0a9a2866e22b888bbbb44"
+        "sha256": "6064bdc5189a0ebc629a264cf3a97ee62f3f90bcf5c03e269c69a9a502db3297"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
-        "sha256": "d2e6a044a0617b6d1d8cee3b62a4d2638036fdda5134c06fb2bb6ec1971fe546"
+        "sha256": "5040c4d329e03de4a854b87c1bee08f04967d2823c0cbb5d8481773d0f519b47"
       },
       {
         "path": "native/hip/src/minimax_m3_moe_route_api.cpp",
@@ -478,7 +478,7 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "fbb906d62dbf22f7e7dd054ac9e289fb137fcc6f1d154db2d1bbbac33db97b9a"
+        "sha256": "d5114d24c31f115f894ca3440060ef16a9a9df96bd20aec8e4c3261b9cf347d4"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
@@ -486,7 +486,7 @@
       },
       {
         "path": "native/hip/src/qwen38_projection_pack_runtime.inc",
-        "sha256": "647da36b16dff597b0c0b0c0119cbc4b9aaadfb4b9457e39f624a036f3c0281b"
+        "sha256": "b76fda25e3037fcb28aa092a3d6b083ecb778526a7c1fb15a55136df06776164"
       },
       {
         "path": "native/hip/src/residual_rmsnorm_api.cpp",
@@ -597,7 +597,7 @@
         "sha256": "e6d480204c7f49f0385ca511cdb2080372e114d2befa5f345a97b7d5bd0eb8f1"
       }
     ],
-    "source_set_sha256": "d4f9a56ed2a39fdda08d5f841231150fa8b337d9dd966956ef8c17495185c689"
+    "source_set_sha256": "f5bc2e0b797f43945e6f8ff847aace9b636ce66e3e5c8584bf9ea1fa62e1eecd"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",

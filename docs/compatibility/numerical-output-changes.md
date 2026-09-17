@@ -61,6 +61,13 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### 2026-09-13 Phase85 follow-up MXFP M=1 Columns2（ローカル）
+
+- N0: 1出力あたりのFP32加算/reduction順と量子化recipeを維持し、隣接2列でactivation読出し・復号を共有する。
+- exact gfx1030/gfx1201の実MTP形状・境界で前後digest、固定MTPの生成列・採用数を確認した。BF16比品質同等性の認定ではない。
+- MXFP6で退行した範囲は旧ID20を維持する。採用scope、測定、失敗と訂正は[履歴](../history/2026/09/11-20/phase85-mxfp-m1-mtp-followup.md)を参照する。
+- rollback基準は `e25bcc077e301f3157b9d7e984e7663f9f3a45c2`。比較用指定は`SLLM_MX_WA_M1_FORCE_BASELINE=1`。新たなsampling/encoding変更はない。
+
 ### 2026-09-13 Phase85 共通MXFP8／MXFP6 kernel
 
 - scope: canonical `gfx1030`／`gfx1201`、MXFP8 E4M3 W8A8／MXFP6 E3M2 W6A6、block32／E8M0。
@@ -1563,3 +1570,33 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 - classification: finite scopeのN0候補。既存ResidualRmsNormのBF16 Add丸め・同じreduction／scale／epsilonと2出力を維持し、MLP後の63 inter-layer pairとfinal1 pairへ適用する。新native kernel／ABIなし。
 - scope: R55と同じexact Qwen3.8 target。attention64とMLP64を別集計し、既存4B／MTP companion／adapter／multimodal条件は維持する。finalノードのpre-norm hiddenはfused output0、normalized hiddenはoutput1を読む。元tensor IDと各consumerを維持する。
 - status: graph／core focused host検査と両GPU通常8192/128をPASS。128token／text hashとMTP採否はR55に一致、HIP-only／cleanup0。V3,648／R3,456の追加dispatch削減を確認したが、R9700単回decode24.435は目標未達で速度改善を認定しない。native数値証拠の不変対応は`r56-native-evidence-mapping.json`、新graph／runtime出力は`r56-gfx1030-output-comparison.json`／`r56-gfx1201-output-comparison.json`、詳細は[Phase83.5計画](../plans/archive/2026/09/1-10/phase83-5-llama-guided-performance.md)。
+
+
+### OUT-2026-09-14-P85-M1-A16: MXFP8／MXFP6のM=1活性化量子化省略
+
+- scope: exact gfx1030／gfx1201、M=1、K>0かつ32整列、N>0。
+  `SLLM_MX_WA_M1_A16=1` のprepare時選択でID101／102を用い、元のBF16 activationを直接読む。
+  重みcodec、laneのK割当、FP32積和とreduction順はStage 1で維持した。
+- numerical change: A8／A6への丸めを省くため、従来経路との出力digest一致を要求しない。
+  MTPの採用率、block数、生成token列も変わり得る。M>1とWMMA選択、sidecar byte列は維持する。
+- evidence: 両GPU・実6形状とK2016/2048/2080/17376、N1023/1024/1025境界で
+  独立FP32のsampled oracleと全出力finite検査をPASS。72組のM=1比較、gfx1201の
+  M128 MXFP8 ID37／M17 MXFP6 ID48の出力・provider維持を確認した。
+  fake-quant Stage 0は各形式8行列424,673,280要素のBF16往復bit一致を確認した。
+- status: 明示opt-inとして実装・検証済み。BF16 companionを既定に維持する。
+  Stage 3の追加3候補は全18形状で既存A16より遅く、不採用とした。
+  総priming時間は初期ABBA追試で+0.58%だったが、区間別追加ABBAでは総時間-0.0793%、
+  後続batch合計+0.0010%で測定上ほぼ同等となり、非退行確認を完了した。全測定を保持する。
+  [計画](../plans/archive/2026/09/11-20/phase85-m1-a16-mtp.md)、
+  [集約結果](../../ci/matrix/phase85-a16-mtp-results-v1.json)。
+
+## 2026-09-17 FORCE_BASELINE のrollback分類訂正
+
+Phase82およびPhase78の履歴にある `FORCE_BASELINE` は、当時の同一source内比較スイッチとしての事実を保持する。一方、現在の分類では、環境変数は本番rollbackではなく診断用T2（GPU上の帰属用参照経路）である。本番復旧は、対象targetで既知の出力を得たbinaryを生成したcommitへバイナリロールバックする。
+
+| 対象履歴 | 本番rollback identity | `FORCE_BASELINE` の扱い |
+| --- | --- | --- |
+| Phase82既定採用・削除 | `0b2f0a45378375311d208effcdb32ad02dcf9349`（Phase81 r3の既知比較binary）。Phase82実装・削除commit `fff63c574f1ffa7541efbef5c02e91b856db4a7d` の祖先であることを確認済み | [T2約束範囲](../development/force-baseline-reference-oracle.md)に限定。T1真値・本番性能・全shape品質を保証しない |
+| Phase78 Qwen3.8/NVFP4測定 | `40ab582b049cff7effadbca75fe951d6cef5bd96`（evidenceの`identity.source_commit`と既知CLI binary anchor）。Qwen3.8統合実装commit `9ba9959ee14bc27193b7bafed0939a1142e17383`の直後のdocs-only commit | 同じくT2診断用。既知のPhase78 binaryへ戻す操作と、baseline kernelを選ぶ操作を混同しない |
+
+2026-09-17に11 flag棚卸しと必要なT2修復・検証を完了した。NVFP4 W4A4の両GPU longとgfx1030 FP8 decode longは、参照kernelの実dispatch、HIP-only、非finite 0、fallbackなし、cleanup 0を確認した。既定出力とkernel／launch geometryは変更前と一致した。無効果フラグや全target／全shapeの数値同等性は保証しない。詳細は[FORCE_BASELINE T2約束範囲](../development/force-baseline-reference-oracle.md)、[完了計画](../plans/archive/2026/09/11-20/force-baseline-reference-oracle.md)、[検証履歴](../history/2026/09/11-20/force-baseline-reference-oracle.md)を参照する。
