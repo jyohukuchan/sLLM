@@ -9,7 +9,9 @@ Git管理外・ignore対象のscratch copyや実験コードも、実際の流�
 
 | 取込み日時（概算・JST） | 元プロジェクト／元パス | sLLM側パス | 流用区分・概要 | 詳細記録 |
 | --- | --- | --- | --- | --- |
+| 2026-09-17 04:20頃 JST | CarouselAether/rocm_exl3 / repository root | `reference/rocm_exl3/`、`docs/references/patches/rocm-exl3-gfx1201.patch` | `exact` clone・許可済み局所修正：独立動作調査、production組込みなし | [詳細](#rocm-exl3-investigation-20260917) |
 | 不明（2026-09-13に確認・補記） | llama.cpp / `ggml/src/ggml-cuda/fattn-vec.cuh` | `.local-artifacts/phase83-5/qtile8-softmax-ilp/fattn-vec.pinned.cuh` | `exact`：Phase 83.5実験用の固定参照コピー。Git管理外 | [詳細](#llama-cpp-phase83-5-fattn-vec-scratch-001) |
+| 2026-09-14（日付精度） | llama.cpp / repository tree `a402be581cf8` | `.local-artifacts/llama-mtp-20260914/upstream/` | `exact`：最新版の独立HIP比較実行用checkout。sLLM runtimeへのコード組込みなし、Git管理外 | [詳細](#llama-cpp-mtp-quant-benchmark-20260914) |
 
 - 日時は取込み時点について分かる精度で記す（例: `2026-09-12 午後頃`、日付のみも可）。
   不明な場合は`不明`とし、記録日やcommit時刻を取込み日時として推測で埋めない。
@@ -376,4 +378,82 @@ reuse:
     - Added strict unsupported-field, type, size, queue, cancellation, and mid-stream terminal-error cases required by the sLLM profile.
 import:
   commit: b3fbfdccda87628b94d1440df1bf25707cd93c35
+```
+
+## llama-cpp-mtp-quant-benchmark-20260914
+
+最新版のllama.cppを変更せずにHIP buildし、MTP専用重みの量子化比較を行うための独立checkout。
+コピーしたsource／生成binary／modelはGitへ追加しない。upstreamの全license／third-party noticesをcheckout内に維持する。
+sLLMのproduction implementationへのcopy／adapt／portは行っていない。
+
+```yaml
+schema_version: 1
+id: llama-cpp-mtp-quant-benchmark-20260914
+component: isolated llama.cpp HIP MTP quantization benchmark
+upstream:
+  repository: https://github.com/ggml-org/llama.cpp
+  commit: bc52a12b38941b0a690ade65fbc5749715224e30
+  source_tree: a402be581cf83b7c94e5122197a2d9cd2fcfe1d7
+  source_path: /
+  url: https://github.com/ggml-org/llama.cpp/tree/bc52a12b38941b0a690ade65fbc5749715224e30
+local:
+  directory: .local-artifacts/llama-mtp-20260914/upstream/
+  tracked: false
+  ignored: true
+  identity_file: .local-artifacts/llama-mtp-20260914/upstream-identity.json
+  observed_on: "2026-09-14"
+license:
+  project_spdx: MIT
+  copyright: Copyright (c) 2023-2026 The ggml authors
+  file: .local-artifacts/llama-mtp-20260914/upstream/LICENSE
+  upstream_blob: e7dca554bcb802f98408383a864404e3aa4eacca
+  observed_sha256: 94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d
+  third_party: upstream per-component license files retained unchanged
+reuse:
+  mode: exact
+  modifications: []
+import:
+  commit: null
+  commit_status: not-applicable-untracked-standalone-benchmark
+  imported_at: "2026-09-14"
+  time_precision: date
+```
+
+## rocm-exl3-investigation-20260917
+
+ユーザー指定の独立調査checkout。全licenseを保持し、sLLM runtimeへのcopy/adapt/portは行わない。
+
+```yaml
+schema_version: 1
+upstream:
+  repository: https://github.com/CarouselAether/rocm_exl3
+  commit: 550dcfed786ad7bffa08b7a6b2a216fc474cbbb5
+  tree: e5f6b86fca7b2ac45e70e93be18e04c1c4b3868b
+  source_path: /
+local:
+  directory: reference/rocm_exl3/
+  tracked: false
+  ignored: true
+license:
+  spdx: MIT
+  copyright: Copyright (c) 2025 Turboderp
+  file: docs/provenance/licenses/rocm-exl3-MIT-550dcfed.txt
+  upstream_file: reference/rocm_exl3/LICENSE
+  observed_sha256: 27a32b6263fcd96c79d3beeecf221c4366780bdf15ad51986f48650bd7369bff
+  observed_on: "2026-09-17"
+reuse:
+  mode: exact checkout with user-authorized local fixes
+  modifications:
+    - gfx12 WMMA intrinsic and accumulator layout in rocm/rdna_wmma.hip.h
+    - gfx12 direct C consumers in rocm/quant/exl3_gemm_inner_rdna.hip.h
+    - K2 global scratch in rocm/quant/quantize_rdna.hip and quantize_tiles_kernel_rdna.hip.h
+    - Runtime-clamped autotune LDS in rocm/quant/exl3_gemm_rdna.hip
+  tracked_patch: docs/references/patches/rocm-exl3-gfx1201.patch
+  patch_sha256: 781b42bbd9f38cfb3526d7bd36379cd5dcf85b7cb550a741fb1c7fb74681e140
+  patch_import_commit: pending-uncommitted-development
+  source_blob_and_observed_hash_record: ci/matrix/rocm-exl3-investigation-v1.json
+import:
+  commit: null
+  commit_status: not-applicable-ignored-independent-checkout
+  imported_at: "2026-09-17 04:20 JST (approximate)"
 ```

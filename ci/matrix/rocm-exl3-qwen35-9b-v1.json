@@ -1,0 +1,1882 @@
+{
+  "schema_version": "rocm-exl3-qwen35-9b-v1",
+  "status": "complete",
+  "observed_on_jst": "2026-09-17",
+  "artifact_root": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b",
+  "source_model": {
+    "model": "Qwen/Qwen3.5-9B",
+    "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "files": [
+      {
+        "path": "LICENSE",
+        "size_bytes": 11544,
+        "sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a"
+      },
+      {
+        "path": "README.md",
+        "size_bytes": 77643,
+        "sha256": "c5f5a8c2dddab69cfbf05279235aa5fddb137939a06539c4c7637aa900fef6d0"
+      },
+      {
+        "path": "chat_template.jinja",
+        "size_bytes": 7756,
+        "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+      },
+      {
+        "path": "config.json",
+        "size_bytes": 3126,
+        "sha256": "d0883072e01861ed0b2d47be3c16c36a8e81c224c7ffaa310c6558fb3f932b05"
+      },
+      {
+        "path": "merges.txt",
+        "size_bytes": 3353259,
+        "sha256": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d"
+      },
+      {
+        "path": "model.safetensors-00001-of-00004.safetensors",
+        "size_bytes": 5276436216,
+        "sha256": "db6f444b43d318c92f360a13a25561a6a65b10c0631b8ed305a426dbaa6c380e"
+      },
+      {
+        "path": "model.safetensors-00002-of-00004.safetensors",
+        "size_bytes": 5335161512,
+        "sha256": "31c7d7e2dd5d207840b31cc59083c8f4c4718959149e0358c0364052bb9a0330"
+      },
+      {
+        "path": "model.safetensors-00003-of-00004.safetensors",
+        "size_bytes": 5368717440,
+        "sha256": "7ec36ba3a4176a44c3c0876ad80c56a2f70c84bf008d82e9501df642f17dadec"
+      },
+      {
+        "path": "model.safetensors-00004-of-00004.safetensors",
+        "size_bytes": 3325995712,
+        "sha256": "b62b0c4cd7e44edee103ee8f4fe225f246d5e768e07bfd5f25b63a8aa1fdd0c6"
+      },
+      {
+        "path": "model.safetensors.index.json",
+        "size_bytes": 79657,
+        "sha256": "26d3539b516be613f39563617cb9d33b3f83d401298125be392c80cefb8f7fe5"
+      },
+      {
+        "path": "preprocessor_config.json",
+        "size_bytes": 390,
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+      },
+      {
+        "path": "tokenizer.json",
+        "size_bytes": 12807982,
+        "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size_bytes": 16710,
+        "sha256": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+      },
+      {
+        "path": "video_preprocessor_config.json",
+        "size_bytes": 385,
+        "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+      },
+      {
+        "path": "vocab.json",
+        "size_bytes": 6722759,
+        "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+      }
+    ]
+  },
+  "gpu": {
+    "name": "Radeon AI PRO R9700",
+    "target": "gfx1201",
+    "uuid": "GPU-a8e9ddefa2d60f55",
+    "bdf": "0000:07:00.0"
+  },
+  "exl3_build": {
+    "source_commit": "550dcfed786ad7bffa08b7a6b2a216fc474cbbb5",
+    "patch_sha256": "781b42bbd9f38cfb3526d7bd36379cd5dcf85b7cb550a741fb1c7fb74681e140",
+    "modified_sources": [
+      {
+        "path": "exllamav3/exllamav3_ext/rocm/quant/exl3_gemm_inner_rdna.hip.h",
+        "sha256": "fc3cbe726d82ed36e73964d848537efa9fe68baeeb08d1fda4e2c384a0022df1",
+        "upstream_blob": "1d28f7f4da2e9ee16c21ccc5a67d1c0c27b1bdf2"
+      },
+      {
+        "path": "exllamav3/exllamav3_ext/rocm/quant/exl3_gemm_rdna.hip",
+        "sha256": "8023107bd3d3085c4970f7b1207e709de33a9b8edefc13d28a0327c323cb74d7",
+        "upstream_blob": "eb77f1c71b316133467fff79da025bed45fef2af"
+      },
+      {
+        "path": "exllamav3/exllamav3_ext/rocm/quant/quantize_rdna.hip",
+        "sha256": "36f61502d4e90e4000102b84be872ac7ff576978165bf9c8f5de108b2bac7bc9",
+        "upstream_blob": "7f35e10f2175ec579cd1d21512d5db3964bef51a"
+      },
+      {
+        "path": "exllamav3/exllamav3_ext/rocm/quant/quantize_tiles_kernel_rdna.hip.h",
+        "sha256": "df59614c0953e95d887b6145311a3c06a2b341d69b70bc3b734ae3efd8270928",
+        "upstream_blob": "ddaf9c0bce8c210bfd9f594fb12e926b676fa639"
+      },
+      {
+        "path": "exllamav3/exllamav3_ext/rocm/rdna_wmma.hip.h",
+        "sha256": "940fcc5e215054431ee4370b0db4f116e6a81034575c24fafd216d755e37c8ff",
+        "upstream_blob": "f019622ab2bdc019048952b9bf43088dacc1a443"
+      }
+    ],
+    "extension": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/lib-autotune/exllamav3_ext.cpython-312-x86_64-linux-gnu.so",
+      "sha256": "7346227bbcb8e04f5797d99d168f06fc04456319a494d466154ffc53603cb7b0"
+    },
+    "probe_sha256": {
+      "probe_rocm_exl3.py": "bf38ddda2bca3b20d74e8c12d23cbab8667e12cca136b055257aa59b1e707c5d",
+      "probe_rocm_exl3_quantizer.py": "a7b37026ea727e584843a18dd95844aad13a1f7a812316917cf30a487e5b368f"
+    },
+    "prior_patch_sha256": "2029ca361445a566e86cf04a385cad75258ff42caa54dff90631c613189cb380",
+    "prior_extension": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/lib-validated/exllamav3_ext.cpython-312-x86_64-linux-gnu.so",
+      "sha256": "4529c0b995103d7181f0cef367f7456fb84d8718c003a95518d164f9c9debedc"
+    },
+    "relink_note": "Recompiled only rocm/quant/exl3_gemm_rdna.hip using original recorded flags; remaining108objects reused; full relink.",
+    "hsa_preload": {
+      "path": "/opt/rocm/core-7.14/lib/libhsa-runtime64.so.1.21.0",
+      "sha256": "15f8c717f4ebf0d00e64b95090466f35fcda78e0a4728fac010af55e91da3395"
+    }
+  },
+  "llama_build": {
+    "source": {
+      "path": ".local-artifacts/llama-mtp-20260914/upstream",
+      "commit": "bc52a12b38941b0a690ade65fbc5749715224e30",
+      "tree": "a402be581cf83b7c94e5122197a2d9cd2fcfe1d7",
+      "dirty": false
+    },
+    "toolchain": {
+      "rocm_root": "/opt/rocm/core-7.14",
+      "hip_path": "/opt/rocm/core-7.14",
+      "hipcxx": "/opt/rocm/core-7.14/lib/llvm/bin/clang++",
+      "hipconfig": "7.14.60850-0000000",
+      "clang": "AMD clang version 23.0.0git (ROCm llvm-project 46fcb339fb61119b337f973c7ca9e710a319fdd0+PATCHED:440716f8b87be9d8e20ed910e10e5b6d14d57cf6)",
+      "cmake": "3.28.3",
+      "ninja": "1.11.1"
+    },
+    "build_cache": {
+      "CMAKE_BUILD_TYPE": "Release",
+      "CMAKE_C_COMPILER": "/opt/rocm/core-7.14/lib/llvm/bin/clang",
+      "CMAKE_CXX_COMPILER": "/opt/rocm/core-7.14/lib/llvm/bin/clang++",
+      "CMAKE_HIP_COMPILER": "/opt/rocm/core-7.14/lib/llvm/bin/clang++",
+      "GGML_HIP": true,
+      "GGML_HIP_GRAPHS": true,
+      "GGML_HIP_NO_VMM": true,
+      "LLAMA_BUILD_TESTS": true,
+      "AMDGPU_TARGETS": "gfx1201",
+      "GPU_TARGETS": "gfx1201",
+      "compile_arch_flag": "--offload-arch=gfx1201"
+    },
+    "files": [
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/libggml-base.so.0.23.0",
+        "sha256": "96fd4671d1b40be8c51be19280e4b49eefa69b70b3f417272df7984e2e68277a",
+        "size_bytes": 930880
+      },
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/libggml-cpu.so.0.23.0",
+        "sha256": "48224198bc40a882fa7969a0873ac613a7873de911d9035e4424bef3436e97b7",
+        "size_bytes": 1321208
+      },
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/libggml-hip.so.0.23.0",
+        "sha256": "cc4378087a8bbd8faa7b6c5e34609c6099e698c75d2911f496cbbf66aa8f4b7b",
+        "size_bytes": 69763080
+      },
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/libggml.so.0.23.0",
+        "sha256": "165e6a8641faa298b2816246f00f6b1d827fc92675e0820fe60c3ae47f92b508",
+        "size_bytes": 49040
+      },
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/libllama-bench-impl.so",
+        "sha256": "272891c992bc5408eaa7573678d428df7928846b365c6351887939703f64c2fa",
+        "size_bytes": 485496
+      },
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/libllama-common.so.0.4.0",
+        "sha256": "0ece007126bcd299af8bc8c3739a8bc593b655ca7a729f28f0cfa0e38b1e33c8",
+        "size_bytes": 6135000
+      },
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/libllama-quantize-impl.so",
+        "sha256": "6ec6c31623f41174732dd5caeef55d62073d0ff247a702eb00394f74da9ea5fb",
+        "size_bytes": 77376
+      },
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/libllama-server-impl.so",
+        "sha256": "682b95aacd6d9e315ec3a49d16a397dcae87b50ddc33b0bbe77c8463a20776ce",
+        "size_bytes": 7335296
+      },
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/libllama.so.0.4.0",
+        "sha256": "812822b7395261fda861a2062c11ed0f9923b5ed95fd6a708575db28d93f9042",
+        "size_bytes": 4354504
+      },
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/libmtmd.so.0.4.0",
+        "sha256": "976071d9f790aa3d870631f8fe458b2bf6d25444471d37e64c7cd744e28314fe",
+        "size_bytes": 1702472
+      },
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/llama-bench",
+        "sha256": "aaceb02248a1e2adadacc114c37907b4af0fc70a4174b13b422a582840d54e66",
+        "size_bytes": 6568
+      },
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/llama-quantize",
+        "sha256": "8fabab71d11e5f61a3cbbe0a2d7f23456b20cbbae0da6d1b4abe2c459419978e",
+        "size_bytes": 6584
+      },
+      {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/llama-mtp-20260914/build-gfx1201/bin/llama-server",
+        "sha256": "8d8be799f0a8bc38a02a0e9dcd1379466c3a4c2300161bf8e416e67cbf408d9a",
+        "size_bytes": 6664
+      }
+    ]
+  },
+  "models": {
+    "exl3": {
+      "directory": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/models/qwen35-9b-exl3-4bpw",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size_bytes": 11544,
+          "sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a"
+        },
+        {
+          "path": "README.md",
+          "size_bytes": 77643,
+          "sha256": "c5f5a8c2dddab69cfbf05279235aa5fddb137939a06539c4c7637aa900fef6d0"
+        },
+        {
+          "path": "chat_template.jinja",
+          "size_bytes": 7756,
+          "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+        },
+        {
+          "path": "config.json",
+          "size_bytes": 3433,
+          "sha256": "ecbf3d5dc4597827cd6993f98ac2c5bd7d8365e4aaeba0adb1dad3abf4a89004"
+        },
+        {
+          "path": "merges.txt",
+          "size_bytes": 3353259,
+          "sha256": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d"
+        },
+        {
+          "path": "model.safetensors",
+          "size_bytes": 7307469398,
+          "sha256": "223c0b4fa3c4725e680f4e14292636ca3d4ff8f580dcfecc9e59972b8345e725"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "size_bytes": 390,
+          "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+        },
+        {
+          "path": "quantization_config.json",
+          "size_bytes": 314817,
+          "sha256": "9116059a840bfcfd1e842e850b2e774802a9e24923e755f62299eb44281ecf94"
+        },
+        {
+          "path": "tokenizer.json",
+          "size_bytes": 12807982,
+          "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "size_bytes": 16710,
+          "sha256": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        {
+          "path": "video_preprocessor_config.json",
+          "size_bytes": 385,
+          "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+        },
+        {
+          "path": "vocab.json",
+          "size_bytes": 6722759,
+          "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+        }
+      ],
+      "weight_bytes": 7307469398,
+      "total_bytes": 7330786076,
+      "quantization_config": {
+        "quant_method": "exl3",
+        "version": "1.4.4",
+        "bits": 4.0,
+        "head_bits": 6,
+        "calibration": {
+          "rows": 16,
+          "cols": 256
+        },
+        "out_scales": "always",
+        "codebook": "mul1",
+        "mtp_bits": 4
+      }
+    },
+    "gguf": [
+      {
+        "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/models/qwen35-9b-Q4_K_M.gguf",
+        "size_bytes": 5780090688,
+        "sha256": "67a4660442cd0715d07cbfe7a4b4e618cc4a5fb1f319473d69cf4e849d3ef099"
+      },
+      {
+        "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/models/qwen35-9b-bf16.gguf",
+        "size_bytes": 18407321408,
+        "sha256": "d1b6e47bedea1f7e45dcd7f5ac51cfdf833769d2c8d7c5471451a9dec0c3c6f2"
+      }
+    ],
+    "llama_tensor_inventory": {
+      "tensor_count": 442,
+      "tensor_types": {
+        "Q6_K": 35,
+        "F32": 184,
+        "Q4_K": 223
+      },
+      "tensor_payload_bytes": 5769121792,
+      "selected_tensors": [
+        {
+          "name": "output.weight",
+          "type": "Q6_K",
+          "shape": [
+            4096,
+            248320
+          ],
+          "bytes": 834355200
+        },
+        {
+          "name": "token_embd.weight",
+          "type": "Q4_K",
+          "shape": [
+            4096,
+            248320
+          ],
+          "bytes": 572129280
+        },
+        {
+          "name": "blk.0.attn_qkv.weight",
+          "type": "Q6_K",
+          "shape": [
+            4096,
+            8192
+          ],
+          "bytes": 27525120
+        },
+        {
+          "name": "blk.0.ffn_down.weight",
+          "type": "Q6_K",
+          "shape": [
+            12288,
+            4096
+          ],
+          "bytes": 41287680
+        }
+      ]
+    }
+  },
+  "quantization": {
+    "module_times_seconds": {
+      "model.language_model.layers.0": 87.31,
+      "model.language_model.layers.1": 54.54,
+      "model.language_model.layers.2": 54.61,
+      "model.language_model.layers.3": 54.44,
+      "model.language_model.layers.4": 54.69,
+      "model.language_model.layers.5": 54.76,
+      "model.language_model.layers.6": 54.67,
+      "model.language_model.layers.7": 52.99,
+      "model.language_model.layers.8": 54.59,
+      "model.language_model.layers.9": 54.52,
+      "model.language_model.layers.10": 54.72,
+      "model.language_model.layers.11": 52.85,
+      "model.language_model.layers.12": 55.01,
+      "model.language_model.layers.13": 54.49,
+      "model.language_model.layers.14": 54.59,
+      "model.language_model.layers.15": 53.04,
+      "model.language_model.layers.16": 54.61,
+      "model.language_model.layers.17": 54.71,
+      "model.language_model.layers.18": 54.56,
+      "model.language_model.layers.19": 52.98,
+      "model.language_model.layers.20": 54.64,
+      "model.language_model.layers.21": 54.54,
+      "model.language_model.layers.22": 54.66,
+      "model.language_model.layers.23": 52.98,
+      "model.language_model.layers.24": 54.68,
+      "model.language_model.layers.25": 54.58,
+      "model.language_model.layers.26": 54.62,
+      "model.language_model.layers.27": 53.07,
+      "model.language_model.layers.28": 54.6,
+      "model.language_model.layers.29": 54.7,
+      "model.language_model.layers.30": 54.88,
+      "model.language_model.layers.31": 53.05,
+      "lm_head": 251.82
+    },
+    "log_wall_seconds_approx": 2078.99232252,
+    "log_wall_definition": "log creation to final modification (observed filesystem timestamps), excludes setup/hash verification",
+    "llama_quantization_seconds": 70.76583
+  },
+  "runner": {
+    "path": "/home/homelab1/coding-local/sLLM/ci/tools/benchmark_rocm_exl3_large.py",
+    "sha256": "91cb0f31c501bdd06ec567292d552554a9a49820dc87fe52b0787f4cf5c7ae02",
+    "review": "main inspected numerator,actual token aggregation,and no serialization inside timed generation loop"
+  },
+  "conditions": {
+    "context": 4096,
+    "parallel": 1,
+    "kv": "f16",
+    "mtp": false,
+    "sampling": {
+      "temperature": 0.8,
+      "min_p": 0.08,
+      "top_k": 0,
+      "top_p": 1,
+      "repeat_penalty": 1,
+      "seed": 1234
+    },
+    "primary_max_chunk_or_ubatch": 2048,
+    "llama_threads": 8,
+    "llama_threads_batch": 8,
+    "llama_flash_attention": "on",
+    "llama_gpu_layers_argument": 99,
+    "llama_actual_offload": "34/34",
+    "llama_fit": "off",
+    "llama_cache_ram_mib": 0,
+    "llama_model_buffer_mib": 4812.25,
+    "llama_kv_buffer_mib": 128,
+    "llama_recurrent_buffer_mib": 50.25,
+    "warmup_per_row": 1,
+    "measured_per_row": 3
+  },
+  "rows": [
+    {
+      "case_id": "pp128",
+      "exl3_tokens_per_second": 398.3236055692649,
+      "llama_q4_k_m_tokens_per_second": 1609.1722820074424,
+      "llama_over_exl3": 4.039861709194189,
+      "exl3_spread_percent": 1.0513074734409655,
+      "llama_spread_percent": 2.8179166217530867
+    },
+    {
+      "case_id": "pp512",
+      "exl3_tokens_per_second": 2938.522022320622,
+      "llama_q4_k_m_tokens_per_second": 2986.50240903417,
+      "llama_over_exl3": 1.0163280677664128,
+      "exl3_spread_percent": 1.1178624334681468,
+      "llama_spread_percent": 1.6537119020850495
+    },
+    {
+      "case_id": "pp2048",
+      "exl3_tokens_per_second": 4917.5767737473825,
+      "llama_q4_k_m_tokens_per_second": 3441.2302398107327,
+      "llama_over_exl3": 0.699781701056877,
+      "exl3_spread_percent": 9.389242576591855,
+      "llama_spread_percent": 0.8777426373070324
+    },
+    {
+      "case_id": "decode128",
+      "exl3_tokens_per_second": 75.09598739538785,
+      "llama_q4_k_m_tokens_per_second": 78.48305949389639,
+      "llama_over_exl3": 1.045103236750524,
+      "exl3_spread_percent": 0.5044319607781048,
+      "llama_spread_percent": 0.23645827249884815
+    }
+  ],
+  "benchmarks": {
+    "exl3": {
+      "conditions": {
+        "decode_output_tokens_nominal": 64,
+        "decode_prompt_tokens": 128,
+        "measured_per_row": 3,
+        "prefill_tokens": [
+          128,
+          512,
+          2048
+        ],
+        "warmups_per_row": 1
+      },
+      "engine": "exl3",
+      "measured_per_row": 3,
+      "model": "Qwen/Qwen3.5-9B",
+      "native_timing_boundaries": {
+        "exl3": {
+          "decode": "Job max_new_tokens=64 produces 63 actual tokens; time_generate spans 63 forwards from the final prompt-token forward",
+          "prefill": "time_prefill excludes the final prompt token; headline numerator remains prompt_tokens and processed_tokens is prompt_tokens-cached_tokens-1"
+        },
+        "llama": {
+          "decode": "n_predict=64 produces 64 tokens; predicted_ms is reported as 63 timed decode steps via predicted_n-1",
+          "prefill": "prompt_ms includes all prompt_n tokens"
+        }
+      },
+      "prompt_manifest_sha256": "7f61ec648dede1902f38008882d32291f1d370815771c9413656c40d5292c085",
+      "records": [
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp128",
+          "elapsed_seconds": 1.6418607234954834,
+          "engine": "exl3",
+          "event_file": "exl3-pp128-r0.json",
+          "event_sha256": "1c7a5d786d207c024c0d50677cd0c54ee348b220226976efb6ecd1dcde2f69c6",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 128,
+          "input_tokens": 128,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "processed_tokens": 127,
+          "protocol": "PASS",
+          "repeat": 0,
+          "streamed_output_tokens": 1,
+          "timed_tokens": 128,
+          "token_ids_sha256": "2dac468565e696ef604c0d7932a0cea410c06dd389b6ed0dcb5ca3b7b8c75ae1",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 77.96032767474391,
+          "visible_gpu_count": 1,
+          "warmup": true
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp128",
+          "elapsed_seconds": 0.318652868270874,
+          "engine": "exl3",
+          "event_file": "exl3-pp128-r1.json",
+          "event_sha256": "a415b8a9db3edd2352c350b8cb277dc50d8a1a3e36354ed2a8a6e674be431355",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 128,
+          "input_tokens": 128,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "processed_tokens": 127,
+          "protocol": "PASS",
+          "repeat": 1,
+          "streamed_output_tokens": 1,
+          "timed_tokens": 128,
+          "token_ids_sha256": "99d18414623b0ab81d13f918876aa1250ec4e959fb988394f1a13d72f28c7e06",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 401.69103355188486,
+          "visible_gpu_count": 1,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp128",
+          "elapsed_seconds": 0.3213467597961426,
+          "engine": "exl3",
+          "event_file": "exl3-pp128-r2.json",
+          "event_sha256": "211dd0497756c14b5641568d04947a5b5127dde3d80bea7ec0df5ddc5d546ad2",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 128,
+          "input_tokens": 128,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "processed_tokens": 127,
+          "protocol": "PASS",
+          "repeat": 2,
+          "streamed_output_tokens": 1,
+          "timed_tokens": 128,
+          "token_ids_sha256": "9278a274fd823a92f4e386a574a817b6ed51271b4da4420e728d7ba16c79d542",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 398.3236055692649,
+          "visible_gpu_count": 1,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp128",
+          "elapsed_seconds": 0.322009801864624,
+          "engine": "exl3",
+          "event_file": "exl3-pp128-r3.json",
+          "event_sha256": "0232501f3911547f9eaf49cacb8f54e63898eb44c892b1228e7cbb75f83b3641",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 128,
+          "input_tokens": 128,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "processed_tokens": 127,
+          "protocol": "PASS",
+          "repeat": 3,
+          "streamed_output_tokens": 1,
+          "timed_tokens": 128,
+          "token_ids_sha256": "7b827203e5ec64fac824cbb96aaa339df5586957dcb89527b7f3f21c6a7591f4",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 397.50342771805566,
+          "visible_gpu_count": 1,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp512",
+          "elapsed_seconds": 4.361619234085083,
+          "engine": "exl3",
+          "event_file": "exl3-pp512-r0.json",
+          "event_sha256": "e1c9646a40b21615a6b225a3b9a94d5587da12650978f7346d4f8fb6b8e2118a",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 512,
+          "input_tokens": 512,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "processed_tokens": 511,
+          "protocol": "PASS",
+          "repeat": 0,
+          "streamed_output_tokens": 1,
+          "timed_tokens": 512,
+          "token_ids_sha256": "5a57b7498378bfe10506971449c15e0989587737ae669374cc5afd13284db320",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 117.38759678947534,
+          "visible_gpu_count": 1,
+          "warmup": true
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp512",
+          "elapsed_seconds": 0.17433404922485352,
+          "engine": "exl3",
+          "event_file": "exl3-pp512-r1.json",
+          "event_sha256": "1a0700d3213f433a43770ca5fea2adbcf1f630be56c136c22540474012c383b0",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 512,
+          "input_tokens": 512,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "processed_tokens": 511,
+          "protocol": "PASS",
+          "repeat": 1,
+          "streamed_output_tokens": 1,
+          "timed_tokens": 512,
+          "token_ids_sha256": "1b978a4eb17bc4dd9ec0b987400cfe08a739e89d459157cbb076dcd748db47f7",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 2936.8904254591703,
+          "visible_gpu_count": 1,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp512",
+          "elapsed_seconds": 0.17423725128173828,
+          "engine": "exl3",
+          "event_file": "exl3-pp512-r2.json",
+          "event_sha256": "6eecedcadb918a273d155c87bee1f0ba4a15fa28994ab16761e559ada0cf894f",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 512,
+          "input_tokens": 512,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "processed_tokens": 511,
+          "protocol": "PASS",
+          "repeat": 2,
+          "streamed_output_tokens": 1,
+          "timed_tokens": 512,
+          "token_ids_sha256": "1e5b1fc4a06bea95e33edc6941214f2671a7f7d9c619228db5e7b4ac04912c5d",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 2938.522022320622,
+          "visible_gpu_count": 1,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp512",
+          "elapsed_seconds": 0.17240571975708008,
+          "engine": "exl3",
+          "event_file": "exl3-pp512-r3.json",
+          "event_sha256": "d283df98a9917605f66d3c69c105be5bff4c6de80d82bf44f120e5c9a9eefd2c",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 512,
+          "input_tokens": 512,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "processed_tokens": 511,
+          "protocol": "PASS",
+          "repeat": 3,
+          "streamed_output_tokens": 1,
+          "timed_tokens": 512,
+          "token_ids_sha256": "8588498ca99bcca4f633223b26a5c0eeb277de1363989bd3a378a8e50cb2200e",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 2969.739059245881,
+          "visible_gpu_count": 1,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp2048",
+          "elapsed_seconds": 1.1641435623168945,
+          "engine": "exl3",
+          "event_file": "exl3-pp2048-r0.json",
+          "event_sha256": "a72519e51531ddaf74a3fe0b1e4f698f95096664d199d4fd5958512f69356e0c",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 2048,
+          "input_tokens": 2048,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "processed_tokens": 2047,
+          "protocol": "PASS",
+          "repeat": 0,
+          "streamed_output_tokens": 1,
+          "timed_tokens": 2048,
+          "token_ids_sha256": "ae73da57730ec6e129e6f8f85a3a2b30b7cbd4b5d43e7b24a8d9959a3ab1a2eb",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 1759.2331962254227,
+          "visible_gpu_count": 1,
+          "warmup": true
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp2048",
+          "elapsed_seconds": 0.41646528244018555,
+          "engine": "exl3",
+          "event_file": "exl3-pp2048-r1.json",
+          "event_sha256": "84d23fc186480a3703c8cda734c149c8e822d90fdb86b29c531d4ff2a2541233",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 2048,
+          "input_tokens": 2048,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "processed_tokens": 2047,
+          "protocol": "PASS",
+          "repeat": 1,
+          "streamed_output_tokens": 1,
+          "timed_tokens": 2048,
+          "token_ids_sha256": "71c28cf259bfcaa8f4e91d69174a97e7820d14b8adc7acc71be89746718495d1",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 4917.5767737473825,
+          "visible_gpu_count": 1,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp2048",
+          "elapsed_seconds": 0.41464662551879883,
+          "engine": "exl3",
+          "event_file": "exl3-pp2048-r2.json",
+          "event_sha256": "625a35b83f695781809ed89cff5d1503e37181467f4750fb2018bd9497531ae7",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 2048,
+          "input_tokens": 2048,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "processed_tokens": 2047,
+          "protocol": "PASS",
+          "repeat": 2,
+          "streamed_output_tokens": 1,
+          "timed_tokens": 2048,
+          "token_ids_sha256": "0de2dca5fd5dd52b904ee0717257de76a85f5530e337545783c1397422d55136",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 4939.145464978949,
+          "visible_gpu_count": 1,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp2048",
+          "elapsed_seconds": 0.45740604400634766,
+          "engine": "exl3",
+          "event_file": "exl3-pp2048-r3.json",
+          "event_sha256": "6261bf67f2414841698997dc25b57ec27474186bce0cebb85d10987da24dd2a6",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 2048,
+          "input_tokens": 2048,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "processed_tokens": 2047,
+          "protocol": "PASS",
+          "repeat": 3,
+          "streamed_output_tokens": 1,
+          "timed_tokens": 2048,
+          "token_ids_sha256": "e94065ab736ee6e5b170d7416ed8767dc6d0fedb7bdd804968795887248bc0d8",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 4477.422252801668,
+          "visible_gpu_count": 1,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 63,
+          "case_id": "decode128",
+          "elapsed_seconds": 0.8487739562988281,
+          "engine": "exl3",
+          "event_file": "exl3-decode128-r0.json",
+          "event_sha256": "09f686875af6054a99242b6a726d1ecc9201b8895e36774a0976aca7c9384ce4",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 63,
+          "input_tokens": 128,
+          "output_tokens": 64,
+          "phase": "decode",
+          "processed_tokens": 63,
+          "protocol": "PASS",
+          "repeat": 0,
+          "streamed_output_tokens": 63,
+          "timed_tokens": 63,
+          "token_ids_sha256": "955ef860888aada8ec1af2e1895360a7070494f5b379506f7828746799af04d1",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 74.224709102431,
+          "visible_gpu_count": 1,
+          "warmup": true
+        },
+        {
+          "actual_output_tokens": 63,
+          "case_id": "decode128",
+          "elapsed_seconds": 0.8425753116607666,
+          "engine": "exl3",
+          "event_file": "exl3-decode128-r1.json",
+          "event_sha256": "0e1e8d96d723d07720efdb5df392ab700fa5468bce7fe77c91576eddd0dee375",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 63,
+          "input_tokens": 128,
+          "output_tokens": 64,
+          "phase": "decode",
+          "processed_tokens": 63,
+          "protocol": "PASS",
+          "repeat": 1,
+          "streamed_output_tokens": 63,
+          "timed_tokens": 63,
+          "token_ids_sha256": "742c477c30958105947e7134794f5c05f38348f74d9d56e3da80798f059d5882",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 74.77076426061335,
+          "visible_gpu_count": 1,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 63,
+          "case_id": "decode128",
+          "elapsed_seconds": 0.8389263153076172,
+          "engine": "exl3",
+          "event_file": "exl3-decode128-r2.json",
+          "event_sha256": "39d3420178785af67f245110442425466171c8f1b21c19a1f97af5cd587fe257",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 63,
+          "input_tokens": 128,
+          "output_tokens": 64,
+          "phase": "decode",
+          "processed_tokens": 63,
+          "protocol": "PASS",
+          "repeat": 2,
+          "streamed_output_tokens": 63,
+          "timed_tokens": 63,
+          "token_ids_sha256": "2eb3d60493bafc613f800e5c27e1187e9e85f1a0fe92336f2c17d526a480c6b4",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 75.09598739538785,
+          "visible_gpu_count": 1,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 63,
+          "case_id": "decode128",
+          "elapsed_seconds": 0.8383281230926514,
+          "engine": "exl3",
+          "event_file": "exl3-decode128-r3.json",
+          "event_sha256": "28b72b77a6b89ffdeeaadc407ac60a884a3cf5c441221cd85b5d9b94b64a863b",
+          "gpu_arch": "gfx1201",
+          "headline_tokens": 63,
+          "input_tokens": 128,
+          "output_tokens": 64,
+          "phase": "decode",
+          "processed_tokens": 63,
+          "protocol": "PASS",
+          "repeat": 3,
+          "streamed_output_tokens": 63,
+          "timed_tokens": 63,
+          "token_ids_sha256": "3896bc43283bb2801c33e396b7a0baaf751925b8ba5c440c59a1a6aa8d5467a9",
+          "tokenizer_actual_vocab_size": 248077,
+          "tokens_per_second": 75.14957242229758,
+          "visible_gpu_count": 1,
+          "warmup": false
+        }
+      ],
+      "rows": [
+        {
+          "case_id": "pp128",
+          "engine": "exl3",
+          "input_tokens": 128,
+          "measured": 3,
+          "median_tokens_per_second": 398.3236055692649,
+          "nominal_output_tokens": 1,
+          "phase": "prefill",
+          "samples_tokens_per_second": [
+            401.69103355188486,
+            398.3236055692649,
+            397.50342771805566
+          ],
+          "spread_percent": 1.0513074734409655,
+          "timing_definition": "prefill headline numerator prompt_tokens; processed_tokens=prompt_tokens-cached_tokens-1; decode numerator actual new_tokens (63 for max_new_tokens=64)",
+          "warmups": 1
+        },
+        {
+          "case_id": "pp512",
+          "engine": "exl3",
+          "input_tokens": 512,
+          "measured": 3,
+          "median_tokens_per_second": 2938.522022320622,
+          "nominal_output_tokens": 1,
+          "phase": "prefill",
+          "samples_tokens_per_second": [
+            2936.8904254591703,
+            2938.522022320622,
+            2969.739059245881
+          ],
+          "spread_percent": 1.1178624334681468,
+          "timing_definition": "prefill headline numerator prompt_tokens; processed_tokens=prompt_tokens-cached_tokens-1; decode numerator actual new_tokens (63 for max_new_tokens=64)",
+          "warmups": 1
+        },
+        {
+          "case_id": "pp2048",
+          "engine": "exl3",
+          "input_tokens": 2048,
+          "measured": 3,
+          "median_tokens_per_second": 4917.5767737473825,
+          "nominal_output_tokens": 1,
+          "phase": "prefill",
+          "samples_tokens_per_second": [
+            4917.5767737473825,
+            4939.145464978949,
+            4477.422252801668
+          ],
+          "spread_percent": 9.389242576591855,
+          "timing_definition": "prefill headline numerator prompt_tokens; processed_tokens=prompt_tokens-cached_tokens-1; decode numerator actual new_tokens (63 for max_new_tokens=64)",
+          "warmups": 1
+        },
+        {
+          "case_id": "decode128",
+          "engine": "exl3",
+          "input_tokens": 128,
+          "measured": 3,
+          "median_tokens_per_second": 75.09598739538785,
+          "nominal_output_tokens": 64,
+          "phase": "decode",
+          "samples_tokens_per_second": [
+            74.77076426061335,
+            75.09598739538785,
+            75.14957242229758
+          ],
+          "spread_percent": 0.5044319607781048,
+          "timing_definition": "prefill headline numerator prompt_tokens; processed_tokens=prompt_tokens-cached_tokens-1; decode numerator actual new_tokens (63 for max_new_tokens=64)",
+          "warmups": 1
+        }
+      ],
+      "schema_version": "rocm-exl3-large-comparison-v1",
+      "seed": 1234,
+      "warmups_per_row": 1
+    },
+    "llama_q4_k_m_ub2048": {
+      "conditions": {
+        "decode_output_tokens_nominal": 64,
+        "decode_prompt_tokens": 128,
+        "measured_per_row": 3,
+        "prefill_tokens": [
+          128,
+          512,
+          2048
+        ],
+        "warmups_per_row": 1
+      },
+      "engine": "llama",
+      "measured_per_row": 3,
+      "model": "Qwen/Qwen3.5-9B",
+      "native_timing_boundaries": {
+        "exl3": {
+          "decode": "Job max_new_tokens=64 produces 63 actual tokens; time_generate spans 63 forwards from the final prompt-token forward",
+          "prefill": "time_prefill excludes the final prompt token; headline numerator remains prompt_tokens and processed_tokens is prompt_tokens-cached_tokens-1"
+        },
+        "llama": {
+          "decode": "n_predict=64 produces 64 tokens; predicted_ms is reported as 63 timed decode steps via predicted_n-1",
+          "prefill": "prompt_ms includes all prompt_n tokens"
+        }
+      },
+      "prompt_manifest_sha256": "7f61ec648dede1902f38008882d32291f1d370815771c9413656c40d5292c085",
+      "records": [
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp128",
+          "elapsed_seconds": 0.099687,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 0,
+          "response_file": "llama-pp128-r0.json",
+          "response_sha256": "57c13adc49cad1377b3e883f84ac7fb0c56f725e6ad3e6523851f909c8d0cda7",
+          "timed_tokens": 128,
+          "token_ids_sha256": "2dac468565e696ef604c0d7932a0cea410c06dd389b6ed0dcb5ca3b7b8c75ae1",
+          "tokens_per_second": 1284.0189794055393,
+          "warmup": true
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp128",
+          "elapsed_seconds": 0.078077,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 1,
+          "response_file": "llama-pp128-r1.json",
+          "response_sha256": "e2dec3d19d400c76748f47da185834855c9847b8a6cddede84b5db8acf131046",
+          "timed_tokens": 128,
+          "token_ids_sha256": "99d18414623b0ab81d13f918876aa1250ec4e959fb988394f1a13d72f28c7e06",
+          "tokens_per_second": 1639.4072518155156,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp128",
+          "elapsed_seconds": 0.08029800000000001,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 2,
+          "response_file": "llama-pp128-r2.json",
+          "response_sha256": "b2372aca7861e34a37994f031a909780183ae642faf0afbdbe3d5e2110d5606e",
+          "timed_tokens": 128,
+          "token_ids_sha256": "9278a274fd823a92f4e386a574a817b6ed51271b4da4420e728d7ba16c79d542",
+          "tokens_per_second": 1594.0621186081844,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp128",
+          "elapsed_seconds": 0.079544,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 3,
+          "response_file": "llama-pp128-r3.json",
+          "response_sha256": "676af50975aff3ec5974c4f72bec284ddc87cc583b6b1260bf42b71243cfebb2",
+          "timed_tokens": 128,
+          "token_ids_sha256": "7b827203e5ec64fac824cbb96aaa339df5586957dcb89527b7f3f21c6a7591f4",
+          "tokens_per_second": 1609.1722820074424,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp512",
+          "elapsed_seconds": 0.17036400000000002,
+          "engine": "llama",
+          "input_tokens": 512,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 0,
+          "response_file": "llama-pp512-r0.json",
+          "response_sha256": "42529c489e9ee135b9149c58b5b75b2d2e2cef9606e3157e938920b99df1e827",
+          "timed_tokens": 512,
+          "token_ids_sha256": "5a57b7498378bfe10506971449c15e0989587737ae669374cc5afd13284db320",
+          "tokens_per_second": 3005.329764504238,
+          "warmup": true
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp512",
+          "elapsed_seconds": 0.17143799999999998,
+          "engine": "llama",
+          "input_tokens": 512,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 1,
+          "response_file": "llama-pp512-r1.json",
+          "response_sha256": "eb793dadf0fa34f94e912d5d2587b7dee9cb6f65fdd6ea39bae7e8806acb3513",
+          "timed_tokens": 512,
+          "token_ids_sha256": "1b978a4eb17bc4dd9ec0b987400cfe08a739e89d459157cbb076dcd748db47f7",
+          "tokens_per_second": 2986.50240903417,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp512",
+          "elapsed_seconds": 0.174267,
+          "engine": "llama",
+          "input_tokens": 512,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 2,
+          "response_file": "llama-pp512-r2.json",
+          "response_sha256": "4a058332a3733e5a809bf4a85c018f7ebd2875198d2fc87b630bbc01b65f59df",
+          "timed_tokens": 512,
+          "token_ids_sha256": "1e5b1fc4a06bea95e33edc6941214f2671a7f7d9c619228db5e7b4ac04912c5d",
+          "tokens_per_second": 2938.0203939931257,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp512",
+          "elapsed_seconds": 0.17138599999999998,
+          "engine": "llama",
+          "input_tokens": 512,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 3,
+          "response_file": "llama-pp512-r3.json",
+          "response_sha256": "714821a27b1a406c9c21dd92b5619431c3415855c5245ead816d9d15d728b037",
+          "timed_tokens": 512,
+          "token_ids_sha256": "8588498ca99bcca4f633223b26a5c0eeb277de1363989bd3a378a8e50cb2200e",
+          "tokens_per_second": 2987.4085397873805,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp2048",
+          "elapsed_seconds": 0.592249,
+          "engine": "llama",
+          "input_tokens": 2048,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 0,
+          "response_file": "llama-pp2048-r0.json",
+          "response_sha256": "06a41eeff2b5d00e8ae56cc5961f88210291453ecd1feab2f6b9e86447ec3005",
+          "timed_tokens": 2048,
+          "token_ids_sha256": "ae73da57730ec6e129e6f8f85a3a2b30b7cbd4b5d43e7b24a8d9959a3ab1a2eb",
+          "tokens_per_second": 3458.0049945208857,
+          "warmup": true
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp2048",
+          "elapsed_seconds": 0.595136,
+          "engine": "llama",
+          "input_tokens": 2048,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 1,
+          "response_file": "llama-pp2048-r1.json",
+          "response_sha256": "f467827812de4d9295cfbd770b63e503ebf830130fd7309fb0eb723e670d3c38",
+          "timed_tokens": 2048,
+          "token_ids_sha256": "71c28cf259bfcaa8f4e91d69174a97e7820d14b8adc7acc71be89746718495d1",
+          "tokens_per_second": 3441.2302398107327,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp2048",
+          "elapsed_seconds": 0.5946849999999999,
+          "engine": "llama",
+          "input_tokens": 2048,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 2,
+          "response_file": "llama-pp2048-r2.json",
+          "response_sha256": "1c9874bd0b22260c4bf76710ba360b470555e5dfbd4f2751013e6cccb27f9594",
+          "timed_tokens": 2048,
+          "token_ids_sha256": "0de2dca5fd5dd52b904ee0717257de76a85f5530e337545783c1397422d55136",
+          "tokens_per_second": 3443.8400161430004,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp2048",
+          "elapsed_seconds": 0.599947,
+          "engine": "llama",
+          "input_tokens": 2048,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 3,
+          "response_file": "llama-pp2048-r3.json",
+          "response_sha256": "95b9074eba77f8ba8834908d2ba9747ab08487e05011d82bda7d7f95eeed829a",
+          "timed_tokens": 2048,
+          "token_ids_sha256": "e94065ab736ee6e5b170d7416ed8767dc6d0fedb7bdd804968795887248bc0d8",
+          "tokens_per_second": 3413.6348710802786,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 64,
+          "case_id": "decode128",
+          "elapsed_seconds": 0.837066,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 64,
+          "phase": "decode",
+          "protocol": "PASS",
+          "repeat": 0,
+          "response_file": "llama-decode128-r0.json",
+          "response_sha256": "ef17a0d79a37c01a76e99843a2cdc544d10071daeb5b0fb96865fdb93227cc77",
+          "timed_tokens": 63,
+          "token_ids_sha256": "955ef860888aada8ec1af2e1895360a7070494f5b379506f7828746799af04d1",
+          "tokens_per_second": 75.26288249672069,
+          "warmup": true
+        },
+        {
+          "actual_output_tokens": 64,
+          "case_id": "decode128",
+          "elapsed_seconds": 0.8042849999999999,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 64,
+          "phase": "decode",
+          "protocol": "PASS",
+          "repeat": 1,
+          "response_file": "llama-decode128-r1.json",
+          "response_sha256": "c38ea1634c4664230860125a6582738ee1b76f157efa04b08dd31f4569f5bc9a",
+          "timed_tokens": 63,
+          "token_ids_sha256": "742c477c30958105947e7134794f5c05f38348f74d9d56e3da80798f059d5882",
+          "tokens_per_second": 78.3304425670005,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 64,
+          "case_id": "decode128",
+          "elapsed_seconds": 0.802384,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 64,
+          "phase": "decode",
+          "protocol": "PASS",
+          "repeat": 2,
+          "response_file": "llama-decode128-r2.json",
+          "response_sha256": "ba4c2311d5664179cb37379a303dfa0040bafe298204aa09bc00d6573bc8d75c",
+          "timed_tokens": 63,
+          "token_ids_sha256": "2eb3d60493bafc613f800e5c27e1187e9e85f1a0fe92336f2c17d526a480c6b4",
+          "tokens_per_second": 78.51602225368401,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 64,
+          "case_id": "decode128",
+          "elapsed_seconds": 0.802721,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 64,
+          "phase": "decode",
+          "protocol": "PASS",
+          "repeat": 3,
+          "response_file": "llama-decode128-r3.json",
+          "response_sha256": "d384b53fcde868636ddcc984d171495b08cb6a19635c28a730b9a3da05c7b340",
+          "timed_tokens": 63,
+          "token_ids_sha256": "3896bc43283bb2801c33e396b7a0baaf751925b8ba5c440c59a1a6aa8d5467a9",
+          "tokens_per_second": 78.48305949389639,
+          "warmup": false
+        }
+      ],
+      "rows": [
+        {
+          "case_id": "pp128",
+          "engine": "llama",
+          "input_tokens": 128,
+          "measured": 3,
+          "median_tokens_per_second": 1609.1722820074424,
+          "nominal_output_tokens": 1,
+          "phase": "prefill",
+          "samples_tokens_per_second": [
+            1639.4072518155156,
+            1594.0621186081844,
+            1609.1722820074424
+          ],
+          "spread_percent": 2.8179166217530867,
+          "timing_definition": "prefill numerator prompt_n; decode numerator predicted_n-1 (63 timed steps for n_predict=64)",
+          "warmups": 1
+        },
+        {
+          "case_id": "pp512",
+          "engine": "llama",
+          "input_tokens": 512,
+          "measured": 3,
+          "median_tokens_per_second": 2986.50240903417,
+          "nominal_output_tokens": 1,
+          "phase": "prefill",
+          "samples_tokens_per_second": [
+            2986.50240903417,
+            2938.0203939931257,
+            2987.4085397873805
+          ],
+          "spread_percent": 1.6537119020850495,
+          "timing_definition": "prefill numerator prompt_n; decode numerator predicted_n-1 (63 timed steps for n_predict=64)",
+          "warmups": 1
+        },
+        {
+          "case_id": "pp2048",
+          "engine": "llama",
+          "input_tokens": 2048,
+          "measured": 3,
+          "median_tokens_per_second": 3441.2302398107327,
+          "nominal_output_tokens": 1,
+          "phase": "prefill",
+          "samples_tokens_per_second": [
+            3441.2302398107327,
+            3443.8400161430004,
+            3413.6348710802786
+          ],
+          "spread_percent": 0.8777426373070324,
+          "timing_definition": "prefill numerator prompt_n; decode numerator predicted_n-1 (63 timed steps for n_predict=64)",
+          "warmups": 1
+        },
+        {
+          "case_id": "decode128",
+          "engine": "llama",
+          "input_tokens": 128,
+          "measured": 3,
+          "median_tokens_per_second": 78.48305949389639,
+          "nominal_output_tokens": 64,
+          "phase": "decode",
+          "samples_tokens_per_second": [
+            78.3304425670005,
+            78.51602225368401,
+            78.48305949389639
+          ],
+          "spread_percent": 0.23645827249884815,
+          "timing_definition": "prefill numerator prompt_n; decode numerator predicted_n-1 (63 timed steps for n_predict=64)",
+          "warmups": 1
+        }
+      ],
+      "schema_version": "rocm-exl3-large-comparison-v1",
+      "seed": 1234,
+      "warmups_per_row": 1
+    },
+    "llama_q4_k_m_ub512_control": {
+      "conditions": {
+        "decode_output_tokens_nominal": 64,
+        "decode_prompt_tokens": 128,
+        "measured_per_row": 3,
+        "prefill_tokens": [
+          128,
+          512,
+          2048
+        ],
+        "warmups_per_row": 1
+      },
+      "engine": "llama",
+      "measured_per_row": 3,
+      "model": "Qwen/Qwen3.5-9B",
+      "native_timing_boundaries": {
+        "exl3": {
+          "decode": "Job max_new_tokens=64 produces 63 actual tokens; time_generate spans 63 forwards from the final prompt-token forward",
+          "prefill": "time_prefill excludes the final prompt token; headline numerator remains prompt_tokens and processed_tokens is prompt_tokens-cached_tokens-1"
+        },
+        "llama": {
+          "decode": "n_predict=64 produces 64 tokens; predicted_ms is reported as 63 timed decode steps via predicted_n-1",
+          "prefill": "prompt_ms includes all prompt_n tokens"
+        }
+      },
+      "prompt_manifest_sha256": "7f61ec648dede1902f38008882d32291f1d370815771c9413656c40d5292c085",
+      "records": [
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp128",
+          "elapsed_seconds": 0.09939100000000001,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 0,
+          "response_file": "llama-pp128-r0.json",
+          "response_sha256": "a47c2782eca847d3a255340c0b287a5e3a46e2fde089ba53608cb4e1a870311d",
+          "timed_tokens": 128,
+          "token_ids_sha256": "2dac468565e696ef604c0d7932a0cea410c06dd389b6ed0dcb5ca3b7b8c75ae1",
+          "tokens_per_second": 1287.84296364862,
+          "warmup": true
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp128",
+          "elapsed_seconds": 0.078716,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 1,
+          "response_file": "llama-pp128-r1.json",
+          "response_sha256": "95b8cece0ac6a5f4d9420c6e1ceacb19171ffe523042cd08271961be94b9000e",
+          "timed_tokens": 128,
+          "token_ids_sha256": "99d18414623b0ab81d13f918876aa1250ec4e959fb988394f1a13d72f28c7e06",
+          "tokens_per_second": 1626.0988871385741,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp128",
+          "elapsed_seconds": 0.077485,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 2,
+          "response_file": "llama-pp128-r2.json",
+          "response_sha256": "f8f3a13cf55dcfe39b35fc3f8a23cbf6244c60111fae6c4c1f2f5a418f58b42c",
+          "timed_tokens": 128,
+          "token_ids_sha256": "9278a274fd823a92f4e386a574a817b6ed51271b4da4420e728d7ba16c79d542",
+          "tokens_per_second": 1651.9326321223464,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp128",
+          "elapsed_seconds": 0.07854900000000001,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 3,
+          "response_file": "llama-pp128-r3.json",
+          "response_sha256": "9a658eb9b1cc845daf1a6821d4aa779689053145ebf5284ed8d1701e7a7f21e3",
+          "timed_tokens": 128,
+          "token_ids_sha256": "7b827203e5ec64fac824cbb96aaa339df5586957dcb89527b7f3f21c6a7591f4",
+          "tokens_per_second": 1629.5560732790996,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp512",
+          "elapsed_seconds": 0.170511,
+          "engine": "llama",
+          "input_tokens": 512,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 0,
+          "response_file": "llama-pp512-r0.json",
+          "response_sha256": "5383e5323453a0fed6820eabbdade42321e1aaf8b44bfbd83554e2b6d27bd648",
+          "timed_tokens": 512,
+          "token_ids_sha256": "5a57b7498378bfe10506971449c15e0989587737ae669374cc5afd13284db320",
+          "tokens_per_second": 3002.7388262340846,
+          "warmup": true
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp512",
+          "elapsed_seconds": 0.172529,
+          "engine": "llama",
+          "input_tokens": 512,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 1,
+          "response_file": "llama-pp512-r1.json",
+          "response_sha256": "bca38154b3e9b1207f97069a4313110982a7d048cfb775af5e15844cf8845f06",
+          "timed_tokens": 512,
+          "token_ids_sha256": "1b978a4eb17bc4dd9ec0b987400cfe08a739e89d459157cbb076dcd748db47f7",
+          "tokens_per_second": 2967.6170382950113,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp512",
+          "elapsed_seconds": 0.172048,
+          "engine": "llama",
+          "input_tokens": 512,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 2,
+          "response_file": "llama-pp512-r2.json",
+          "response_sha256": "a3a936c7cf54d5b6ea0e6f0003b32617844d419379e8604eaf3d8fcd9cbd0faa",
+          "timed_tokens": 512,
+          "token_ids_sha256": "1e5b1fc4a06bea95e33edc6941214f2671a7f7d9c619228db5e7b4ac04912c5d",
+          "tokens_per_second": 2975.9136985027435,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp512",
+          "elapsed_seconds": 0.173054,
+          "engine": "llama",
+          "input_tokens": 512,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 3,
+          "response_file": "llama-pp512-r3.json",
+          "response_sha256": "22500e197828d4c0be5826aadbe24fd0a1891fcb04119a4f8d9669b7e8f06164",
+          "timed_tokens": 512,
+          "token_ids_sha256": "8588498ca99bcca4f633223b26a5c0eeb277de1363989bd3a378a8e50cb2200e",
+          "tokens_per_second": 2958.6140742196076,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp2048",
+          "elapsed_seconds": 0.605638,
+          "engine": "llama",
+          "input_tokens": 2048,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 0,
+          "response_file": "llama-pp2048-r0.json",
+          "response_sha256": "590fc99a16abb6ac072b8d08efe471bbd5f3368747fb8ea57804c1afe480af5f",
+          "timed_tokens": 2048,
+          "token_ids_sha256": "ae73da57730ec6e129e6f8f85a3a2b30b7cbd4b5d43e7b24a8d9959a3ab1a2eb",
+          "tokens_per_second": 3381.557960365763,
+          "warmup": true
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp2048",
+          "elapsed_seconds": 0.609035,
+          "engine": "llama",
+          "input_tokens": 2048,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 1,
+          "response_file": "llama-pp2048-r1.json",
+          "response_sha256": "6417f8d556f25ddd3357498a63f7c3444999c663b742a0b8e685159efb2a6483",
+          "timed_tokens": 2048,
+          "token_ids_sha256": "71c28cf259bfcaa8f4e91d69174a97e7820d14b8adc7acc71be89746718495d1",
+          "tokens_per_second": 3362.696725147159,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp2048",
+          "elapsed_seconds": 0.611765,
+          "engine": "llama",
+          "input_tokens": 2048,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 2,
+          "response_file": "llama-pp2048-r2.json",
+          "response_sha256": "c874a7c4c96fcf4cbfef645b39f958f17596f934c4367047ab158213aced0329",
+          "timed_tokens": 2048,
+          "token_ids_sha256": "0de2dca5fd5dd52b904ee0717257de76a85f5530e337545783c1397422d55136",
+          "tokens_per_second": 3347.690698225626,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 1,
+          "case_id": "pp2048",
+          "elapsed_seconds": 0.611067,
+          "engine": "llama",
+          "input_tokens": 2048,
+          "output_tokens": 1,
+          "phase": "prefill",
+          "protocol": "PASS",
+          "repeat": 3,
+          "response_file": "llama-pp2048-r3.json",
+          "response_sha256": "f59116b48243c0121c7c2e0d4171c06a2e23cca3e2ddc60097acaa282b4c1961",
+          "timed_tokens": 2048,
+          "token_ids_sha256": "e94065ab736ee6e5b170d7416ed8767dc6d0fedb7bdd804968795887248bc0d8",
+          "tokens_per_second": 3351.5146456935163,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 64,
+          "case_id": "decode128",
+          "elapsed_seconds": 0.783353,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 64,
+          "phase": "decode",
+          "protocol": "PASS",
+          "repeat": 0,
+          "response_file": "llama-decode128-r0.json",
+          "response_sha256": "05c552d99ad6ad40e1eb080a928ba20dbeb78d57e7ca4bae001f41cd0fbc6e39",
+          "timed_tokens": 63,
+          "token_ids_sha256": "955ef860888aada8ec1af2e1895360a7070494f5b379506f7828746799af04d1",
+          "tokens_per_second": 80.4235127713815,
+          "warmup": true
+        },
+        {
+          "actual_output_tokens": 64,
+          "case_id": "decode128",
+          "elapsed_seconds": 0.7790320000000001,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 64,
+          "phase": "decode",
+          "protocol": "PASS",
+          "repeat": 1,
+          "response_file": "llama-decode128-r1.json",
+          "response_sha256": "d7707d9ce57af04bf1c30d60dbd74d9b2f7586e5f80aea6aee29a3d69ee9d7e9",
+          "timed_tokens": 63,
+          "token_ids_sha256": "742c477c30958105947e7134794f5c05f38348f74d9d56e3da80798f059d5882",
+          "tokens_per_second": 80.8695920064901,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 64,
+          "case_id": "decode128",
+          "elapsed_seconds": 0.777503,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 64,
+          "phase": "decode",
+          "protocol": "PASS",
+          "repeat": 2,
+          "response_file": "llama-decode128-r2.json",
+          "response_sha256": "7c2d3c3ce37508799ece86bf96875b6175c7c14ee57ec4493b95f06c44a3bdff",
+          "timed_tokens": 63,
+          "token_ids_sha256": "2eb3d60493bafc613f800e5c27e1187e9e85f1a0fe92336f2c17d526a480c6b4",
+          "tokens_per_second": 81.02862625610447,
+          "warmup": false
+        },
+        {
+          "actual_output_tokens": 64,
+          "case_id": "decode128",
+          "elapsed_seconds": 0.793938,
+          "engine": "llama",
+          "input_tokens": 128,
+          "output_tokens": 64,
+          "phase": "decode",
+          "protocol": "PASS",
+          "repeat": 3,
+          "response_file": "llama-decode128-r3.json",
+          "response_sha256": "75dd03fc88b2785d1760649d1c115ce88d1681a29eba3c192fd6d960cf66e24b",
+          "timed_tokens": 63,
+          "token_ids_sha256": "3896bc43283bb2801c33e396b7a0baaf751925b8ba5c440c59a1a6aa8d5467a9",
+          "tokens_per_second": 79.35128435721681,
+          "warmup": false
+        }
+      ],
+      "rows": [
+        {
+          "case_id": "pp128",
+          "engine": "llama",
+          "input_tokens": 128,
+          "measured": 3,
+          "median_tokens_per_second": 1629.5560732790996,
+          "nominal_output_tokens": 1,
+          "phase": "prefill",
+          "samples_tokens_per_second": [
+            1626.0988871385741,
+            1651.9326321223464,
+            1629.5560732790996
+          ],
+          "spread_percent": 1.5853240896330678,
+          "timing_definition": "prefill numerator prompt_n; decode numerator predicted_n-1 (63 timed steps for n_predict=64)",
+          "warmups": 1
+        },
+        {
+          "case_id": "pp512",
+          "engine": "llama",
+          "input_tokens": 512,
+          "measured": 3,
+          "median_tokens_per_second": 2967.6170382950113,
+          "nominal_output_tokens": 1,
+          "phase": "prefill",
+          "samples_tokens_per_second": [
+            2967.6170382950113,
+            2975.9136985027435,
+            2958.6140742196076
+          ],
+          "spread_percent": 0.5829466558486638,
+          "timing_definition": "prefill numerator prompt_n; decode numerator predicted_n-1 (63 timed steps for n_predict=64)",
+          "warmups": 1
+        },
+        {
+          "case_id": "pp2048",
+          "engine": "llama",
+          "input_tokens": 2048,
+          "measured": 3,
+          "median_tokens_per_second": 3351.5146456935163,
+          "nominal_output_tokens": 1,
+          "phase": "prefill",
+          "samples_tokens_per_second": [
+            3362.696725147159,
+            3347.690698225626,
+            3351.5146456935163
+          ],
+          "spread_percent": 0.44773866469045687,
+          "timing_definition": "prefill numerator prompt_n; decode numerator predicted_n-1 (63 timed steps for n_predict=64)",
+          "warmups": 1
+        },
+        {
+          "case_id": "decode128",
+          "engine": "llama",
+          "input_tokens": 128,
+          "measured": 3,
+          "median_tokens_per_second": 80.8695920064901,
+          "nominal_output_tokens": 64,
+          "phase": "decode",
+          "samples_tokens_per_second": [
+            80.8695920064901,
+            81.02862625610447,
+            79.35128435721681
+          ],
+          "spread_percent": 2.07413176853056,
+          "timing_definition": "prefill numerator prompt_n; decode numerator predicted_n-1 (63 timed steps for n_predict=64)",
+          "warmups": 1
+        }
+      ],
+      "schema_version": "rocm-exl3-large-comparison-v1",
+      "seed": 1234,
+      "warmups_per_row": 1
+    }
+  },
+  "smoke": {
+    "exl3_en": {
+      "model": "/work/models/qwen35-9b-exl3-4bpw",
+      "gpu": "gfx1201",
+      "torch": "2.12.0+rocm7.2",
+      "torch_hip": "7.2.53211",
+      "prompt": "<|im_start|>user\nExplain why the sky is blue in two sentences.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "seed": 1234,
+      "sampler": "DefaultSampler(min_p=0.08, temperature=0.8)",
+      "requested_tokens": 64,
+      "stop_token_ids": [
+        248044,
+        248046
+      ],
+      "load_seconds": 1.392941347003216,
+      "generation_wall_seconds": 12.46159931900911,
+      "observed_finite_logit_rows": 59,
+      "text": "The sky appears blue because molecules in Earth's atmosphere scatter shorter wavelengths of sunlight, such as blue and violet, more efficiently than longer wavelengths like red. However, our eyes are more sensitive to blue light and less sensitive to violet, which is why we perceive the sky as blue rather than violet.",
+      "first_logit_top1": 760,
+      "metrics": {
+        "prompt_tokens": 37,
+        "new_tokens": 60,
+        "time_prefill": 8.643142223358154,
+        "time_generate": 3.8043935298919678,
+        "cached_tokens": 0
+      },
+      "peak_torch_allocated_bytes": 5529328640,
+      "status": "generation-and-finite-logits-observed"
+    },
+    "exl3_ja": {
+      "model": "/work/models/qwen35-9b-exl3-4bpw",
+      "gpu": "gfx1201",
+      "torch": "2.12.0+rocm7.2",
+      "torch_hip": "7.2.53211",
+      "prompt": "<|im_start|>user\n2 + 3 の計算結果を、数字だけで答えてください。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "seed": 1234,
+      "sampler": "DefaultSampler(min_p=0.08, temperature=0.8)",
+      "requested_tokens": 32,
+      "stop_token_ids": [
+        248044,
+        248046
+      ],
+      "load_seconds": 1.4948800790007226,
+      "generation_wall_seconds": 10.002528357988922,
+      "observed_finite_logit_rows": 1,
+      "text": "5",
+      "first_logit_top1": 20,
+      "metrics": {
+        "prompt_tokens": 41,
+        "new_tokens": 2,
+        "time_prefill": 6.988917350769043,
+        "time_generate": 3.00024676322937,
+        "cached_tokens": 0
+      },
+      "peak_torch_allocated_bytes": 5529773056,
+      "status": "generation-and-finite-logits-observed"
+    },
+    "llama_en": {
+      "content": "The sky appears blue because Earth's atmosphere scatters shorter wavelengths of sunlight, such as blue and violet, more strongly than longer wavelengths like red. This phenomenon, known as Rayleigh scattering, causes the blue light to spread out in all directions, making the sky look blue to our eyes.",
+      "stop_type": "eos",
+      "tokens_predicted": 59,
+      "tokens_evaluated": 23,
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 23,
+        "prompt_ms": 59.233,
+        "prompt_per_token_ms": 2.5753478260869564,
+        "prompt_per_second": 388.29706413654554,
+        "predicted_n": 59,
+        "predicted_ms": 713.042,
+        "predicted_per_token_ms": 12.293827586206897,
+        "predicted_per_second": 81.34163204972498
+      }
+    },
+    "llama_ja": {
+      "content": "5",
+      "stop_type": "eos",
+      "tokens_predicted": 2,
+      "tokens_evaluated": 27,
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 27,
+        "prompt_ms": 65.771,
+        "prompt_per_token_ms": 2.435962962962963,
+        "prompt_per_second": 410.5152726885709,
+        "predicted_n": 2,
+        "predicted_ms": 14.062,
+        "predicted_per_token_ms": 14.062,
+        "predicted_per_second": 71.11363959607453
+      }
+    }
+  },
+  "exit_codes": {
+    "exl3_quantization": 0,
+    "gguf_conversion": 0,
+    "q4_k_m_quantization": 0,
+    "exl3_smoke_en": 0,
+    "exl3_smoke_ja": 0,
+    "exl3_benchmark": 0,
+    "llama_benchmark_ub512": 0,
+    "llama_benchmark_ub2048": 0,
+    "llama_smoke": 0,
+    "llama_server_ub512": 0,
+    "llama_server_ub2048": 0
+  },
+  "gdn_oracle": {
+    "shape": "key16/value32,kdim128,vdim128",
+    "cases_passed": 6,
+    "cases_failed": 0,
+    "cases": "batch1,length1/15;batch2,length17;historyfalse/true",
+    "oracle": "independent upstream torch FP32 formula"
+  },
+  "caveats": [
+    "EXL3 calibration16x256 is reduced workflow smoke, not standard250x2048 quality.",
+    "Formats have different bit allocation; no equal-quality certification.",
+    "EXL3 native prefill numerator N covers N-1 processed inputs; llama covers N.",
+    "Nominal output64means EXL3actual63forward/output and llamaactual64outputwith63timeddecode steps; one-token phase offset.",
+    "EXL3 GPU sampler and no EOSmask versus llama CPU sampler and ignore_eos mask.",
+    "EXL3 pp2048spread9.39%; all3samples retained, median reported.",
+    "Primary comparison matches maximum chunk2048; original llamaub512measurement is kept as control, not mixed into primary medians.",
+    "Source/code provenance reuses already-recorded checkouts; no new external source import."
+  ],
+  "files": {
+    "logs/exl3-quantization.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/exl3-quantization.log",
+      "sha256": "fc24a0e3af7b6b7b93af532f7db0ef67d01870aa97f5b6c789b661d572190297"
+    },
+    "logs/gguf-conversion.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/gguf-conversion.log",
+      "sha256": "fa2d68ac4fd42f44fe04c8f15718233ff5a397100dc6648eaf98323fc32b6b44"
+    },
+    "logs/llama-quantization.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/llama-quantization.log",
+      "sha256": "8b87d474eb0f00b1f9bbe7e019528de5ec52522c46a959ec5036cb18c1f4c224"
+    },
+    "logs/gdn-9b-oracle.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/gdn-9b-oracle.log",
+      "sha256": "b2e3981c82c903631ae2671d3a3175618d73c0456c6a9a8853f301ce13a080a8"
+    },
+    "logs/prompt-generation.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/prompt-generation.log",
+      "sha256": "5a99c2f1c2c6feeb9244833ec4e4fe97928ccb3d5493ae9623051dfd0990de59"
+    },
+    "logs/benchmark-exl3.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/benchmark-exl3.log",
+      "sha256": "a76647ae462ccc7a4e91298634d7f9c106401c268fa33a21c416ee58015d4d37"
+    },
+    "logs/benchmark-llama.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/benchmark-llama.log",
+      "sha256": "2da98b447ec2ad6f36ad23c45d47f18d3aa3c5d9174519b2b2658d988c3e0797"
+    },
+    "logs/benchmark-llama-ub2048.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/benchmark-llama-ub2048.log",
+      "sha256": "c63161311158d0fa2cd8d7e6ae9dd9b5b07c27e0de1f48f983db5f2045ccb2a9"
+    },
+    "logs/llama-server.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/llama-server.log",
+      "sha256": "8680cee1e92cba149fed32bd43ba7768e83b7146ede95b02c7ea1488627e0b31"
+    },
+    "logs/llama-server-ub2048.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/llama-server-ub2048.log",
+      "sha256": "471cf85d6ea0c826684aa3365a8e4e40a45710bcbd2c4a6d127dcf679042f982"
+    },
+    "logs/smoke-exl3-en.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/smoke-exl3-en.log",
+      "sha256": "8af8695db77425bf6cd5f70ab8f4913ad9f2dfaf55370e7dd7eb41471be8e86d"
+    },
+    "logs/smoke-exl3-ja.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/smoke-exl3-ja.log",
+      "sha256": "7d230919ae10d70e86cc3ff2cc74924f38d9ab0109c7b8af047487c937277f46"
+    },
+    "logs/smoke-llama.log": {
+      "path": "/home/homelab1/datapool/rocm-exl3-experiment/large-9b/logs/smoke-llama.log",
+      "sha256": "7cdfd15131a1f8545407a96e6a0fb86c041071d0a9c0bee6ec210a86a7b61b73"
+    }
+  }
+}

@@ -1,0 +1,626 @@
+diff --git a/exllamav3/exllamav3_ext/rocm/quant/exl3_gemm_inner_rdna.hip.h b/exllamav3/exllamav3_ext/rocm/quant/exl3_gemm_inner_rdna.hip.h
+index 1d28f7f..2ab3465 100644
+--- a/exllamav3/exllamav3_ext/rocm/quant/exl3_gemm_inner_rdna.hip.h
++++ b/exllamav3/exllamav3_ext/rocm/quant/exl3_gemm_inner_rdna.hip.h
+@@ -164,9 +164,9 @@ void exl3_gemm_kernel_inner
+     const int warp_id = t / 32;
+     const int lane_id = t % 32;
+ 
+-    // RDNA C fragment mapping, used by every output path below.
+-    const int c_row      = lane_id % 16;
+-    const int c_col_base = (lane_id >= 16) ? 1 : 0;
++    // C fragment mapping is architecture-specific inside rdna_wmma: gfx11
++    // stores interleaved columns while gfx12 stores contiguous rows per lane.
++    // Keep all direct fragment accesses below on the shared mapping helpers.
+ 
+     // Dimensions
+     const int tiles_k  = size_k / TILESIZE_K;
+@@ -484,10 +484,15 @@ void exl3_gemm_kernel_inner
+         }
+     };
+ 
+-    // Column of the output tile owned by element j of fragment n.
++    // Row/column of the output tile owned by element j of fragment n.
++    auto out_row = [&] (int m, int j)
++    {
++        return m * 16 + rdna_wmma::c_row(lane_id, j);
++    };
++
+     auto out_col = [&] (int n, int j)
+     {
+-        return (warp_id * FRAGS_N_PER_WARP + n) * 16 + j * 2 + c_col_base;
++        return (warp_id * FRAGS_N_PER_WARP + n) * 16 + rdna_wmma::c_col(lane_id, j);
+     };
+ 
+     auto read_sum_gl = [&] ()
+@@ -495,13 +500,13 @@ void exl3_gemm_kernel_inner
+         #pragma unroll
+         for (int m = 0; m < TILEBLOCKS_M; ++m)
+         {
+-            int row = m * 16 + c_row;
+-            if (row >= size_m) continue;
+             #pragma unroll
+             for (int n = 0; n < FRAGS_N_PER_WARP; ++n)
+                 #pragma unroll
+                 for (int j = 0; j < 8; ++j)
+                 {
++                    int row = out_row(m, j);
++                    if (row >= size_m) continue;
+                     int col = out_col(n, j);
+                     if constexpr (c_fp32)
+                         frag_c[m][n][j] += gl_c_ptr_32[row * size_n + col];
+@@ -516,13 +521,13 @@ void exl3_gemm_kernel_inner
+         #pragma unroll
+         for (int m = 0; m < TILEBLOCKS_M; ++m)
+         {
+-            int row = m * 16 + c_row;
+-            if (row >= size_m) continue;
+             #pragma unroll
+             for (int n = 0; n < FRAGS_N_PER_WARP; ++n)
+                 #pragma unroll
+                 for (int j = 0; j < 8; ++j)
+                 {
++                    int row = out_row(m, j);
++                    if (row >= size_m) continue;
+                     int col = out_col(n, j);
+                     if constexpr (c_fp32)
+                         gl_c_ptr_32[row * size_n + col] = frag_c[m][n][j];
+@@ -538,13 +543,15 @@ void exl3_gemm_kernel_inner
+         #pragma unroll
+         for (int m = 0; m < TILEBLOCKS_M; ++m)
+         {
+-            int row = m * 16 + c_row;
+-            if (row >= size_m) continue;
+             #pragma unroll
+             for (int n = 0; n < FRAGS_N_PER_WARP; ++n)
+                 #pragma unroll
+                 for (int j = 0; j < 8; ++j)
+-                    sh_c[row * TILESIZE_N + out_col(n, j)] = frag_c[m][n][j];
++                {
++                    int row = out_row(m, j);
++                    if (row < size_m)
++                        sh_c[row * TILESIZE_N + out_col(n, j)] = frag_c[m][n][j];
++                }
+         }
+     };
+ 
+diff --git a/exllamav3/exllamav3_ext/rocm/quant/exl3_gemm_rdna.hip b/exllamav3/exllamav3_ext/rocm/quant/exl3_gemm_rdna.hip
+index eb77f1c..78e84ed 100644
+--- a/exllamav3/exllamav3_ext/rocm/quant/exl3_gemm_rdna.hip
++++ b/exllamav3/exllamav3_ext/rocm/quant/exl3_gemm_rdna.hip
+@@ -12,7 +12,8 @@
+ // the autotune-hash clamp; all merged clean.
+ //
+ // EXL3_RDNA_SMEM covers the four launch-configuration sites. The four autotuner
+-// sites still pass upstream's SMEM_MAX, unchanged from before this rebase.
++// sites use the runtime-clamped common budget; SMEM_MAX alone may exceed
++// the device limit (gfx1201: 90 KiB build table versus 64 KiB per workgroup).
+ //
+ // A sibling is required because exl3_gemm.cu includes exl3_gemm_kernel.cuh,
+ // which reaches ptx.cuh through exl3_gemm_inner.cuh by relative quoted include.
+@@ -348,7 +349,7 @@ int exl3_gemm_gr
+     {
+         uint64_t autotune_key = gemm_autotune_hash(MAX(size_m, 2), size_k, size_n, K, c_fp32, device, cc, num_sms, cb);
+         CoopAutotuneLaunch tuned;
+-        if (CoopKernelAutotuner::launch_locked(autotune_key, kernelArgs, SMEM_MAX, stream, &tuned))
++        if (CoopKernelAutotuner::launch_locked(autotune_key, kernelArgs, exl3_rdna_smem_budget(device), stream, &tuned))
+         {
+             add_graph_args((void*) tuned.kernel);
+             cuda_check(cudaPeekAtLastError());
+@@ -399,7 +400,7 @@ int exl3_gemm_gr
+             }
+             TORCH_CHECK(!candidates.empty(), "exl3_gemm autotune: no compatible kernel shapes");
+ 
+-            tuned = CoopKernelAutotuner::launch(autotune_key, candidates, kernelArgs, SMEM_MAX, stream, (size_t) size_k * size_n);
++            tuned = CoopKernelAutotuner::launch(autotune_key, candidates, kernelArgs, exl3_rdna_smem_budget(device), stream, (size_t) size_k * size_n);
+             add_graph_args((void*) tuned.kernel);
+             cuda_check(cudaPeekAtLastError());
+             return tuned.tag;
+@@ -698,7 +699,7 @@ int exl3_mgemm_gr
+         );
+ 
+         CoopAutotuneLaunch tuned;
+-        if (CoopKernelAutotuner::launch_locked(autotune_key, kernelArgs, SMEM_MAX, stream, &tuned))
++        if (CoopKernelAutotuner::launch_locked(autotune_key, kernelArgs, exl3_rdna_smem_budget(device), stream, &tuned))
+         {
+             add_graph_args((void*) tuned.kernel);
+             cuda_check(cudaPeekAtLastError());
+@@ -731,7 +732,7 @@ int exl3_mgemm_gr
+             }
+             TORCH_CHECK(!candidates.empty(), "exl3_mgemm autotune: no compatible kernel shapes");
+ 
+-            tuned = CoopKernelAutotuner::launch(autotune_key, candidates, kernelArgs, SMEM_MAX, stream, (size_t) size_k * size_n * bszm);
++            tuned = CoopKernelAutotuner::launch(autotune_key, candidates, kernelArgs, exl3_rdna_smem_budget(device), stream, (size_t) size_k * size_n * bszm);
+             add_graph_args((void*) tuned.kernel);
+ 
+             // DBGI10(size_m, size_k, size_n, K, bszm_in, bszm_out, tuned.tag, tuned.block_dim, tuned.num_sms, tuned.concurrency);
+diff --git a/exllamav3/exllamav3_ext/rocm/quant/quantize_rdna.hip b/exllamav3/exllamav3_ext/rocm/quant/quantize_rdna.hip
+index 7f35e10..44cf76b 100644
+--- a/exllamav3/exllamav3_ext/rocm/quant/quantize_rdna.hip
++++ b/exllamav3/exllamav3_ext/rocm/quant/quantize_rdna.hip
+@@ -81,7 +81,10 @@ void quantize_tiles
+     int device;
+     cudaGetDevice(&device);
+     const int max_batch_size = MIN((int) temp_costs.size(0), 2 * DevCtx::instance().get_num_sms(device));
+-    const int shmem = (K >= 2 ? 2 * edges * sizeof(half) : 0) + 512 + 64 + 128;
++    // K=2 costs alone fill 64 KiB; the input/reduction scratch needs another
++    // 704 bytes. Use the already allocated global costs for K=1/2 on RDNA.
++    // Keep this threshold paired with quantize_tiles_kernel_rdna.hip.h.
++    const int shmem = (K >= 3 ? 2 * edges * sizeof(half) : 0) + 512 + 64 + 128;
+     int cb = 0;
+     if (mcg) cb = 1;
+     if (mul1) cb = 2;
+diff --git a/exllamav3/exllamav3_ext/rocm/quant/quantize_tiles_kernel_rdna.hip.h b/exllamav3/exllamav3_ext/rocm/quant/quantize_tiles_kernel_rdna.hip.h
+index ddaf9c0..42c39f0 100644
+--- a/exllamav3/exllamav3_ext/rocm/quant/quantize_tiles_kernel_rdna.hip.h
++++ b/exllamav3/exllamav3_ext/rocm/quant/quantize_tiles_kernel_rdna.hip.h
+@@ -69,7 +69,9 @@ void quantize_tiles_kernel
+     int* sh_idx = (int*) sh; sh += 32 * sizeof(int);
+ 
+     half* sh_temp_costs = (half*) sh;
+-    half* temp_costs = K >= 2 ? sh_temp_costs : temp_costs_ptr + 2 * edges * tile_idx;
++    // K=2 plus the 704-byte scratch exceeds RDNA's 64 KiB workgroup LDS.
++    // Match the launcher's shared-memory calculation in quantize_rdna.hip.
++    half* temp_costs = K >= 3 ? sh_temp_costs : temp_costs_ptr + 2 * edges * tile_idx;
+     half* temp_costs_inc = temp_costs + edges;
+ 
+     if (thread < 256) sh_input_tile[thread] = __float2half_rn(input_tile[thread]);
+diff --git a/exllamav3/exllamav3_ext/rocm/rdna_wmma.hip.h b/exllamav3/exllamav3_ext/rocm/rdna_wmma.hip.h
+index f019622..0960551 100644
+--- a/exllamav3/exllamav3_ext/rocm/rdna_wmma.hip.h
++++ b/exllamav3/exllamav3_ext/rocm/rdna_wmma.hip.h
+@@ -1,8 +1,8 @@
+ // =============================================================================
+-// RDNA 3.5 primitives for EXL3 -- the ptx.cuh replacement
++// RDNA WMMA primitives for EXL3 -- the ptx.cuh replacement
+ // =============================================================================
+ //
+-// Target: gfx1150/gfx1151 (RDNA 3.5), wave32.
++// Target: gfx1150/gfx1151 (RDNA 3.5) and gfx1200/gfx1201 (RDNA 4), wave32.
+ //
+ // Upstream `exllamav3_ext/ptx.cuh` is 22 blocks of NVIDIA inline PTX. None of it
+ // parses under hipcc -- the constraint letters `f` and `l` are not valid on
+@@ -83,6 +83,15 @@ typedef int      int32x8_t __attribute__((ext_vector_type(8)));
+ // below can take the HIP type and reinterpret without a conversion.
+ typedef __bf16   bf16x16_t __attribute__((ext_vector_type(16)));
+ 
++// gfx12 changed the WMMA register width from 256 bits to 128 bits.  Keep the
++// public fragments above at the gfx11 width (callers and the shared-memory
++// loaders rely on that layout), and use these private-width vectors only at
++// the intrinsic boundary below.  One gfx12 lane therefore consumes either
++// the low or high half of the existing fragment, selected by lane / 16.
++typedef _Float16 rdna_wmma_f16x8_t __attribute__((ext_vector_type(8)));
++typedef short    rdna_wmma_bf16x8_t __attribute__((ext_vector_type(8)));
++typedef int      rdna_wmma_i32x2_t __attribute__((ext_vector_type(2)));
++
+ struct WmmaFragA {
+     half16_t data;
+     __device__ __forceinline__ void clear() {
+@@ -197,17 +206,23 @@ struct WmmaFragC_i32 {
+ // rdna_wmma namespace -- WMMA operations for the GEMM/GEMV kernels
+ // =============================================================================
+ //
+-// Native RDNA 3.5 WMMA: 16x16x16 FP16 -> FP32, computes C += A x B.
++// Native RDNA WMMA: 16x16x16 FP16 -> FP32, computes C += A x B.  gfx11 and
++// gfx12 use different physical fragment widths and C mappings; the public
++// wrapper layout stays at the gfx11 width and the gfx12 conversion is local to
++// the intrinsic boundary.
+ //
+-// Builtin signature -- note B precedes A:
+-//   __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(B, A, C) -> C
++// Builtin signatures:
++//   gfx11: __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(B, A, C) -> C
++//   gfx12: __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(A, B, C) -> C
+ //
+-// Wave32 lane mapping (validated by tests/wmma_smoke2.cpp, 256/256 cells,
++// gfx11 wave32 lane mapping (validated by tests/wmma_smoke2.cpp, 256/256 cells,
+ // 0 transposed, 0 swapped, re-proven on ROCm 7.2.4):
+ //   A fragment: lane L holds row (L % 16), all 16 columns
+ //   B fragment: lane L holds column (L % 16), all 16 rows
+ //   C fragment: row = lane % 16; col_base = (lane >= 16) ? 1 : 0;
+ //               each lane stores 8 floats at columns [i*2 + col_base], i in 0..7
++// gfx12 uses 8-element inputs and a transposed native C fragment; c_row/c_col
++// below convert that representation to the same row-major wrapper contract.
+ //
+ // This layout is NOT interchangeable with PTX mma.m16n8k16, which distributes
+ // 8 halves/lane for A and 4 floats/lane for C. That mismatch is why the GEMM
+@@ -216,6 +231,68 @@ struct WmmaFragC_i32 {
+ 
+ namespace rdna_wmma {
+ 
++// gfx12's 128-bit WMMA operands cover the same 16x16 tile as gfx11's
++// 256-bit operands, but distribute each row/column across the two lane
++// groups: lanes 0..15 carry elements 0..7 and lanes 16..31 carry 8..15.
++// The rest of this header deliberately keeps the established 16-element
++// fragment ABI, so this conversion is kept local to the gfx12 builtins.
++#if defined(__gfx1200__) || defined(__gfx1201__)
++__device__ __forceinline__ rdna_wmma_f16x8_t gfx12_f16_input(const half16_t& data)
++{
++    rdna_wmma_f16x8_t result;
++    const _Float16* src = reinterpret_cast<const _Float16*>(&data);
++    const int base = ((threadIdx.x & 31) >> 4) * 8;
++    #pragma unroll
++    for (int i = 0; i < 8; i++) result[i] = src[base + i];
++    return result;
++}
++
++__device__ __forceinline__ rdna_wmma_bf16x8_t gfx12_bf16_input(const bf16x16_t& data)
++{
++    rdna_wmma_bf16x8_t result;
++    const short* src = reinterpret_cast<const short*>(&data);
++    const int base = ((threadIdx.x & 31) >> 4) * 8;
++    #pragma unroll
++    for (int i = 0; i < 8; i++) result[i] = src[base + i];
++    return result;
++}
++
++__device__ __forceinline__ rdna_wmma_i32x2_t gfx12_i8_input(const int32x4_t& data)
++{
++    rdna_wmma_i32x2_t result;
++    const int* src = reinterpret_cast<const int*>(&data);
++    const int base = ((threadIdx.x & 31) >> 4) * 2;
++    #pragma unroll
++    for (int i = 0; i < 2; i++) result[i] = src[base + i];
++    return result;
++}
++#endif
++
++// C/D fragments use the gfx11 row-major lane mapping in the legacy path.  On
++// gfx12 the native 128-bit result is column-major: lane L is column L % 16 and
++// its eight elements are rows (L / 16) * 8 .. (L / 16) * 8 + 7.  Keep that
++// difference in one pair of index helpers so every load/store operation has
++// the same external row-major contract on both architectures.
++__device__ __forceinline__ int c_row(int lane, int elem)
++{
++#if defined(__gfx1200__) || defined(__gfx1201__)
++    return (lane >> 4) * 8 + elem;
++#else
++    (void) elem;
++    return lane % 16;
++#endif
++}
++
++__device__ __forceinline__ int c_col(int lane, int elem)
++{
++#if defined(__gfx1200__) || defined(__gfx1201__)
++    (void) elem;
++    return lane % 16;
++#else
++    return elem * 2 + ((lane >= 16) ? 1 : 0);
++#endif
++}
++
+ // Load A fragment from a row-major matrix.
+ // Lane L loads row (L % 16), WMMA_K=16 columns from the pointer. The caller
+ // bakes the sub-K column offset into A, so this is always 16 consecutive halves
+@@ -267,7 +344,12 @@ __device__ __forceinline__ void mma_sync(
+     const WmmaFragA& a,
+     const WmmaFragB& b)
+ {
++#if defined(__gfx1200__) || defined(__gfx1201__)
++    c.data = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
++        gfx12_f16_input(a.data), gfx12_f16_input(b.data), c.data);
++#else
+     c.data = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(b.data, a.data, c.data);
++#endif
+ }
+ 
+ // Load and accumulate C (FP32) -- no bounds checking
+@@ -277,14 +359,9 @@ __device__ __forceinline__ void load_accumulate_c(
+     int stride)
+ {
+     int lane = threadIdx.x & 31;
+-    int row = lane % 16;
+-    int col_base = (lane >= 16) ? 1 : 0;
+-
+-    const float* row_ptr = C + row * stride;
+     #pragma unroll
+     for (int i = 0; i < 8; i++) {
+-        int col = i * 2 + col_base;
+-        frag[i] += row_ptr[col];
++        frag[i] += C[c_row(lane, i) * stride + c_col(lane, i)];
+     }
+ }
+ 
+@@ -295,14 +372,9 @@ __device__ __forceinline__ void load_accumulate_c_half(
+     int stride)
+ {
+     int lane = threadIdx.x & 31;
+-    int row = lane % 16;
+-    int col_base = (lane >= 16) ? 1 : 0;
+-
+-    const half* row_ptr = C + row * stride;
+     #pragma unroll
+     for (int i = 0; i < 8; i++) {
+-        int col = i * 2 + col_base;
+-        frag[i] += __half2float(row_ptr[col]);
++        frag[i] += __half2float(C[c_row(lane, i) * stride + c_col(lane, i)]);
+     }
+ }
+ 
+@@ -314,16 +386,11 @@ __device__ __forceinline__ void load_accumulate_c_checked(
+     int valid_rows)
+ {
+     int lane = threadIdx.x & 31;
+-    int row = lane % 16;
+-    int col_base = (lane >= 16) ? 1 : 0;
+-
+-    if (row < valid_rows) {
+-        const float* row_ptr = C + row * stride;
+-        #pragma unroll
+-        for (int i = 0; i < 8; i++) {
+-            int col = i * 2 + col_base;
+-            frag[i] += row_ptr[col];
+-        }
++    #pragma unroll
++    for (int i = 0; i < 8; i++) {
++        int row = c_row(lane, i);
++        int col = c_col(lane, i);
++        if (row < valid_rows && col < stride) frag[i] += C[row * stride + col];
+     }
+ }
+ 
+@@ -335,16 +402,11 @@ __device__ __forceinline__ void load_accumulate_c_half_checked(
+     int valid_rows)
+ {
+     int lane = threadIdx.x & 31;
+-    int row = lane % 16;
+-    int col_base = (lane >= 16) ? 1 : 0;
+-
+-    if (row < valid_rows) {
+-        const half* row_ptr = C + row * stride;
+-        #pragma unroll
+-        for (int i = 0; i < 8; i++) {
+-            int col = i * 2 + col_base;
+-            frag[i] += __half2float(row_ptr[col]);
+-        }
++    #pragma unroll
++    for (int i = 0; i < 8; i++) {
++        int row = c_row(lane, i);
++        int col = c_col(lane, i);
++        if (row < valid_rows && col < stride) frag[i] += __half2float(C[row * stride + col]);
+     }
+ }
+ 
+@@ -357,18 +419,11 @@ __device__ __forceinline__ void store_matrix_c_checked(
+     int valid_cols)
+ {
+     int lane = threadIdx.x & 31;
+-    int row = lane % 16;
+-    int col_base = (lane >= 16) ? 1 : 0;
+-
+-    if (row < valid_rows) {
+-        float* row_ptr = C + row * stride;
+-        #pragma unroll
+-        for (int i = 0; i < 8; i++) {
+-            int col = i * 2 + col_base;
+-            if (col < valid_cols) {
+-                row_ptr[col] = frag[i];
+-            }
+-        }
++    #pragma unroll
++    for (int i = 0; i < 8; i++) {
++        int row = c_row(lane, i);
++        int col = c_col(lane, i);
++        if (row < valid_rows && col < valid_cols) C[row * stride + col] = frag[i];
+     }
+ }
+ 
+@@ -381,18 +436,11 @@ __device__ __forceinline__ void store_matrix_c_half_checked(
+     int valid_cols)
+ {
+     int lane = threadIdx.x & 31;
+-    int row = lane % 16;
+-    int col_base = (lane >= 16) ? 1 : 0;
+-
+-    if (row < valid_rows) {
+-        half* row_ptr = C + row * stride;
+-        #pragma unroll
+-        for (int i = 0; i < 8; i++) {
+-            int col = i * 2 + col_base;
+-            if (col < valid_cols) {
+-                row_ptr[col] = __float2half(frag[i]);
+-            }
+-        }
++    #pragma unroll
++    for (int i = 0; i < 8; i++) {
++        int row = c_row(lane, i);
++        int col = c_col(lane, i);
++        if (row < valid_rows && col < valid_cols) C[row * stride + col] = __float2half(frag[i]);
+     }
+ }
+ 
+@@ -403,15 +451,8 @@ __device__ __forceinline__ void store_matrix_c(
+     int stride)
+ {
+     int lane = threadIdx.x & 31;
+-    int row = lane % 16;
+-    int col_base = (lane >= 16) ? 1 : 0;
+-
+-    float* row_ptr = C + row * stride;
+     #pragma unroll
+-    for (int i = 0; i < 8; i++) {
+-        int col = i * 2 + col_base;
+-        row_ptr[col] = frag[i];
+-    }
++    for (int i = 0; i < 8; i++) C[c_row(lane, i) * stride + c_col(lane, i)] = frag[i];
+ }
+ 
+ // Store C fragment (FP32 -> FP16, no bounds checking)
+@@ -421,25 +462,20 @@ __device__ __forceinline__ void store_matrix_c_half(
+     int stride)
+ {
+     int lane = threadIdx.x & 31;
+-    int row = lane % 16;
+-    int col_base = (lane >= 16) ? 1 : 0;
+-
+-    half* row_ptr = C + row * stride;
+     #pragma unroll
+-    for (int i = 0; i < 8; i++) {
+-        int col = i * 2 + col_base;
+-        row_ptr[col] = __float2half(frag[i]);
+-    }
++    for (int i = 0; i < 8; i++)
++        C[c_row(lane, i) * stride + c_col(lane, i)] = __float2half(frag[i]);
+ }
+ 
+ // =============================================================================
+ // bf16 WMMA -- v_wmma_f32_16x16x16_bf16
+ // =============================================================================
+ //
+-// Operand order is (B, A, C), same as every other variant -- verified on
+-// gfx1151 against a CPU reference: correct order gives 0/256 mismatches, and
+-// the swapped order gives 240 transpose-matches, which is the signature of an
+-// operand-order bug rather than a layout one.
++// The gfx11 builtin operand order is (B, A, C), verified on gfx1151 against a
++// CPU reference: correct order gives 0/256 mismatches, and the swapped order
++// gives 240 transpose-matches, which is the signature of an operand-order bug
++// rather than a layout one.  The gfx12 builtin has the normal (A, B, C) order;
++// both branches preserve the wrapper's A x B contract.
+ //
+ // A, B and C layouts are identical to the f16 form, and C is fp32, so this
+ // reuses WmmaFragC and every existing store/accumulate helper.
+@@ -475,7 +511,12 @@ __device__ __forceinline__ void mma_sync_bf16(
+     const WmmaFragA_bf16& a,
+     const WmmaFragB_bf16& b)
+ {
++#if defined(__gfx1200__) || defined(__gfx1201__)
++    c.data = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(
++        gfx12_bf16_input(a.data), gfx12_bf16_input(b.data), c.data);
++#else
+     c.data = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(b.data, a.data, c.data);
++#endif
+ }
+ 
+ // =============================================================================
+@@ -497,7 +538,19 @@ __device__ __forceinline__ void mma_sync_f16(
+     const WmmaFragA& a,
+     const WmmaFragB& b)
+ {
++#if defined(__gfx1200__) || defined(__gfx1201__)
++    rdna_wmma_f16x8_t c12;
++    const _Float16* csrc = reinterpret_cast<const _Float16*>(&c.data);
++    #pragma unroll
++    for (int i = 0; i < 8; i++) c12[i] = csrc[i * 2 + (opsel ? 1 : 0)];
++    c12 = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32_gfx12(
++        gfx12_f16_input(a.data), gfx12_f16_input(b.data), c12);
++    _Float16* cdst = reinterpret_cast<_Float16*>(&c.data);
++    #pragma unroll
++    for (int i = 0; i < 8; i++) cdst[i * 2 + (opsel ? 1 : 0)] = c12[i];
++#else
+     c.data = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(b.data, a.data, c.data, opsel);
++#endif
+ }
+ 
+ template <bool opsel = false>
+@@ -507,13 +560,9 @@ __device__ __forceinline__ void store_matrix_c_f16(
+     int stride)
+ {
+     int lane = threadIdx.x & 31;
+-    int row = lane % 16;
+-    int col_base = (lane >= 16) ? 1 : 0;
+-
+-    half* row_ptr = C + row * stride;
+     #pragma unroll
+     for (int i = 0; i < 8; i++)
+-        row_ptr[i * 2 + col_base] = frag.get<opsel>(i);
++        C[c_row(lane, i) * stride + c_col(lane, i)] = frag.get<opsel>(i);
+ }
+ 
+ template <bool opsel = false>
+@@ -525,16 +574,11 @@ __device__ __forceinline__ void store_matrix_c_f16_checked(
+     int valid_cols)
+ {
+     int lane = threadIdx.x & 31;
+-    int row = lane % 16;
+-    int col_base = (lane >= 16) ? 1 : 0;
+-
+-    if (row < valid_rows) {
+-        half* row_ptr = C + row * stride;
+-        #pragma unroll
+-        for (int i = 0; i < 8; i++) {
+-            int col = i * 2 + col_base;
+-            if (col < valid_cols) row_ptr[col] = frag.get<opsel>(i);
+-        }
++    #pragma unroll
++    for (int i = 0; i < 8; i++) {
++        int row = c_row(lane, i);
++        int col = c_col(lane, i);
++        if (row < valid_rows && col < valid_cols) C[row * stride + col] = frag.get<opsel>(i);
+     }
+ }
+ 
+@@ -553,7 +597,7 @@ __device__ __forceinline__ void store_matrix_c_f16_checked(
+ //               8 int32 at columns [i*2 + col_base]                  -> 8 VGPRs
+ //
+ // TRAP, and the reason these wrappers exist rather than calling the builtin
+-// directly: the builtin is
++// directly: the gfx11 builtin is
+ //
+ //   __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(s0, v0, s1, v1, C, clamp)
+ //
+@@ -561,7 +605,9 @@ __device__ __forceinline__ void store_matrix_c_f16_checked(
+ // because the operand order is (B, A, C), the *first* flag describes B, not A.
+ // Writing (signed_a, ..., signed_b, ...) reads naturally and is wrong. Verified
+ // on gfx1151: flags(1,0) computes signed-B times unsigned-A. mma_sync_i8 below
+-// takes (a, b) in the natural order and does the swap internally.
++// takes (a, b) in the natural order and does the swap internally.  The gfx12
++// builtin uses (A, B, C) and the normal flag order; both branches preserve the
++// natural mma_sync_i8(a, b) API.
+ //
+ // The flags select sign interpretation of the *stored bytes*; the loaders copy
+ // bytes verbatim, so signedness is a property of the multiply, not the load.
+@@ -597,10 +643,16 @@ __device__ __forceinline__ void mma_sync_i8(
+     const WmmaFragA_i8& a,
+     const WmmaFragB_i8& b)
+ {
++#if defined(__gfx1200__) || defined(__gfx1201__)
++    c.data = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(
++        signed_a, gfx12_i8_input(a.data),
++        signed_b, gfx12_i8_input(b.data), c.data, clamp);
++#else
+     c.data = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+         signed_b, b.data,     // first flag/vector pair is B
+         signed_a, a.data,
+         c.data, clamp);
++#endif
+ }
+ 
+ __device__ __forceinline__ void store_matrix_c_i32(
+@@ -609,13 +661,9 @@ __device__ __forceinline__ void store_matrix_c_i32(
+     int stride)
+ {
+     int lane = threadIdx.x & 31;
+-    int row = lane % 16;
+-    int col_base = (lane >= 16) ? 1 : 0;
+-
+-    int* row_ptr = C + row * stride;
+     #pragma unroll
+     for (int i = 0; i < 8; i++)
+-        row_ptr[i * 2 + col_base] = frag[i];
++        C[c_row(lane, i) * stride + c_col(lane, i)] = frag[i];
+ }
+ 
+ __device__ __forceinline__ void store_matrix_c_i32_checked(
+@@ -626,16 +674,11 @@ __device__ __forceinline__ void store_matrix_c_i32_checked(
+     int valid_cols)
+ {
+     int lane = threadIdx.x & 31;
+-    int row = lane % 16;
+-    int col_base = (lane >= 16) ? 1 : 0;
+-
+-    if (row < valid_rows) {
+-        int* row_ptr = C + row * stride;
+-        #pragma unroll
+-        for (int i = 0; i < 8; i++) {
+-            int col = i * 2 + col_base;
+-            if (col < valid_cols) row_ptr[col] = frag[i];
+-        }
++    #pragma unroll
++    for (int i = 0; i < 8; i++) {
++        int row = c_row(lane, i);
++        int col = c_col(lane, i);
++        if (row < valid_rows && col < valid_cols) C[row * stride + col] = frag[i];
+     }
+ }
+ 

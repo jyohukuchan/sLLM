@@ -3,7 +3,7 @@
 ## 目的とスナップショット
 
 - この文書は、sLLMが実装の比較・調査だけに使う外部推論engine sourceの取得元、固定revision、local checkout状態を記録する。参照sourceはsLLMの実装、配布物、正しさの証拠ではない。
-- 初回観測日は **2026-08-02**、最新更新監査日は **2026-08-17** である。表は更新監査で採用した固定revisionを
+- 初回観測日は **2026-08-02**、既存sourceの一括更新監査日は **2026-08-17** である。表は更新監査で採用した固定revisionを
   記録し、将来の「latest」を約束しない。新しい正式releaseに重大な既知問題がある場合は、観測したreleaseと
   local採用revisionを分けて記録する。
 - version/tagは表示用の識別子であり、lock値は40桁の完全commit SHAである。SGLangだけは、commitを指すannotated tag objectも併記する。
@@ -144,3 +144,12 @@ test "$(git -C reference/KTransformers grep -Il '^version https://git-lfs.github
 - 固定sourceの参照範囲と今回の採用判断は [推論engine参照](inference-engines.md) を参照する。
 - 取得作業の完了記録は [取得計画](../plans/archive/2026/08/1-10/reference-source-acquisition.md) と [取得履歴](../history/2026/08/1-10/reference-source-acquisition.md) を参照する。
 - 今回の採用作業は [採用計画](../plans/archive/2026/08/1-10/reference-source-adoption.md) と [採用履歴](../history/2026/08/1-10/reference-source-adoption.md) を参照する。
+
+## rocm_exl3 独立調査追加（2026-09-17）
+
+- origin: https://github.com/CarouselAether/rocm_exl3
+- local: `reference/rocm_exl3/`（ignored）
+- revision: `550dcfed786ad7bffa08b7a6b2a216fc474cbbb5`
+- tree: `e5f6b86fca7b2ac45e70e93be18e04c1c4b3868b`
+- MIT、Copyright (c) 2025 Turboderp。ユーザー指示による実行調査と軽微な局所修正を許可。
+- sLLM productionへのコード組込みなし。局所差分と結果は[調査履歴](../history/2026/09/11-20/rocm-exl3-investigation.md)へ記録する。
