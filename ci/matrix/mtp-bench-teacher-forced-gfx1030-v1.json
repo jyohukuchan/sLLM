@@ -1,0 +1,105 @@
+{
+  "schema_version": "mtp-teacher-forced-agreement-v1",
+  "state": "COMPLETE",
+  "target": "gfx1030",
+  "device_uuid": "GPU-76a08c022586fed6",
+  "sampling": "gpu-fixed seed123 (trajectory fixed by forced prefix)",
+  "prefix_file": "gen2-bf16/prefixes.json",
+  "forced_positions": 2048,
+  "conditions": 8,
+  "pooled": {
+    "mxfp8_agreement": 0.97314453125,
+    "mxfp8_se": 0.003572235364874417,
+    "mxfp6_agreement": 0.9697265625,
+    "mxfp6_se": 0.0037860865556923204
+  },
+  "paired_mxfp8_vs_mxfp6": {
+    "b": 40,
+    "c": 33,
+    "difference": 0.00341796875,
+    "se": 0.004171876828768325
+  },
+  "per_condition": [
+    {
+      "case_id": "code-c-implement-en",
+      "rows": 256,
+      "mxfp8_agree": 252,
+      "mxfp6_agree": 248,
+      "mxfp8_rate": 0.984375,
+      "mxfp6_rate": 0.96875,
+      "b": 7,
+      "c": 3
+    },
+    {
+      "case_id": "code-cuda-explain-ja",
+      "rows": 256,
+      "mxfp8_agree": 247,
+      "mxfp6_agree": 241,
+      "mxfp8_rate": 0.96484375,
+      "mxfp6_rate": 0.94140625,
+      "b": 9,
+      "c": 3
+    },
+    {
+      "case_id": "code-rust-bugfix-zh",
+      "rows": 256,
+      "mxfp8_agree": 247,
+      "mxfp6_agree": 249,
+      "mxfp8_rate": 0.96484375,
+      "mxfp6_rate": 0.97265625,
+      "b": 4,
+      "c": 6
+    },
+    {
+      "case_id": "code-python-review-zh",
+      "rows": 256,
+      "mxfp8_agree": 242,
+      "mxfp6_agree": 247,
+      "mxfp8_rate": 0.9453125,
+      "mxfp6_rate": 0.96484375,
+      "b": 5,
+      "c": 10
+    },
+    {
+      "case_id": "code-go-implement-en",
+      "rows": 256,
+      "mxfp8_agree": 250,
+      "mxfp6_agree": 251,
+      "mxfp8_rate": 0.9765625,
+      "mxfp6_rate": 0.98046875,
+      "b": 2,
+      "c": 3
+    },
+    {
+      "case_id": "code-java-refactor-en",
+      "rows": 256,
+      "mxfp8_agree": 251,
+      "mxfp6_agree": 248,
+      "mxfp8_rate": 0.98046875,
+      "mxfp6_rate": 0.96875,
+      "b": 6,
+      "c": 3
+    },
+    {
+      "case_id": "trans-en-ja-tech",
+      "rows": 256,
+      "mxfp8_agree": 251,
+      "mxfp6_agree": 250,
+      "mxfp8_rate": 0.98046875,
+      "mxfp6_rate": 0.9765625,
+      "b": 4,
+      "c": 3
+    },
+    {
+      "case_id": "trans-zh-en-tech",
+      "rows": 256,
+      "mxfp8_agree": 253,
+      "mxfp6_agree": 252,
+      "mxfp8_rate": 0.98828125,
+      "mxfp6_rate": 0.984375,
+      "b": 3,
+      "c": 2
+    }
+  ],
+  "note": "agreement is the draft's top-1 at identical forced positions; logits were never bit-identical across formats"
+}

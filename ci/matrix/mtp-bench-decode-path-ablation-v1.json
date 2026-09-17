@@ -1,0 +1,36 @@
+{
+  "schema_version": "mtp-decode-path-ablation-v1",
+  "state": "COMPLETE",
+  "target": "gfx1030",
+  "device_uuid": "GPU-76a08c022586fed6",
+  "hypothesis": "gfx1201 MXFP8 is more faithful because it uses make_wave_block32 (block-hoisted E8M0 scale) and native v_cvt_f32_fp8, while gfx1030 MXFP8 reloads the scale per element via BlockCodec::load.",
+  "method": "Diagnostic build only: the gfx1201 wave-block branch inside sllm_matmul_mxfp8_w8a8_m1_col2_body was enabled for gfx1030 as well. Same forced prefix, same BF16 baseline, same device.",
+  "source_control": {
+    "file": "native/hip/src/matmul_kernel.hip.cpp",
+    "sha256_before": "f13689d343aa596f762893dbcd6956b9b5c9220f38f3588cb695320676ee6c6c",
+    "sha256_after_restore": "f13689d343aa596f762893dbcd6956b9b5c9220f38f3588cb695320676ee6c6c",
+    "production_source_modified": false
+  },
+  "diagnostic_binary_sha256": "caf49e0e10bbfb00d0ef42e6175530e93a51faf3cd8f045eeffe86963b140663",
+  "control_bf16": {
+    "logits_bit_identical_cases": "8/8",
+    "top1_agreement": 1.0,
+    "interpretation": "the diagnostic build does not touch the BF16 path"
+  },
+  "result": {
+    "mxfp8_logits_bit_identical_cases": "8/8",
+    "mxfp8_top1_agreement_prod_vs_diag": 1.0,
+    "agreement_with_bf16_scalar": 0.9731,
+    "agreement_with_bf16_wave": 0.9731,
+    "near_tie_flip_rate_scalar": 0.42,
+    "near_tie_flip_rate_wave": 0.42,
+    "gfx1201_mxfp8_near_tie_flip_rate_for_reference": 0.238
+  },
+  "verdict": "HYPOTHESIS REJECTED. The two decode paths produce bit-identical logits on gfx1030.",
+  "why": "decode_scaled(value, scale) fuses the E8M0 exponent add into the FP32 bit pattern; load_wave_block32 computes decode(value) * decode(scale). For a power-of-two scale both are exact in the normal range. The lane-to-K assignment is also identical (thread wave*32+lane covers elements wave*32+lane+256j in both), so the FP32 accumulation order is unchanged. Only the mechanism for reading the scale byte differs, and that carries the same value.",
+  "remaining_candidates": [
+    "the gfx1201 BF16 baseline itself differs (the two GPUs disagree on 4.8% of positions), so within-GPU agreement rates are measured against different references and are not directly comparable across GPUs",
+    "other MXFP8-path kernels on gfx1201 (activation quantizer, attention route) rather than the M=1 matmul decode",
+    "MXFP6 near-tie flip rate is stable across GPUs (0.386 gfx1030 / 0.405 gfx1201) while MXFP8 varies (0.420 / 0.238); the MXFP8-specific variation is unexplained by the matmul decode"
+  ]
+}

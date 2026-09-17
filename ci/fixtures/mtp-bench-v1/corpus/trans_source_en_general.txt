@@ -1,0 +1,53 @@
+On the Quiet Persistence of Paper Maps
+
+The folding map is a technology that refuses to die, and its survival says something
+about how people actually navigate rather than how we imagine they do. Every year
+someone predicts the last printing. Every year the presses run again, in smaller
+numbers, for an audience that has not so much resisted the satellite as learned
+where it fails them.
+
+Consider what a paper map does that a screen does not. It shows everything at once.
+A driver glancing at a phone sees a corridor two blocks wide and a blue arrow that
+knows where it is going but will not say why. Unfolded across a passenger's knees,
+the same journey appears with its alternatives intact: the road that runs parallel
+along the river, the town that would add twenty minutes and a bakery, the mountain
+pass that closes in November. The screen optimises. The paper deliberates.
+
+This difference matters most when the plan fails. Anyone who has watched a
+navigation app recalculate in a dead zone knows the particular helplessness of a
+device that has lost its own position. The map, having never known where you were,
+cannot lose you. It waits. You find a road sign, a river, a ridge line, and the
+paper reorients itself around whatever you have managed to recognise. The
+knowledge required is old and not difficult, but it is knowledge, and it lives in
+the person rather than the battery.
+
+Cartographers describe a quality they call legibility, by which they mean something
+more demanding than readability. A legible map does not merely present its
+information clearly; it presents the shape of the terrain in a way that a reader
+can hold in memory afterwards. The best of them leave you with an internal model
+of a place. Turn-by-turn directions, by design, leave nothing. They are consumed
+and discarded, instruction by instruction, and a driver who has followed them
+perfectly for two hours may arrive with no idea which direction the sea lies in.
+
+None of this is an argument against the satellite. The routing is better. The
+traffic data is genuinely new information that no printed sheet could carry, and
+for the specific task of getting from an unfamiliar address to another unfamiliar
+address in a city you do not know, the phone wins without contest. The interesting
+claim is narrower: that the two artefacts answer different questions, and that the
+older one answers a question people still have.
+
+There is also the matter of the fold. Mapmakers spend real effort on it, because
+the fold determines which portions of the sheet can be seen together, and the
+panels that appear side by side become, for the reader, adjacent places. A badly
+folded map severs a city down its centre. A well folded one anticipates the
+journeys its readers will actually take. It is a constraint that has no screen
+equivalent at all, and it has produced a century of quiet, invisible design work
+that most users have never once noticed and would immediately miss.
+
+Sales figures tell a modest story. Hikers buy them, because batteries fail and
+weather does not care. Sailors buy them, and are required to. Cyclists planning a
+long route buy them for the planning rather than the riding. And a persistent
+number of ordinary drivers keep one in the door pocket, unopened for years, with
+the untroubled confidence of someone carrying a spare tyre. The map is no longer
+the instrument of navigation. It has become the thing you have in case navigation
+stops, which is a smaller role, and a durable one.

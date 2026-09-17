@@ -1,0 +1,171 @@
+You are working in this repository. Read the source below and propose a refactoring for the region named in the TASK section. Behaviour must not change. Explain what improves and what stays the same.
+
+--- sycl_block_scaled_gemv.cpp ---
+// Block-scaled FP8 GEMV expressed with SYCL 2020 unified shared memory.
+//
+// The kernel mirrors the CUDA variant: E4M3 weight values, one E8M0 scale per
+// 32-element K block, BF16 activations, FP32 accumulation, BF16 output. The
+// sub-group reduction replaces the warp shuffle and the local accessor
+// replaces shared memory.
+
+#include <sycl/sycl.hpp>
+
+#include <cstdint>
+#include <cstring>
+#include <stdexcept>
+#include <vector>
+
+namespace mxgemv {
+
+inline constexpr int kBlockSize = 32;
+inline constexpr int kSubGroupSize = 32;
+inline constexpr int kSubGroupsPerGroup = 8;
+inline constexpr int kWorkGroupSize = kSubGroupSize * kSubGroupsPerGroup;
+
+inline float decode_e8m0(std::uint8_t code) {
+  if (code == 0xFFu) {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
+  return sycl::exp2(static_cast<float>(static_cast<int>(code) - 127));
+}
+
+inline float decode_e4m3(std::uint8_t code) {
+  const std::uint32_t sign = static_cast<std::uint32_t>(code & 0x80u) << 24;
+  const std::uint32_t exponent = (code >> 3) & 0x0Fu;
+  const std::uint32_t mantissa = code & 0x07u;
+  if (exponent == 0u && mantissa == 0u) {
+    float zero;
+    std::memcpy(&zero, &sign, sizeof(zero));
+    return zero;
+  }
+  if (exponent == 0x0Fu && mantissa == 0x07u) {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
+  std::uint32_t bits;
+  if (exponent == 0u) {
+    // Subnormal: normalize the mantissa into an FP32 exponent.
+    int shift = 0;
+    std::uint32_t m = mantissa;
+    while ((m & 0x04u) == 0u) {
+      m <<= 1;
+      ++shift;
+    }
+    m &= 0x03u;
+    const std::uint32_t e32 = static_cast<std::uint32_t>(127 - 6 - shift);
+    bits = sign | (e32 << 23) | (m << 21);
+  } else {
+    const std::uint32_t e32 = exponent + 127u - 7u;
+    bits = sign | (e32 << 23) | (mantissa << 20);
+  }
+  float value;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+inline float bf16_to_float(std::uint16_t bits) {
+  const std::uint32_t widened = static_cast<std::uint32_t>(bits) << 16;
+  float value;
+  std::memcpy(&value, &widened, sizeof(value));
+  return value;
+}
+
+inline std::uint16_t float_to_bf16_rne(float value) {
+  std::uint32_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  if ((bits & 0x7FFFFFFFu) > 0x7F800000u) {
+    return static_cast<std::uint16_t>((bits >> 16) | 0x0040u);
+  }
+  const std::uint32_t lsb = (bits >> 16) & 1u;
+  return static_cast<std::uint16_t>((bits + 0x7FFFu + lsb) >> 16);
+}
+
+struct GemvShape {
+  std::int64_t k;
+  std::int64_t n;
+};
+
+sycl::event submit_mxfp8_w8a16_gemv(sycl::queue &queue,
+                                    const std::uint16_t *activation,
+                                    const std::uint8_t *weight_values,
+                                    const std::uint8_t *weight_scales,
+                                    std::uint16_t *output, GemvShape shape) {
+  if (shape.k <= 0 || shape.n <= 0 || (shape.k % kBlockSize) != 0) {
+    throw std::invalid_argument("k must be a positive multiple of 32");
+  }
+  const std::int64_t blocks_per_row = shape.k / kBlockSize;
+  const std::int64_t column_pairs = (shape.n + 1) / 2;
+  const sycl::nd_range<1> range{
+      sycl::range<1>(static_cast<std::size_t>(column_pairs * kWorkGroupSize)),
+      sycl::range<1>(kWorkGroupSize)};
+
+  return queue.submit([&](sycl::handler &handler) {
+    sycl::local_accessor<float, 2> wave_sums(
+        sycl::range<2>(kSubGroupsPerGroup, 2), handler);
+
+    handler.parallel_for(
+        range, [=](sycl::nd_item<1> item)
+                   [[sycl::reqd_sub_group_size(kSubGroupSize)]] {
+          const auto sub_group = item.get_sub_group();
+          const int lane = static_cast<int>(sub_group.get_local_linear_id());
+          const int wave = static_cast<int>(sub_group.get_group_linear_id());
+          const std::int64_t column0 =
+              static_cast<std::int64_t>(item.get_group_linear_id()) * 2;
+          const std::int64_t column1 = column0 + 1;
+          const bool has_column1 = column1 < shape.n;
+
+          float partial0 = 0.0f;
+          float partial1 = 0.0f;
+
+          for (std::int64_t block = wave; block < blocks_per_row;
+               block += kSubGroupsPerGroup) {
+            const std::int64_t element = block * kBlockSize + lane;
+            const float a = bf16_to_float(activation[element]);
+
+            const float scale0 =
+                decode_e8m0(weight_scales[column0 * blocks_per_row + block]);
+            partial0 = sycl::fma(
+                a, decode_e4m3(weight_values[column0 * shape.k + element]) * scale0,
+                partial0);
+
+            if (has_column1) {
+              const float scale1 =
+                  decode_e8m0(weight_scales[column1 * blocks_per_row + block]);
+              partial1 = sycl::fma(
+                  a,
+                  decode_e4m3(weight_values[column1 * shape.k + element]) * scale1,
+                  partial1);
+            }
+          }
+
+          partial0 = sycl::reduce_over_group(sub_group, partial0,
+                                             sycl::plus<float>());
+          partial1 = sycl::reduce_over_group(sub_group, partial1,
+                                             sycl::plus<float>());
+
+          if (lane == 0) {
+            wave_sums[wave][0] = partial0;
+            wave_sums[wave][1] = partial1;
+          }
+          sycl::group_barrier(item.get_group());
+
+          if (wave == 0) {
+            float total0 = lane < kSubGroupsPerGroup ? wave_sums[lane][0] : 0.0f;
+            float total1 = lane < kSubGroupsPerGroup ? wave_sums[lane][1] : 0.0f;
+            total0 = sycl::reduce_over_group(sub_group, total0,
+                                             sycl::plus<float>());
+            total1 = sycl::reduce_over_group(sub_group, total1,
+                                             sycl::plus<float>());
+            if (lane == 0) {
+              output[column0] = float_to_bf16_rne(total0);
+              if (has_column1) {
+                output[column1] = float_to_bf16_rne(total1);
+              }
+            }
+          }
+        });
+  });
+}
+
+}  // namespace mxgemv
+
+TASK (C++ (SYCL)): Refactor `submit_mxfp8_w8a16_gemv` so the two-column body is expressed once instead of duplicating the column-0 and column-1 paths.

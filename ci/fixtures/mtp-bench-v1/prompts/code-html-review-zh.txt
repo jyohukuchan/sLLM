@@ -1,0 +1,208 @@
+你正在评审对这个代码库的改动。请阅读下面的源码，针对 TASK 节提出的关注点撰写评审意见。请说明每一处发现、为何重要，以及你会如何修改。
+
+--- html_benchmark_dashboard.html ---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MTP Acceptance Dashboard</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #fbfbfa;
+        --fg: #1b1b18;
+        --muted: #6b6b63;
+        --line: #dcdcd4;
+        --accent: #2f6f4f;
+        --warn: #8a4b2a;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #16161a;
+          --fg: #ecece6;
+          --muted: #9a9a92;
+          --line: #33333a;
+          --accent: #6fbf90;
+          --warn: #d89a6a;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding-block: 32px;
+        padding-inline: 20px;
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main { max-width: 1040px; margin-inline: auto; }
+      h1 { font-size: 1.5rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+      .subtitle { color: var(--muted); margin: 0 0 28px; }
+      .tiles {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 12px;
+        margin-bottom: 28px;
+      }
+      .tile {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 14px 16px;
+        background: color-mix(in srgb, var(--bg) 82%, var(--fg) 4%);
+      }
+      .tile dt { font-size: 0.78rem; color: var(--muted); margin: 0 0 6px; }
+      .tile dd { margin: 0; font-size: 1.45rem; font-variant-numeric: tabular-nums; }
+      .tile dd.warn { color: var(--warn); }
+      table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+      caption { text-align: left; font-weight: 600; padding-block: 12px; }
+      th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: right; }
+      th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
+      thead th { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
+      tbody tr:hover { background: color-mix(in srgb, var(--bg) 88%, var(--accent) 12%); }
+      .delta-positive { color: var(--accent); }
+      .delta-negative { color: var(--warn); }
+      .tier-b caption { color: var(--muted); }
+      .tier-b::after {
+        content: "Tier B is measured for reference and never gates adoption.";
+        display: block;
+        color: var(--muted);
+        font-size: 0.82rem;
+        padding-block: 8px;
+      }
+      .scroll { overflow-x: auto; }
+      footer { margin-top: 36px; color: var(--muted); font-size: 0.82rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>MTP Acceptance Dashboard</h1>
+      <p class="subtitle">
+        Campaign <code id="campaign-id">pending</code> &middot;
+        target <code id="exact-target">pending</code>
+      </p>
+
+      <dl class="tiles" id="summary-tiles">
+        <div class="tile">
+          <dt>Tier A acceptance</dt>
+          <dd id="tile-acceptance">&mdash;</dd>
+        </div>
+        <div class="tile">
+          <dt>Derived decode</dt>
+          <dd id="tile-decode">&mdash;</dd>
+        </div>
+        <div class="tile">
+          <dt>Draft ms / block</dt>
+          <dd id="tile-draft">&mdash;</dd>
+        </div>
+        <div class="tile">
+          <dt>Baseline drift</dt>
+          <dd id="tile-drift">&mdash;</dd>
+        </div>
+      </dl>
+
+      <div class="scroll">
+        <table id="tier-a">
+          <caption>Tier A &mdash; coding agent and translation</caption>
+          <thead>
+            <tr>
+              <th scope="col">Condition</th>
+              <th scope="col">Code lang</th>
+              <th scope="col">Blocks</th>
+              <th scope="col">Accepted / proposed</th>
+              <th scope="col">Acceptance</th>
+              <th scope="col">Δ vs BF16</th>
+              <th scope="col">Decode tok/s</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="scroll tier-b">
+        <table id="tier-b">
+          <caption>Tier B &mdash; creative (reference only)</caption>
+          <thead>
+            <tr>
+              <th scope="col">Condition</th>
+              <th scope="col">Acceptance</th>
+              <th scope="col">Decode tok/s</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <footer>
+        Decode rate is derived from blocks and per-block times, not measured
+        end to end. Series from different campaigns are never compared.
+      </footer>
+    </main>
+
+    <script type="module">
+      const percent = (value) =>
+        value === null ? "—" : `${(value * 100).toFixed(2)}%`;
+      const points = (value) =>
+        value === null ? "—" : `${value >= 0 ? "+" : ""}${(value * 100).toFixed(2)} pt`;
+
+      function renderRow(row) {
+        const tr = document.createElement("tr");
+        const delta = document.createElement("td");
+        delta.textContent = points(row.acceptance_delta);
+        delta.className = row.acceptance_delta >= 0 ? "delta-positive" : "delta-negative";
+        for (const text of [row.cond_id, row.code_language ?? "—", row.blocks,
+                            `${row.accepted} / ${row.proposed}`, percent(row.acceptance)]) {
+          const td = document.createElement("td");
+          td.textContent = text;
+          tr.append(td);
+        }
+        tr.append(delta);
+        const tps = document.createElement("td");
+        tps.textContent = row.decode_tokens_per_second.toFixed(3);
+        tr.append(tps);
+        return tr;
+      }
+
+      async function load() {
+        const response = await fetch("./results.json", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`results.json returned ${response.status}`);
+        }
+        const data = await response.json();
+        document.getElementById("campaign-id").textContent = data.campaign_id;
+        document.getElementById("exact-target").textContent = data.exact_target;
+        document.getElementById("tile-acceptance").textContent = percent(data.tier_a.acceptance);
+        document.getElementById("tile-decode").textContent =
+          data.tier_a.decode_tokens_per_second.toFixed(3);
+        document.getElementById("tile-draft").textContent =
+          data.tier_a.draft_ms_per_block.toFixed(3);
+
+        const drift = document.getElementById("tile-drift");
+        drift.textContent = points(data.baseline_drift);
+        drift.classList.toggle("warn", Math.abs(data.baseline_drift) > 0.015);
+
+        const tierA = document.querySelector("#tier-a tbody");
+        for (const row of data.tier_a.rows) {
+          tierA.append(renderRow(row));
+        }
+        const tierB = document.querySelector("#tier-b tbody");
+        for (const row of data.tier_b.rows) {
+          const tr = document.createElement("tr");
+          for (const text of [row.cond_id, percent(row.acceptance),
+                              row.decode_tokens_per_second.toFixed(3)]) {
+            const td = document.createElement("td");
+            td.textContent = text;
+            tr.append(td);
+          }
+          tierB.append(tr);
+        }
+      }
+
+      load().catch((error) => {
+        document.querySelector(".subtitle").textContent = `Load failed: ${error.message}`;
+      });
+    </script>
+  </body>
+</html>
+
+TASK (HTML): Review the dark-mode token definitions and the `load()` error path for accessibility and failure handling.

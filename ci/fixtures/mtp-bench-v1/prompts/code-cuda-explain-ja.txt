@@ -1,0 +1,145 @@
+あなたはこのリポジトリに新しく参加した人へ説明しています。以下のソースを読み、TASK節で指定した部分を散文で説明してください。何をしているか、なぜこの書き方なのか、読む際の注意点を述べてください。
+
+--- cuda_block_scaled_gemv.cu ---
+// Block-scaled FP8 GEMV for single-row decode.
+//
+// The weight matrix is stored as OCP MX style blocks: every 32 contiguous
+// elements along K share one E8M0 power-of-two scale byte. Values are E4M3.
+// Activations stay in BF16 because at M=1 the activation vector is negligible
+// next to the weight matrix and quantizing it buys no bandwidth.
+
+#include <cuda_fp8.h>
+#include <cuda_runtime.h>
+#include <cstdint>
+#include <cstdio>
+
+namespace mxgemv {
+
+constexpr int kBlockSize = 32;
+constexpr int kWarpSize = 32;
+constexpr int kWavesPerBlock = 8;
+constexpr int kThreadsPerBlock = kWarpSize * kWavesPerBlock;
+
+__device__ __forceinline__ float decode_e8m0(uint8_t code) {
+  // 0xFF is the NaN scale code; every other code is 2^(code-127).
+  if (code == 0xFFu) {
+    return __int_as_float(0x7FC00000);
+  }
+  return exp2f(static_cast<float>(static_cast<int>(code) - 127));
+}
+
+__device__ __forceinline__ float decode_e4m3(uint8_t code) {
+  __nv_fp8_storage_t storage = static_cast<__nv_fp8_storage_t>(code);
+  return __half2float(__nv_cvt_fp8_to_halfraw(storage, __NV_E4M3));
+}
+
+__device__ __forceinline__ float bf16_to_float(uint16_t bits) {
+  uint32_t widened = static_cast<uint32_t>(bits) << 16;
+  float value;
+  memcpy(&value, &widened, sizeof(value));
+  return value;
+}
+
+__device__ __forceinline__ uint16_t float_to_bf16_rne(float value) {
+  uint32_t bits;
+  memcpy(&bits, &value, sizeof(bits));
+  if ((bits & 0x7FFFFFFFu) > 0x7F800000u) {
+    return static_cast<uint16_t>((bits >> 16) | 0x0040u);
+  }
+  uint32_t lsb = (bits >> 16) & 1u;
+  uint32_t rounded = bits + 0x7FFFu + lsb;
+  return static_cast<uint16_t>(rounded >> 16);
+}
+
+__device__ __forceinline__ float warp_reduce_sum(float value) {
+#pragma unroll
+  for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
+    value += __shfl_down_sync(0xFFFFFFFFu, value, offset, kWarpSize);
+  }
+  return value;
+}
+
+// One block computes two adjacent output columns so the activation element is
+// decoded once and reused. Each lane keeps a fixed K assignment so the FP32
+// reduction order does not depend on the column pair.
+__global__ __launch_bounds__(kThreadsPerBlock) void mxfp8_w8a16_gemv_col2(
+    const uint16_t *__restrict__ activation,
+    const uint8_t *__restrict__ weight_values,
+    const uint8_t *__restrict__ weight_scales,
+    uint16_t *__restrict__ output, int64_t k, int64_t n) {
+  const int64_t column0 = static_cast<int64_t>(blockIdx.x) * 2;
+  if (column0 >= n) {
+    return;
+  }
+  const int64_t column1 = column0 + 1;
+  const bool has_column1 = column1 < n;
+  const int64_t blocks_per_row = k / kBlockSize;
+
+  const int lane = threadIdx.x % kWarpSize;
+  const int wave = threadIdx.x / kWarpSize;
+
+  float partial0 = 0.0f;
+  float partial1 = 0.0f;
+
+  for (int64_t block = wave; block < blocks_per_row; block += kWavesPerBlock) {
+    const int64_t element = block * kBlockSize + lane;
+    const float a = bf16_to_float(activation[element]);
+
+    const uint8_t scale_code0 = weight_scales[column0 * blocks_per_row + block];
+    const float scale0 = decode_e8m0(scale_code0);
+    const uint8_t raw0 = weight_values[column0 * k + element];
+    partial0 = fmaf(a, decode_e4m3(raw0) * scale0, partial0);
+
+    if (has_column1) {
+      const uint8_t scale_code1 = weight_scales[column1 * blocks_per_row + block];
+      const float scale1 = decode_e8m0(scale_code1);
+      const uint8_t raw1 = weight_values[column1 * k + element];
+      partial1 = fmaf(a, decode_e4m3(raw1) * scale1, partial1);
+    }
+  }
+
+  partial0 = warp_reduce_sum(partial0);
+  partial1 = warp_reduce_sum(partial1);
+
+  __shared__ float wave_sums[kWavesPerBlock][2];
+  if (lane == 0) {
+    wave_sums[wave][0] = partial0;
+    wave_sums[wave][1] = partial1;
+  }
+  __syncthreads();
+
+  if (wave == 0) {
+    partial0 = lane < kWavesPerBlock ? wave_sums[lane][0] : 0.0f;
+    partial1 = lane < kWavesPerBlock ? wave_sums[lane][1] : 0.0f;
+    partial0 = warp_reduce_sum(partial0);
+    partial1 = warp_reduce_sum(partial1);
+    if (lane == 0) {
+      output[column0] = float_to_bf16_rne(partial0);
+      if (has_column1) {
+        output[column1] = float_to_bf16_rne(partial1);
+      }
+    }
+  }
+}
+
+cudaError_t launch_mxfp8_w8a16_gemv(const uint16_t *activation,
+                                    const uint8_t *weight_values,
+                                    const uint8_t *weight_scales,
+                                    uint16_t *output, int64_t k, int64_t n,
+                                    cudaStream_t stream) {
+  if (k <= 0 || n <= 0 || (k % kBlockSize) != 0) {
+    return cudaErrorInvalidValue;
+  }
+  const int64_t grid = (n + 1) / 2;
+  if (grid > 0x7FFFFFFF) {
+    return cudaErrorInvalidValue;
+  }
+  mxfp8_w8a16_gemv_col2<<<static_cast<unsigned int>(grid), kThreadsPerBlock, 0,
+                          stream>>>(activation, weight_values, weight_scales,
+                                    output, k, n);
+  return cudaGetLastError();
+}
+
+}  // namespace mxgemv
+
+TASK (C++ (CUDA)): Explain why the activation stays in BF16 while the weights are E4M3, and what that costs and saves at M=1.

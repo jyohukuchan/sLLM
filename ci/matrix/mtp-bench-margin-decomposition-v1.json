@@ -1,0 +1,107 @@
+{
+  "schema_version": "mtp-margin-decomposition-v1",
+  "positions": 2048,
+  "buckets": [
+    {
+      "target": "gfx1030",
+      "margin_lo": 0,
+      "margin_hi": 0.25,
+      "positions": 88,
+      "mxfp8_flips": 37,
+      "mxfp8_flip_rate": 0.42045454545454547,
+      "mxfp6_flips": 34,
+      "mxfp6_flip_rate": 0.38636363636363635
+    },
+    {
+      "target": "gfx1030",
+      "margin_lo": 0.25,
+      "margin_hi": 1,
+      "positions": 257,
+      "mxfp8_flips": 16,
+      "mxfp8_flip_rate": 0.0622568093385214,
+      "mxfp6_flips": 27,
+      "mxfp6_flip_rate": 0.10505836575875487
+    },
+    {
+      "target": "gfx1030",
+      "margin_lo": 1,
+      "margin_hi": 2,
+      "positions": 267,
+      "mxfp8_flips": 1,
+      "mxfp8_flip_rate": 0.003745318352059925,
+      "mxfp6_flips": 1,
+      "mxfp6_flip_rate": 0.003745318352059925
+    },
+    {
+      "target": "gfx1030",
+      "margin_lo": 2,
+      "margin_hi": 4,
+      "positions": 356,
+      "mxfp8_flips": 1,
+      "mxfp8_flip_rate": 0.0028089887640449437,
+      "mxfp6_flips": 0,
+      "mxfp6_flip_rate": 0.0
+    },
+    {
+      "target": "gfx1030",
+      "margin_lo": 4,
+      "margin_hi": null,
+      "positions": 1080,
+      "mxfp8_flips": 0,
+      "mxfp8_flip_rate": 0.0,
+      "mxfp6_flips": 0,
+      "mxfp6_flip_rate": 0.0
+    },
+    {
+      "target": "gfx1201",
+      "margin_lo": 0,
+      "margin_hi": 0.25,
+      "positions": 84,
+      "mxfp8_flips": 20,
+      "mxfp8_flip_rate": 0.23809523809523808,
+      "mxfp6_flips": 34,
+      "mxfp6_flip_rate": 0.40476190476190477
+    },
+    {
+      "target": "gfx1201",
+      "margin_lo": 0.25,
+      "margin_hi": 1,
+      "positions": 269,
+      "mxfp8_flips": 15,
+      "mxfp8_flip_rate": 0.055762081784386616,
+      "mxfp6_flips": 30,
+      "mxfp6_flip_rate": 0.11152416356877323
+    },
+    {
+      "target": "gfx1201",
+      "margin_lo": 1,
+      "margin_hi": 2,
+      "positions": 258,
+      "mxfp8_flips": 1,
+      "mxfp8_flip_rate": 0.003875968992248062,
+      "mxfp6_flips": 2,
+      "mxfp6_flip_rate": 0.007751937984496124
+    },
+    {
+      "target": "gfx1201",
+      "margin_lo": 2,
+      "margin_hi": 4,
+      "positions": 358,
+      "mxfp8_flips": 0,
+      "mxfp8_flip_rate": 0.0,
+      "mxfp6_flips": 0,
+      "mxfp6_flip_rate": 0.0
+    },
+    {
+      "target": "gfx1201",
+      "margin_lo": 4,
+      "margin_hi": null,
+      "positions": 1079,
+      "mxfp8_flips": 0,
+      "mxfp8_flip_rate": 0.0,
+      "mxfp6_flips": 1,
+      "mxfp6_flip_rate": 0.0009267840593141798
+    }
+  ],
+  "conclusion": "All draft top-1 disagreement, both from quantization and between the two GPUs, is concentrated at near-tie positions. Above a top1-top2 logit margin of about 1 the flip rate is essentially zero; the whole effect lives in the smallest-margin decile."
+}

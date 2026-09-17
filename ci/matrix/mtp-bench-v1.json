@@ -1,0 +1,1629 @@
+{
+  "schema_version": "mtp-bench-v1",
+  "state": "frozen",
+  "spec": "docs/development/mtp-acceptance-benchmark.md",
+  "purpose": "Reusable MTP acceptance/effective-speed benchmark. Tier A (coding agent + translation) decides adoption; Tier B (creative) is measured but never gates.",
+  "runtime_contract": {
+    "mtp_width": 2,
+    "kv_encoding": "mxfp8-e4",
+    "sampling": "greedy",
+    "target": "Qwen3.8-27B-NVFP4",
+    "exact_targets": [
+      "gfx1030",
+      "gfx1201"
+    ],
+    "hip_only": true,
+    "fallback_allowed": false,
+    "required_cleanup": 0
+  },
+  "metrics": {
+    "M1": {
+      "name": "expected_pq_acceptance",
+      "role": "primary",
+      "definition": "per proposal row sum_t min(p'(t), q'(t)); p' and q' are target and draft distributions after the engine support transform; averaged per prompt",
+      "support_transform": "reference token selector top_k/top_p branch: logit desc with lower id on ties, top_k 20, softmax, smallest prefix reaching top_p*sum (>=1), renormalise; temperature 1.0",
+      "conditioning": "production-faithful forced mode P (Phase86): width-2 chain with draft hidden at step 2 and production keep/rewind",
+      "requires": "forced report storing both draft and target logits (draft_logit_rows / target_logit_rows)",
+      "pairing": "draft and target rows paired by (sequence_index, block_row) within one run",
+      "inference": "prompt cluster; bootstrap and two-sided sign-flip over prompts, never positions",
+      "tool": "ci/tools/mtp_expected_acceptance.py",
+      "harness_ready": true,
+      "revised": "2026-09-17; before this date M1 values were top-1 agreement and are now M1_top1"
+    },
+    "M1_top1": {
+      "name": "top1_agreement",
+      "role": "auxiliary",
+      "use": "flip and margin analysis only; never an adoption input",
+      "note": "discretises near-tie positions; about 3x wider prompt-cluster intervals than M1 in Phase86"
+    },
+    "M2": {
+      "name": "free_running_paired_acceptance",
+      "role": "fallback",
+      "harness_ready": true,
+      "seeds": [
+        123,
+        456
+      ]
+    },
+    "M3": {
+      "name": "per_block_times",
+      "role": "primary",
+      "harness_ready": true,
+      "fields": [
+        "draft_ms_per_block",
+        "non_draft_ms_per_block"
+      ],
+      "conditions": [
+        "code-c-implement-en",
+        "code-rust-bugfix-zh",
+        "code-cuda-explain-ja",
+        "trans-en-ja-tech"
+      ],
+      "warmups": 1,
+      "measured": 3
+    },
+    "M4": {
+      "name": "derived_decode_tokens_per_second",
+      "role": "adoption_value",
+      "identity": "decode_tokens / (blocks * (draft_ms_per_block + non_draft_ms_per_block))",
+      "tokens_per_block_model": "1 + a1 + a1*a2 for width 2, a_k = M1 of proposal step k (independence approximation)",
+      "validated_against": "V620 BF16 53 blocks, 74 accepted, 12.847+82.808 ms -> 25.05 vs measured 25.049",
+      "note": "when a candidate changes only the draft path, hold non_draft_ms_per_block at the control value"
+    },
+    "M5": {
+      "name": "free_running_end_to_end",
+      "role": "sanity_only",
+      "conditions": [
+        "code-c-implement-en",
+        "code-rust-bugfix-zh",
+        "code-cuda-explain-ja",
+        "trans-en-ja-tech"
+      ],
+      "warmups": 1,
+      "measured": 3,
+      "note": "Never overrides M4; record divergence instead."
+    }
+  },
+  "guard_rails": {
+    "baseline_drift_tolerance_points": 1.5,
+    "cross_campaign_baseline_prohibited": true,
+    "record_series_token_sequence_equality": true,
+    "dual_reference_sign_check": [
+      "bf16",
+      "w8a8"
+    ]
+  },
+  "adoption_rule": {
+    "require_all": [
+      "Tier A M4 (from M1 expected acceptance and M3) exceeds BF16 with prompt-cluster CI excluding zero on BOTH exact targets",
+      "Tier A M1 expected acceptance not lower than BF16 by more than 1.0 point",
+      "prefill and M>1 paths including WMMA selection do not regress"
+    ],
+    "tier_b_gates_nothing": true,
+    "single_gpu_result": "keep BF16 default; retain as selectable path and record scope"
+  },
+  "profiles": {
+    "full": {
+      "conditions": "all",
+      "metrics": [
+        "M1",
+        "M3",
+        "M5"
+      ],
+      "note": "adoption decisions"
+    },
+    "quick": {
+      "conditions": [
+        "code-c-implement-en",
+        "code-cuda-explain-ja",
+        "code-rust-bugfix-zh",
+        "code-python-review-zh",
+        "code-go-implement-en",
+        "code-java-refactor-en",
+        "trans-en-ja-tech",
+        "trans-zh-en-tech"
+      ],
+      "metrics": [
+        "M1"
+      ],
+      "series": 2,
+      "targets": 1,
+      "note": "development regression only; never decides adoption"
+    }
+  },
+  "variance_basis": {
+    "source": "docs/history/2026/09/11-20/mtp-language-task-acceptance.json (72 runs)",
+    "between_condition_sd_all12": 0.1276,
+    "between_condition_sd_excluding_creative": 0.049,
+    "within_condition_sd": 0.0495,
+    "binomial_only_se_per_run": 0.0445,
+    "observed_to_binomial_variance_ratio": 9.54
+  },
+  "tier_a_count": 26,
+  "tier_b_count": 3,
+  "conditions": [
+    {
+      "cond_id": "code-c-implement-en",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "implement",
+      "code_language": "C",
+      "instruction_language": "en",
+      "code_prose_axis": "code_heavy",
+      "sources": [
+        {
+          "kind": "repo",
+          "ref": "native/hip/src/header_c_compile.c@e25bcc07",
+          "sha256": "ecf773f3195c3466d769a70c901ba9354a38da92af672181fafbda37a46975c3"
+        },
+        {
+          "kind": "repo",
+          "ref": "native/hip/src/evidence_abi.h@e25bcc07",
+          "sha256": "47ea5cd6da761ee1c181f5886b2f87c97bd03a4b59b99a4230b0ba7a9f279bc9"
+        }
+      ],
+      "source_sha256": "124be46f3c39276a957583423d067b8c0afc277b205ca8540753f5a0d0a45b1a",
+      "prompt_file": "prompts/code-c-implement-en.txt",
+      "prompt_sha256": "86d5b1df53d817d25bb66979b77054a791bcbd1d0d9600e985e226d1d40e9070",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 4640,
+      "prompt_tokens_raw": 4629,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-c-implement-en.bf16.json",
+          "sequence_sha256": "ca7dbafdb917e8e6e3f1058bd4b0d6d23eadf154f725303b610f8dc62e017bd6",
+          "committed_token_sha256": "f5dd0c42c42ebc5795562992f10b4b111dc416c9330472e7994e27410e99e7cb",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 210,
+            "accepted": 150,
+            "blocks": 105
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-c-implement-en.w8a8.json",
+          "sequence_sha256": "b77b6a0eba6b201c6a429766737419b8ff33badba56dec992881af982edeae4e",
+          "committed_token_sha256": "3073e1a0a79b34fbecafba7bac04b4b7a91d6e9baeee6ee1a8c3308dfd7ccc47",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 197,
+            "accepted": 157,
+            "blocks": 99
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-c-explain-ja",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "explain",
+      "code_language": "C",
+      "instruction_language": "ja",
+      "code_prose_axis": "prose_side",
+      "sources": [
+        {
+          "kind": "repo",
+          "ref": "native/hip/src/header_c_compile.c@e25bcc07",
+          "sha256": "ecf773f3195c3466d769a70c901ba9354a38da92af672181fafbda37a46975c3"
+        },
+        {
+          "kind": "repo",
+          "ref": "native/hip/src/evidence_abi.h@e25bcc07",
+          "sha256": "47ea5cd6da761ee1c181f5886b2f87c97bd03a4b59b99a4230b0ba7a9f279bc9"
+        }
+      ],
+      "source_sha256": "124be46f3c39276a957583423d067b8c0afc277b205ca8540753f5a0d0a45b1a",
+      "prompt_file": "prompts/code-c-explain-ja.txt",
+      "prompt_sha256": "e55a33e1ee7641aca651d7c7eb084716ae53e17e190c3a3a7135e77a431eb6e1",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 4634,
+      "prompt_tokens_raw": 4623,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-c-explain-ja.bf16.json",
+          "sequence_sha256": "b41589c0e9f7a9a4af834d2a6cc3272b020d15659fd90b43a9ad90136872248a",
+          "committed_token_sha256": "f97343f9e767a003eaed5cc72498a8f734ca4048b95f09d215e554cf9e85971d",
+          "committed_token_count": 255,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 227,
+            "accepted": 142,
+            "blocks": 114
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-c-explain-ja.w8a8.json",
+          "sequence_sha256": "daed64ae3d2300f729489f74221f3d242670f06922bdfe1a3c384e54ccdc5002",
+          "committed_token_sha256": "0db66c6c9c28ef0181f0879808e85c7c0d8b206355311a11924f93791034ed74",
+          "committed_token_count": 255,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 229,
+            "accepted": 141,
+            "blocks": 115
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-html-test-ja",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "test",
+      "code_language": "HTML",
+      "instruction_language": "ja",
+      "code_prose_axis": "code_heavy",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/html_benchmark_dashboard.html",
+          "sha256": "535ebbf331fd774abb30036db90287b4af93636fe23f101a9bec15ed94bad28b"
+        }
+      ],
+      "source_sha256": "2180033a757a7ad4266588d081636bfd0556024375c73a0028bb17add3e06be2",
+      "prompt_file": "prompts/code-html-test-ja.txt",
+      "prompt_sha256": "9ce6bfafa4ae62a89c6a35235160bd99f4f6d04ccc550fceef1eff7a3736b436",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 2287,
+      "prompt_tokens_raw": 2276,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-html-test-ja.bf16.json",
+          "sequence_sha256": "e291028a50109af19d10fdcf919dc7fe032343bba70d3b2bbea592cc4ec85d1f",
+          "committed_token_sha256": "97fec7e97071c2254d9435038358c6e60ef393f8f8c2045c889e4f5731d3099e",
+          "committed_token_count": 139,
+          "reported_completion_tokens": 140,
+          "finish_reason": "stop",
+          "reference_mtp": {
+            "proposed": 106,
+            "accepted": 87,
+            "blocks": 53
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-html-test-ja.w8a8.json",
+          "sequence_sha256": "42ab4b8d7975c61a1f11c33f84ed5376344f2fd05e3fc1e3f66912f157d2ec32",
+          "committed_token_sha256": "a74180a0b9a181b6b00427e414e9aa77b79df6b913389bcd1195cf0851aaac79",
+          "committed_token_count": 106,
+          "reported_completion_tokens": 107,
+          "finish_reason": "stop",
+          "reference_mtp": {
+            "proposed": 78,
+            "accepted": 68,
+            "blocks": 39
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-html-review-zh",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "review",
+      "code_language": "HTML",
+      "instruction_language": "zh",
+      "code_prose_axis": "prose_side",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/html_benchmark_dashboard.html",
+          "sha256": "535ebbf331fd774abb30036db90287b4af93636fe23f101a9bec15ed94bad28b"
+        }
+      ],
+      "source_sha256": "2180033a757a7ad4266588d081636bfd0556024375c73a0028bb17add3e06be2",
+      "prompt_file": "prompts/code-html-review-zh.txt",
+      "prompt_sha256": "623e7396f3f986b1273a2dd1245d5c967e8d6cc20c5e9dc387cc52f45239ecb3",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 2270,
+      "prompt_tokens_raw": 2259,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-html-review-zh.bf16.json",
+          "sequence_sha256": "6e2c53675e7c8d6a169827ddaf623e9b36b55e933984d31c1147f214adc846fd",
+          "committed_token_sha256": "b2c8390507cd0e0cc2de8ffe1cf5cf04748a825ac48f3a5996dabee48c9aaaca",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 218,
+            "accepted": 146,
+            "blocks": 109
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-html-review-zh.w8a8.json",
+          "sequence_sha256": "b6811b62b08285bbf8cc31244c5d374dc9ccb874ac3b02ee503b01ec6aa908a8",
+          "committed_token_sha256": "801154217e39f88b32698eb2cc22c682d88a2410f2ea5e29962463187f8c20f3",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 205,
+            "accepted": 152,
+            "blocks": 103
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-rust-bugfix-zh",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "bugfix",
+      "code_language": "Rust",
+      "instruction_language": "zh",
+      "code_prose_axis": "code_heavy",
+      "sources": [
+        {
+          "kind": "repo",
+          "ref": "crates/sllm-core/src/mtp_quantized_sidecar.rs@e25bcc07",
+          "sha256": "cd489a996084e7d13298bb3f890195e08df3e6b3baef7cb7e9bfaf53dff9d7bf"
+        }
+      ],
+      "source_sha256": "6655fc005fbe7d62a6a53d1a8e52014c2498a7c1ab378f3c88450f539ed2c6cc",
+      "prompt_file": "prompts/code-rust-bugfix-zh.txt",
+      "prompt_sha256": "2c46f5ace108413fd60318d17d023dfa51bfe14b0315e19776d6fe9aa07f589f",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 8284,
+      "prompt_tokens_raw": 8273,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-rust-bugfix-zh.bf16.json",
+          "sequence_sha256": "eab63e7c523cf6f2f39ea216aaeaa614f343e14ad3619240fb0e6b4166cbb59b",
+          "committed_token_sha256": "c80226ac21984ecc55d2d86cc9319848e905254c273940958b80f14f76f30f61",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 205,
+            "accepted": 152,
+            "blocks": 103
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-rust-bugfix-zh.w8a8.json",
+          "sequence_sha256": "901c4f64bf5c21114daef8d499e08963615b7d1e1e0015b27d27ca550c49fb7e",
+          "committed_token_sha256": "c69886abaf6a46806719a0144084df05d798356444bb17e35eff27f35e4104a7",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 201,
+            "accepted": 155,
+            "blocks": 101
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-rust-refactor-en",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "refactor",
+      "code_language": "Rust",
+      "instruction_language": "en",
+      "code_prose_axis": "prose_side",
+      "sources": [
+        {
+          "kind": "repo",
+          "ref": "crates/sllm-core/src/mtp_quantized_sidecar.rs@e25bcc07",
+          "sha256": "cd489a996084e7d13298bb3f890195e08df3e6b3baef7cb7e9bfaf53dff9d7bf"
+        }
+      ],
+      "source_sha256": "6655fc005fbe7d62a6a53d1a8e52014c2498a7c1ab378f3c88450f539ed2c6cc",
+      "prompt_file": "prompts/code-rust-refactor-en.txt",
+      "prompt_sha256": "9a789117994a2b9064d57871491dc2f59838c2dc1343b5c77eef112c7e515b04",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 8267,
+      "prompt_tokens_raw": 8256,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-rust-refactor-en.bf16.json",
+          "sequence_sha256": "85a9e15b707bd77f07f948426741f6076a4c4dcbbdf4619429fd0cb53909e3b6",
+          "committed_token_sha256": "adcc7b8cb19a1fd082e29225a90f03a54d6764f2be944bd4c3389749c51785cc",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 206,
+            "accepted": 153,
+            "blocks": 103
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-rust-refactor-en.w8a8.json",
+          "sequence_sha256": "ddeafb18f76d8b58d016e7ed567f2f0729d503a35df38af489901b5a057879d7",
+          "committed_token_sha256": "7f6c461ae3ef9cbce980e3f8ff6ab82e61640104b320f6ac6e5c67d93aacc59e",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 222,
+            "accepted": 144,
+            "blocks": 111
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-cuda-implement-en",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "implement",
+      "code_language": "C++ (CUDA)",
+      "instruction_language": "en",
+      "code_prose_axis": "code_heavy",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/cuda_block_scaled_gemv.cu",
+          "sha256": "1e4dcd3f5cf5d2b14902d27b02c50f828dd8249cc628028817b73e6945e8b7d8"
+        }
+      ],
+      "source_sha256": "db9de1c585891ceab1b2a272c6fb6db94192c7405019863407a548bcddd85ca0",
+      "prompt_file": "prompts/code-cuda-implement-en.txt",
+      "prompt_sha256": "43459faad0910194806d438ee52e28cd65f59377d8f8ab4fe0c7eaa6ef5cb080",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 1718,
+      "prompt_tokens_raw": 1707,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-cuda-implement-en.bf16.json",
+          "sequence_sha256": "87ce7fe2555482456c79a37b936ce2d37d60b23e2086949fcff39f8bbdd4796b",
+          "committed_token_sha256": "e9306e089693e8667070f824d347b6be6f73312869edfd6bf2fa9494f5d7aba4",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 188,
+            "accepted": 161,
+            "blocks": 94
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-cuda-implement-en.w8a8.json",
+          "sequence_sha256": "89015ac68559f3259df4dee020d6f780df65f8279870cb16b9d3a9bbc4fe820e",
+          "committed_token_sha256": "4f2d59e0d193dd2c03fe0c95d7651619e4f750e26b0f297b09f4e3520bc5e8ef",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 192,
+            "accepted": 160,
+            "blocks": 96
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-cuda-explain-ja",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "explain",
+      "code_language": "C++ (CUDA)",
+      "instruction_language": "ja",
+      "code_prose_axis": "prose_side",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/cuda_block_scaled_gemv.cu",
+          "sha256": "1e4dcd3f5cf5d2b14902d27b02c50f828dd8249cc628028817b73e6945e8b7d8"
+        }
+      ],
+      "source_sha256": "db9de1c585891ceab1b2a272c6fb6db94192c7405019863407a548bcddd85ca0",
+      "prompt_file": "prompts/code-cuda-explain-ja.txt",
+      "prompt_sha256": "bcb465068a6f61c52f447270e20a51c3b328e65089c8c15b32b5f26626f97d28",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 1727,
+      "prompt_tokens_raw": 1716,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-cuda-explain-ja.bf16.json",
+          "sequence_sha256": "48568bb21f124781c7b46b4c51590ef43fa80606711ebc477c2215c8e4dd0b08",
+          "committed_token_sha256": "358bc6d0f2c71acfacdc6c9b389f5005ec97a596a12c55e1d502639370ccc1dd",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 248,
+            "accepted": 131,
+            "blocks": 124
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-cuda-explain-ja.w8a8.json",
+          "sequence_sha256": "a3be5b30304a64e2b1483011c78233870cfa121c6ebf687afbe93d838d958dee",
+          "committed_token_sha256": "b3e38493e7a1f0f3cb57a87f31d15a86289c6404bac051dc9aacc9d710427949",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 222,
+            "accepted": 144,
+            "blocks": 111
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-python-test-ja",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "test",
+      "code_language": "Python",
+      "instruction_language": "ja",
+      "code_prose_axis": "code_heavy",
+      "sources": [
+        {
+          "kind": "repo",
+          "ref": "ci/tools/common.py@e25bcc07",
+          "sha256": "ec4d890f2758488f509472b3f48ba8855c209b1a5c4c6dcac91b7cce9136d898"
+        }
+      ],
+      "source_sha256": "275b25ef55f53f7a1731c5d27973782bceb468c090d4feaf8228bde8e67299f5",
+      "prompt_file": "prompts/code-python-test-ja.txt",
+      "prompt_sha256": "70db81816f33806ecfa36ad9715314a1421c4e00cb43d1f4e59d9af4087934c4",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 8271,
+      "prompt_tokens_raw": 8260,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-python-test-ja.bf16.json",
+          "sequence_sha256": "5e7185aeb5dc54f2279a693b8101ec44a46b3b80b1f5be4c8da9387904cf610b",
+          "committed_token_sha256": "eabfddf5d3beedd9ba9d1f64c4788f7b0f332f64df1ab18adfe73f5339191403",
+          "committed_token_count": 115,
+          "reported_completion_tokens": 116,
+          "finish_reason": "stop",
+          "reference_mtp": {
+            "proposed": 84,
+            "accepted": 73,
+            "blocks": 42
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-python-test-ja.w8a8.json",
+          "sequence_sha256": "65b54fc3c9c97c055a1f1f8e65796ecea2153aa5acd41b1028e119471a470bf6",
+          "committed_token_sha256": "eecde05b8a2be54c26a24afc012f06b0c1b9d0baa7f5b2210ac89358716b7165",
+          "committed_token_count": 197,
+          "reported_completion_tokens": 198,
+          "finish_reason": "stop",
+          "reference_mtp": {
+            "proposed": 146,
+            "accepted": 124,
+            "blocks": 73
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-python-review-zh",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "review",
+      "code_language": "Python",
+      "instruction_language": "zh",
+      "code_prose_axis": "prose_side",
+      "sources": [
+        {
+          "kind": "repo",
+          "ref": "ci/tools/common.py@e25bcc07",
+          "sha256": "ec4d890f2758488f509472b3f48ba8855c209b1a5c4c6dcac91b7cce9136d898"
+        }
+      ],
+      "source_sha256": "275b25ef55f53f7a1731c5d27973782bceb468c090d4feaf8228bde8e67299f5",
+      "prompt_file": "prompts/code-python-review-zh.txt",
+      "prompt_sha256": "95967d76521d26faf74c58b75998b18b1ba1a9e1b4ec959560be9e7e466ccf1e",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 8257,
+      "prompt_tokens_raw": 8246,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-python-review-zh.bf16.json",
+          "sequence_sha256": "f1f9d9636fdb8b2fca11aef8eccb2eb991a7042f78cccbae1c36830b7f5d2197",
+          "committed_token_sha256": "5ea85f8a4e9b26c272a033e46de432c2d60ee41fb5a756b2010dbeeb37c911c4",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 223,
+            "accepted": 144,
+            "blocks": 112
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-python-review-zh.w8a8.json",
+          "sequence_sha256": "04ffe75f635af32ed23a82cb712fc268d891fd808186f1013bbc724a66a9e15a",
+          "committed_token_sha256": "8500935623ae2a61606f8a9c81cbd7cde5eb5a8462f2760925746ad80d58c6e3",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 209,
+            "accepted": 151,
+            "blocks": 105
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-sycl-bugfix-zh",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "bugfix",
+      "code_language": "C++ (SYCL)",
+      "instruction_language": "zh",
+      "code_prose_axis": "code_heavy",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/sycl_block_scaled_gemv.cpp",
+          "sha256": "e2ba4761deebbdc75f72d0ef04e334d68f981cfb1e6a9620463f7c8fa0c3fb02"
+        }
+      ],
+      "source_sha256": "914fe9ccfa0948ab5da1b124397c2be5ca9cdbab625c8102037953887c497e3b",
+      "prompt_file": "prompts/code-sycl-bugfix-zh.txt",
+      "prompt_sha256": "3446bfa1ed9e4fe9bfc92345aafddcd90857f7f8e2c92a01f9249feb1267c570",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 1995,
+      "prompt_tokens_raw": 1984,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-sycl-bugfix-zh.bf16.json",
+          "sequence_sha256": "ce22ed010f64335116133fd51135e835274b79cedbb541bcd9728c5d068cd1b2",
+          "committed_token_sha256": "d50c98efa60e3c10b1eaaf5f6dc6cff2b0d9353d9af8fb5214e182eaf8ec6be0",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 210,
+            "accepted": 151,
+            "blocks": 105
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-sycl-bugfix-zh.w8a8.json",
+          "sequence_sha256": "133379acc26e1e5836cdabebbf79a6c26b8e7833f7c04bf7f11c7f6e492102ec",
+          "committed_token_sha256": "a22d8f18606f396ecd3a4994128fffae8b6e26cc99541d96265c3ca1795d029e",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 228,
+            "accepted": 141,
+            "blocks": 114
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-sycl-refactor-en",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "refactor",
+      "code_language": "C++ (SYCL)",
+      "instruction_language": "en",
+      "code_prose_axis": "prose_side",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/sycl_block_scaled_gemv.cpp",
+          "sha256": "e2ba4761deebbdc75f72d0ef04e334d68f981cfb1e6a9620463f7c8fa0c3fb02"
+        }
+      ],
+      "source_sha256": "914fe9ccfa0948ab5da1b124397c2be5ca9cdbab625c8102037953887c497e3b",
+      "prompt_file": "prompts/code-sycl-refactor-en.txt",
+      "prompt_sha256": "e9800703a9047deb73c5345207ae14542102551f5e9960ea5488f30b2a077573",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 2006,
+      "prompt_tokens_raw": 1995,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-sycl-refactor-en.bf16.json",
+          "sequence_sha256": "94bd23702dda57a12f5d127b3572925eb7343b9a2fd679c0f95f2ab2ab17caa4",
+          "committed_token_sha256": "83ee351100499504162b2b23659bec1ebdf7a208dc4735d874c56272398977dc",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 198,
+            "accepted": 157,
+            "blocks": 99
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-sycl-refactor-en.w8a8.json",
+          "sequence_sha256": "51754180dfd27708ddd0ba870ddfb644de56e809b7c8f3233712cbee02f8fa57",
+          "committed_token_sha256": "492d1aa9533b387d39c0a17e85b64ef3ad3076ea12135e2f1f608f7139cdd16f",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 214,
+            "accepted": 148,
+            "blocks": 107
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-go-implement-en",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "implement",
+      "code_language": "Go",
+      "instruction_language": "en",
+      "code_prose_axis": "code_heavy",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/go_inference_gateway.go",
+          "sha256": "046008a50ecc132ca1a13f9687ee9592326b12ee92a85e9032b412668dd47f30"
+        }
+      ],
+      "source_sha256": "8eeddb454557b49b16638330509471a7162ead8711fadf1d5a3b537e5f351985",
+      "prompt_file": "prompts/code-go-implement-en.txt",
+      "prompt_sha256": "8cb38c55b0c9fbdc364b7f362e8f754e93a1953d3533d9296424bb2bba43149d",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 1558,
+      "prompt_tokens_raw": 1547,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-go-implement-en.bf16.json",
+          "sequence_sha256": "586964c505813acae6c6045871e3f6405cd47e0a3513ccd975b62f0e74e31332",
+          "committed_token_sha256": "293d1d06d842b2f6a8bc6e0af95b38285a9eb2cd054426fbe2d6725280fd0080",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 206,
+            "accepted": 152,
+            "blocks": 103
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-go-implement-en.w8a8.json",
+          "sequence_sha256": "571d486ccd9c19a252f1f4bca3c38c48ffc4f75c71bdc7008602ca7faa6dadbd",
+          "committed_token_sha256": "3d99719282b3baeac549603437bd04a235f7816c277aee60a4363a0400e36d60",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 204,
+            "accepted": 154,
+            "blocks": 102
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-go-explain-ja",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "explain",
+      "code_language": "Go",
+      "instruction_language": "ja",
+      "code_prose_axis": "prose_side",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/go_inference_gateway.go",
+          "sha256": "046008a50ecc132ca1a13f9687ee9592326b12ee92a85e9032b412668dd47f30"
+        }
+      ],
+      "source_sha256": "8eeddb454557b49b16638330509471a7162ead8711fadf1d5a3b537e5f351985",
+      "prompt_file": "prompts/code-go-explain-ja.txt",
+      "prompt_sha256": "e63e9f59abc020710db9714a0285fa909b8f4cc4b0d3894cfddda1fd7ec04811",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 1564,
+      "prompt_tokens_raw": 1553,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-go-explain-ja.bf16.json",
+          "sequence_sha256": "77dc8171bc1128855de2ee7f5fc0e3440444d0e7ea3156061e3247f1382f207d",
+          "committed_token_sha256": "442d20fe2ef83e9062a53ea030e83346d49ab44051c87777c909b4d7ec46c920",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 219,
+            "accepted": 146,
+            "blocks": 110
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-go-explain-ja.w8a8.json",
+          "sequence_sha256": "6fb569c211e4b1b1787d3dda89013b5f146c194d770326408110771bebb4f28a",
+          "committed_token_sha256": "7d8f9c8bde2da61f0f9b65cc2b21bf4cd8bf3434790c5ba7ecd20024606c10e2",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 225,
+            "accepted": 143,
+            "blocks": 113
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-typescript-test-ja",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "test",
+      "code_language": "TypeScript",
+      "instruction_language": "ja",
+      "code_prose_axis": "code_heavy",
+      "sources": [
+        {
+          "kind": "repo",
+          "ref": "webui/lib/sllm-api.ts@e25bcc07",
+          "sha256": "55ad4cac2dddb73f310a90f3ded7466302ee84605a40690ed3ab9d0807591d15"
+        },
+        {
+          "kind": "repo",
+          "ref": "webui/app/page.tsx@e25bcc07",
+          "sha256": "2b93dbb348a4851f3d54b254d8f3469221f85cb95b63c3ac8f89802a982ef3a5"
+        }
+      ],
+      "source_sha256": "1ee7086fd4cf47257caa89eaf9e08cee8cfba5f0293f5240ede4b67b51f26b19",
+      "prompt_file": "prompts/code-typescript-test-ja.txt",
+      "prompt_sha256": "2f7406f5adbc2c3c8de8b614124e3db7f0a7e6297971f212ca322b51c9509d25",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 8270,
+      "prompt_tokens_raw": 8259,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-typescript-test-ja.bf16.json",
+          "sequence_sha256": "045d74442b2aef79ebecd92f6d7ed3dedbb07b29d80d228fb5967e8655ca20a8",
+          "committed_token_sha256": "de5afb76dc3414aa8f78149276159d1512a35cc8367de01917fe49b8a554efd0",
+          "committed_token_count": 145,
+          "reported_completion_tokens": 146,
+          "finish_reason": "stop",
+          "reference_mtp": {
+            "proposed": 110,
+            "accepted": 91,
+            "blocks": 55
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-typescript-test-ja.w8a8.json",
+          "sequence_sha256": "4f41384b0a1b4ae2ca494852cfefa7b37c751ea91903ecfa191b02d18c8e289a",
+          "committed_token_sha256": "7b9e0e7ec4f64d41bd5d4b12b558e2a026f44b31def8c9755bec6059f22696ca",
+          "committed_token_count": 181,
+          "reported_completion_tokens": 182,
+          "finish_reason": "stop",
+          "reference_mtp": {
+            "proposed": 130,
+            "accepted": 116,
+            "blocks": 65
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-typescript-review-zh",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "review",
+      "code_language": "TypeScript",
+      "instruction_language": "zh",
+      "code_prose_axis": "prose_side",
+      "sources": [
+        {
+          "kind": "repo",
+          "ref": "webui/lib/sllm-api.ts@e25bcc07",
+          "sha256": "55ad4cac2dddb73f310a90f3ded7466302ee84605a40690ed3ab9d0807591d15"
+        },
+        {
+          "kind": "repo",
+          "ref": "webui/app/page.tsx@e25bcc07",
+          "sha256": "2b93dbb348a4851f3d54b254d8f3469221f85cb95b63c3ac8f89802a982ef3a5"
+        }
+      ],
+      "source_sha256": "1ee7086fd4cf47257caa89eaf9e08cee8cfba5f0293f5240ede4b67b51f26b19",
+      "prompt_file": "prompts/code-typescript-review-zh.txt",
+      "prompt_sha256": "26fd7ed971c19bf15c5267e8adc892a26649f6f41caef80ccd482807707a0edb",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 8260,
+      "prompt_tokens_raw": 8249,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-typescript-review-zh.bf16.json",
+          "sequence_sha256": "60fada7c94902be14770fb291b0032df95f90fad9214ecb72beb5a2b60cd6075",
+          "committed_token_sha256": "a23b844a3b6790a1cf5dcae316f428a4f88f0ec6ccd3fa04bf40560e5db906b0",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 214,
+            "accepted": 148,
+            "blocks": 107
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-typescript-review-zh.w8a8.json",
+          "sequence_sha256": "51234d91ae61a42f3581736e7b5fd4a277f0c05255b4c2913f5fca8ecb8ddf0f",
+          "committed_token_sha256": "5150afa855917e0956fb156bb660b5040a10241a6b8579caea111a661655b0f5",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 229,
+            "accepted": 141,
+            "blocks": 115
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-java-bugfix-zh",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "bugfix",
+      "code_language": "Java",
+      "instruction_language": "zh",
+      "code_prose_axis": "code_heavy",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/java_bpe_tokenizer.java",
+          "sha256": "db8e604d97e46a98dffb404bcff2c5ce37565c18dc6b987c2c0cbeae88b79cb6"
+        }
+      ],
+      "source_sha256": "0e2d37e2b86925faf4f109ee725d96ac30904d7b4558a7a7b0df8ae5bd1043af",
+      "prompt_file": "prompts/code-java-bugfix-zh.txt",
+      "prompt_sha256": "ce2e6b96b356dc13715d466f187cd9356d58324d0540fa4cd55b1a9269252ce7",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 1795,
+      "prompt_tokens_raw": 1784,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-java-bugfix-zh.bf16.json",
+          "sequence_sha256": "64a7ae9dbbd40adc9e7097175074df9462d4be9a87426f08fc50f72eee5aa012",
+          "committed_token_sha256": "9dc69f58d90ef997dfb03d87d11947f19a99b477b30a26e07e7676eafda16876",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 197,
+            "accepted": 157,
+            "blocks": 99
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-java-bugfix-zh.w8a8.json",
+          "sequence_sha256": "d196627f64c385afae0c5132e5ac04cfdee3f138e22fddac0e312654c516105f",
+          "committed_token_sha256": "09d47cf434d2258fbf25cd9cb6658d66a50f9fa411f4310098ec4c4952f5fca9",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 205,
+            "accepted": 153,
+            "blocks": 103
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-java-refactor-en",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "refactor",
+      "code_language": "Java",
+      "instruction_language": "en",
+      "code_prose_axis": "prose_side",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/java_bpe_tokenizer.java",
+          "sha256": "db8e604d97e46a98dffb404bcff2c5ce37565c18dc6b987c2c0cbeae88b79cb6"
+        }
+      ],
+      "source_sha256": "0e2d37e2b86925faf4f109ee725d96ac30904d7b4558a7a7b0df8ae5bd1043af",
+      "prompt_file": "prompts/code-java-refactor-en.txt",
+      "prompt_sha256": "c627321dbc788cdcd294810ad360d09113c293040d3b8da843edc8508e8073c3",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 1797,
+      "prompt_tokens_raw": 1786,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-java-refactor-en.bf16.json",
+          "sequence_sha256": "3c2706c0bb19c0d8a8a19546a66e33acf67ad1af2695b916f23fdcb4040a9771",
+          "committed_token_sha256": "87a50cf5e9ddc793e4c159f8278ed15a8908b88144feda75c97734e0f302b90d",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 235,
+            "accepted": 138,
+            "blocks": 118
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-java-refactor-en.w8a8.json",
+          "sequence_sha256": "f599fb00d0fd7c9c28a6244b63f55ef908d861ba6e7b779cbdc13b17665cf56d",
+          "committed_token_sha256": "4daa4825093539c0bc5d14ac642db5ebaeafecd68c9b637542e04376e6a9d735",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 224,
+            "accepted": 143,
+            "blocks": 112
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-sql-implement-en",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "implement",
+      "code_language": "SQL",
+      "instruction_language": "en",
+      "code_prose_axis": "code_heavy",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/sql_benchmark_schema.sql",
+          "sha256": "2c530433c3b246bb78978148c4f0469e0933b0470b0c060868052a4700603e90"
+        }
+      ],
+      "source_sha256": "eadc06869076bb5fe420ede73699305ee416c0194c66a0ce817a954d35418f16",
+      "prompt_file": "prompts/code-sql-implement-en.txt",
+      "prompt_sha256": "619f80535e7e87549bc684c2cbafc0a7daaf99586c62115a0ae9c2577b5c2e9d",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 1566,
+      "prompt_tokens_raw": 1555,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-sql-implement-en.bf16.json",
+          "sequence_sha256": "5bed94108231bb58c0dfff7ef35678856e39fd5909b5bf8fa7f4be15fd01afa3",
+          "committed_token_sha256": "4f652d5aa8a93921539c981f387625cdfa01a260845f5175f07cc40af17ba769",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 218,
+            "accepted": 146,
+            "blocks": 109
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-sql-implement-en.w8a8.json",
+          "sequence_sha256": "ace7e57fd92c68e4a5c552261ee4912d38b99d48165248f67e7a144bce55b1b0",
+          "committed_token_sha256": "261ba3bcbb32403b948636f5e501f335f534c5ed8bba95d1798f235b0f71de82",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 210,
+            "accepted": 150,
+            "blocks": 105
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "code-sql-explain-ja",
+      "tier": "A",
+      "group": "coding_agent",
+      "task": "explain",
+      "code_language": "SQL",
+      "instruction_language": "ja",
+      "code_prose_axis": "prose_side",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/sql_benchmark_schema.sql",
+          "sha256": "2c530433c3b246bb78978148c4f0469e0933b0470b0c060868052a4700603e90"
+        }
+      ],
+      "source_sha256": "eadc06869076bb5fe420ede73699305ee416c0194c66a0ce817a954d35418f16",
+      "prompt_file": "prompts/code-sql-explain-ja.txt",
+      "prompt_sha256": "c027b51c8354a4292661d1327a83d1f5e419efed79684daf262282a4d5ccfb7a",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 1578,
+      "prompt_tokens_raw": 1567,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/code-sql-explain-ja.bf16.json",
+          "sequence_sha256": "d275d1075b783c2c670d2e74c5376ef7dcd91c431846f57ac1905752e9275099",
+          "committed_token_sha256": "16ae1f222607f8efbac56da9931eaec480cd9c109de8947318d948120e2ac11d",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 245,
+            "accepted": 132,
+            "blocks": 123
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/code-sql-explain-ja.w8a8.json",
+          "sequence_sha256": "6d996d0962dd46f06def472dde59b71444a71d3e0ee54696f01e8db0e439a34c",
+          "committed_token_sha256": "eec3fa018f1a1d498d8527701b068ff8f7833833b392f11e33b8117f46dd80c4",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 253,
+            "accepted": 128,
+            "blocks": 127
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "trans-en-ja-tech",
+      "tier": "A",
+      "group": "translation",
+      "source_language": "en",
+      "target_language": "ja",
+      "domain": "tech",
+      "sources": [
+        {
+          "kind": "repo",
+          "ref": "AGENTS.md@e25bcc07",
+          "sha256": "e57cf118c7d5335ab8dc9864aeb9ed676d1d56d3ed07e7216440cb5dadc24c16"
+        }
+      ],
+      "source_sha256": "54be5e74f48e1df104c0a190446de49a242979b0b75cbf8c31e8670e0ded62cc",
+      "prompt_file": "prompts/trans-en-ja-tech.txt",
+      "prompt_sha256": "723385ee6fe327f2741cb7afe9e2235f3fe627019a597f5be20a2bb93242b159",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 1054,
+      "prompt_tokens_raw": 1043,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/trans-en-ja-tech.bf16.json",
+          "sequence_sha256": "aad78bd6151073b0254d67f93ab65dc56b32c9c9ae6dd1bf36d4850dfebaa9a6",
+          "committed_token_sha256": "f6ae9e31bb1ef612883a80befd753317eb7c03c6170825d6755eaccb25d6df4e",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 204,
+            "accepted": 153,
+            "blocks": 102
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/trans-en-ja-tech.w8a8.json",
+          "sequence_sha256": "f62733bbe958dca0c946695308d6e0b83b5af559190485a4854c7e7f20dc64e5",
+          "committed_token_sha256": "b02cda89ea97a1c614f1c7eb0d0c8bbbda887220612092519ebc49d2daa643d4",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 217,
+            "accepted": 147,
+            "blocks": 109
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "trans-ja-en-tech",
+      "tier": "A",
+      "group": "translation",
+      "source_language": "ja",
+      "target_language": "en",
+      "domain": "tech",
+      "sources": [
+        {
+          "kind": "repo",
+          "ref": "docs/history/2026/09/11-20/mtp-language-task-acceptance.md@e25bcc07",
+          "sha256": "dab70683eeb0902f7cead1011353fd1be8208be0bbf8823370951103dee9f77a"
+        }
+      ],
+      "source_sha256": "a04c51946fc0d1388a5d231c4d8531de0d28bb1408815fce1b6935b28699c4c9",
+      "prompt_file": "prompts/trans-ja-en-tech.txt",
+      "prompt_sha256": "2498be27ff21fcebf63cdfe81058a9e73ab2c4226836b103512f9725b4455d90",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 1019,
+      "prompt_tokens_raw": 1008,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/trans-ja-en-tech.bf16.json",
+          "sequence_sha256": "02a432a6ecacdc47bc932cb863a62922dec1c322d4141ca6375cfc7ccba08e47",
+          "committed_token_sha256": "e673ff257a1333d72d100b52fd6117651e763b15f39453a5aea9dbddafeeaa66",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 178,
+            "accepted": 166,
+            "blocks": 89
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/trans-ja-en-tech.w8a8.json",
+          "sequence_sha256": "f0efe742d2dcd5956de960594eaaeb4f90723c8ef7ef291f13787c247db92ee0",
+          "committed_token_sha256": "f73c872830ef459dc530317a6aa706bc5a6ab985684f06ba8d255165ac09b763",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 184,
+            "accepted": 163,
+            "blocks": 92
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "trans-en-zh-tech",
+      "tier": "A",
+      "group": "translation",
+      "source_language": "en",
+      "target_language": "zh",
+      "domain": "tech",
+      "sources": [
+        {
+          "kind": "repo",
+          "ref": "AGENTS.md@e25bcc07",
+          "sha256": "e57cf118c7d5335ab8dc9864aeb9ed676d1d56d3ed07e7216440cb5dadc24c16"
+        }
+      ],
+      "source_sha256": "54be5e74f48e1df104c0a190446de49a242979b0b75cbf8c31e8670e0ded62cc",
+      "prompt_file": "prompts/trans-en-zh-tech.txt",
+      "prompt_sha256": "bb0a277601132edcf20582d041f628d7b4aa942a47b21befacef409b5ee42b6d",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 1056,
+      "prompt_tokens_raw": 1045,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/trans-en-zh-tech.bf16.json",
+          "sequence_sha256": "30f68743de7cda9a4ae4a301a4018c2a827d00ce44eadb03efa6c476bfb1d31e",
+          "committed_token_sha256": "3ccfe3525adc46fbf4afb23329d5e03b5657f55fe62000c50e2c60b09bc698c8",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 198,
+            "accepted": 156,
+            "blocks": 99
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/trans-en-zh-tech.w8a8.json",
+          "sequence_sha256": "d27efc0a38acff84428dbf6827b0474b9d6d3dad7eb21f37c43b73f1e7df8a6c",
+          "committed_token_sha256": "cb25545352a52bc830a4a5bd3400ab8d08dd21735361c66b37e2333a7c9f1c5c",
+          "committed_token_count": 255,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 193,
+            "accepted": 158,
+            "blocks": 97
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "trans-zh-en-tech",
+      "tier": "A",
+      "group": "translation",
+      "source_language": "zh",
+      "target_language": "en",
+      "domain": "tech",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/trans_source_zh_tech.txt",
+          "sha256": "93045339c33f94ebdb347344e7a7284f817e55739508f5ac1442adcc97543a8f"
+        }
+      ],
+      "source_sha256": "93045339c33f94ebdb347344e7a7284f817e55739508f5ac1442adcc97543a8f",
+      "prompt_file": "prompts/trans-zh-en-tech.txt",
+      "prompt_sha256": "ff0f94f5e5ee350b764f59331a4470faa8f99c72b2f32b3a7e2d337d74a8d0ee",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 765,
+      "prompt_tokens_raw": 754,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/trans-zh-en-tech.bf16.json",
+          "sequence_sha256": "f6c56ec964bc7f687a500c69acbf18dcb2e7daacbf4f11cf35d45e8f6d460e87",
+          "committed_token_sha256": "bbfcaca391ec0bf8e521ebbd00982603e6ac739f3f9934b51efd136290203ed0",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 196,
+            "accepted": 157,
+            "blocks": 98
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/trans-zh-en-tech.w8a8.json",
+          "sequence_sha256": "d22a69783627aef2172432bf95ad8629dce64aa0084106c732a4c4f0c3056776",
+          "committed_token_sha256": "7ef2baae482dc05ebe7a1475d08e9324bd5a289e9fa7873217e71f99698e29c4",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 189,
+            "accepted": 161,
+            "blocks": 95
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "trans-en-ja-general",
+      "tier": "A",
+      "group": "translation",
+      "source_language": "en",
+      "target_language": "ja",
+      "domain": "general",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/trans_source_en_general.txt",
+          "sha256": "d9cdc7223d50e487818a1638a6d1af82ea4c136dcc4fe34a0e02d675f5d8305d"
+        }
+      ],
+      "source_sha256": "d9cdc7223d50e487818a1638a6d1af82ea4c136dcc4fe34a0e02d675f5d8305d",
+      "prompt_file": "prompts/trans-en-ja-general.txt",
+      "prompt_sha256": "ecc306853d664881d7348039a17c13cb5c0639b86515dcbcd99632c17c32c89c",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 789,
+      "prompt_tokens_raw": 778,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/trans-en-ja-general.bf16.json",
+          "sequence_sha256": "edbb52e989e542f07b3e84e523df7da3d7650f3532924da199cf44f9570e7349",
+          "committed_token_sha256": "31c4790cc03aa7f539223afaed53630211b33436801974cda80e7f0938dfd0fc",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 255,
+            "accepted": 128,
+            "blocks": 128
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/trans-en-ja-general.w8a8.json",
+          "sequence_sha256": "2fedca6426226574f60b68f0d196c4b544fee414ec36f3a83b7d9840880609ad",
+          "committed_token_sha256": "1161cb3aa6db9126037df791e774a4f3b0d54207ea44b9d8186a5a7f8fba4d4f",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 261,
+            "accepted": 125,
+            "blocks": 131
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "trans-ja-en-general",
+      "tier": "A",
+      "group": "translation",
+      "source_language": "ja",
+      "target_language": "en",
+      "domain": "general",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "ci/fixtures/mtp-bench-v1/corpus/trans_source_ja_general.txt",
+          "sha256": "2997b4d327ed489aa01a42d0ee63be0f4fc892f472414f31303c8046326c3168"
+        }
+      ],
+      "source_sha256": "2997b4d327ed489aa01a42d0ee63be0f4fc892f472414f31303c8046326c3168",
+      "prompt_file": "prompts/trans-ja-en-general.txt",
+      "prompt_sha256": "7790b4aec31ae5dd05956845cd2568541a077edd731fc54a8de70e2ffe1fc622",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 695,
+      "prompt_tokens_raw": 684,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/trans-ja-en-general.bf16.json",
+          "sequence_sha256": "bad883da8d14e224f01b2b575d59684c1b24c2096037b73036f45f0656db1d92",
+          "committed_token_sha256": "4ce966b8252f6d65a7944a746081b7e07bffb0bb6d47bcd9a947167ac90ac325",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 216,
+            "accepted": 147,
+            "blocks": 108
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/trans-ja-en-general.w8a8.json",
+          "sequence_sha256": "f6cc0625506b76f427a36958b724fa1c8087eed57fded53889a3d27b18979be7",
+          "committed_token_sha256": "19721fb557698f7137f643415738cc767f0875f1819226c8d6a209fc9e1ff0f4",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 204,
+            "accepted": 153,
+            "blocks": 102
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "creative-en",
+      "tier": "B",
+      "group": "creative",
+      "instruction_language": "en",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "inline",
+          "sha256": "82c0705b0faf6af5273a82f49d74c35532ab20036c754bcd8b0db58c64c7d97e"
+        }
+      ],
+      "source_sha256": "82c0705b0faf6af5273a82f49d74c35532ab20036c754bcd8b0db58c64c7d97e",
+      "prompt_file": "prompts/creative-en.txt",
+      "prompt_sha256": "82c0705b0faf6af5273a82f49d74c35532ab20036c754bcd8b0db58c64c7d97e",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 57,
+      "prompt_tokens_raw": 46,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/creative-en.bf16.json",
+          "sequence_sha256": "e241a370548b67c0a4a328d10d9a774d4c6bde452fd30c0de83aeadf9a89f4e8",
+          "committed_token_sha256": "b45664d4389ba1fe73aac6a27bb266bda203c7b406677d406b2793fc09c01a74",
+          "committed_token_count": 203,
+          "reported_completion_tokens": 204,
+          "finish_reason": "stop",
+          "reference_mtp": {
+            "proposed": 206,
+            "accepted": 100,
+            "blocks": 103
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/creative-en.w8a8.json",
+          "sequence_sha256": "54c0921bcfd1f90b7da881618bb0ed73a091fa39df6310870b514129707bb46c",
+          "committed_token_sha256": "78b9d8bca6a2c2e1d27b11a1af4d4d8247b2b08cca6d46ef123f5ce00da20f75",
+          "committed_token_count": 256,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 241,
+            "accepted": 135,
+            "blocks": 121
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "creative-ja",
+      "tier": "B",
+      "group": "creative",
+      "instruction_language": "ja",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "inline",
+          "sha256": "bc7c45f35873b6a5241d7eb2a891a469863b14a3d0057759ad79d419f9bdb9da"
+        }
+      ],
+      "source_sha256": "bc7c45f35873b6a5241d7eb2a891a469863b14a3d0057759ad79d419f9bdb9da",
+      "prompt_file": "prompts/creative-ja.txt",
+      "prompt_sha256": "bc7c45f35873b6a5241d7eb2a891a469863b14a3d0057759ad79d419f9bdb9da",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 66,
+      "prompt_tokens_raw": 55,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/creative-ja.bf16.json",
+          "sequence_sha256": "697ef50f373a254ab800e89f1db2591228d33021da8d3c82aa43fe9cfceba3ca",
+          "committed_token_sha256": "6a2a007b2ced5cd0e927532a4aa0f4cc4907fda7f152e8c4441e6b207405504f",
+          "committed_token_count": 202,
+          "reported_completion_tokens": 203,
+          "finish_reason": "stop",
+          "reference_mtp": {
+            "proposed": 208,
+            "accepted": 99,
+            "blocks": 104
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/creative-ja.w8a8.json",
+          "sequence_sha256": "0d56f37661eda2b31d84cfd9c53e3433a376376dc3af0151b52dc1802ac89430",
+          "committed_token_sha256": "89e6e3aa7b943bd4b939cccbb5595c509d4e001b0c3acd3c430fef199fabae75",
+          "committed_token_count": 110,
+          "reported_completion_tokens": 111,
+          "finish_reason": "stop",
+          "reference_mtp": {
+            "proposed": 120,
+            "accepted": 51,
+            "blocks": 60
+          }
+        }
+      }
+    },
+    {
+      "cond_id": "creative-zh",
+      "tier": "B",
+      "group": "creative",
+      "instruction_language": "zh",
+      "sources": [
+        {
+          "kind": "authored",
+          "ref": "inline",
+          "sha256": "cc3cc43ff8f4c2337f72674e892b01e27716e88b5c549e0081a91cdc8f1f2add"
+        }
+      ],
+      "source_sha256": "cc3cc43ff8f4c2337f72674e892b01e27716e88b5c549e0081a91cdc8f1f2add",
+      "prompt_file": "prompts/creative-zh.txt",
+      "prompt_sha256": "cc3cc43ff8f4c2337f72674e892b01e27716e88b5c549e0081a91cdc8f1f2add",
+      "output_tokens": 256,
+      "prompt_tokens_rendered": 56,
+      "prompt_tokens_raw": 45,
+      "reference_sequences": {
+        "bf16": {
+          "sequence_file": "sequences/creative-zh.bf16.json",
+          "sequence_sha256": "8b326f6f0aa563eac01aac3dc49fff0cd0172f2ad3f9e2c8eb285f57175b511d",
+          "committed_token_sha256": "1746099b289d111c07e221ba884e3ff9294433e06cec4a8fe29733bb57580ac7",
+          "committed_token_count": 250,
+          "reported_completion_tokens": 252,
+          "finish_reason": "stop",
+          "reference_mtp": {
+            "proposed": 272,
+            "accepted": 116,
+            "blocks": 136
+          }
+        },
+        "w8a8": {
+          "sequence_file": "sequences/creative-zh.w8a8.json",
+          "sequence_sha256": "8e3f7a8c8c526ba94636d20d07a3883d18a3bfb3e46c70844338124494b02436",
+          "committed_token_sha256": "11265a35a875e6d78c5071db54871fd54f058d5bcede48f35aa53b2a755ca319",
+          "committed_token_count": 255,
+          "reported_completion_tokens": 256,
+          "finish_reason": "length",
+          "reference_mtp": {
+            "proposed": 278,
+            "accepted": 116,
+            "blocks": 139
+          }
+        }
+      }
+    }
+  ],
+  "corpus_commit": "e25bcc07",
+  "tokenizer_sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+  "reference_sequence_provenance": {
+    "generated_on": {
+      "exact_target": "gfx1030",
+      "device_index": 0,
+      "hip_visible_devices": "1"
+    },
+    "binary_sha256": "c3436c2f8088f2cd07f1ff2c37c5eb879c16afc8be799773159d38a484e8ff50",
+    "sampling": {
+      "temperature": 1.0,
+      "seed": 123,
+      "mtp_draft_width": 2,
+      "kv_cache_encoding": "kv-mxfp8-e4",
+      "note": "the Qwen3.8 NVFP4 CLI fixes temperature=1.0 and forbids greedy"
+    },
+    "sequence_count": 58,
+    "derivation": "tokenize(output_text); the sequence is a forced input, not a reproduction target",
+    "input_mode": "chat template single user turn (--message user:...)"
+  },
+  "freeze_problems": [],
+  "revisions": [
+    {
+      "date": "2026-09-17",
+      "change": "M1 switched from top-1 agreement to expected p/q acceptance under production-faithful conditioning; top-1 kept as M1_top1 auxiliary. Fixture identity (prompts, sequences, output length, width, KV) unchanged, so schema_version stays mtp-bench-v1; M1 values before and after this date are not comparable.",
+      "also": "replaced stale condition ids in M3, M5 and profiles.quick with ids that exist in this manifest"
+    }
+  ]
+}

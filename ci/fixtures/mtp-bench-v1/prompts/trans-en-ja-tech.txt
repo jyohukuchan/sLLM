@@ -1,0 +1,79 @@
+Translate the following text into Japanese. Preserve paragraph structure, technical terms, and the register of the original. Output only the translation.
+
+# AGENTS.md
+
+## Project
+
+- sLLM is an MIT-licensed LLM inference engine. GPU operations use C++/HIP;
+  other backends and the upper layers use Rust.
+- `sLLM.md` is the detailed, Git-excluded requirements document.
+  `docs/plans/main-plan.md` is the tracked plan for product, architecture,
+  compatibility decisions, progress, and unresolved questions.
+- Read `docs/plans/main-plan.md` before beginning work. If `sLLM.md` and the
+  main plan disagree, ask the user; do not silently merge the difference.
+
+## Authority and proposal policy
+
+- Authority, from highest to lowest, is: the current explicit user
+  instruction; `sLLM.md`; this `AGENTS.md`; approved decisions in
+  `docs/plans/main-plan.md`; the active task-local plan; and historical facts.
+  A lower level or history fact cannot create a blocker.
+- An AI proposal is nonblocking. Without explicit user approval, it cannot
+  introduce a hard gate, independent review requirement, broad or GPU rerun,
+  security boundary, reuse restriction, blocking stage, finer work unit, or
+  larger immutable-evidence requirement. Record nonblocking proposals with
+  their origin, scope, cost, and expiry when they matter.
+- The default mode is trusted-solo-development. External-contribution and
+  release policies are separate lanes; inactive rules do not block work.
+- The main agent may investigate and implement directly. It should also use
+  bounded subagents proactively when delegation can shorten implementation or
+  verification. Neither delegation nor a particular Codex invocation method
+  is a completion gate.
+- Future changes to `AGENTS.md` or `sLLM.md` still require explicit user
+  confirmation.
+
+## Native Codex subagents
+
+- Proactively delegate bounded coding, repository inspection, focused tests,
+  summaries, and repetitive work when the task can proceed independently.
+  Launch independent subtasks in parallel up to the available concurrency
+  instead of serializing them without a resource or dependency reason. This
+  standing authorization applies within the current user-approved task and
+  does not expand its scope or authorize external writes, commits, or pushes.
+- Prefer the `luna` subagent with its fixed xhigh reasoning profile for ordinary
+  bounded coding and verification because its lower latency makes it the most
+  useful native coding worker. Give each editing agent explicit, non-overlapping
+  file ownership and tell it that other agents share the workspace and that it
+  must preserve their changes.
+- Do not select `terra` or `sol` by default for routine work; their additional
+  overhead usually provides little benefit here. Use `terra` only for a broad
+  cross-cutting investigation or integration task that the main agent and Luna
+  cannot handle efficiently, and use `sol` only as an escalation after repeated
+  failure or when unusually deep specialist reasoning is demonstrably needed.
+- The main agent remains responsible for inspecting subagent edits, reconciling
+  shared-workspace changes, and running relevant checks. Subagents must not
+  commit or push unless the user explicitly requests publication.
+
+## Local Qwen subagent
+
+- Use the `qwen38-subagent` skill when a task materially benefits from a local,
+  offline, long-context second opinion or the Qwen/Pi environment. Ordinary
+  bounded coding defaults to native Luna because it is faster. Qwen is a
+  command-backed Pi agent, not a native Codex subagent and not a replacement
+  for the main agent.
+- Check it with `/home/homelab1/.local/bin/qwen38-subagent-server status`, then
+  delegate one bounded task from its target workspace with
+  `/home/homelab1/.local/bin/qwen38-pi --profile standard --read-only "<task>"`.
+  The wrapper starts the localhost-only service when needed. Use `fast` for an
+  exact lookup and `deep` for bounded multi-file implementation or review.
+- State the workspace, allowed files, whether edits are allowed, and expected
+  output. The main agent must inspect edits and run relevant checks before
+  accepting the report. Do not let the subagent commit or push unless the user
+  explicitly requests it.
+- Use `qwen38-pi --read-only` for inspection and
+  `qwen38-pi --workspace-write` only for an explicitly bounded editing task.
+  Landlock limits writes to ephemeral scratch and, in workspace-write mode,
+  the current workspace. When these instructions are being read by Qwen in Pi, it is
+  already the delegated agent and must perform the task directly rather than
+  invoking the wrapper or attempting recursive delegation.
+

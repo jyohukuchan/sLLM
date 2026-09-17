@@ -1,0 +1,45 @@
+{
+  "schema_version": "gfx1201-wmma-attribution-v1",
+  "state": "complete",
+  "question": "Is the gfx1030 / gfx1201 target_hidden divergence attributable to WMMA?",
+  "answer": "CONFIRMED CONTRIBUTOR, NOT ISOLATED AS SOLE CAUSE",
+  "evidence_wmma_is_used": {
+    "method": "rocprofv3 --kernel-trace of the default gfx1201 BF16-series teacher-forced run, one condition",
+    "condition": "code-rust-bugfix-zh (8284 prompt tokens, 256 forced rows)",
+    "total_dispatches_traced": 314644,
+    "distinct_kernels": 43,
+    "wmma_dispatch_count": 840,
+    "wmma_kernels": {
+      "sllm_nvfp4_gfx1201_wmma128x64_pad68_k17408n5120_v1": 224,
+      "sllm_nvfp4_gfx1201_wmma128x64_pad68_k5120n17408_v1": 448,
+      "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1": 168
+    },
+    "note": "all three are 27B target MLP prefill shapes: gate/up K5120 N17408, down K17408 N5120, plus the Kahan lookahead variant"
+  },
+  "counterpart_on_gfx1030": {
+    "source": "native/hip/src/matmul_kernel_internal.hpp:3285-3313",
+    "gfx1030_variants": [
+      "sllm_nvfp4_w4a4_prefill_compensated128x64_v1",
+      "Nvfp4W4A4PrefillDp4a64x64 (index32 pipeline)"
+    ],
+    "gfx1201_variant": "Nvfp4W4A4PrefillGfx1201WmmaKahan (WMMA 128x64 + Kahan compensation)",
+    "note": "RDNA2 gfx1030 has no matrix cores, so the same MLP prefill matmul necessarily uses a different accumulation scheme"
+  },
+  "isolation_attempt": {
+    "method": "SLLM_NVFP4_W4A4_FORCE_BASELINE=1 on both targets, compare target_hidden",
+    "result": "BLOCKED - both targets failed identically",
+    "error": "Qwen node layer.0.mlp_gate_matmul.qwen38_projection_pack2 failed: backend status 260: matmul kernel launch: invalid configuration argument",
+    "gfx1030_exit": 1,
+    "gfx1201_exit": 1,
+    "cleanup": "current_bytes=0 retryable_cleanup=0 durable_quarantine=0 on both",
+    "defect_note": "the documented NVFP4 W4A4 baseline rollback path does not support the Qwen3.8 packed projection node; recorded as a separate defect, not fixed here"
+  },
+  "conclusion": "WMMA is confirmed present on gfx1201 and absent by construction on gfx1030 for the same MLP prefill matmuls that produce the hidden state, so it is a real contributor to the divergence. Whether it is the sole cause could not be tested because the only available alignment lever crashes on this model path. Per the user's instruction this line of investigation stops here.",
+  "not_claimed": [
+    "that WMMA explains all 8/8 target_hidden differences",
+    "that removing WMMA would make the two GPUs bit-identical",
+    "any statement about the MXFP8 top-1 advantage, which the prior clustered test did not support (p=0.0625)"
+  ],
+  "service_restored": true,
+  "artifacts": ".local-artifacts/mtp-bench/wmma-check/"
+}

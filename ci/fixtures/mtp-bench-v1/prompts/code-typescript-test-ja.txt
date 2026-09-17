@@ -1,0 +1,1055 @@
+あなたはこのリポジトリで作業しています。以下のソースを読み、TASK節の挙動に対するテストを書いてください。2の冪だけでなく、非整列値と各境界の両側を含めてください。
+
+--- webui/lib/sllm-api.ts ---
+import { SseDecoder, type SseEvent } from './sse.ts';
+
+export interface ApiConfig {
+  baseUrl: string;
+  userKey: string;
+  adminKey: string;
+}
+
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+  reasoning?: string;
+}
+
+export interface ServerModel {
+  id: string;
+  lifecycle?: string;
+  residentBytes?: number;
+}
+
+export interface ServerProps {
+  schema_version?: string;
+  state?: string;
+  models?: Array<Record<string, unknown>>;
+  scheduler?: Record<string, unknown>;
+  hardware?: {
+    vendor?: string;
+    device_index?: number;
+    name?: string;
+    target?: string;
+    memory_bytes?: number;
+  } | null;
+  features?: Record<string, unknown>;
+}
+
+export interface ServerSnapshot {
+  health: string;
+  ready: string;
+  models: ServerModel[];
+  props: ServerProps | null;
+}
+
+export interface ModelLibraryModel {
+  alias: string;
+  file_name: string;
+  size_bytes: number;
+  architecture: string;
+  supported_architecture: boolean;
+  compatible: boolean;
+  reason?: string | null;
+  mtp_companion_file_name?: string | null;
+  mtp_companion_for?: string | null;
+}
+
+export interface ModelLibrarySnapshot {
+  schema_version: string;
+  selected_path?: string | null;
+  models: ModelLibraryModel[];
+  error?: string | null;
+}
+
+export interface ModelLibraryDirectory {
+  name: string;
+  path: string;
+}
+
+export interface ModelLibraryBrowse {
+  schema_version: string;
+  current_path: string;
+  parent_path?: string | null;
+  directories: ModelLibraryDirectory[];
+}
+
+export interface HuggingFaceStatus {
+  schema_version: string;
+  cli_available: boolean;
+  cli_version?: string | null;
+  auth_state: 'authenticated' | 'unauthenticated' | 'unknown';
+  authenticated: boolean;
+  username?: string | null;
+  active_downloads: number;
+}
+
+export interface HuggingFaceModel {
+  repo_id: string;
+  revision: string;
+  downloads: number;
+  likes: number;
+  gated: boolean;
+  private: boolean;
+  last_modified?: string | null;
+}
+
+export interface HuggingFaceSearch {
+  schema_version: string;
+  query: string;
+  models: HuggingFaceModel[];
+}
+
+export interface HuggingFaceGgufFile {
+  path: string;
+  size_bytes: number;
+  sha256?: string | null;
+  derived_lock_path?: string | null;
+  download_command: string;
+}
+
+export interface HuggingFaceFiles {
+  schema_version: string;
+  repo_id: string;
+  revision: string;
+  selected_path: string;
+  files: HuggingFaceGgufFile[];
+}
+
+export type HuggingFaceDownloadState =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed';
+
+export interface HuggingFaceDownloadJob {
+  schema_version: string;
+  id: string;
+  repo_id: string;
+  revision: string;
+  file_path: string;
+  destination: string;
+  command: string;
+  state: HuggingFaceDownloadState;
+  message?: string | null;
+}
+
+export interface ChatRequest {
+  model: string;
+  messages: ChatMessage[];
+  temperature: number;
+  topP: number;
+  maxTokens: number;
+  responseFormat: 'text' | 'json_object';
+  reasoning: boolean;
+  reasoningBudget: number;
+}
+
+function endpoint(config: ApiConfig, path: string): string {
+  const url = new URL(config.baseUrl);
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw new Error('Endpoint must use HTTP or HTTPS.');
+  }
+  return new URL(path, `${url.toString().replace(/\/$/, '')}/`).toString();
+}
+
+function auth(key: string): Record<string, string> {
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
+async function errorMessage(response: Response): Promise<string> {
+  const fallback = `${response.status} ${response.statusText}`.trim();
+  try {
+    const payload = (await response.json()) as { error?: { message?: string } };
+    return payload.error?.message?.slice(0, 400) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function request(config: ApiConfig, path: string, init?: RequestInit) {
+  const headers = new Headers(init?.headers);
+  if (config.userKey) headers.set('Authorization', `Bearer ${config.userKey}`);
+  const response = await fetch(endpoint(config, path), {
+    ...init,
+    headers,
+  });
+  if (!response.ok) throw new Error(await errorMessage(response));
+  return response;
+}
+
+async function readiness(config: ApiConfig): Promise<string> {
+  const response = await fetch(endpoint(config, '/readyz'));
+  if (response.status !== 200 && response.status !== 503) {
+    throw new Error(await errorMessage(response));
+  }
+  try {
+    const payload = (await response.json()) as { status?: string };
+    return payload.status ?? (response.ok ? 'ready' : 'not_ready');
+  } catch {
+    return response.ok ? 'ready' : 'not_ready';
+  }
+}
+
+export async function fetchServerSnapshot(
+  config: ApiConfig,
+): Promise<ServerSnapshot> {
+  const [health, ready, modelResponse, propsResponse] = await Promise.all([
+    request(config, '/healthz').then((value) => value.text()),
+    readiness(config),
+    request(config, '/v1/models').then((value) => value.json()),
+    request(config, '/props').then((value) => value.json()),
+  ]);
+  const listed = modelResponse as { data?: Array<{ id?: string }> };
+  const props = propsResponse as ServerProps;
+  const stringValue = (value: unknown) =>
+    typeof value === 'string' ? value : '';
+  const lifecycle = new Map(
+    (props.models ?? []).map((model) => [
+      stringValue(model.alias ?? model.id),
+      model,
+    ]),
+  );
+  const models = (listed.data ?? [])
+    .filter((model): model is { id: string } => Boolean(model.id))
+    .map((model) => {
+      const detail = lifecycle.get(model.id);
+      return {
+        id: model.id,
+        lifecycle: detail
+          ? stringValue(detail.lifecycle ?? detail.state)
+          : undefined,
+        residentBytes:
+          typeof detail?.resident_bytes === 'number'
+            ? detail.resident_bytes
+            : undefined,
+      };
+    });
+  return { health: health.trim(), ready: ready.trim(), models, props };
+}
+
+export async function fetchServerMetrics(config: ApiConfig): Promise<string> {
+  return request(config, '/metrics').then((response) => response.text());
+}
+
+export async function modelAction(
+  config: ApiConfig,
+  alias: string,
+  action: 'load' | 'unload',
+): Promise<void> {
+  const response = await fetch(
+    endpoint(config, `/admin/models/${encodeURIComponent(alias)}/${action}`),
+    { method: 'POST', headers: auth(config.adminKey) },
+  );
+  if (!response.ok) throw new Error(await errorMessage(response));
+}
+
+async function adminRequest(
+  config: ApiConfig,
+  path: string,
+  init?: RequestInit,
+): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  for (const [name, value] of Object.entries(auth(config.adminKey)))
+    headers.set(name, value);
+  const response = await fetch(endpoint(config, path), { ...init, headers });
+  if (!response.ok) throw new Error(await errorMessage(response));
+  return response;
+}
+
+export async function fetchModelLibrary(
+  config: ApiConfig,
+): Promise<ModelLibrarySnapshot> {
+  return adminRequest(config, '/admin/model-library').then((response) =>
+    response.json(),
+  );
+}
+
+export async function browseModelLibrary(
+  config: ApiConfig,
+  path?: string,
+): Promise<ModelLibraryBrowse> {
+  return adminRequest(config, '/admin/model-library/browse', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(path ? { path } : {}),
+  }).then((response) => response.json());
+}
+
+export async function selectModelLibraryFolder(
+  config: ApiConfig,
+  path: string,
+): Promise<ModelLibrarySnapshot> {
+  return adminRequest(config, '/admin/model-library/select', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  }).then((response) => response.json());
+}
+
+export async function rescanModelLibrary(
+  config: ApiConfig,
+): Promise<ModelLibrarySnapshot> {
+  return adminRequest(config, '/admin/model-library/rescan', {
+    method: 'POST',
+  }).then((response) => response.json());
+}
+
+export async function fetchHuggingFaceStatus(
+  config: ApiConfig,
+): Promise<HuggingFaceStatus> {
+  return adminRequest(config, '/admin/hugging-face/status').then((response) =>
+    response.json(),
+  );
+}
+
+export async function searchHuggingFaceModels(
+  config: ApiConfig,
+  query: string,
+): Promise<HuggingFaceSearch> {
+  return adminRequest(config, '/admin/hugging-face/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+  }).then((response) => response.json());
+}
+
+export async function fetchHuggingFaceFiles(
+  config: ApiConfig,
+  repoId: string,
+  revision: string,
+): Promise<HuggingFaceFiles> {
+  return adminRequest(config, '/admin/hugging-face/files', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo_id: repoId, revision }),
+  }).then((response) => response.json());
+}
+
+export async function startHuggingFaceDownload(
+  config: ApiConfig,
+  repoId: string,
+  revision: string,
+  file: HuggingFaceGgufFile,
+): Promise<HuggingFaceDownloadJob> {
+  return adminRequest(config, '/admin/hugging-face/downloads', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      repo_id: repoId,
+      revision,
+      file_path: file.path,
+      ...(file.derived_lock_path
+        ? { derived_lock_path: file.derived_lock_path }
+        : {}),
+    }),
+  }).then((response) => response.json());
+}
+
+export async function fetchHuggingFaceDownloadJob(
+  config: ApiConfig,
+  id: string,
+): Promise<HuggingFaceDownloadJob> {
+  return adminRequest(
+    config,
+    `/admin/hugging-face/downloads/${encodeURIComponent(id)}`,
+  ).then((response) => response.json());
+}
+
+function consumeEvent(
+  event: SseEvent,
+  callbacks: {
+    onContent(value: string): void;
+    onReasoning(value: string): void;
+  },
+): boolean {
+  if (event.data === '[DONE]') return true;
+  let payload: {
+    error?: { message?: string };
+    choices?: Array<{
+      delta?: { content?: string; reasoning_content?: string };
+    }>;
+  };
+  try {
+    payload = JSON.parse(event.data) as typeof payload;
+  } catch {
+    throw new Error('The server returned malformed SSE JSON.');
+  }
+  if (payload.error)
+    throw new Error(payload.error.message || 'The stream failed.');
+  const delta = payload.choices?.[0]?.delta;
+  if (delta?.content) callbacks.onContent(delta.content);
+  if (delta?.reasoning_content) callbacks.onReasoning(delta.reasoning_content);
+  return false;
+}
+
+export async function streamChatCompletion(
+  config: ApiConfig,
+  requestBody: ChatRequest,
+  signal: AbortSignal,
+  callbacks: {
+    onContent(value: string): void;
+    onReasoning(value: string): void;
+  },
+): Promise<void> {
+  const body = {
+    model: requestBody.model,
+    messages: requestBody.messages.map(({ role, content, reasoning }) => ({
+      role,
+      content,
+      ...(reasoning ? { reasoning_content: reasoning } : {}),
+    })),
+    stream: true,
+    temperature: requestBody.temperature,
+    top_p: requestBody.topP,
+    max_completion_tokens: requestBody.maxTokens,
+    ...(requestBody.responseFormat === 'json_object'
+      ? { response_format: { type: 'json_object' } }
+      : {}),
+    ...(requestBody.reasoning
+      ? {
+          sllm: {
+            thinking: 'enabled',
+            separate_reasoning: true,
+            max_reasoning_tokens: requestBody.reasoningBudget,
+          },
+        }
+      : {}),
+  };
+  const response = await request(config, '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.body)
+    throw new Error('The server returned no response stream.');
+
+  const reader = response.body.getReader();
+  const text = new TextDecoder();
+  const decoder = new SseDecoder();
+  let done = false;
+  while (!done) {
+    const chunk = await reader.read();
+    for (const event of decoder.push(
+      text.decode(chunk.value, { stream: !chunk.done }),
+    )) {
+      done = consumeEvent(event, callbacks) || done;
+    }
+    if (chunk.done) break;
+  }
+  for (const event of decoder.finish())
+    done = consumeEvent(event, callbacks) || done;
+  if (!done) throw new Error('The stream ended before [DONE].');
+}
+
+--- webui/app/page.tsx ---
+'use client';
+
+import {
+  Activity,
+  ArrowLeft,
+  ArrowUp,
+  BarChart3,
+  BrainCircuit,
+  Cable,
+  Check,
+  ChevronRight,
+  CircleStop,
+  Cpu,
+  Folder,
+  FolderOpen,
+  Gauge,
+  HardDrive,
+  Menu,
+  MessageSquare,
+  Moon,
+  PanelRight,
+  Play,
+  RefreshCw,
+  Server,
+  Settings2,
+  Sparkles,
+  Sun,
+  Timer,
+  Unplug,
+  Zap,
+} from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { HuggingFaceModels } from '@/components/hugging-face-models';
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from '@/components/ui/native-select';
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
+import { Textarea } from '@/components/ui/textarea';
+import {
+  browseModelLibrary,
+  fetchModelLibrary,
+  fetchServerMetrics,
+  fetchServerSnapshot,
+  modelAction,
+  rescanModelLibrary,
+  selectModelLibraryFolder,
+  streamChatCompletion,
+  type ApiConfig,
+  type ChatMessage,
+  type ModelLibraryBrowse,
+  type ModelLibraryModel,
+  type ModelLibrarySnapshot,
+  type ServerModel,
+  type ServerProps,
+} from '@/lib/sllm-api';
+import { modelMetricSnapshot, subtractMetrics } from '@/lib/metrics';
+import { fetchIntegratedRuntimeConfig } from '@/lib/runtime-config';
+
+type ConnectionState = 'demo' | 'connecting' | 'live' | 'error';
+type Theme = 'light' | 'dark';
+type View = 'performance' | 'chat';
+type BenchmarkState = 'idle' | 'running' | 'complete' | 'error';
+type UiMessage = ChatMessage & { id: string };
+
+interface HardwareInfo {
+  vendor: string;
+  name: string;
+  target: string;
+  memoryBytes?: number;
+  source: 'fixture' | 'server';
+}
+
+interface BenchmarkResult {
+  id: string;
+  model: string;
+  prefillTps: number;
+  decodeTps: number;
+  ttftMs: number;
+  e2eMs: number;
+  promptTokens: number;
+  completionTokens: number;
+  source: 'fixture' | 'server-metrics';
+  createdAt: string;
+}
+
+const demoModels: ServerModel[] = [
+  { id: 'qwen35-4b-bf16', lifecycle: 'loaded', residentBytes: 4_980_000_000 },
+  { id: 'qwen35-4b-fp16', lifecycle: 'configured' },
+];
+
+const demoLibrary: ModelLibrarySnapshot = {
+  schema_version: 'sllm-model-library-v1',
+  selected_path: '/srv/models',
+  models: [
+    {
+      alias: 'qwen35-4b-bf16',
+      file_name: 'qwen35-4b-bf16.gguf',
+      size_bytes: 4_980_000_000,
+      architecture: 'qwen35',
+      supported_architecture: true,
+      compatible: true,
+    },
+    {
+      alias: 'llama-example',
+      file_name: 'llama-example.gguf',
+      size_bytes: 3_120_000_000,
+      architecture: 'llama',
+      supported_architecture: false,
+      compatible: false,
+      reason: 'This GGUF architecture is not implemented by sLLM.',
+    },
+  ],
+};
+
+const demoProps: ServerProps = {
+  schema_version: '1',
+  state: 'ready',
+  scheduler: { active_requests: 0, queued_requests: 0 },
+  features: { reasoning: true, structured_output: true },
+};
+
+const demoHardware: HardwareInfo = {
+  vendor: 'AMD',
+  name: 'Radeon PRO R9700',
+  target: 'gfx1201',
+  memoryBytes: 32_000_000_000,
+  source: 'fixture',
+};
+
+const demoBenchmark: BenchmarkResult = {
+  id: 'fixture-run',
+  model: demoModels[0].id,
+  prefillTps: 3611.8,
+  decodeTps: 128.4,
+  ttftMs: 410,
+  e2eMs: 1380,
+  promptTokens: 1480,
+  completionTokens: 124,
+  source: 'fixture',
+  createdAt: 'DEMO FIXTURE',
+};
+
+const defaultApiConfig: ApiConfig = {
+  baseUrl: 'http://127.0.0.1:8080',
+  userKey: '',
+  adminKey: '',
+};
+
+const seedMessages: UiMessage[] = [
+  {
+    id: 'seed-user',
+    role: 'user',
+    content: 'Summarize the active inference configuration.',
+  },
+  {
+    id: 'seed-assistant',
+    role: 'assistant',
+    reasoning:
+      'Use only the prototype fixture. Keep the GPU and KV-cache details explicit.',
+    content:
+      'Qwen3.5-4B BF16 is shown on gfx1201. The standard OCP KV path uses MXFP8 E4M3; FP16 remains an explicit rollback option. This is fixture data, not live GPU evidence.',
+  },
+];
+
+function formatBytes(value?: number): string {
+  if (value === undefined) return 'not resident';
+  return `${(value / 1_000_000_000).toFixed(1)} GB`;
+}
+
+function formatRate(value?: number): string {
+  if (value === undefined) return '—';
+  return value >= 1000
+    ? value.toLocaleString(undefined, { maximumFractionDigits: 0 })
+    : value.toFixed(1);
+}
+
+function stringField(
+  value: Record<string, unknown>,
+  ...keys: string[]
+): string {
+  for (const key of keys) {
+    if (typeof value[key] === 'string') return value[key];
+  }
+  return '';
+}
+
+function numberField(
+  value: Record<string, unknown>,
+  ...keys: string[]
+): number | undefined {
+  for (const key of keys) {
+    if (typeof value[key] === 'number') return value[key];
+  }
+  return undefined;
+}
+
+function hardwareFromProps(props: ServerProps | null): HardwareInfo | null {
+  if (!props) return null;
+  const hardware = (props as ServerProps & Record<string, unknown>).hardware;
+  if (!hardware || typeof hardware !== 'object' || Array.isArray(hardware))
+    return null;
+  const record = hardware as Record<string, unknown>;
+  const target = stringField(record, 'target', 'architecture', 'gfx');
+  const name = stringField(record, 'name', 'device_name', 'device');
+  if (!target && !name) return null;
+  return {
+    vendor: stringField(record, 'vendor') || 'Unknown vendor',
+    name: name || 'Unnamed GPU',
+    target: target || 'unknown target',
+    memoryBytes: numberField(record, 'memory_bytes', 'vram_bytes'),
+    source: 'server',
+  };
+}
+
+function StatusDot({ state }: { state: ConnectionState }) {
+  return <span className={`status-dot status-${state}`} aria-hidden="true" />;
+}
+
+function ModelRow({
+  model,
+  selected,
+  busy,
+  onSelect,
+  onAction,
+}: {
+  model: ServerModel;
+  selected: boolean;
+  busy: boolean;
+  onSelect: () => void;
+  onAction: (action: 'load' | 'unload') => void;
+}) {
+  const lifecycle = model.lifecycle?.toLowerCase() || '';
+  const loaded = lifecycle.includes('loaded') || lifecycle === 'ready';
+  return (
+    <div className={`model-row ${selected ? 'model-selected' : ''}`}>
+      <button
+        type="button"
+        className="model-main"
+        aria-label={`Select ${model.id}`}
+        onClick={onSelect}
+      >
+        <span className={`model-light ${loaded ? 'model-loaded' : ''}`} />
+        <span>
+          <strong>{model.id}</strong>
+          <small>
+            {model.lifecycle || 'configured'} ·{' '}
+            {formatBytes(model.residentBytes)}
+          </small>
+        </span>
+      </button>
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        disabled={busy}
+        aria-label={`${loaded ? 'Unload' : 'Load'} ${model.id}`}
+        onClick={() => onAction(loaded ? 'unload' : 'load')}
+      >
+        {loaded ? <Unplug /> : <Cable />}
+      </Button>
+    </div>
+  );
+}
+
+function LibraryModelRow({ model }: { model: ModelLibraryModel }) {
+  const mtpAssistant = model.architecture === 'gemma4mtp';
+  return (
+    <div
+      className={`library-model-row ${model.compatible ? '' : 'library-model-disabled'}`}
+      title={model.reason || undefined}
+    >
+      <span className="library-file-icon">
+        <HardDrive />
+      </span>
+      <span>
+        <strong>{model.file_name}</strong>
+        <small>
+          {model.architecture} · {formatBytes(model.size_bytes)}
+        </small>
+        {model.mtp_companion_file_name && (
+          <small>MTP assistant: {model.mtp_companion_file_name}</small>
+        )}
+        {mtpAssistant && (
+          <small>
+            {model.mtp_companion_for
+              ? `MTP companion for: ${model.mtp_companion_for}`
+              : 'MTP assistant companion only · requires its matching target'}
+          </small>
+        )}
+        {!model.compatible && model.reason && <em>{model.reason}</em>}
+      </span>
+      <Badge variant="outline">
+        {mtpAssistant
+          ? 'companion only'
+          : model.compatible
+            ? 'ready'
+            : 'unsupported'}
+      </Badge>
+    </div>
+  );
+}
+
+function MessageCard({ message }: { message: UiMessage }) {
+  const assistant = message.role === 'assistant';
+  return (
+    <article
+      className={`message ${assistant ? 'message-assistant' : 'message-user'}`}
+    >
+      <div className="message-meta">
+        <span className="message-avatar">
+          {assistant ? <Sparkles /> : <span>YOU</span>}
+        </span>
+        <strong>{assistant ? 'sLLM' : 'Operator'}</strong>
+      </div>
+      {message.reasoning && (
+        <details className="reasoning" open>
+          <summary>
+            <BrainCircuit /> Reasoning stream
+          </summary>
+          <p>{message.reasoning}</p>
+        </details>
+      )}
+      <p className="message-content">
+        {message.content || (assistant ? '…' : '')}
+      </p>
+    </article>
+  );
+}
+
+export default function Home() {
+  const [view, setView] = useState<View>('performance');
+  const [messages, setMessages] = useState<UiMessage[]>(seedMessages);
+  const [input, setInput] = useState('');
+  const [models, setModels] = useState<ServerModel[]>(demoModels);
+  const [props, setProps] = useState<ServerProps | null>(demoProps);
+  const [selectedModel, setSelectedModel] = useState(demoModels[0].id);
+  const [connection, setConnection] = useState<ConnectionState>('demo');
+  const [config, setConfig] = useState<ApiConfig>(defaultApiConfig);
+  const [connectionOpen, setConnectionOpen] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [library, setLibrary] = useState<ModelLibrarySnapshot>(demoLibrary);
+  const [libraryBrowse, setLibraryBrowse] = useState<ModelLibraryBrowse | null>(
+    null,
+  );
+  const [libraryBusy, setLibraryBusy] = useState(false);
+  const [libraryError, setLibraryError] = useState('');
+  const [navOpen, setNavOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [error, setError] = useState('');
+  const [busyModel, setBusyModel] = useState('');
+  const [maxTokens, setMaxTokens] = useState(512);
+  const [theme, setTheme] = useState<Theme>('light');
+  const [benchmarkPrompt, setBenchmarkPrompt] = useState(
+    'Explain in practical terms how KV-cache precision affects memory bandwidth during transformer inference.',
+  );
+  const [benchmarkTokens, setBenchmarkTokens] = useState(128);
+  const [benchmarkState, setBenchmarkState] =
+    useState<BenchmarkState>('complete');
+  const [benchmark, setBenchmark] = useState<BenchmarkResult | null>(
+    demoBenchmark,
+  );
+  const [benchmarkHistory, setBenchmarkHistory] = useState<BenchmarkResult[]>([
+    demoBenchmark,
+  ]);
+  const [benchmarkError, setBenchmarkError] = useState('');
+  const abortRef = useRef<AbortController | null>(null);
+  const benchmarkAbortRef = useRef<AbortController | null>(null);
+
+  const queue = Number(props?.scheduler?.queued_requests ?? 0);
+  const active = Number(props?.scheduler?.active_requests ?? 0);
+  const live = connection === 'live';
+  const hardware = live ? hardwareFromProps(props) : demoHardware;
+  const selectedServerModel = models.find(
+    (model) => model.id === selectedModel,
+  );
+  const connectionLabel = useMemo(() => {
+    if (connection === 'live') return 'Live server';
+    if (connection === 'connecting') return 'Connecting';
+    if (connection === 'error') return 'Connection error';
+    return 'Safe demo';
+  }, [connection]);
+
+  async function connectLive(
+    targetConfig: ApiConfig = config,
+    openOnFailure = false,
+  ) {
+    benchmarkAbortRef.current?.abort();
+    setConnection('connecting');
+    setError('');
+    try {
+      const snapshot = await fetchServerSnapshot(targetConfig);
+      setModels(snapshot.models);
+      setProps(snapshot.props);
+      setSelectedModel(snapshot.models[0]?.id || '');
+      setBenchmark(null);
+      setBenchmarkHistory([]);
+      setBenchmarkState('idle');
+      setBenchmarkError('');
+      try {
+        setLibrary(await fetchModelLibrary(targetConfig));
+        setLibraryError('');
+      } catch (cause) {
+        setLibrary({
+          schema_version: 'sllm-model-library-v1',
+          models: [],
+          error: null,
+        });
+        setLibraryError(
+          cause instanceof Error
+            ? cause.message
+            : 'Model library is unavailable.',
+        );
+      }
+      setConnection('live');
+      setConnectionOpen(false);
+    } catch (cause) {
+      setConnection('error');
+      setError(cause instanceof Error ? cause.message : 'Connection failed.');
+      if (openOnFailure) setConnectionOpen(true);
+    }
+  }
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetchIntegratedRuntimeConfig(controller.signal)
+      .then((runtime) => {
+        if (!runtime || controller.signal.aborted) return;
+        const integratedConfig = {
+          ...defaultApiConfig,
+          baseUrl: runtime.apiBaseUrl,
+        };
+        setConfig(integratedConfig);
+        void connectLive(integratedConfig, true);
+      })
+      .catch((cause) => {
+        if (controller.signal.aborted) return;
+        setConnection('error');
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : 'Integrated runtime configuration failed.',
+        );
+        setConnectionOpen(true);
+      });
+    return () => controller.abort();
+  }, []);
+
+  function returnToDemo() {
+    abortRef.current?.abort();
+    benchmarkAbortRef.current?.abort();
+    setConnection('demo');
+    setModels(demoModels);
+    setProps(demoProps);
+    setSelectedModel(demoModels[0].id);
+    setBenchmark(demoBenchmark);
+    setBenchmarkHistory([demoBenchmark]);
+    setBenchmarkState('complete');
+    setLibrary(demoLibrary);
+    setLibraryBrowse(null);
+    setLibraryError('');
+    setBenchmarkError('');
+    setError('');
+    setConnectionOpen(false);
+  }
+
+  async function refreshLive() {
+    if (!live) return;
+    setError('');
+    try {
+      const snapshot = await fetchServerSnapshot(config);
+      setModels(snapshot.models);
+      setProps(snapshot.props);
+      setLibrary(await fetchModelLibrary(config));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Refresh failed.');
+    }
+  }
+
+  async function openModelLibrary() {
+    setLibraryOpen(true);
+    setLibraryError('');
+    if (!live) {
+      setLibrary(demoLibrary);
+      setLibraryBrowse(null);
+      return;
+    }
+    setLibraryBusy(true);
+    try {
+      const [snapshot, listing] = await Promise.all([
+        fetchModelLibrary(config),
+        browseModelLibrary(config, library.selected_path || undefined),
+      ]);
+      setLibrary(snapshot);
+      setLibraryBrowse(listing);
+    } catch (cause) {
+      setLibraryError(
+        cause instanceof Error
+          ? cause.message
+          : 'Model folder could not be opened.',
+      );
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function browseFolder(path?: string) {
+    if (!live) return;
+    setLibraryBusy(true);
+    setLibraryError('');
+    try {
+      setLibraryBrowse(await browseModelLibrary(config, path));
+    } catch (cause) {
+      setLibraryError(
+        cause instanceof Error ? cause.message : 'Folder could not be opened.',
+      );
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function selectCurrentFolder() {
+    if (!live || !libraryBrowse) return;
+    setLibraryBusy(true);
+    setLibraryError('');
+    try {
+      const snapshot = await selectModelLibraryFolder(
+        config,
+        libraryBrowse.current_path,
+      );
+      setLibrary(snapshot);
+      const server = await fetchServerSnapshot(config);
+      setModels(server.models);
+      setProps(server.props);
+      if (!server.models.some((model) => model.id === selectedModel))
+        setSelectedModel(server.models[0]?.id || '');
+    } catch (cause) {
+      setLibraryError(
+        cause instanceof Error
+          ? cause.message
+          : 'Model folder could not be selected.',
+      );
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function rescanLibrary() {
+    if (!live) return;
+    setLibraryBusy(true);
+    setLibraryError('');
+    try {
+      setLibrary(await rescanModelLibrary(config));
+      const server = await fetchServerSnapshot(config);
+      setModels(server.models);
+      setProps(server.props);
+    } catch (cause) {
+      setLibraryError(
+        cause instanceof Error ? cause.message : 'Model folder rescan failed.',
+      );
+    } finally {
+      setLibraryBusy(false);
+    }
+  }
+
+  async function runModelAction(alias: string, action: 'load' | 'unload') {
+    setBusyModel(alias);
+    setError('');
+    try {
+      if (live) {
+        await modelAction(config, alias, action);
+        await refreshLive();
+      } else {
+        setModels((current) =>
+          current.map((model) =>
+            model.id === alias
+              ? {
+                  ...model,
+                  lifecycle: action === 'load' ? 'loaded' : 'configured',
+                  residentBytes: action === 'load' ? 4_980_000_000 : undefined,
+                }
+              : model,
+          ),
+        );
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Model action failed.');
+    } finally {
+      setBusyModel('');
+    }
+  }
+
+  async function simulate(id: string) {
+    const reasoningText =
+      'Inspect the request, use the selected model fixture, and separate internal reasoning from the answer.';
+    const answer = `Prototype response from ${selectedModel}. Connect a server to replace this deterministic fixture with a live SSE stream.`;
+    for (const value of reasoningText) {
+
+TASK (TypeScript): Write tests for the API client's error mapping and the metrics formatting helpers, including a response with a missing counter field.

@@ -1,0 +1,192 @@
+// Package gateway routes completion requests to a pool of inference backends
+// and records the speculative-decoding counters each backend reports.
+package gateway
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"sort"
+	"sync"
+	"time"
+)
+
+// AcceptanceCounters mirrors the MTP counters a backend returns with every
+// completion. Proposed is the number of draft tokens offered to the target
+// model; Accepted is how many survived verification.
+type AcceptanceCounters struct {
+	ProposalBlocks uint64 `json:"proposal_blocks"`
+	Proposed       uint64 `json:"proposed_draft_tokens"`
+	Accepted       uint64 `json:"accepted_draft_tokens"`
+	DraftNanos     uint64 `json:"draft_wall_ns"`
+	DecodeNanos    uint64 `json:"decode_ns"`
+}
+
+// Rate returns accepted/proposed, or zero when nothing was proposed.
+func (c AcceptanceCounters) Rate() float64 {
+	if c.Proposed == 0 {
+		return 0
+	}
+	return float64(c.Accepted) / float64(c.Proposed)
+}
+
+// TokensPerSecond derives the decode rate from the block decomposition so a
+// single noisy end-to-end sample never drives the reported number.
+func (c AcceptanceCounters) TokensPerSecond() float64 {
+	if c.DecodeNanos == 0 {
+		return 0
+	}
+	tokens := float64(c.ProposalBlocks + c.Accepted)
+	return tokens / (float64(c.DecodeNanos) / 1e9)
+}
+
+// Backend is one resident model process reachable over HTTP.
+type Backend struct {
+	Name    string
+	BaseURL string
+	Target  string
+	Weight  int
+
+	mu       sync.Mutex
+	inflight int
+	healthy  bool
+}
+
+func (b *Backend) snapshotLoad() (int, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.inflight, b.healthy
+}
+
+func (b *Backend) acquire() {
+	b.mu.Lock()
+	b.inflight++
+	b.mu.Unlock()
+}
+
+func (b *Backend) release() {
+	b.mu.Lock()
+	if b.inflight > 0 {
+		b.inflight--
+	}
+	b.mu.Unlock()
+}
+
+// ErrNoHealthyBackend is returned when every backend failed its last probe.
+var ErrNoHealthyBackend = errors.New("gateway: no healthy backend")
+
+// Pool selects among backends by least weighted inflight requests.
+type Pool struct {
+	backends []*Backend
+	client   *http.Client
+}
+
+// NewPool builds a pool with a bounded client timeout.
+func NewPool(backends []*Backend, timeout time.Duration) (*Pool, error) {
+	if len(backends) == 0 {
+		return nil, errors.New("gateway: pool requires at least one backend")
+	}
+	for _, b := range backends {
+		if b.Weight <= 0 {
+			return nil, fmt.Errorf("gateway: backend %q needs a positive weight", b.Name)
+		}
+		b.healthy = true
+	}
+	return &Pool{
+		backends: backends,
+		client:   &http.Client{Timeout: timeout},
+	}, nil
+}
+
+func (p *Pool) pick() (*Backend, error) {
+	type scored struct {
+		backend *Backend
+		score   float64
+	}
+	candidates := make([]scored, 0, len(p.backends))
+	for _, b := range p.backends {
+		inflight, healthy := b.snapshotLoad()
+		if !healthy {
+			continue
+		}
+		candidates = append(candidates, scored{
+			backend: b,
+			score:   float64(inflight) / float64(b.Weight),
+		})
+	}
+	if len(candidates) == 0 {
+		return nil, ErrNoHealthyBackend
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].score < candidates[j].score
+	})
+	return candidates[0].backend, nil
+}
+
+// CompletionRequest is the subset of the OpenAI schema the gateway forwards.
+type CompletionRequest struct {
+	Model       string  `json:"model"`
+	Prompt      string  `json:"prompt"`
+	MaxTokens   int     `json:"max_tokens"`
+	Temperature float64 `json:"temperature"`
+	Seed        *uint64 `json:"seed,omitempty"`
+}
+
+// CompletionResponse carries the generated text plus the MTP counters.
+type CompletionResponse struct {
+	Text     string             `json:"text"`
+	Backend  string             `json:"backend"`
+	Target   string             `json:"target"`
+	Counters AcceptanceCounters `json:"mtp"`
+}
+
+// Complete forwards one request and annotates the response with routing data.
+func (p *Pool) Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error) {
+	if req.MaxTokens <= 0 {
+		return nil, errors.New("gateway: max_tokens must be positive")
+	}
+	backend, err := p.pick()
+	if err != nil {
+		return nil, err
+	}
+	backend.acquire()
+	defer backend.release()
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: encode request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		backend.BaseURL+"/v1/completions", bytesReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("gateway: build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		backend.markUnhealthy()
+		return nil, fmt.Errorf("gateway: backend %q: %w", backend.Name, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway: backend %q returned %d", backend.Name, resp.StatusCode)
+	}
+
+	var decoded CompletionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return nil, fmt.Errorf("gateway: decode response: %w", err)
+	}
+	decoded.Backend = backend.Name
+	decoded.Target = backend.Target
+	return &decoded, nil
+}
+
+func (b *Backend) markUnhealthy() {
+	b.mu.Lock()
+	b.healthy = false
+	b.mu.Unlock()
+}

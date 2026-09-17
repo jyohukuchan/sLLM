@@ -1,0 +1,198 @@
+You are working in this repository. Read the source below and propose a refactoring for the region named in the TASK section. Behaviour must not change. Explain what improves and what stays the same.
+
+--- java_bpe_tokenizer.java ---
+package dev.sllm.tokenizer;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.PriorityQueue;
+
+/**
+ * Byte-level BPE encoder for the reviewed model vocabulary.
+ *
+ * <p>The merge table is ordered: a lower rank must be applied before a higher
+ * rank. Encoding repeatedly fuses the lowest-ranked adjacent pair until no pair
+ * in the current symbol sequence appears in the table.
+ */
+public final class BpeTokenizer {
+
+    private final Map<String, Integer> vocabulary;
+    private final Map<Long, Integer> mergeRanks;
+    private final Map<Integer, String> reverseVocabulary;
+    private final int unknownTokenId;
+
+    private BpeTokenizer(
+            Map<String, Integer> vocabulary,
+            Map<Long, Integer> mergeRanks,
+            int unknownTokenId) {
+        this.vocabulary = Map.copyOf(vocabulary);
+        this.mergeRanks = Map.copyOf(mergeRanks);
+        this.unknownTokenId = unknownTokenId;
+        Map<Integer, String> reverse = new HashMap<>(vocabulary.size());
+        for (Map.Entry<String, Integer> entry : vocabulary.entrySet()) {
+            reverse.put(entry.getValue(), entry.getKey());
+        }
+        this.reverseVocabulary = Map.copyOf(reverse);
+    }
+
+    /**
+     * Builds a tokenizer from a vocabulary and an ordered merge list.
+     *
+     * @param vocabulary token text to identifier
+     * @param merges ordered pairs; index in the list is the merge rank
+     * @param unknownToken the token used for unmapped symbols
+     * @throws IllegalArgumentException when the unknown token is absent
+     */
+    public static BpeTokenizer create(
+            Map<String, Integer> vocabulary,
+            List<Map.Entry<String, String>> merges,
+            String unknownToken) {
+        Objects.requireNonNull(vocabulary, "vocabulary");
+        Objects.requireNonNull(merges, "merges");
+        Integer unknownId = vocabulary.get(Objects.requireNonNull(unknownToken));
+        if (unknownId == null) {
+            throw new IllegalArgumentException("unknown token is not in the vocabulary");
+        }
+        Map<Long, Integer> ranks = new HashMap<>(merges.size() * 2);
+        for (int rank = 0; rank < merges.size(); rank++) {
+            Map.Entry<String, String> merge = merges.get(rank);
+            Integer left = vocabulary.get(merge.getKey());
+            Integer right = vocabulary.get(merge.getValue());
+            if (left == null || right == null) {
+                throw new IllegalArgumentException(
+                        "merge rank " + rank + " references a token outside the vocabulary");
+            }
+            ranks.putIfAbsent(packPair(left, right), rank);
+        }
+        return new BpeTokenizer(vocabulary, ranks, unknownId);
+    }
+
+    private static long packPair(int left, int right) {
+        return (((long) left) << 32) | (right & 0xFFFFFFFFL);
+    }
+
+    private record Symbol(int id, int previous, int next, boolean alive) {}
+
+    private record Candidate(int rank, int position) {}
+
+    /**
+     * Encodes UTF-8 text into token identifiers.
+     *
+     * @param text input text; must not be null
+     * @return an immutable list of token identifiers
+     */
+    public List<Integer> encode(String text) {
+        Objects.requireNonNull(text, "text");
+        byte[] raw = text.getBytes(StandardCharsets.UTF_8);
+        if (raw.length == 0) {
+            return List.of();
+        }
+
+        List<Symbol> symbols = new ArrayList<>(raw.length);
+        for (int index = 0; index < raw.length; index++) {
+            String unit = byteToUnit(raw[index]);
+            int id = vocabulary.getOrDefault(unit, unknownTokenId);
+            symbols.add(new Symbol(id, index - 1, index + 1 < raw.length ? index + 1 : -1, true));
+        }
+
+        PriorityQueue<Candidate> queue = new PriorityQueue<>(
+                Comparator.comparingInt(Candidate::rank).thenComparingInt(Candidate::position));
+        for (int index = 0; index + 1 < symbols.size(); index++) {
+            enqueueIfMergeable(symbols, queue, index);
+        }
+
+        while (!queue.isEmpty()) {
+            Candidate candidate = queue.poll();
+            int left = candidate.position();
+            Symbol leftSymbol = symbols.get(left);
+            if (!leftSymbol.alive() || leftSymbol.next() < 0) {
+                continue;
+            }
+            int right = leftSymbol.next();
+            Symbol rightSymbol = symbols.get(right);
+            if (!rightSymbol.alive()) {
+                continue;
+            }
+            Integer rank = mergeRanks.get(packPair(leftSymbol.id(), rightSymbol.id()));
+            if (rank == null || rank != candidate.rank()) {
+                continue;
+            }
+
+            String fused = reverseVocabulary.get(leftSymbol.id())
+                    + reverseVocabulary.get(rightSymbol.id());
+            Integer fusedId = vocabulary.get(fused);
+            if (fusedId == null) {
+                continue;
+            }
+
+            symbols.set(left, new Symbol(fusedId, leftSymbol.previous(), rightSymbol.next(), true));
+            symbols.set(right, new Symbol(rightSymbol.id(), right, rightSymbol.next(), false));
+            if (rightSymbol.next() >= 0) {
+                Symbol after = symbols.get(rightSymbol.next());
+                symbols.set(rightSymbol.next(),
+                        new Symbol(after.id(), left, after.next(), after.alive()));
+            }
+
+            enqueueIfMergeable(symbols, queue, left);
+            if (leftSymbol.previous() >= 0) {
+                enqueueIfMergeable(symbols, queue, leftSymbol.previous());
+            }
+        }
+
+        List<Integer> encoded = new ArrayList<>();
+        for (Symbol symbol : symbols) {
+            if (symbol.alive()) {
+                encoded.add(symbol.id());
+            }
+        }
+        return List.copyOf(encoded);
+    }
+
+    private void enqueueIfMergeable(
+            List<Symbol> symbols, PriorityQueue<Candidate> queue, int position) {
+        if (position < 0 || position >= symbols.size()) {
+            return;
+        }
+        Symbol left = symbols.get(position);
+        if (!left.alive() || left.next() < 0) {
+            return;
+        }
+        Symbol right = symbols.get(left.next());
+        if (!right.alive()) {
+            return;
+        }
+        Integer rank = mergeRanks.get(packPair(left.id(), right.id()));
+        if (rank != null) {
+            queue.add(new Candidate(rank, position));
+        }
+    }
+
+    private static String byteToUnit(byte value) {
+        int unsigned = value & 0xFF;
+        return String.valueOf((char) (unsigned + 0x100));
+    }
+
+    /** Decodes identifiers back to text, skipping identifiers outside the vocabulary. */
+    public String decode(List<Integer> tokenIds) {
+        Objects.requireNonNull(tokenIds, "tokenIds");
+        StringBuilder builder = new StringBuilder();
+        for (Integer id : tokenIds) {
+            String unit = reverseVocabulary.get(id);
+            if (unit != null) {
+                builder.append(unit);
+            }
+        }
+        byte[] raw = new byte[builder.length()];
+        for (int index = 0; index < builder.length(); index++) {
+            raw[index] = (byte) (builder.charAt(index) - 0x100);
+        }
+        return new String(raw, StandardCharsets.UTF_8);
+    }
+}
+
+TASK (Java): Refactor the symbol linked list so `Symbol` no longer carries an `alive` flag that every reader must remember to check.

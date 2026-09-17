@@ -1,0 +1,154 @@
+{
+  "schema_version": "mtp-teacher-forced-agreement-v2",
+  "state": "COMPLETE",
+  "conditions": 8,
+  "forced_positions_per_series": 2048,
+  "prefix_origin": "generated on gfx1030 with the BF16 companion; reused on gfx1201 so both targets are forced at identical positions",
+  "sampling": "gpu-fixed seed123; the trajectory is fixed by the forced prefix, not by the sampler",
+  "devices": {
+    "gfx1030": "GPU-76a08c022586fed6",
+    "gfx1201": "GPU-a8e9ddefa2d60f55"
+  },
+  "within_gpu_vs_bf16_draft": {
+    "gfx1030": {
+      "mxfp8": {
+        "agree": 1993,
+        "positions": 2048,
+        "rate": 0.97314453125,
+        "se": 0.003572235364874417
+      },
+      "mxfp6": {
+        "agree": 1986,
+        "positions": 2048,
+        "rate": 0.9697265625,
+        "se": 0.0037860865556923204
+      }
+    },
+    "gfx1201": {
+      "mxfp8": {
+        "agree": 2012,
+        "positions": 2048,
+        "rate": 0.982421875,
+        "se": 0.0029038241321692575
+      },
+      "mxfp6": {
+        "agree": 1981,
+        "positions": 2048,
+        "rate": 0.96728515625,
+        "se": 0.0039308340616367385
+      }
+    }
+  },
+  "paired_mxfp8_vs_mxfp6": {
+    "gfx1030": {
+      "mxfp8_only_agrees": 40,
+      "mxfp6_only_agrees": 33,
+      "difference": 0.00341796875,
+      "se": 0.004171876828768325,
+      "z": 0.819288030372914
+    },
+    "gfx1201": {
+      "mxfp8_only_agrees": 47,
+      "mxfp6_only_agrees": 16,
+      "difference": 0.01513671875,
+      "se": 0.0038756122720672716,
+      "z": 3.9056328877620143
+    }
+  },
+  "cross_gpu_same_format": {
+    "bf16": {
+      "agree": 1950,
+      "positions": 2048,
+      "rate": 0.9521484375,
+      "se": 0.004716669163840861
+    },
+    "mxfp8": {
+      "agree": 1945,
+      "positions": 2048,
+      "rate": 0.94970703125,
+      "se": 0.004829292235742105
+    },
+    "mxfp6": {
+      "agree": 1936,
+      "positions": 2048,
+      "rate": 0.9453125,
+      "se": 0.005024198151185712
+    }
+  },
+  "per_condition": {
+    "gfx1030": {
+      "code-c-implement-en": {
+        "mxfp8": 0.984375,
+        "mxfp6": 0.96875
+      },
+      "code-cuda-explain-ja": {
+        "mxfp8": 0.96484375,
+        "mxfp6": 0.94140625
+      },
+      "code-rust-bugfix-zh": {
+        "mxfp8": 0.96484375,
+        "mxfp6": 0.97265625
+      },
+      "code-python-review-zh": {
+        "mxfp8": 0.9453125,
+        "mxfp6": 0.96484375
+      },
+      "code-go-implement-en": {
+        "mxfp8": 0.9765625,
+        "mxfp6": 0.98046875
+      },
+      "code-java-refactor-en": {
+        "mxfp8": 0.98046875,
+        "mxfp6": 0.96875
+      },
+      "trans-en-ja-tech": {
+        "mxfp8": 0.98046875,
+        "mxfp6": 0.9765625
+      },
+      "trans-zh-en-tech": {
+        "mxfp8": 0.98828125,
+        "mxfp6": 0.984375
+      }
+    },
+    "gfx1201": {
+      "code-c-implement-en": {
+        "mxfp8": 0.98046875,
+        "mxfp6": 0.96875
+      },
+      "code-cuda-explain-ja": {
+        "mxfp8": 0.96484375,
+        "mxfp6": 0.94140625
+      },
+      "code-rust-bugfix-zh": {
+        "mxfp8": 0.9921875,
+        "mxfp6": 0.98046875
+      },
+      "code-python-review-zh": {
+        "mxfp8": 0.98046875,
+        "mxfp6": 0.953125
+      },
+      "code-go-implement-en": {
+        "mxfp8": 0.96875,
+        "mxfp6": 0.9609375
+      },
+      "code-java-refactor-en": {
+        "mxfp8": 0.9921875,
+        "mxfp6": 0.96875
+      },
+      "trans-en-ja-tech": {
+        "mxfp8": 0.98046875,
+        "mxfp6": 0.9765625
+      },
+      "trans-zh-en-tech": {
+        "mxfp8": 1.0,
+        "mxfp6": 0.98828125
+      }
+    }
+  },
+  "contract": {
+    "nonfinite_values": 0,
+    "all_dispatches_hip": true,
+    "fallback_used": false
+  },
+  "key_finding": "The two GPUs disagree with each other more (4.8% of positions, BF16 draft, identical forced inputs) than quantization disagrees with BF16 on either GPU (1.8-3.3%)."
+}
