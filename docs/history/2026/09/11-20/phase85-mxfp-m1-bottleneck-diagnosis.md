@@ -2,7 +2,7 @@
 
 ## 2026-09-13: V620／R9700 counter and clock diagnosis
 
-M1、K=5,120、N=17,408を対象に、exact `gfx1030`（V620）とexact `gfx1201`（R9700）のraw rocprofv3 PMCを、BF16／MXFP8／MXFP6ごとにfetch、cache、instruction、wait groupへ分けて採取した。各groupはwarmup 100、measured 5、kernel iteration 101..105で、clock probeは各profile 100反復である。集計は[counter analysis](../../../../../.local-artifacts/phase85-m1-bottleneck/counter-notes/gate-counter-analysis.json)と[markdown view](../../../../../.local-artifacts/phase85-m1-bottleneck/counter-notes/gate-counter-analysis.md)に置いた。counter catalogとtarget別の単位・式は[RDNA catalog note](../../../../../.local-artifacts/phase85-m1-bottleneck/counter-notes/rdna-counter-catalog.md)に分離している。
+M1、K=5,120、N=17,408を対象に、exact `gfx1030`（V620）とexact `gfx1201`（R9700）のraw rocprofv3 PMCを、BF16／MXFP8／MXFP6ごとにfetch、cache、instruction、wait groupへ分けて採取した。各groupはwarmup 100、measured 5、kernel iteration 101..105で、clock probeは各profile 100反復である。集計はcounter analysis（Git管理外: `.local-artifacts/phase85-m1-bottleneck/counter-notes/gate-counter-analysis.json`）とmarkdown view（Git管理外: `.local-artifacts/phase85-m1-bottleneck/counter-notes/gate-counter-analysis.md`）に置いた。counter catalogとtarget別の単位・式はRDNA catalog note（Git管理外: `.local-artifacts/phase85-m1-bottleneck/counter-notes/rdna-counter-catalog.md`）に分離している。
 
 V620のraw VALU周辺では、SALU instruction medianはBF16 6.74M、MXFP6 23.71M、MXFP8 40.02Mで、量子化形式の命令量はBF16より約3.5倍／5.9倍だった。wave32 instruction medianはBF16 44.76M、MXFP6 155.59M、MXFP8 160.03Mだった。これらは命令数でありFLOPsまたはVALU throughput saturationへ読み替えない。集計のMACはM×K×N、FLOPsは2×M×K×Nとして、出力列数・per-output・per-useful-MACを区別した。wave数はBF16のN×8、col2のceil(N/2)×8を個別に照合した。
 

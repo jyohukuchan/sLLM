@@ -130,7 +130,7 @@ native APIにdraft専用walltimeはないので推定値を作っていない。
 `/home/homelab1/.cache/sllm-benchmarks/llama-mtp-20260914/models/` へ移し、従来のlogical pathはsymlinkで維持した。
 原本はdatapool上で不変。Gitには集約値・hash・文書だけを保存し、model／binary／raw traceは保存しない。
 
-比較図: [専用8行列](../../../../../.local-artifacts/llama-mtp-20260914/plots/phase85-fixed-heatmap.png) / [ファイル全体](../../../../../.local-artifacts/llama-mtp-20260914/plots/phase85-full-sidecar-heatmap.png)。
+比較図: 専用8行列（Git管理外: `.local-artifacts/llama-mtp-20260914/plots/phase85-fixed-heatmap.png`） / ファイル全体（Git管理外: `.local-artifacts/llama-mtp-20260914/plots/phase85-full-sidecar-heatmap.png`）。
 詳細表: [CSV](llama-mtp-quantization-results.csv) / [集約JSON](../../../../../ci/matrix/llama-mtp-quantization-results-v1.json)。
 
 [計画](../../../../plans/archive/2026/09/11-20/llama-mtp-quantization-benchmark.md) / [メイン計画](../../../../plans/main-plan.md)
