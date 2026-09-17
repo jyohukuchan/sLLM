@@ -47,3 +47,11 @@ Phase82で既定化しなかった候補固有controlは、既存のbaseline比�
 ## 証拠の境界
 
 Phase82のGPU証拠は記載したtarget、shape、encoding、fixtureに限る。`max_bf16_ulp=0`やtoken一致はそのscopeの観測であり、全model・全shape・全KV形式の品質証明ではない。未設定時に既定へ到達すること、明示0／未知値でbaselineまたはfallbackへ戻ること、fallback・非finite・cleanupを引き続き検査する。詳細な数値分類は[数値・出力影響変更台帳](../../../../compatibility/numerical-output-changes.md)、候補削除の試行と理由は[Phase82 cleanup history](phase82-optimization-cleanup-default-adoption.md)、固定fixtureとsource/build identityは[Phase82 evidence ledger](phase82-optimization-evidence.json)を参照する。
+
+## 2026-09-17 FORCE_BASELINE 記述の訂正
+
+当時の `FORCE_BASELINE=1` は、同一source内で候補kernelを比較するための実装上の切戻し指定として記録されていた。この記録は当時の実験条件として保持する。現在の本番復旧手段は環境変数によるT2参照経路ではなく、既知の実行binaryを生成したcommitへのバイナリロールバックである。
+
+- Phase82の既知の実装前・比較用source anchorは `0b2f0a45378375311d208effcdb32ad02dcf9349`（Phase81 r3 binary）である。Phase82の実装・削除commitは `fff63c574f1ffa7541efbef5c02e91b856db4a7d` と記録済みであり、前者が後者の祖先であることを確認している。Phase82の本番復旧を必要とする場合は、対象target用の既知binaryをこのcommitのbuildへ戻す。
+- `SLLM_*_FORCE_BASELINE=1` は、[FORCE_BASELINE T2約束範囲](../../../../development/force-baseline-reference-oracle.md)に記載する診断用参照経路である。T2はT1の独立真値ではなく、本番ロールバック、性能保証、全shapeの品質保証を担わない。
+- 2026-09-17に11 flagの棚卸しと、失敗したNVFP4 W4A4／gfx1030 FP8 decodeの修復・検証を完了した。無効果フラグを検証済み参照経路には数えない。初期失敗は[欠陥記録](../../../../../ci/matrix/nvfp4-force-baseline-defect-v1.json)に保持し、修復後の実モデル完走と数値証拠は[完了履歴](../11-20/force-baseline-reference-oracle.md)を参照する。

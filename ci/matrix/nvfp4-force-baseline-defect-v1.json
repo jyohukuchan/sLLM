@@ -1,0 +1,67 @@
+{
+  "schema_version": "nvfp4-force-baseline-defect-v1",
+  "state": "complete",
+  "date": "2026-09-16",
+  "summary": "SLLM_NVFP4_W4A4_FORCE_BASELINE=1 cannot run the Qwen3.8-27B NVFP4 prefill. The failure is not an interaction with the projection-pack optimisation: it is the NVFP4 W4A4 baseline matmul itself.",
+  "model": "Qwen3.8-27B-NVFP4",
+  "condition": "code-rust-bugfix-zh, 8284 prompt tokens, chunk 2048",
+  "experiments": [
+    {
+      "flags": "(default)",
+      "target": "gfx1030/gfx1201",
+      "exit": 0,
+      "note": "normal path, used for every measurement in this line of work"
+    },
+    {
+      "flags": "SLLM_NVFP4_W4A4_FORCE_BASELINE=1",
+      "target": "gfx1030 and gfx1201",
+      "exit": 1,
+      "error": "Qwen node layer.0.mlp_gate_matmul.qwen38_projection_pack2 failed: backend status 260: matmul kernel launch: invalid configuration argument"
+    },
+    {
+      "flags": "SLLM_QWEN38_NVFP4_PROJECTION_PACK2=0",
+      "target": "gfx1030",
+      "exit": 0,
+      "note": "the unpacked projection path exists and works; packing is default-on via default_on_env and can be disabled with =0"
+    },
+    {
+      "flags": "SLLM_NVFP4_W4A4_FORCE_BASELINE=1 SLLM_QWEN38_NVFP4_PROJECTION_PACK2=0",
+      "target": "gfx1030",
+      "exit": 1,
+      "error": "Qwen node layer.0.mlp_gate_matmul failed: backend status 260: matmul kernel launch: invalid configuration argument",
+      "note": "label no longer carries .qwen38_projection_pack2, so the packed node is not the cause"
+    }
+  ],
+  "attribution": "The NVFP4 W4A4 baseline uses TilePolicy::Elementwise (one thread per output element). The Qwen3.8 MLP gate prefill is m=2048 x n=17408 = 35,651,584 outputs. The specialised prefill kernels were validated at that scale; the baseline launch configuration was not.",
+  "documented_rollback_claims_affected": [
+    "phase82-default-adoption-scope.md: NVFP4 activation quantizer wave8 -> SLLM_NVFP4_FORCE_BASELINE=1 or SLLM_NVFP4_W4A4_FORCE_BASELINE=1",
+    "phase82-default-adoption-scope.md: NVFP4 decode ID67 -> SLLM_NVFP4_W4A4_FORCE_BASELINE=1",
+    "phase78-nvfp4-cross-model-measurement.md: prefill ID59 / decode ID58 -> SLLM_NVFP4_W4A4_FORCE_BASELINE=1 で旧ID11へ戻せる"
+  ],
+  "validation_gap": "Phase82 recorded force-baseline as PASS over 26 operator fixtures and 5 modes. Those are operator-scale fixtures, not the Qwen3.8 full-model graph at prefill shapes.",
+  "not_established": [
+    "whether decode-only (m=1) force-baseline works; the run fails during prefill before reaching decode",
+    "whether the other FORCE_BASELINE flags (attention, matmul, FP8 outer) have the same gap",
+    "the exact launch parameter that HIP rejects"
+  ],
+  "severity": "Production default path is unaffected and fails closed: the error is raised at layer 0 with current_bytes=0, retryable_cleanup=0, durable_quarantine=0 on both targets. The impact is on rollback capability and on numerical debugging, not on shipped inference.",
+  "artifacts": ".local-artifacts/mtp-bench/wmma-check/",
+  "follow_up_2026_09_17": {
+    "state": "resolved within documented diagnostic T2 scope; both exact-target full-model NVFP4 runs passed",
+    "historical_record_preserved": true,
+    "attribution_correction": "The baseline uses one 256-thread block per output, not one thread. The per-X global-thread limit rejects 16,777,216 or more such blocks despite the reported maxGridSize[0].",
+    "repair": "Split baseline launches at 16,777,215 outputs without changing arithmetic, graph, or chunk size; reject unsupported diagnostic scope explicitly.",
+    "scope_document": "docs/development/force-baseline-reference-oracle.md",
+    "ledger": "ci/matrix/force-baseline-oracle-v1.json",
+    "resolved_unknowns": {
+      "decode": "Initial short NVFP4 reference runs succeeded on both targets.",
+      "other_flags": "All 11 flags inventoried; gfx1030 FP8 decode also failed Graph admission and was repaired separately.",
+      "launch_parameter": "Per-X total threads: grid blocks multiplied by 256 must be below 2^32."
+    },
+    "full_model_evidence": {
+      "gfx1030": ".local-artifacts/force-baseline-oracle/model-r4-gfx1030/gfx1030/nvfp4_w4a4_force_baseline/long/run.json",
+      "gfx1201": ".local-artifacts/force-baseline-oracle/model-r1-gfx1201/gfx1201/nvfp4_w4a4_force_baseline/long/run.json"
+    },
+    "role": "diagnostic attribution reference T2, not production rollback or independent truth"
+  }
+}

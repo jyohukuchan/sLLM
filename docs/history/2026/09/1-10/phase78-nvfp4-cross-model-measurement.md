@@ -72,3 +72,11 @@ raw・argv・stderr・hashは`.local-artifacts/phase78-nvfp4-cross-model/`およ
 
 [完了計画](../../../../plans/archive/2026/09/1-10/phase78-nvfp4-cross-model-measurement.md) ·
 [先行MXFP8測定](phase78-cross-model-measurement.md)
+
+## 2026-09-17 FORCE_BASELINE 記述の訂正
+
+この履歴にある `SLLM_NVFP4_W4A4_FORCE_BASELINE=1` は、Phase78当時の同一binary内比較用指定として残す。現在の本番復旧手段は、この環境変数を設定することではなく、Phase78の既知実行binaryを生成したcommitへのバイナリロールバックである。
+
+- Phase78のQwen3.8実行CLIと証拠に記録された既知source commitは `40ab582b049cff7effadbca75fe951d6cef5bd96`（Qwen3.8統合実装commit `9ba9959ee14bc27193b7bafed0939a1142e17383` の直後のdocs-only commit）である。`phase78-nvfp4-cross-model-evidence.json` の `identity.source_commit` と、この履歴の実行条件が同じcommitを指していることを確認している。Phase78へ戻す必要がある場合は、対象target用に保存したこの既知binaryを使う。
+- `SLLM_NVFP4_W4A4_FORCE_BASELINE=1` を含む `SLLM_*_FORCE_BASELINE=1` は、[FORCE_BASELINE T2約束範囲](../../../../development/force-baseline-reference-oracle.md)に定義する診断用参照経路へ分類する。T2はhost独立T1 oracleではなく、Phase78の本番ロールバック、性能、全モデル品質を保証しない。
+- 2026-09-17に11 flag棚卸しと対象範囲の確定、必要な修復を完了した。NVFP4参照経路は両GPUの固定long実モデルと独立FP32演算子検証をPASSした。今回の訂正は既存Phase78性能測定を再実行したものではなく、無効果フラグや別モデルまでの数値保証には広げない。[完了履歴](../11-20/force-baseline-reference-oracle.md)に証拠を記す。
