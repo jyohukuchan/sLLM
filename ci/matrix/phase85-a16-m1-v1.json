@@ -1,0 +1,1229 @@
+{
+  "schema_version": "phase85-mxfp-shapes-v1",
+  "state": "frozen-before-a16-candidate",
+  "purpose": "Phase85 M=1 A16 candidate shape manifest: six real MTP matrices, M=1 K/N boundaries, and host selector boundaries before candidate implementation.",
+  "oracle_policy": "BoundarySample for all GPU-scale and selector cases; no full CPU oracle for large matrices.",
+  "measurement_contract": {
+    "warmups": 3,
+    "measured_repeats": 32,
+    "measured_scope": "real-mtp and m1-boundary cases; host-selector cases are also runnable by filter for dispatch evidence",
+    "activation_variants": {
+      "mxfp8": [
+        "a8",
+        "a16"
+      ],
+      "mxfp6": [
+        "a6",
+        "a16"
+      ]
+    },
+    "activation_labels": {
+      "mxfp8": {
+        "a8": "W8A8",
+        "a16": "W8A16"
+      },
+      "mxfp6": {
+        "a6": "W6A6",
+        "a16": "W6A16"
+      }
+    },
+    "a16_scope": "m==1 only; m>1 selector cases retain the current quantized activation path",
+    "planned_case_count": 48,
+    "planned_measurement_rows": 84,
+    "repeats_note": "3 warmup submissions and 32 measured submissions per runnable case/provider variant; host selector assertions are separate from timing claims"
+  },
+  "shape_contract": {
+    "real_mtp_shapes": 6,
+    "real_shape_m": 1,
+    "real_k_n_pairs": [
+      {
+        "k": 10240,
+        "n": 5120
+      },
+      {
+        "k": 17408,
+        "n": 5120
+      },
+      {
+        "k": 5120,
+        "n": 17408
+      },
+      {
+        "k": 5120,
+        "n": 12288
+      },
+      {
+        "k": 5120,
+        "n": 1024
+      },
+      {
+        "k": 6144,
+        "n": 5120
+      }
+    ],
+    "boundary_m": 1,
+    "boundary_k": [
+      2016,
+      2048,
+      2080,
+      17376
+    ],
+    "boundary_n": [
+      1023,
+      1024,
+      1025
+    ],
+    "host_selector_m": [
+      1,
+      2,
+      16,
+      17,
+      127,
+      128,
+      129
+    ],
+    "host_selector_representative_shape": {
+      "k": 2048,
+      "n": 1024
+    },
+    "deduplicated_overlap": [
+      "mxfp8-m1-boundary-k2048-n1024",
+      "mxfp6-m1-boundary-k2048-n1024"
+    ]
+  },
+  "selector_contract": {
+    "host_targets": [
+      "gfx1030",
+      "gfx1201"
+    ],
+    "gfx1201": {
+      "mxfp8": {
+        "wmma_min_m": 128,
+        "wmma_representative_m": 128,
+        "wmma_cases": [
+          "mxfp8-host-selector-m128-k2048-n1024"
+        ],
+        "non_wmma_m": [
+          1,
+          2,
+          16,
+          17,
+          127
+        ]
+      },
+      "mxfp6": {
+        "wmma_min_m": 17,
+        "wmma_representative_m": 17,
+        "wmma_cases": [
+          "mxfp6-host-selector-m17-k2048-n1024"
+        ],
+        "non_wmma_m": [
+          1,
+          2,
+          16
+        ]
+      }
+    },
+    "gfx1030": {
+      "mxfp8": {
+        "wmma": "unavailable-for-mxfp8",
+        "m_values": [
+          1,
+          2,
+          16,
+          17,
+          127,
+          128,
+          129
+        ]
+      },
+      "mxfp6": {
+        "wmma": "unavailable-for-mxfp6",
+        "m_values": [
+          1,
+          2,
+          16,
+          17,
+          127,
+          128,
+          129
+        ]
+      }
+    },
+    "boundary_expectation": "m=1,2,16,17,127,128,129 are host selector assertions; only gfx1201 WMMA expectations above are target-specific."
+  },
+  "coverage": {
+    "real_mtp_case_ids": [
+      "mxfp8-mtp-m1-fusion-k10240-n5120",
+      "mxfp8-mtp-m1-down-k17408-n5120",
+      "mxfp8-mtp-m1-gate-up-k5120-n17408",
+      "mxfp8-mtp-m1-q-k5120-n12288",
+      "mxfp8-mtp-m1-kv-k5120-n1024",
+      "mxfp8-mtp-m1-o-k6144-n5120",
+      "mxfp6-mtp-m1-fusion-k10240-n5120",
+      "mxfp6-mtp-m1-down-k17408-n5120",
+      "mxfp6-mtp-m1-gate-up-k5120-n17408",
+      "mxfp6-mtp-m1-q-k5120-n12288",
+      "mxfp6-mtp-m1-kv-k5120-n1024",
+      "mxfp6-mtp-m1-o-k6144-n5120"
+    ],
+    "m1_boundary_case_ids": [
+      "mxfp8-m1-boundary-k2016-n1023",
+      "mxfp8-m1-boundary-k2016-n1024",
+      "mxfp8-m1-boundary-k2016-n1025",
+      "mxfp8-m1-boundary-k2048-n1023",
+      "mxfp8-m1-boundary-k2048-n1024",
+      "mxfp8-m1-boundary-k2048-n1025",
+      "mxfp8-m1-boundary-k2080-n1023",
+      "mxfp8-m1-boundary-k2080-n1024",
+      "mxfp8-m1-boundary-k2080-n1025",
+      "mxfp8-m1-boundary-k17376-n1023",
+      "mxfp8-m1-boundary-k17376-n1024",
+      "mxfp8-m1-boundary-k17376-n1025",
+      "mxfp6-m1-boundary-k2016-n1023",
+      "mxfp6-m1-boundary-k2016-n1024",
+      "mxfp6-m1-boundary-k2016-n1025",
+      "mxfp6-m1-boundary-k2048-n1023",
+      "mxfp6-m1-boundary-k2048-n1024",
+      "mxfp6-m1-boundary-k2048-n1025",
+      "mxfp6-m1-boundary-k2080-n1023",
+      "mxfp6-m1-boundary-k2080-n1024",
+      "mxfp6-m1-boundary-k2080-n1025",
+      "mxfp6-m1-boundary-k17376-n1023",
+      "mxfp6-m1-boundary-k17376-n1024",
+      "mxfp6-m1-boundary-k17376-n1025"
+    ],
+    "host_selector_case_ids": [
+      "mxfp8-host-selector-m2-k2048-n1024",
+      "mxfp8-host-selector-m16-k2048-n1024",
+      "mxfp8-host-selector-m17-k2048-n1024",
+      "mxfp8-host-selector-m127-k2048-n1024",
+      "mxfp8-host-selector-m128-k2048-n1024",
+      "mxfp8-host-selector-m129-k2048-n1024",
+      "mxfp6-host-selector-m2-k2048-n1024",
+      "mxfp6-host-selector-m16-k2048-n1024",
+      "mxfp6-host-selector-m17-k2048-n1024",
+      "mxfp6-host-selector-m127-k2048-n1024",
+      "mxfp6-host-selector-m128-k2048-n1024",
+      "mxfp6-host-selector-m129-k2048-n1024",
+      "mxfp8-m1-boundary-k2048-n1024",
+      "mxfp6-m1-boundary-k2048-n1024"
+    ],
+    "formats": [
+      "mxfp8",
+      "mxfp6"
+    ],
+    "activation_variants": {
+      "mxfp8": ["a8", "a16"],
+      "mxfp6": ["a6", "a16"]
+    },
+    "total_unique_cases": 48,
+    "total_case_format_variant_rows": 84
+  },
+  "cases": [
+    {
+      "case_id": "mxfp8-mtp-m1-fusion-k10240-n5120",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "mtp",
+        "real-shape",
+        "m1",
+        "a8-a16"
+      ],
+      "role": "mtp",
+      "m": 1,
+      "k": 10240,
+      "n": 5120,
+      "phase": 3000,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-mtp-m1-down-k17408-n5120",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "mtp",
+        "real-shape",
+        "m1",
+        "a8-a16"
+      ],
+      "role": "mtp",
+      "m": 1,
+      "k": 17408,
+      "n": 5120,
+      "phase": 3001,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-mtp-m1-gate-up-k5120-n17408",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "mtp",
+        "real-shape",
+        "m1",
+        "a8-a16"
+      ],
+      "role": "mtp",
+      "m": 1,
+      "k": 5120,
+      "n": 17408,
+      "phase": 3002,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-mtp-m1-q-k5120-n12288",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "mtp",
+        "real-shape",
+        "m1",
+        "a8-a16"
+      ],
+      "role": "mtp",
+      "m": 1,
+      "k": 5120,
+      "n": 12288,
+      "phase": 3003,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-mtp-m1-kv-k5120-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "mtp",
+        "real-shape",
+        "m1",
+        "a8-a16"
+      ],
+      "role": "mtp",
+      "m": 1,
+      "k": 5120,
+      "n": 1024,
+      "phase": 3004,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-mtp-m1-o-k6144-n5120",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "mtp",
+        "real-shape",
+        "m1",
+        "a8-a16"
+      ],
+      "role": "mtp",
+      "m": 1,
+      "k": 6144,
+      "n": 5120,
+      "phase": 3005,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2016-n1023",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a8-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2016,
+      "n": 1023,
+      "phase": 3020,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2016-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a8-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2016,
+      "n": 1024,
+      "phase": 3021,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2016-n1025",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a8-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2016,
+      "n": 1025,
+      "phase": 3022,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2048-n1023",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a8-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2048,
+      "n": 1023,
+      "phase": 3023,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2048-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "m1",
+        "host-selector",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a8-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3024,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2048-n1025",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a8-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2048,
+      "n": 1025,
+      "phase": 3025,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2080-n1023",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a8-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2080,
+      "n": 1023,
+      "phase": 3026,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2080-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a8-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2080,
+      "n": 1024,
+      "phase": 3027,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k2080-n1025",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a8-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2080,
+      "n": 1025,
+      "phase": 3028,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k17376-n1023",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a8-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 17376,
+      "n": 1023,
+      "phase": 3029,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k17376-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a8-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 17376,
+      "n": 1024,
+      "phase": 3030,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-m1-boundary-k17376-n1025",
+      "format": "mxfp8",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a8-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 17376,
+      "n": 1025,
+      "phase": 3031,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp8-host-selector-m2-k2048-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "host-selector",
+        "selector-boundary",
+        "a8"
+      ],
+      "role": "matmul",
+      "m": 2,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3040,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8"
+      ]
+    },
+    {
+      "case_id": "mxfp8-host-selector-m16-k2048-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "host-selector",
+        "selector-boundary",
+        "a8"
+      ],
+      "role": "matmul",
+      "m": 16,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3041,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8"
+      ]
+    },
+    {
+      "case_id": "mxfp8-host-selector-m17-k2048-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "host-selector",
+        "selector-boundary",
+        "a8",
+        "wmma-m17"
+      ],
+      "role": "matmul",
+      "m": 17,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3042,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8"
+      ]
+    },
+    {
+      "case_id": "mxfp8-host-selector-m127-k2048-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "host-selector",
+        "selector-boundary",
+        "a8"
+      ],
+      "role": "matmul",
+      "m": 127,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3043,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8"
+      ]
+    },
+    {
+      "case_id": "mxfp8-host-selector-m128-k2048-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "host-selector",
+        "selector-boundary",
+        "a8",
+        "gfx1201-wmma-candidate",
+        "wmma-m128"
+      ],
+      "role": "matmul",
+      "m": 128,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3044,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8"
+      ]
+    },
+    {
+      "case_id": "mxfp8-host-selector-m129-k2048-n1024",
+      "format": "mxfp8",
+      "tags": [
+        "host-selector",
+        "selector-boundary",
+        "a8"
+      ],
+      "role": "matmul",
+      "m": 129,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3045,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a8"
+      ]
+    },
+    {
+      "case_id": "mxfp6-mtp-m1-fusion-k10240-n5120",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "mtp",
+        "real-shape",
+        "m1",
+        "a6-a16"
+      ],
+      "role": "mtp",
+      "m": 1,
+      "k": 10240,
+      "n": 5120,
+      "phase": 3010,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-mtp-m1-down-k17408-n5120",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "mtp",
+        "real-shape",
+        "m1",
+        "a6-a16"
+      ],
+      "role": "mtp",
+      "m": 1,
+      "k": 17408,
+      "n": 5120,
+      "phase": 3011,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-mtp-m1-gate-up-k5120-n17408",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "mtp",
+        "real-shape",
+        "m1",
+        "a6-a16"
+      ],
+      "role": "mtp",
+      "m": 1,
+      "k": 5120,
+      "n": 17408,
+      "phase": 3012,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-mtp-m1-q-k5120-n12288",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "mtp",
+        "real-shape",
+        "m1",
+        "a6-a16"
+      ],
+      "role": "mtp",
+      "m": 1,
+      "k": 5120,
+      "n": 12288,
+      "phase": 3013,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-mtp-m1-kv-k5120-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "mtp",
+        "real-shape",
+        "m1",
+        "a6-a16"
+      ],
+      "role": "mtp",
+      "m": 1,
+      "k": 5120,
+      "n": 1024,
+      "phase": 3014,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-mtp-m1-o-k6144-n5120",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "mtp",
+        "real-shape",
+        "m1",
+        "a6-a16"
+      ],
+      "role": "mtp",
+      "m": 1,
+      "k": 6144,
+      "n": 5120,
+      "phase": 3015,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2016-n1023",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a6-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2016,
+      "n": 1023,
+      "phase": 3050,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2016-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a6-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2016,
+      "n": 1024,
+      "phase": 3051,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2016-n1025",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a6-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2016,
+      "n": 1025,
+      "phase": 3052,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2048-n1023",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a6-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2048,
+      "n": 1023,
+      "phase": 3053,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2048-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "m1",
+        "host-selector",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a6-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3054,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2048-n1025",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a6-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2048,
+      "n": 1025,
+      "phase": 3055,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2080-n1023",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a6-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2080,
+      "n": 1023,
+      "phase": 3056,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2080-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a6-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2080,
+      "n": 1024,
+      "phase": 3057,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k2080-n1025",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a6-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 2080,
+      "n": 1025,
+      "phase": 3058,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k17376-n1023",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a6-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 17376,
+      "n": 1023,
+      "phase": 3059,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k17376-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a6-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 17376,
+      "n": 1024,
+      "phase": 3060,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-m1-boundary-k17376-n1025",
+      "format": "mxfp6",
+      "tags": [
+        "decode",
+        "m1",
+        "selector-boundary",
+        "k-boundary",
+        "n-tail",
+        "a6-a16"
+      ],
+      "role": "matmul",
+      "m": 1,
+      "k": 17376,
+      "n": 1025,
+      "phase": 3061,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6",
+        "a16"
+      ]
+    },
+    {
+      "case_id": "mxfp6-host-selector-m2-k2048-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "host-selector",
+        "selector-boundary",
+        "a6"
+      ],
+      "role": "matmul",
+      "m": 2,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3070,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6"
+      ]
+    },
+    {
+      "case_id": "mxfp6-host-selector-m16-k2048-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "host-selector",
+        "selector-boundary",
+        "a6"
+      ],
+      "role": "matmul",
+      "m": 16,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3071,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6"
+      ]
+    },
+    {
+      "case_id": "mxfp6-host-selector-m17-k2048-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "host-selector",
+        "selector-boundary",
+        "a6",
+        "gfx1201-wmma-candidate",
+        "wmma-m17"
+      ],
+      "role": "matmul",
+      "m": 17,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3072,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6"
+      ]
+    },
+    {
+      "case_id": "mxfp6-host-selector-m127-k2048-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "host-selector",
+        "selector-boundary",
+        "a6"
+      ],
+      "role": "matmul",
+      "m": 127,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3073,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6"
+      ]
+    },
+    {
+      "case_id": "mxfp6-host-selector-m128-k2048-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "host-selector",
+        "selector-boundary",
+        "a6",
+        "wmma-m128"
+      ],
+      "role": "matmul",
+      "m": 128,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3074,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6"
+      ]
+    },
+    {
+      "case_id": "mxfp6-host-selector-m129-k2048-n1024",
+      "format": "mxfp6",
+      "tags": [
+        "host-selector",
+        "selector-boundary",
+        "a6"
+      ],
+      "role": "matmul",
+      "m": 129,
+      "k": 2048,
+      "n": 1024,
+      "phase": 3075,
+      "oracle": "boundary",
+      "activation_variants": [
+        "a6"
+      ]
+    }
+  ]
+}
