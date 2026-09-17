@@ -236,28 +236,30 @@ def check_symbol_map(repo: Path, matrix: dict[str, Any]) -> None:
 
 
 def expected_build_commands() -> list[list[str]]:
-    """Reuse the canonical public-runtime closure with RMSNorm-owned outputs."""
+    """Use the RMSNorm-owned outputs with the canonical lowp compile tuple."""
 
     common_hip = [
-        COMPILER, "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", '-DSLLM_HIP_COMPILE_TARGET="{target}"', "-std=gnu++17",
-        "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "--offload-arch={target}",
+        COMPILER, "-D__HIP_ROCclr__=1", "-O3", "-ffp-contract=off", "-DNDEBUG",
+        '-DSLLM_HIP_COMPILE_TARGET="{target}"', '-DLOWP_COMPILED_TARGET="{target}"',
+        "-std=gnu++17", "-I", "{repo}/include", "-I", "{repo}/native/hip/src",
+        "-I", "{repo}/native/lowp/include", "--offload-arch={target}",
         "-mcode-object-version=6", "-mno-wavefrontsize64", "-pthread",
     ]
     return [
         [*common_hip, "-o", "{build_dir}/rmsnorm-kernel-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/rmsnorm_kernel.hip.cpp"],
         [*common_hip, "-o", "{build_dir}/public-runtime-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp"],
         [
-            COMPILER, "-O3", "-DNDEBUG", '-DSLLM_HIP_COMPILE_TARGET="{target}"', "-std=gnu++17", "-I", "{repo}/include", "-I",
-            "{repo}/native/hip/src", "--offload-arch={target}", "-mcode-object-version=6",
+            COMPILER, "-O3", "-ffp-contract=off", "-DNDEBUG", '-DSLLM_HIP_COMPILE_TARGET="{target}"', '-DLOWP_COMPILED_TARGET="{target}"', "-std=gnu++17", "-I", "{repo}/include", "-I",
+            "{repo}/native/hip/src", "-I", "{repo}/native/lowp/include", "--offload-arch={target}", "-mcode-object-version=6",
             "-mno-wavefrontsize64", "-pthread", "-o", "{build_dir}/rmsnorm-api-{target}.o",
             "-c", "{repo}/native/hip/src/rmsnorm_api.cpp",
         ],
         [
-            COMPILER, "-O3", "-DNDEBUG", '-DSLLM_HIP_COMPILE_TARGET="{target}"', "-std=gnu++17", "--offload-arch={target}",
+            COMPILER, "-O3", "-ffp-contract=off", "-DNDEBUG", "--offload-arch={target}",
             "-mcode-object-version=6", "-mno-wavefrontsize64", "--hip-link", "--rtlib=compiler-rt",
             "-unwindlib=libgcc", "-pthread", "-nostartfiles", "{build_dir}/rmsnorm-kernel-{target}.o",
             "{build_dir}/public-runtime-{target}.o", "{build_dir}/rmsnorm-api-{target}.o",
-            "-D__HIP_ROCclr__=1", "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "-x", "c++",
+            "-D__HIP_ROCclr__=1", "-D__HIP_PLATFORM_AMD__", '-DSLLM_HIP_COMPILE_TARGET="{target}"', '-DLOWP_COMPILED_TARGET="{target}"', "-std=gnu++17", "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "-I", "{repo}/native/lowp/include", "-I", "/opt/rocm/include", "-x", "c++",
             *[f"{{repo}}/{path}" for path in public_h3.PUBLIC_RUNTIME_API_SOURCE_PATHS if path != "native/hip/src/rmsnorm_api.cpp"],
             "-x", "hip",
             *[f"{{repo}}/{path}" for path in public_h3.PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS if path != "native/hip/src/rmsnorm_kernel.hip.cpp"],

@@ -18,7 +18,7 @@
 // set.  The run still accepts SLLM_FP8_RANK_SWEEP_SHAPE=KxN for a bounded
 // single-shape execution during development.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_version.h>

@@ -2,7 +2,8 @@
 
 ## 状態
 
-- 計画済み・未着手（2026-09-17作成）。フェーズ番号は割り当てていない。
+- 完了（2026-09-17）。フェーズ番号は割り当てていない。
+- 受入条件1〜10を維持し、移動前HEAD `ba640680` をisolated worktreeへ固定した。
 - 2026-09-17のユーザー決定:
   - **Phase 87より先に実施する**。Phase 87（他精度残差最適化）の変更は境界化後のライブラリへ入れる。
   - 下記「検証」の両GPU再検証を承認済みとする。
@@ -207,3 +208,29 @@ native/lowp/
 - **CI資産の検査が厳しい**: G2 inventoryの順序digestなど、パス変更で壊れる検査が多い。段階1で先に通してから本体を移す。
 - AGENTS.mdの停止条件（同じ単位の2回reject、1時間超の停滞、検証・文書が30%超、見積り1.5倍超、受入条件の変更）に従い、
   該当したら作業を止めて再計画する。
+
+
+## 完了確認（2026-09-17）
+
+| 受入条件 | 結果と証拠 |
+| --- | --- |
+| 1 | 両exact targetで単体configure/buildと4種類のGPU testがPASS |
+| 2 | 対象kernel・launcher・selectorをnative/lowpへ移動。本番C API接続、内部W4A4例外を確認 |
+| 3 | 旧sourceから凍結した4,700ケースのprovider/variant/tile/footprintが一致 |
+| 4 | KernelVariant/ProviderKind/TilePolicy/InnerProductのenum宣言を移動前と照合し一致 |
+| 5 | 両GPUのMXFP/NVFP4/内部MXFP4 oracleとcodec、指定モデルのtoken列・logits hashが一致。fallback 0、cleanup 0 |
+| 6 | 両GPUで1 warmup＋3 measuredを記録。前後の測定範囲は重なり、新しい速度下限は設けていない |
+| 7 | H0 628件、公開runtime/C ABI等7件、両targetの既存H3 compile/link argvと検査がPASS。CI入力とhash同期済み |
+| 8 | THIRD_PARTY_NOTICESに移動先を追記。新規外部importなし |
+| 9 | H0の依存境界検査がPASS。lowpからsLLMへのinclude依存なし |
+| 10 | 公開MXFP4はW4A8 v1のみ定義しplan拒否。W4A4は内部に保持 |
+
+検証は未コミットsourceをhashで固定したlocal draftであり、GitHub workflow実行やrelease証拠とは区別する。
+Phase 87は開始していない。
+
+完了後の残件修正で、設計にある`native/lowp/src/internal/`は`native/lowp/include/lowp/detail/`へ移し、
+BF16等の統合側IDはsLLM側へ移した。内容は実装・検証履歴の追記を参照する。
+
+[集約証拠](../../../../../../ci/matrix/lowp-kernel-library-boundary-v1.json)
+
+[実装・検証履歴](../../../../../history/2026/09/11-20/lowp-kernel-library-boundary.md)

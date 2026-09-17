@@ -123,690 +123,48 @@ matmul_lowp_target(const char *const arch_name) noexcept {
              : sllm_lowp::ExactTarget::Unknown;
 }
 
-const char *
-matmul_lowp_selector_target(const sllm_lowp::ExactTarget target) noexcept {
-  switch (target) {
-  case sllm_lowp::ExactTarget::Gfx1030:
-    return "gfx1030";
-  case sllm_lowp::ExactTarget::Gfx1201:
-    return "gfx1201";
-  case sllm_lowp::ExactTarget::Gfx942SrameccOnXnackOff:
-    return "gfx942:sramecc+:xnack-";
-  case sllm_lowp::ExactTarget::Unknown:
-    break;
-  }
-  return "";
+lowp_status_t
+matmul_prepare_lowp_c_plan(const sllm_lowp::PreparedProviderPlan &provider,
+                           lowp_matmul_plan_t *plan) noexcept {
+  lowp_matmul_request_t request{
+      sizeof(request),
+      LOWP_ABI_VERSION,
+      static_cast<uint32_t>(provider.format),
+      static_cast<uint32_t>(provider.target),
+      static_cast<uint32_t>(provider.weight_layout),
+      static_cast<uint32_t>(provider.activation_layout),
+      provider.m,
+      provider.n,
+      provider.k};
+  return provider.format == sllm_lowp::MatmulFormat::Mxfp4W4A4
+             ? sllm_lowp::plan_internal(&request, plan, true)
+             : lowp_matmul_plan(&request, plan);
 }
 
 sllm_matmul_kernel::SelectorDecision
 matmul_lowp_selector_decision(const sllm_matmul::DescriptorMetadata &metadata,
                               const sllm_lowp::PreparedProviderPlan &provider,
-                              const char *const arch_name) noexcept {
+                              const char *arch_name) noexcept {
+  (void)metadata;
   (void)arch_name;
-  const char *const selector_target =
-      matmul_lowp_selector_target(provider.target);
-  switch (provider.provider) {
-  case sllm_lowp::ProviderKind::Mxfp8Block32:
-  case sllm_lowp::ProviderKind::Mxfp8Gfx1201Wmma:
-    return ::sllm_matmul_kernel::make_selector_decision(
-        ::sllm_matmul_kernel::select_mxfp8_variant(metadata.m, metadata.k,
-                                                   metadata.n, selector_target),
-        true, true, true, ::sllm_matmul_kernel::kSelectorReasonAdopted);
-  case sllm_lowp::ProviderKind::Mxfp8A16Block32:
-    return ::sllm_matmul_kernel::make_selector_decision(
-        ::sllm_matmul_kernel::KernelVariant::Mxfp8W8A16M1Col2, true, true, true,
-        ::sllm_matmul_kernel::kSelectorReasonAdopted);
-  case sllm_lowp::ProviderKind::Mxfp6Block32:
-  case sllm_lowp::ProviderKind::Mxfp6Gfx1030Half2Dot2:
-  case sllm_lowp::ProviderKind::Mxfp6Gfx1201WmmaViaE4M3:
-    return ::sllm_matmul_kernel::make_selector_decision(
-        ::sllm_matmul_kernel::select_mxfp6_variant(metadata.m, metadata.k,
-                                                   metadata.n, selector_target),
-        true, true, true, ::sllm_matmul_kernel::kSelectorReasonAdopted);
-  case sllm_lowp::ProviderKind::Mxfp6A16Block32:
-    return ::sllm_matmul_kernel::make_selector_decision(
-        ::sllm_matmul_kernel::KernelVariant::Mxfp6W6A16M1Col2, true, true, true,
-        ::sllm_matmul_kernel::kSelectorReasonAdopted);
-  case sllm_lowp::ProviderKind::Nvfp4W4A16Block16:
-    return ::sllm_matmul_kernel::make_selector_decision(
-        ::sllm_matmul_kernel::select_nvfp4_variant(metadata.m), true, true,
-        true, ::sllm_matmul_kernel::kSelectorReasonAdopted);
-  case sllm_lowp::ProviderKind::Nvfp4W4A4Block16:
-    return ::sllm_matmul_kernel::select_nvfp4_w4a4_decision(
-        metadata.m, metadata.k, metadata.n, selector_target);
-  case sllm_lowp::ProviderKind::Mxfp4W4A4Block32:
-    return ::sllm_matmul_kernel::make_selector_decision(
-        ::sllm_matmul_kernel::select_mxfp4_variant(metadata.m), true, true,
-        true, ::sllm_matmul_kernel::kSelectorReasonAdopted);
-  case sllm_lowp::ProviderKind::Fp8OuterGfx1030Software:
-  case sllm_lowp::ProviderKind::Unsupported:
-    break;
-  }
-  return ::sllm_matmul_kernel::make_selector_decision(
-      ::sllm_matmul_kernel::KernelVariant::Baseline, false, false, false,
-      ::sllm_matmul_kernel::kSelectorReasonUnsupported);
-}
-
-sllm_matmul_kernel::KernelVariant
-matmul_lowp_kernel_variant(const sllm_matmul::DescriptorMetadata &metadata,
-                           const sllm_lowp::PreparedProviderPlan &provider,
-                           const char *const arch_name) noexcept {
-  return matmul_lowp_selector_decision(metadata, provider, arch_name).variant;
+  lowp_matmul_plan_t plan{};
+  const auto status = matmul_prepare_lowp_c_plan(provider, &plan);
+  return sllm_matmul_kernel::make_selector_decision(
+      static_cast<sllm_matmul_kernel::KernelVariant>(plan.variant),
+      status == LOWP_SUCCESS && plan.selector_supported, plan.selector_enabled,
+      plan.adopted, plan.reason);
 }
 
 std::optional<sllm_lowp::PreparedProviderPlan>
 matmul_lowp_concrete_provider_plan(
     const sllm_lowp::PreparedProviderPlan &provider,
     const sllm_matmul_kernel::KernelVariant variant) noexcept {
-  using sllm_lowp::InnerProduct;
-  using sllm_lowp::MatmulFormat;
-  using sllm_lowp::ProviderKind;
-  using sllm_lowp::TilePolicy;
-  using sllm_matmul_kernel::KernelVariant;
-
-  ProviderKind concrete_provider = ProviderKind::Unsupported;
-  TilePolicy concrete_tile = TilePolicy::None;
-  InnerProduct concrete_inner_product = InnerProduct::None;
-
-  switch (variant) {
-  case KernelVariant::Fp8Emulation:
-    if (provider.format != MatmulFormat::Fp8OuterE4M3W8A8 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Fp8OuterGfx1030Software;
-    concrete_tile = TilePolicy::Elementwise;
-    concrete_inner_product = InnerProduct::E4M3OuterFp32;
-    break;
-  case KernelVariant::Fp8OuterPrefillTiled16:
-    if (provider.format != MatmulFormat::Fp8OuterE4M3W8A8 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Fp8OuterGfx1030Software;
-    concrete_tile = TilePolicy::BlockTiled16x16;
-    concrete_inner_product = InnerProduct::E4M3OuterFp32;
-    break;
-  case KernelVariant::Fp8OuterPrefillGfx1030Half2_128x64:
-    if (provider.format != MatmulFormat::Fp8OuterE4M3W8A8 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Fp8OuterGfx1030Software;
-    concrete_tile = TilePolicy::BlockRow128Column64;
-    concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
-    break;
-  case KernelVariant::Fp8OuterPrefillGfx1030Half2_64x64:
-    if (provider.format != MatmulFormat::Fp8OuterE4M3W8A8 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030 ||
-        provider.m <= 1U) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Fp8OuterGfx1030Software;
-    concrete_tile = ::sllm_matmul_kernel::
-                            fp8_outer_prefill_gfx1030_half2_short_m32_n64_shape(
-                                provider.m, provider.k, provider.n)
-                        ? TilePolicy::BlockRow32Column64
-                    : ::sllm_matmul_kernel::
-                            fp8_outer_prefill_gfx1030_half2_short_m32_n32_shape(
-                                provider.m, provider.k, provider.n)
-                        ? TilePolicy::BlockRow32Column32
-                        : TilePolicy::BlockRow64Column64;
-    concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
-    break;
-  case KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32:
-    if (provider.format != MatmulFormat::Fp8OuterE4M3W8A8 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030 ||
-        provider.m != 1U) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Fp8OuterGfx1030Software;
-    concrete_tile = TilePolicy::DecodeWave4Column32;
-    concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
-    break;
-  case KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32:
-    if (provider.format != MatmulFormat::Fp8OuterE4M3W8A8 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030 ||
-        provider.m != 1U) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Fp8OuterGfx1030Software;
-    concrete_tile = TilePolicy::DecodeDword8Wave4Column32;
-    concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
-    break;
-  case KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32:
-    if (provider.format != MatmulFormat::Fp8OuterE4M3W8A8 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030 ||
-        !::sllm_matmul_kernel::fp8_outer_decode_gfx1030_half2_shape(
-            provider.m, provider.k, provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Fp8OuterGfx1030Software;
-    concrete_tile = TilePolicy::DecodeDword8Wave4Column32;
-    concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
-    break;
-  case KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4:
-    if (provider.format != MatmulFormat::Fp8OuterE4M3W8A8 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030 ||
-        !::sllm_matmul_kernel::fp8_outer_decode_gfx1030_fused_m2_4_shape(
-            provider.m, provider.k, provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Fp8OuterGfx1030Software;
-    concrete_tile = TilePolicy::DecodeDword8Wave4Column32;
-    concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
-    break;
-  case KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave4Col32:
-    if (provider.format != MatmulFormat::Fp8OuterE4M3W8A8 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030 ||
-        !::sllm_matmul_kernel::
-            fp8_outer_decode_gfx1030_activation_shared_wave4_shape(
-                provider.m, provider.k, provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Fp8OuterGfx1030Software;
-    // Keep the existing public decode tile contract; kernel identity carries
-    // the activation-shared distinction without widening the provider ABI.
-    concrete_tile = TilePolicy::DecodeDword8Wave4Column32;
-    concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
-    break;
-  case KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64:
-    if (provider.format != MatmulFormat::Fp8OuterE4M3W8A8 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030 ||
-        !::sllm_matmul_kernel::
-            fp8_outer_decode_gfx1030_activation_shared_wave8_shape(
-                provider.m, provider.k, provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Fp8OuterGfx1030Software;
-    concrete_tile = TilePolicy::DecodeWave4Column32;
-    concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
-    break;
-  case KernelVariant::Nvfp4W4A4SmallMVgprReuse:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 ||
-        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
-         provider.target != sllm_lowp::ExactTarget::Gfx1201) ||
-        !::sllm_matmul_kernel::phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(
-            provider.m, provider.k, provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::DecodeWave4Column32;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledDp4aFp32;
-    break;
-  case KernelVariant::Nvfp4W4A4SmallMRowGrid:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030 || provider.m < 2U ||
-        provider.m > 4U ||
-        !::sllm_matmul_kernel::
-            phase78_nvfp4_w4a4_decode_activation_shared_shape(1U, provider.k,
-                                                              provider.n))
-      return std::nullopt;
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::DecodeWave4Column32;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledDp4aFp32;
-    break;
-  case KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1201 ||
-        !::sllm_matmul_kernel::phase83_gfx1201_nvfp4_w4a4_small_m_rowgrid_shape(
-            provider.m, provider.k, provider.n))
-      return std::nullopt;
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::DecodeWave4Column32;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledDp4aFp32;
-    break;
-  case KernelVariant::Nvfp4W4A4DecodeScaleLut:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 || provider.m != 1U ||
-        ((provider.target == sllm_lowp::ExactTarget::Gfx1030 &&
-          !::sllm_matmul_kernel::
-              phase78_nvfp4_w4a4_decode_activation_shared_shape(
-                  provider.m, provider.k, provider.n)) ||
-         (provider.target == sllm_lowp::ExactTarget::Gfx1201 &&
-          !::sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_wave4col32_shape(
-              provider.m, provider.k, provider.n)) ||
-         (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
-          provider.target != sllm_lowp::ExactTarget::Gfx1201))) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::DecodeWave4Column32;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledDp4aFp32;
-    break;
-  case KernelVariant::Mxfp8W8A8Decode:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Block32;
-    concrete_tile = TilePolicy::DecodeRowReduction;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp8W8A8M1Col2:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8 ||
-        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
-         provider.target != sllm_lowp::ExactTarget::Gfx1201) ||
-        !::sllm_matmul_kernel::phase85_mxfp_m1_col2_shape(
-            provider.m, provider.k, provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Block32;
-    concrete_tile = TilePolicy::DecodeRowReduction;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp8W8A16M1Col2:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A16 ||
-        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
-         provider.target != sllm_lowp::ExactTarget::Gfx1201) ||
-        !::sllm_matmul_kernel::phase85_mxfp_m1_a16_shape(provider.m, provider.k,
-                                                         provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8A16Block32;
-    concrete_tile = TilePolicy::DecodeRowReduction;
-    concrete_inner_product = InnerProduct::E4M3Bf16Fp32;
-    break;
-  case KernelVariant::Mxfp8W8A8Prefill:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Block32;
-    concrete_tile = TilePolicy::Elementwise;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp8W8A8PrefillRow8:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Block32;
-    concrete_tile = TilePolicy::BlockRow8;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp8W8A8PrefillTiled16:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Block32;
-    concrete_tile = TilePolicy::BlockTiled16x16;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp8W8A8PrefillMmqCol4:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Block32;
-    concrete_tile = TilePolicy::BlockRow8Column4;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp8W8A8PrefillMmqCol8:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Block32;
-    concrete_tile = TilePolicy::BlockRow8Column8;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp8W8A8PrefillPhase85SmallM:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8 ||
-        !::sllm_matmul_kernel::phase85_mxfp_small_m_force_shape(
-            provider.m, provider.k, provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Block32;
-    concrete_tile = TilePolicy::BlockRow4Column8;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Vector32:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Block32;
-    concrete_tile = TilePolicy::BlockRow8Column8;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Block32;
-    concrete_tile = TilePolicy::BlockRow128Column64;
-    concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
-    break;
-  case KernelVariant::Mxfp8W8A8PrefillWmmaN16:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Gfx1201Wmma;
-    concrete_tile = TilePolicy::Wmma128x16x32;
-    concrete_inner_product = InnerProduct::E4M3WmmaFp32;
-    break;
-  case KernelVariant::Mxfp8W8A8PrefillWmmaN64:
-  case KernelVariant::Mxfp8W8A8PrefillWmmaDirectWeight:
-  case KernelVariant::Mxfp8W8A8PrefillWmmaDirectBoth:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Gfx1201Wmma;
-    concrete_tile = TilePolicy::Wmma128x64x32;
-    concrete_inner_product = InnerProduct::E4M3WmmaFp32;
-    break;
-  case KernelVariant::Mxfp8W8A8PrefillWmmaN128DirectBoth:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8Gfx1201Wmma;
-    concrete_tile = TilePolicy::Wmma128x128x32;
-    concrete_inner_product = InnerProduct::E4M3WmmaFp32;
-    break;
-  case KernelVariant::Mxfp6W6A6Decode:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6Block32;
-    concrete_tile = TilePolicy::DecodeRowReduction;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp6W6A6M1Col2:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6 ||
-        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
-         provider.target != sllm_lowp::ExactTarget::Gfx1201) ||
-        !::sllm_matmul_kernel::phase85_mxfp_m1_col2_shape(
-            provider.m, provider.k, provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6Block32;
-    concrete_tile = TilePolicy::DecodeRowReduction;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp6W6A16M1Col2:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A16 ||
-        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
-         provider.target != sllm_lowp::ExactTarget::Gfx1201) ||
-        !::sllm_matmul_kernel::phase85_mxfp_m1_a16_shape(provider.m, provider.k,
-                                                         provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6A16Block32;
-    concrete_tile = TilePolicy::DecodeRowReduction;
-    concrete_inner_product = InnerProduct::E3M2Bf16Fp32;
-    break;
-  case KernelVariant::Mxfp6W6A6Prefill:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6Block32;
-    concrete_tile = TilePolicy::Elementwise;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp6W6A6PrefillRow8:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6Block32;
-    concrete_tile = TilePolicy::BlockRow8;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp6W6A6PrefillTiled16:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6Block32;
-    concrete_tile = TilePolicy::BlockTiled16x16;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp6W6A6PrefillMmqCol4:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6Block32;
-    concrete_tile = TilePolicy::BlockRow8Column4;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp6W6A6PrefillMmqCol8:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6Block32;
-    concrete_tile = TilePolicy::BlockRow8Column8;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp6W6A6PrefillPhase85SmallM:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6 ||
-        !::sllm_matmul_kernel::phase85_mxfp_small_m_force_shape(
-            provider.m, provider.k, provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6Block32;
-    concrete_tile = TilePolicy::BlockRow4Column8;
-    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp6W6A6PrefillGfx1030Half2Dot2:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6Gfx1030Half2Dot2;
-    concrete_tile = TilePolicy::BlockRow32Column32;
-    concrete_inner_product = InnerProduct::E3M2Fp16Dot2Fp32;
-    break;
-  case KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6Gfx1030Half2Dot2;
-    concrete_tile = TilePolicy::BlockRow128Column64;
-    concrete_inner_product = InnerProduct::E3M2Fp16Dot2Fp32;
-    break;
-  case KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201ViaE4M3N64:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1201) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6Gfx1201WmmaViaE4M3;
-    concrete_tile = TilePolicy::Wmma128x64x32;
-    concrete_inner_product = InnerProduct::E3M2ViaE4M3WmmaFp32;
-    break;
-  case KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201Pack4N64:
-  case KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201Pack4Swar:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1201) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6Gfx1201WmmaViaE4M3;
-    concrete_tile = TilePolicy::Wmma128x64x32;
-    concrete_inner_product = InnerProduct::E3M2ViaE4M3WmmaFp32;
-    break;
-  case KernelVariant::Nvfp4DecodePackedDequant:
-    if (provider.format != MatmulFormat::Nvfp4W4A16) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A16Block16;
-    concrete_tile = TilePolicy::DecodeRowReduction;
-    concrete_inner_product = InnerProduct::E2M1Bf16Fp32;
-    break;
-  case KernelVariant::Nvfp4PrefillRow8Tiled256:
-    if (provider.format != MatmulFormat::Nvfp4W4A16) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A16Block16;
-    concrete_tile = TilePolicy::PackedRow8;
-    concrete_inner_product = InnerProduct::E2M1Bf16Fp32;
-    break;
-  case KernelVariant::Nvfp4BaselinePackedDequant:
-    if (provider.format != MatmulFormat::Nvfp4W4A16) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A16Block16;
-    concrete_tile = TilePolicy::Elementwise;
-    concrete_inner_product = InnerProduct::E2M1Bf16Fp32;
-    break;
-  case KernelVariant::Nvfp4W4A4Packed:
-    if (provider.format != MatmulFormat::Nvfp4W4A4) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::Elementwise;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledFp32;
-    break;
-  case KernelVariant::Nvfp4W4A4PrefillRow8Tiled256:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 || provider.m <= 1U) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::PackedRow8;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledFp32;
-    break;
-  case KernelVariant::Nvfp4W4A4PrefillRow8Col8Tiled256:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 || provider.m <= 1U) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::BlockRow8Column8;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledFp32;
-    break;
-  case KernelVariant::Nvfp4W4A4PrefillDp4a64x64:
-  case KernelVariant::Nvfp4W4A4PrefillCompensated64x64:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 || provider.m <= 1U ||
-        provider.k == 0U || (provider.k % 16U) != 0U) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile =
-        variant == KernelVariant::Nvfp4W4A4PrefillCompensated64x64 &&
-                provider.target == sllm_lowp::ExactTarget::Gfx1030 &&
-                ::sllm_matmul_kernel::
-                    phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(
-                        provider.m, provider.k, provider.n)
-            ? TilePolicy::BlockRow128Column64
-            : TilePolicy::BlockRow64Column64;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledFp32;
-    break;
-  case KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1201 ||
-        !::sllm_matmul_kernel::phase83_gfx1201_nvfp4_w4a4_wmma_kahan_shape(
-            provider.m, provider.k, provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::Wmma128x64x32;
-    concrete_inner_product = InnerProduct::E2M1ViaE4M3WmmaFp32;
-    break;
-  case KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 || provider.m <= 1U ||
-        provider.k == 0U || (provider.k % 16U) != 0U ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1201) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::Wmma128x64x32;
-    concrete_inner_product = InnerProduct::E2M1ViaE4M3WmmaFp32;
-    break;
-  case KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1201 ||
-        !::sllm_matmul_kernel::phase78_gfx1201_nvfp4_w4a4_f16_staging_shape(
-            provider.m, provider.k, provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::BlockTiled16x16;
-    concrete_inner_product = InnerProduct::E2M1Fp16ScaleWmmaFp32;
-    break;
-  case KernelVariant::Nvfp4W4A4Decode:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 || provider.m != 1U) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::DecodeRowReduction;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledFp32;
-    break;
-  case KernelVariant::Nvfp4W4A4DecodeWave4Column32:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 || provider.m != 1U ||
-        !::sllm_matmul_kernel::phase78_nvfp4_w4a4_decode_wave4col32_shape(
-            provider.m, provider.k, provider.n) ||
-        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
-         provider.target != sllm_lowp::ExactTarget::Gfx1201)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::DecodeWave4Column32;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledDp4aFp32;
-    break;
-  case KernelVariant::Nvfp4W4A4DecodeActivationShared:
-    if (provider.format != MatmulFormat::Nvfp4W4A4 ||
-        provider.target != sllm_lowp::ExactTarget::Gfx1030 ||
-        !::sllm_matmul_kernel::
-            phase78_nvfp4_w4a4_decode_activation_shared_shape(
-                provider.m, provider.k, provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A4Block16;
-    concrete_tile = TilePolicy::DecodeWave4Column32;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledDp4aFp32;
-    break;
-  case KernelVariant::Mxfp4W4A4Decode:
-    if (provider.format != MatmulFormat::Mxfp4W4A4) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp4W4A4Block32;
-    concrete_tile = TilePolicy::DecodeRowReduction;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledFp32;
-    break;
-  case KernelVariant::Mxfp4W4A4Prefill:
-    if (provider.format != MatmulFormat::Mxfp4W4A4) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp4W4A4Block32;
-    concrete_tile = TilePolicy::Elementwise;
-    concrete_inner_product = InnerProduct::E2M1BlockScaledFp32;
-    break;
-  default:
-    return std::nullopt;
-  }
-
-  return sllm_lowp::with_execution_semantics(
-      provider, concrete_provider, concrete_tile, concrete_inner_product);
+  return sllm_lowp::concrete_provider_plan(provider, variant);
 }
 
 bool matmul_lowp_workspace_bytes(
-    const sllm_lowp::PreparedProviderPlan &provider,
-    uint64_t *const workspace_bytes) noexcept {
-  if (workspace_bytes == nullptr) {
-    return false;
-  }
-  *workspace_bytes = 0U;
-  const uint64_t block_size =
-      static_cast<uint64_t>(provider.block_contract.activation_block_size);
-  const uint64_t bits =
-      static_cast<uint64_t>(provider.block_contract.activation_bits);
-  if (block_size == 0U || bits == 0U) {
-    return true;
-  }
-  // Every accepted low-precision matmul has K aligned to its block size, but
-  // retain the rounded expressions so this remains correct at descriptor
-  // boundaries and documents the storage contract at the allocation site.
-  const uint64_t max_value = std::numeric_limits<uint64_t>::max();
-  if (provider.k > (max_value - UINT64_C(7)) / bits ||
-      provider.k > max_value - (block_size - UINT64_C(1))) {
-    return false;
-  }
-  const uint64_t value_bytes = (provider.k * bits + UINT64_C(7)) / UINT64_C(8);
-  const uint64_t scale_bytes =
-      (provider.k + block_size - UINT64_C(1)) / block_size;
-  if (provider.m > max_value / value_bytes ||
-      provider.m > max_value / scale_bytes) {
-    return false;
-  }
-  const uint64_t value_total = provider.m * value_bytes;
-  const uint64_t scale_total = provider.m * scale_bytes;
-  if (value_total > max_value - scale_total) {
-    return false;
-  }
-  *workspace_bytes = value_total + scale_total;
-  return true;
+    const sllm_lowp::PreparedProviderPlan &provider, uint64_t *bytes) noexcept {
+  return sllm_lowp::activation_workspace_bytes(provider, bytes);
 }
 
 struct MatmulWorkspaceFootprint final {
@@ -1048,7 +406,7 @@ sllm_status_t select_matmul_workspace_footprint(
   std::optional<sllm_lowp::PreparedProviderPlan> provider;
   bool split4_plan = false;
   sllm_matmul_kernel::KernelVariant kernel_variant =
-      sllm_matmul_kernel::KernelVariant::Baseline;
+      sllm_matmul_kernel::HostKernelVariant::Baseline;
   if (metadata.fp8_outer) {
     const bool fnuz = metadata.fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ;
     const sllm_matmul_kernel::SelectorDecision selector_decision =
@@ -1706,6 +1064,35 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
                   ::sllm_matmul_kernel::phase78_gfx1201_nvfp4_w4a4_split4_shape(
                       metadata.m, metadata.k, metadata.n)));
           }
+          if (candidate->matmul_provider_plan.has_value()) {
+            lowp_matmul_plan_t lowp_plan{};
+            const auto lowp_status = matmul_prepare_lowp_c_plan(
+                *candidate->matmul_provider_plan, &lowp_plan);
+            if (lowp_status != LOWP_SUCCESS ||
+                lowp_plan.variant !=
+                    static_cast<uint32_t>(candidate->matmul_kernel_variant)) {
+              (void)sllm_public_runtime::AccountingState::release_prepared_plan(
+                  context->accounting, activation->accounting,
+                  weight->accounting, output->accounting);
+              char detail[320]{};
+              std::snprintf(
+                  detail, sizeof(detail),
+                  "lowp C API rejected prepared matmul: status=%d format=%u "
+                  "M=%llu K=%llu N=%llu variant=%u expected=%u reason=%s",
+                  lowp_status,
+                  static_cast<unsigned>(
+                      candidate->matmul_provider_plan->format),
+                  static_cast<unsigned long long>(metadata.m),
+                  static_cast<unsigned long long>(metadata.k),
+                  static_cast<unsigned long long>(metadata.n),
+                  lowp_plan.variant,
+                  static_cast<unsigned>(candidate->matmul_kernel_variant),
+                  lowp_plan.reason ? lowp_plan.reason : "none");
+              return sllm_public_runtime::write_error(
+                  error_sink, SLLM_STATUS_UNSUPPORTED, detail);
+            }
+            candidate->matmul_lowp_c_plan = lowp_plan;
+          }
           const bool nvfp4_f16_staging =
               metadata.nvfp4_w4a4 && candidate->matmul_kernel_variant ==
                                          ::sllm_matmul_kernel::KernelVariant::
@@ -1782,7 +1169,7 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
           if (metadata.fp8_outer &&
               candidate->matmul_kernel_variant ==
-                  ::sllm_matmul_kernel::KernelVariant::Fp8Native) {
+                  ::sllm_matmul_kernel::HostKernelVariant::Fp8Native) {
             hipDeviceProp_t properties = {};
             const sllm_status_t property_status =
                 get_context_device_properties(context, &properties, error_sink);
@@ -2242,319 +1629,53 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
       matmul_workspace_bytes = plan->matmul_workspace_bytes;
     }
     hipError_t launch_status = hipSuccess;
-    if (plan->matmul_metadata.mxfp8_w8a8) {
+    if (plan->matmul_lowp_c_plan.has_value()) {
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      launch_status = hipErrorInvalidValue;
-#else
-      if (!matches_runtime_gcn_arch(arch_name, "gfx1201") &&
-          !matches_runtime_gcn_arch(arch_name, "gfx1030")) {
-        launch_status = hipErrorNotSupported;
-      } else {
-        const bool a16 = plan->matmul_provider_plan.has_value() &&
-                         plan->matmul_provider_plan->format ==
-                             sllm_lowp::MatmulFormat::Mxfp8E4M3W8A16;
-        const auto *const fp8_weight =
-            static_cast<const uint8_t *>(weight_storage);
-        const auto *const weight_scales =
-            fp8_weight + plan->matmul_metadata.weight_value_bytes;
-        if (a16) {
-          launch_status = ::sllm_matmul_kernel::launch_mxfp8_w8a16(
-              activation, fp8_weight, weight_scales, output,
-              plan->matmul_metadata.m, plan->matmul_metadata.k,
-              plan->matmul_metadata.n, variant, queue->stream);
-        } else {
-          const uint64_t activation_value_bytes =
-              plan->matmul_metadata.m * plan->matmul_metadata.k;
-          const uint64_t activation_scale_bytes =
-              plan->matmul_metadata.m * plan->matmul_metadata.k / UINT64_C(32);
-          if (matmul_workspace == nullptr ||
-              matmul_workspace_bytes <
-                  activation_value_bytes + activation_scale_bytes) {
-            launch_status = hipErrorOutOfMemory;
-          } else {
-            auto *const quantized = static_cast<uint8_t *>(matmul_workspace);
-            auto *const activation_scales = quantized + activation_value_bytes;
-            launch_status = ::sllm_matmul_kernel::launch_mxfp8_quantize(
-                activation, quantized, activation_scales,
-                plan->matmul_metadata.m, plan->matmul_metadata.k,
-                queue->stream);
-            if (launch_status == hipSuccess) {
-              launch_status = ::sllm_matmul_kernel::launch_mxfp8_w8a8(
-                  quantized, activation_scales, fp8_weight, weight_scales,
-                  output, plan->matmul_metadata.m, plan->matmul_metadata.k,
-                  plan->matmul_metadata.n, variant, queue->stream);
-            }
-          }
-        }
-      }
-#endif
-    } else if (plan->matmul_metadata.mxfp6_w6a6) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      launch_status = hipErrorInvalidValue;
-#else
-      if (!matches_runtime_gcn_arch(arch_name, "gfx1201") &&
-          !matches_runtime_gcn_arch(arch_name, "gfx1030")) {
-        launch_status = hipErrorNotSupported;
-      } else {
-        const bool a16 = plan->matmul_provider_plan.has_value() &&
-                         plan->matmul_provider_plan->format ==
-                             sllm_lowp::MatmulFormat::Mxfp6E3M2W6A16;
-        const auto *const packed_weight =
-            static_cast<const uint8_t *>(weight_storage);
-        const auto *const weight_scales =
-            packed_weight + plan->matmul_metadata.weight_value_bytes;
-        if (a16) {
-          launch_status = ::sllm_matmul_kernel::launch_mxfp6_w6a16(
-              activation, packed_weight, weight_scales, output,
-              plan->matmul_metadata.m, plan->matmul_metadata.k,
-              plan->matmul_metadata.n, variant, queue->stream);
-        } else {
-          const uint64_t activation_value_bytes =
-              plan->matmul_metadata.m *
-              (plan->matmul_metadata.k * UINT64_C(3) / UINT64_C(4));
-          const uint64_t activation_scale_bytes =
-              plan->matmul_metadata.m * plan->matmul_metadata.k / UINT64_C(32);
-          if (matmul_workspace == nullptr ||
-              matmul_workspace_bytes <
-                  activation_value_bytes + activation_scale_bytes) {
-            launch_status = hipErrorOutOfMemory;
-          } else {
-            auto *const packed = static_cast<uint8_t *>(matmul_workspace);
-            auto *const activation_scales = packed + activation_value_bytes;
-            launch_status = ::sllm_matmul_kernel::launch_mxfp6_quantize(
-                activation, packed, activation_scales, plan->matmul_metadata.m,
-                plan->matmul_metadata.k, queue->stream);
-            if (launch_status == hipSuccess) {
-              launch_status = ::sllm_matmul_kernel::launch_mxfp6_w6a6(
-                  packed, activation_scales, packed_weight, weight_scales,
-                  output, plan->matmul_metadata.m, plan->matmul_metadata.k,
-                  plan->matmul_metadata.n, variant, queue->stream);
-            }
-          }
-        }
-      }
-#endif
-    } else if (plan->matmul_metadata.mxfp4_w4a4) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      launch_status = hipErrorInvalidValue;
-#else
-      if (!matches_runtime_gcn_arch(arch_name, "gfx1201") &&
-          !matches_runtime_gcn_arch(arch_name, "gfx1030")) {
-        launch_status = hipErrorNotSupported;
-      } else {
-        const uint64_t packed_activation_bytes =
-            plan->matmul_metadata.m *
-            ((plan->matmul_metadata.k + UINT64_C(1)) / UINT64_C(2));
-        const uint64_t activation_scale_bytes =
-            plan->matmul_metadata.m *
-            ((plan->matmul_metadata.k + UINT64_C(31)) / UINT64_C(32));
-        if (matmul_workspace == nullptr ||
-            matmul_workspace_bytes <
-                packed_activation_bytes + activation_scale_bytes) {
-          launch_status = hipErrorOutOfMemory;
-        } else {
-          auto *const packed_activation =
-              static_cast<uint8_t *>(matmul_workspace);
-          auto *const activation_block_scales =
-              packed_activation + packed_activation_bytes;
-          const auto *const packed_weight =
-              static_cast<const uint8_t *>(weight_storage);
-          const auto *const weight_block_scales =
-              packed_weight + plan->matmul_metadata.weight_value_bytes;
-          launch_status = ::sllm_matmul_kernel::launch_mxfp4_quantize(
-              activation, packed_activation, activation_block_scales,
-              plan->matmul_metadata.m, plan->matmul_metadata.k, queue->stream);
-          if (launch_status == hipSuccess) {
-            launch_status = ::sllm_matmul_kernel::launch_mxfp4_w4a4(
-                packed_activation, activation_block_scales, packed_weight,
-                weight_block_scales, output, plan->matmul_metadata.m,
-                plan->matmul_metadata.k, plan->matmul_metadata.n, variant,
-                queue->stream);
-          }
-        }
-      }
-#endif
-    } else if (plan->matmul_metadata.nvfp4_w4a4) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      // Production kernels are absent from the host-contract binary.  Permit
-      // ID73 and queue-owned lowp scratch routes can publish a completion so
-      // selector identity, two-dispatch accounting, and async ownership can
-      // be tested without claiming a GPU numerical result.
-      launch_status = plan->matmul_queue_workspace ||
-                              variant == ::sllm_matmul_kernel::KernelVariant::
-                                             Nvfp4W4A4DecodeActivationShared
+      // Preserve the pre-existing host simulation contract; never GPU evidence.
+      launch_status = plan->matmul_metadata.nvfp4_w4a4 &&
+                              (plan->matmul_queue_workspace ||
+                               variant == ::sllm_matmul_kernel::KernelVariant::
+                                              Nvfp4W4A4DecodeActivationShared)
                           ? hipSuccess
                           : hipErrorInvalidValue;
 #else
-      if (!matches_runtime_gcn_arch(arch_name, "gfx1201") &&
-          !matches_runtime_gcn_arch(arch_name, "gfx1030")) {
-        launch_status = hipErrorNotSupported;
-      } else {
-        const uint64_t packed_activation_bytes =
-            plan->matmul_metadata.m *
-            ((plan->matmul_metadata.k + UINT64_C(1)) / UINT64_C(2));
-        const uint64_t activation_scale_bytes =
-            plan->matmul_metadata.m *
-            ((plan->matmul_metadata.k + UINT64_C(15)) / UINT64_C(16));
-        if (matmul_workspace == nullptr ||
-            matmul_workspace_bytes <
-                packed_activation_bytes + activation_scale_bytes) {
-          launch_status = hipErrorOutOfMemory;
-        } else {
-          auto *const packed_activation =
-              static_cast<uint8_t *>(matmul_workspace);
-          auto *const activation_block_scales =
-              packed_activation + packed_activation_bytes;
-          const auto *const packed_weight =
-              static_cast<const uint8_t *>(weight_storage);
-          const auto *const weight_block_scales =
-              packed_weight + plan->matmul_metadata.weight_value_bytes;
-          const auto *const weight_tensor_scale =
-              reinterpret_cast<const float *>(
-                  static_cast<const uint8_t *>(weight_storage) +
-                  (plan->matmul_metadata.weight_tensor_scale_offset -
-                   plan->matmul_metadata.weight.byte_offset));
-          const auto *const input_tensor_scale =
-              reinterpret_cast<const float *>(
-                  static_cast<const uint8_t *>(weight_storage) +
-                  (plan->matmul_metadata.input_tensor_scale_offset -
-                   plan->matmul_metadata.weight.byte_offset));
-          launch_status = ::sllm_matmul_kernel::launch_nvfp4_quantize(
-              activation, packed_activation, activation_block_scales,
-              input_tensor_scale, plan->matmul_metadata.m,
-              plan->matmul_metadata.k, queue->stream);
-          if (launch_status == hipSuccess) {
-            const bool split4_execute =
-                ((variant == ::sllm_matmul_kernel::KernelVariant::
-                                 Nvfp4W4A4PrefillDp4a64x64 &&
-                  matches_runtime_gcn_arch(arch_name, "gfx1030") &&
-                  ::sllm_matmul_kernel::phase78_gfx1030_nvfp4_w4a4_split4_shape(
-                      plan->matmul_metadata.m, plan->matmul_metadata.k,
-                      plan->matmul_metadata.n)) ||
-                 (variant == ::sllm_matmul_kernel::KernelVariant::
-                                 Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
-                  matches_runtime_gcn_arch(arch_name, "gfx1201") &&
-                  ::sllm_matmul_kernel::phase78_gfx1201_nvfp4_w4a4_split4_shape(
-                      plan->matmul_metadata.m, plan->matmul_metadata.k,
-                      plan->matmul_metadata.n)));
-            if (split4_execute) {
-              uint64_t partial_offset = 0U;
-              uint64_t split4_workspace_bytes = 0U;
-              if (!::sllm_matmul_kernel::phase78_nvfp4_w4a4_split4_workspace(
-                      plan->matmul_metadata.m, plan->matmul_metadata.k,
-                      plan->matmul_metadata.n, &partial_offset,
-                      &split4_workspace_bytes) ||
-                  matmul_workspace == nullptr ||
-                  matmul_workspace_bytes < split4_workspace_bytes) {
-                launch_status = hipErrorOutOfMemory;
-              } else {
-                auto *const partial = reinterpret_cast<float *>(
-                    packed_activation + partial_offset);
-                if (variant == ::sllm_matmul_kernel::KernelVariant::
-                                   Nvfp4W4A4PrefillDp4a64x64) {
-                  launch_status = ::sllm_matmul_kernel::
-                      launch_nvfp4_w4a4_prefill_dp4a_short_split4(
-                          packed_activation, activation_block_scales,
-                          packed_weight, weight_block_scales,
-                          weight_tensor_scale, input_tensor_scale, output,
-                          partial, plan->matmul_metadata.m,
-                          plan->matmul_metadata.k, plan->matmul_metadata.n,
-                          queue->stream);
-                } else {
-                  launch_status = ::sllm_matmul_kernel::
-                      launch_nvfp4_w4a4_prefill_gfx1201_wmma128x64_split4(
-                          packed_activation, activation_block_scales,
-                          packed_weight, weight_block_scales,
-                          weight_tensor_scale, input_tensor_scale, output,
-                          partial, plan->matmul_metadata.m,
-                          plan->matmul_metadata.k, plan->matmul_metadata.n,
-                          queue->stream);
-                }
-              }
-            } else if (variant == ::sllm_matmul_kernel::KernelVariant::
-                                      Nvfp4W4A4PrefillGfx1201F16Staging) {
-              ::sllm_matmul_kernel::F16StagingWorkspaceLayout staging_layout{};
-              const bool staging_valid =
-                  ::sllm_matmul_kernel::
-                      phase78_gfx1201_nvfp4_w4a4_f16_staging_shape(
-                          plan->matmul_metadata.m, plan->matmul_metadata.k,
-                          plan->matmul_metadata.n) &&
-                  ::sllm_matmul_kernel::f16_staging_workspace_layout(
-                      plan->matmul_metadata.m, plan->matmul_metadata.k,
-                      plan->matmul_metadata.n, &staging_layout) &&
-                  matmul_f16_staging_workspace != nullptr &&
-                  matmul_f16_staging_workspace_bytes >=
-                      staging_layout.total_bytes;
-              if (!staging_valid) {
-                launch_status = hipErrorOutOfMemory;
-              } else {
-                auto *const staging_bytes =
-                    static_cast<uint8_t *>(matmul_f16_staging_workspace);
-                auto *const activation_f16 = reinterpret_cast<uint16_t *>(
-                    staging_bytes + staging_layout.activation_offset);
-                auto *const weight_f16 = reinterpret_cast<uint16_t *>(
-                    staging_bytes + staging_layout.weight_offset);
-                auto *const output_f32 = reinterpret_cast<float *>(
-                    staging_bytes + staging_layout.output_offset);
-                launch_status =
-                    ::sllm_matmul_kernel::launch_nvfp4_block16_to_fp16_staging(
-                        packed_activation, activation_block_scales,
-                        activation_f16, plan->matmul_metadata.m,
-                        plan->matmul_metadata.k, queue->stream);
-                if (launch_status == hipSuccess) {
-                  launch_status = ::sllm_matmul_kernel::
-                      launch_nvfp4_block16_to_fp16_staging(
-                          packed_weight, weight_block_scales, weight_f16,
-                          plan->matmul_metadata.n, plan->matmul_metadata.k,
-                          queue->stream);
-                }
-                if (launch_status == hipSuccess) {
-                  launch_status = launch_matmul_f16_staging_f32_gemm(
-                      plan->context, queue->stream, activation_f16, weight_f16,
-                      output_f32, plan->matmul_metadata.m,
-                      plan->matmul_metadata.k, plan->matmul_metadata.n);
-                }
-                if (launch_status == hipSuccess) {
-                  launch_status =
-                      ::sllm_matmul_kernel::launch_nvfp4_tensor_scale_epilogue(
-                          output_f32, weight_tensor_scale, input_tensor_scale,
-                          output, plan->matmul_metadata.m,
-                          plan->matmul_metadata.n, queue->stream);
-                }
-              }
-            } else {
-              launch_status = ::sllm_matmul_kernel::launch_nvfp4_w4a4(
-                  packed_activation, activation_block_scales, packed_weight,
-                  weight_block_scales, weight_tensor_scale, input_tensor_scale,
-                  output, plan->matmul_metadata.m, plan->matmul_metadata.k,
-                  plan->matmul_metadata.n, variant, queue->stream);
-            }
-          }
-        }
-      }
-#endif
-    } else if (plan->matmul_metadata.nvfp4) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      launch_status = hipErrorInvalidValue;
-#else
-      if (!matches_runtime_gcn_arch(arch_name, "gfx1201") &&
-          !matches_runtime_gcn_arch(arch_name, "gfx1030")) {
-        launch_status = hipErrorNotSupported;
-      } else {
-        const auto *const packed_weight =
-            static_cast<const uint8_t *>(weight_storage);
-        const auto *const block_scales =
-            static_cast<const uint8_t *>(weight_storage) +
-            plan->matmul_metadata.weight_value_bytes;
-        const auto *const tensor_scale = reinterpret_cast<const float *>(
+      lowp_matmul_buffers_t buffers{};
+      buffers.struct_size = sizeof(buffers);
+      buffers.activation = activation;
+      buffers.weight = weight_storage;
+      buffers.weight_scales = static_cast<const uint8_t *>(weight_storage) +
+                              plan->matmul_metadata.weight_value_bytes;
+      buffers.output = output;
+      buffers.workspace = matmul_workspace;
+      buffers.workspace_bytes = matmul_workspace_bytes;
+      buffers.staging_workspace = matmul_f16_staging_workspace;
+      buffers.staging_workspace_bytes = matmul_f16_staging_workspace_bytes;
+      if (plan->matmul_metadata.nvfp4 || plan->matmul_metadata.nvfp4_w4a4) {
+        buffers.weight_tensor_scale = reinterpret_cast<const float *>(
             static_cast<const uint8_t *>(weight_storage) +
             (plan->matmul_metadata.weight_tensor_scale_offset -
              plan->matmul_metadata.weight.byte_offset));
-        launch_status = ::sllm_matmul_kernel::launch_nvfp4(
-            activation, packed_weight, block_scales, tensor_scale, output,
-            plan->matmul_metadata.m, plan->matmul_metadata.k,
-            plan->matmul_metadata.n, variant, queue->stream);
       }
+      if (plan->matmul_metadata.nvfp4_w4a4) {
+        buffers.activation_tensor_scale = reinterpret_cast<const float *>(
+            static_cast<const uint8_t *>(weight_storage) +
+            (plan->matmul_metadata.input_tensor_scale_offset -
+             plan->matmul_metadata.weight.byte_offset));
+      }
+      buffers.f16_gemm_user = plan->context;
+      buffers.f16_gemm = [](void *user, const uint16_t *a, const uint16_t *w,
+                            float *o, uint64_t m, uint64_t n, uint64_t k,
+                            void *stream) -> lowp_status_t {
+        return launch_matmul_f16_staging_f32_gemm(
+            static_cast<Context *>(user), static_cast<hipStream_t>(stream), a,
+            w, o, m, k, n);
+      };
+      const auto &lowp_plan = *plan->matmul_lowp_c_plan;
+      launch_status = static_cast<hipError_t>(
+          plan->matmul_metadata.mxfp4_w4a4
+              ? sllm_lowp::launch_internal(&lowp_plan, &buffers, queue->stream,
+                                           true)
+              : lowp_matmul_launch(&lowp_plan, &buffers, queue->stream));
 #endif
     } else if (plan->matmul_metadata.fp8_outer) {
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
@@ -2583,7 +1704,7 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
             plan->matmul_metadata.fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ,
             queue->stream);
         if (launch_status == hipSuccess) {
-          if (variant == ::sllm_matmul_kernel::KernelVariant::Fp8Native) {
+          if (variant == ::sllm_matmul_kernel::HostKernelVariant::Fp8Native) {
             std::lock_guard<std::mutex> lt_lock(plan->context->matmul_lt_mutex);
             launch_status =
                 launch_fp8_lt_plan(plan->fp8_lt_plan, quantized, fp8_weight,
@@ -2668,7 +1789,7 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
 #endif
     } else
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-        if (variant == ::sllm_matmul_kernel::KernelVariant::PrefillShortMixed) {
+        if (variant == ::sllm_matmul_kernel::HostKernelVariant::PrefillShortMixed) {
       uint64_t workspace_bytes = 0U;
       uint64_t output_elements = 0U;
       bool workspace_valid =
@@ -2768,7 +1889,7 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
               output_f32, output, output_elements, queue->stream);
         }
       }
-    } else if (variant == ::sllm_matmul_kernel::KernelVariant::HipBlas) {
+    } else if (variant == ::sllm_matmul_kernel::HostKernelVariant::HipBlas) {
       if (plan->context->matmul_blas_handle == nullptr) {
         launch_status = hipErrorInvalidHandle;
       } else {

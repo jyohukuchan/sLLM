@@ -104,7 +104,13 @@ uint32_t qwen38_projection_pack_compute_grid(
     *result = rows * columns;
     return *result != 0U;
   };
+  using sllm_matmul_kernel::HostKernelVariant;
   using sllm_matmul_kernel::KernelVariant;
+  // The native FP8 provider ID is owned by this runtime, not the lowp enum.
+  if (variant == HostKernelVariant::Fp8Native) {
+    return n > static_cast<uint64_t>(UINT32_MAX) ? 0U
+                                                 : static_cast<uint32_t>(n);
+  }
   switch (variant) {
   case KernelVariant::Nvfp4W4A4DecodeWave4Column32:
   case KernelVariant::Nvfp4W4A4DecodeActivationShared:
@@ -164,9 +170,6 @@ uint32_t qwen38_projection_pack_compute_grid(
   case KernelVariant::Nvfp4W4A4SmallMVgprReuse:
   case KernelVariant::Nvfp4W4A4SmallMGfx1201RowGrid:
     return ceil_grid(n, UINT64_C(32));
-  case KernelVariant::Fp8Native:
-    return n > static_cast<uint64_t>(UINT32_MAX) ? 0U
-                                                 : static_cast<uint32_t>(n);
   case KernelVariant::Fp8Emulation:
     return ceil_grid(n, UINT64_C(256));
   case KernelVariant::Nvfp4W4A4Packed:
@@ -344,6 +347,7 @@ bool qwen38_projection_pack_nvfp4_quantize_grid(
 bool qwen38_projection_pack_nvfp4_adopted_variant(
     const sllm_matmul_kernel::KernelVariant variant, const uint64_t m,
     const uint64_t k, const uint64_t n, const char *const arch_name) noexcept {
+  using sllm_matmul_kernel::HostKernelVariant;
   using sllm_matmul_kernel::KernelVariant;
   if (arch_name == nullptr) {
     return false;
@@ -696,13 +700,45 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
             "Qwen3.8 projection-pack requires exact gfx1030 or gfx1201");
       }
       std::array<sllm_matmul_kernel::KernelVariant, 2> variants{};
-      std::optional<sllm_lowp::PreparedProviderPlan> provider;
-      std::optional<sllm_lowp::PreparedProviderPlan> concrete;
+      std::array<lowp_matmul_plan_t, 2> lowp_plans{};
+      const lowp_target_t lowp_target =
+          static_cast<lowp_target_t>(matmul_lowp_target(arch_name));
       if (fp8_gdn) {
+        const bool native_fp8 = matches_runtime_gcn_arch(arch_name, "gfx1201");
         for (uint32_t index = 0U; index != 2U; ++index) {
-          variants[index] = ::sllm_matmul_kernel::select_fp8_outer_variant(
-              metadata[index].m, metadata[index].k, metadata[index].n,
-              arch_name, false);
+          if (native_fp8) {
+            variants[index] = ::sllm_matmul_kernel::select_fp8_outer_variant(
+                metadata[index].m, metadata[index].k, metadata[index].n,
+                arch_name, false);
+            continue;
+          }
+          if (lowp_target == LOWP_TARGET_UNKNOWN) {
+            return sllm_public_runtime::write_error(
+                error_sink, SLLM_STATUS_UNSUPPORTED,
+                "Qwen3.8 projection-pack lowp target is unknown");
+          }
+          lowp_matmul_request_t request{};
+          request.struct_size = sizeof(request);
+          request.version = LOWP_ABI_VERSION;
+          request.format = LOWP_FP8_OUTER_E4M3_W8A8;
+          request.target = lowp_target;
+          request.weight_layout = LOWP_ROW_MAJOR;
+          request.activation_layout = LOWP_ROW_MAJOR;
+          request.m = metadata[index].m;
+          request.n = metadata[index].n;
+          request.k = metadata[index].k;
+          lowp_plans[index].struct_size = sizeof(lowp_plans[index]);
+          lowp_plans[index].version = LOWP_ABI_VERSION;
+          const lowp_status_t plan_status =
+              lowp_matmul_plan(&request, &lowp_plans[index]);
+          if (plan_status != LOWP_SUCCESS ||
+              lowp_plans[index].supported == 0U) {
+            return sllm_public_runtime::write_error(
+                error_sink, SLLM_STATUS_UNSUPPORTED,
+                "Qwen3.8 projection-pack FP8 GDN lowp plan rejected");
+          }
+          variants[index] = static_cast<sllm_matmul_kernel::KernelVariant>(
+              lowp_plans[index].variant);
           if (qwen38_projection_pack_compute_grid(variants[index],
                                                   metadata[index].m,
                                                   metadata[index].n) == 0U) {
@@ -712,22 +748,41 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
                 "target");
           }
         }
+        if (!native_fp8 &&
+            lowp_plans[0].workspace_bytes != lowp_plans[1].workspace_bytes) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_UNSUPPORTED,
+              "Qwen3.8 projection-pack FP8 GDN lowp workspace differs");
+        }
       } else {
-        const sllm_lowp::ProviderRequest request =
-            sllm_lowp::make_provider_request(sllm_lowp::MatmulFormat::Nvfp4W4A4,
-                                             matmul_lowp_target(arch_name),
-                                             metadata[0].m, metadata[0].n,
-                                             metadata[0].k);
-        provider.emplace(sllm_lowp::prepare_provider_plan(request));
-        variants[0] =
-            matmul_lowp_kernel_variant(metadata[0], *provider, arch_name);
-        variants[1] =
-            matmul_lowp_kernel_variant(metadata[1], *provider, arch_name);
-        if (provider->supported()) {
-          const auto selected =
-              matmul_lowp_concrete_provider_plan(*provider, variants[0]);
-          if (selected.has_value())
-            concrete.emplace(*selected);
+        if (lowp_target == LOWP_TARGET_UNKNOWN) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_UNSUPPORTED,
+              "Qwen3.8 projection-pack lowp target is unknown");
+        }
+        for (uint32_t index = 0U; index != 2U; ++index) {
+          lowp_matmul_request_t request{};
+          request.struct_size = sizeof(request);
+          request.version = LOWP_ABI_VERSION;
+          request.format = LOWP_NVFP4_W4A4;
+          request.target = lowp_target;
+          request.weight_layout = LOWP_ROW_MAJOR_BLOCK_SCALED;
+          request.activation_layout = LOWP_ROW_MAJOR_BLOCK_SCALED;
+          request.m = metadata[index].m;
+          request.n = metadata[index].n;
+          request.k = metadata[index].k;
+          lowp_plans[index].struct_size = sizeof(lowp_plans[index]);
+          lowp_plans[index].version = LOWP_ABI_VERSION;
+          const lowp_status_t plan_status =
+              lowp_matmul_plan(&request, &lowp_plans[index]);
+          if (plan_status != LOWP_SUCCESS ||
+              lowp_plans[index].supported == 0U) {
+            return sllm_public_runtime::write_error(
+                error_sink, SLLM_STATUS_UNSUPPORTED,
+                "Qwen3.8 projection-pack NVFP4 lowp plan rejected");
+          }
+          variants[index] = static_cast<sllm_matmul_kernel::KernelVariant>(
+              lowp_plans[index].variant);
         }
         const bool adopted_pair =
             metadata[0].m == kQwen38ProjectionPackM ||
@@ -737,15 +792,17 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
              qwen38_projection_pack_nvfp4_adopted_variant(
                  variants[1], metadata[1].m, metadata[1].k, metadata[1].n,
                  arch_name));
-        if (!concrete.has_value() || variants[0] != variants[1] ||
-            !adopted_pair ||
+        if (!adopted_pair || variants[0] != variants[1] ||
+            lowp_plans[0].provider != lowp_plans[1].provider ||
+            lowp_plans[0].tile != lowp_plans[1].tile ||
+            lowp_plans[0].inner_product != lowp_plans[1].inner_product ||
             qwen38_projection_pack_compute_grid(variants[0], metadata[0].m,
                                                 metadata[0].n) == 0U ||
             qwen38_projection_pack_compute_grid(variants[1], metadata[1].m,
                                                 metadata[1].n) == 0U) {
           return sllm_public_runtime::write_error(
               error_sink, SLLM_STATUS_UNSUPPORTED,
-              "Qwen3.8 projection-pack NVFP4 selector is not safe for both "
+              "Qwen3.8 projection-pack NVFP4 lowp plan is not safe for both "
               "members");
         }
       }
@@ -766,15 +823,33 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
             descriptor->input_global_scale_f32_bits);
         candidate->qwen38_projection_pack2_role = descriptor->role;
         candidate->qwen38_projection_pack2_kernel_variants = variants;
-        if (concrete.has_value())
-          candidate->matmul_provider_plan.emplace(*concrete);
+        candidate->qwen38_projection_pack2_lowp_plans = lowp_plans;
+        if (!fp8_gdn) {
+          const auto base =
+              sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
+                  sllm_lowp::MatmulFormat::Nvfp4W4A4,
+                  matmul_lowp_target(arch_name), metadata[0].m, metadata[0].n,
+                  metadata[0].k));
+          candidate->matmul_provider_plan.emplace(
+              sllm_lowp::with_execution_semantics(
+                  base,
+                  static_cast<sllm_lowp::ProviderKind>(lowp_plans[0].provider),
+                  static_cast<sllm_lowp::TilePolicy>(lowp_plans[0].tile),
+                  static_cast<sllm_lowp::InnerProduct>(
+                      lowp_plans[0].inner_product)));
+        }
+
         candidate->matmul_kernel_variant = variants[0];
         const bool queue_workspace =
             !fp8_gdn && metadata[0].m != kQwen38ProjectionPackM;
+        const bool native_fp8 =
+            fp8_gdn && matches_runtime_gcn_arch(arch_name, "gfx1201");
+        uint64_t legacy_workspace_bytes = 0U;
         if (fp8_gdn) {
           if (!qwen38_projection_pack_fp8_gdn_workspace_bytes(
-                  metadata[0].m, metadata[0].k,
-                  &candidate->matmul_workspace_bytes)) {
+                  metadata[0].m, metadata[0].k, &legacy_workspace_bytes) ||
+              (!native_fp8 &&
+               lowp_plans[0].workspace_bytes != legacy_workspace_bytes)) {
             (void)sllm_public_runtime::AccountingState::
                 release_five_buffer_prepared_plan(
                     context->accounting, activation->accounting,
@@ -785,9 +860,12 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
                 error_sink, SLLM_STATUS_UNSUPPORTED,
                 "Qwen3.8 projection-pack FP8 GDN workspace size overflowed");
           }
+          candidate->matmul_workspace_bytes =
+              native_fp8 ? legacy_workspace_bytes
+                         : lowp_plans[0].workspace_bytes;
         } else if (!qwen38_projection_pack_nvfp4_workspace_bytes(
-                       metadata[0].m, metadata[0].k,
-                       &candidate->matmul_workspace_bytes)) {
+                       metadata[0].m, metadata[0].k, &legacy_workspace_bytes) ||
+                   lowp_plans[0].workspace_bytes != legacy_workspace_bytes) {
           (void)sllm_public_runtime::AccountingState::
               release_five_buffer_prepared_plan(
                   context->accounting, activation->accounting,
@@ -797,6 +875,8 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
           return sllm_public_runtime::write_error(
               error_sink, SLLM_STATUS_UNSUPPORTED,
               "Qwen3.8 projection-pack NVFP4 workspace size overflowed");
+        } else {
+          candidate->matmul_workspace_bytes = lowp_plans[0].workspace_bytes;
         }
         candidate->matmul_queue_workspace = queue_workspace;
         const hipError_t workspace_status =
@@ -1240,9 +1320,20 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
         auto *const activation_scales = reinterpret_cast<float *>(
             workspace +
             projection_m * plan->qwen38_projection_pack2_metadata[0].k);
-        launch_status = ::sllm_matmul_kernel::launch_fp8_quantize(
-            activation, quantized_activation, activation_scales, projection_m,
-            plan->qwen38_projection_pack2_metadata[0].k, false, queue->stream);
+        const bool native_fp8 =
+            plan->qwen38_projection_pack2_kernel_variants[0] ==
+            sllm_matmul_kernel::HostKernelVariant::Fp8Native;
+        if (native_fp8) {
+          launch_status = ::sllm_matmul_kernel::launch_fp8_quantize(
+              activation, quantized_activation, activation_scales, projection_m,
+              plan->qwen38_projection_pack2_metadata[0].k, false,
+              queue->stream);
+        } else {
+          const lowp_status_t status = lowp_quantize_activation(
+              &plan->qwen38_projection_pack2_lowp_plans[0], activation,
+              quantized_activation, activation_scales, nullptr, queue->stream);
+          launch_status = static_cast<hipError_t>(status);
+        }
         for (uint32_t index = 0U; launch_status == hipSuccess && index != 2U;
              ++index) {
           const auto &member = plan->qwen38_projection_pack2_metadata[index];
@@ -1254,9 +1345,7 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
           uint16_t *const output =
               output_pointer(plan->qwen38_projection_pack2_outputs[index],
                              member.output.byte_offset);
-          const auto variant =
-              plan->qwen38_projection_pack2_kernel_variants[index];
-          if (variant == sllm_matmul_kernel::KernelVariant::Fp8Native) {
+          if (native_fp8) {
             if (plan->qwen38_projection_pack2_fp8_lt_plans[index] == nullptr) {
               launch_status = hipErrorInvalidHandle;
             } else {
@@ -1266,76 +1355,19 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
                   plan->qwen38_projection_pack2_fp8_lt_plans[index],
                   quantized_activation, fp8_weight, output, queue->stream);
             }
-          } else if (variant == sllm_matmul_kernel::KernelVariant::
-                                    Fp8OuterPrefillTiled16) {
-            launch_status =
-                ::sllm_matmul_kernel::launch_fp8_outer_prefill_tiled16(
-                    quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, member.m, member.k, member.n,
-                    queue->stream);
-          } else if (variant == sllm_matmul_kernel::KernelVariant::
-                                    Fp8OuterPrefillGfx1030Half2_128x64) {
-            launch_status = ::sllm_matmul_kernel::
-                launch_fp8_outer_prefill_gfx1030_half2_128x64(
-                    quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, member.m, member.k, member.n,
-                    queue->stream);
-          } else if (variant == sllm_matmul_kernel::KernelVariant::
-                                    Fp8OuterPrefillGfx1030Half2_64x64) {
-            launch_status = ::sllm_matmul_kernel::
-                launch_fp8_outer_prefill_gfx1030_half2_64x64(
-                    quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, member.m, member.k, member.n,
-                    queue->stream);
-          } else if (variant == sllm_matmul_kernel::KernelVariant::
-                                    Fp8OuterDecodeGfx1030Dword8Wave4Col32) {
-            launch_status = ::sllm_matmul_kernel::
-                launch_fp8_outer_decode_gfx1030_dword8_wave4col32(
-                    quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, member.m, member.k, member.n,
-                    queue->stream);
-          } else if (variant == sllm_matmul_kernel::KernelVariant::
-                                    Fp8OuterDecodeGfx1030LdsLutWave4Col32) {
-            launch_status = ::sllm_matmul_kernel::
-                launch_fp8_outer_decode_gfx1030_lds_lut_wave4col32(
-                    quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, member.m, member.k, member.n,
-                    queue->stream);
-          } else if (variant == sllm_matmul_kernel::KernelVariant::
-                                    Fp8OuterDecodeGfx1030FusedM2_4) {
-            launch_status = ::sllm_matmul_kernel::
-                launch_fp8_outer_decode_gfx1030_fused_m2_4(
-                    quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, member.m, member.k, member.n,
-                    queue->stream);
-          } else if (variant ==
-                     sllm_matmul_kernel::KernelVariant::
-                         Fp8OuterDecodeGfx1030ActivationSharedWave4Col32) {
-            launch_status = ::sllm_matmul_kernel::
-                launch_fp8_outer_decode_gfx1030_activation_shared_wave4col32(
-                    quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, member.m, member.k, member.n,
-                    queue->stream);
-          } else if (variant ==
-                     sllm_matmul_kernel::KernelVariant::
-                         Fp8OuterDecodeGfx1030ActivationSharedWave8Col64) {
-            launch_status = ::sllm_matmul_kernel::
-                launch_fp8_outer_decode_gfx1030_activation_shared_wave8col64(
-                    quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, member.m, member.k, member.n,
-                    queue->stream);
-          } else if (variant == sllm_matmul_kernel::KernelVariant::
-                                    Fp8OuterDecodeGfx1030Half2Wave4Col32) {
-            launch_status = ::sllm_matmul_kernel::
-                launch_fp8_outer_decode_gfx1030_half2_wave4col32(
-                    quantized_activation, activation_scales, fp8_weight,
-                    weight_scales, output, member.m, member.k, member.n,
-                    queue->stream);
           } else {
-            launch_status = ::sllm_matmul_kernel::launch_fp8_emulation(
-                quantized_activation, activation_scales, fp8_weight,
-                weight_scales, output, member.m, member.k, member.n,
+            lowp_matmul_buffers_t buffers{};
+            buffers.struct_size = sizeof(buffers);
+            buffers.flags = LOWP_ACTIVATION_PREQUANTIZED;
+            buffers.activation = quantized_activation;
+            buffers.activation_scales = activation_scales;
+            buffers.weight = fp8_weight;
+            buffers.weight_scales = weight_scales;
+            buffers.output = output;
+            const lowp_status_t status = lowp_matmul_launch(
+                &plan->qwen38_projection_pack2_lowp_plans[index], &buffers,
                 queue->stream);
+            launch_status = static_cast<hipError_t>(status);
           }
         }
       } else {
@@ -1354,9 +1386,13 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
               reinterpret_cast<const float *>(
                   weight_pointer(plan->qwen38_projection_pack2_weights[0],
                                  gate.input_tensor_scale_offset));
-          launch_status = ::sllm_matmul_kernel::launch_nvfp4_quantize(
-              activation, packed_activation, activation_block_scales,
-              shared_input_tensor_scale, gate.m, gate.k, queue->stream);
+          const lowp_status_t quantize_status = lowp_quantize_activation(
+              &plan->qwen38_projection_pack2_lowp_plans[0], activation,
+              packed_activation, activation_block_scales,
+              shared_input_tensor_scale, queue->stream);
+          launch_status = quantize_status == LOWP_SUCCESS
+                              ? hipSuccess
+                              : hipErrorInvalidValue;
           for (uint32_t index = 0U; launch_status == hipSuccess && index != 2U;
                ++index) {
             const auto &member = plan->qwen38_projection_pack2_metadata[index];
@@ -1368,15 +1404,25 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
             const auto *const weight_tensor_scale =
                 reinterpret_cast<const float *>(
                     weight_pointer(weight, member.weight_tensor_scale_offset));
-            launch_status = ::sllm_matmul_kernel::launch_nvfp4_w4a4(
-                packed_activation, activation_block_scales, packed_weight,
-                weight_block_scales, weight_tensor_scale,
-                shared_input_tensor_scale,
+            uint16_t *const output =
                 output_pointer(plan->qwen38_projection_pack2_outputs[index],
-                               member.output.byte_offset),
-                member.m, member.k, member.n,
-                plan->qwen38_projection_pack2_kernel_variants[index],
+                               member.output.byte_offset);
+            lowp_matmul_buffers_t buffers{};
+            buffers.struct_size = sizeof(buffers);
+            buffers.flags = LOWP_ACTIVATION_PREQUANTIZED;
+            buffers.activation = packed_activation;
+            buffers.activation_scales = activation_block_scales;
+            buffers.weight = packed_weight;
+            buffers.weight_scales = weight_block_scales;
+            buffers.weight_tensor_scale = weight_tensor_scale;
+            buffers.activation_tensor_scale = shared_input_tensor_scale;
+            buffers.output = output;
+            buffers.workspace = workspace;
+            buffers.workspace_bytes = plan->matmul_workspace_bytes;
+            const lowp_status_t status = lowp_matmul_launch(
+                &plan->qwen38_projection_pack2_lowp_plans[index], &buffers,
                 queue->stream);
+            launch_status = static_cast<hipError_t>(status);
           }
         }
       }

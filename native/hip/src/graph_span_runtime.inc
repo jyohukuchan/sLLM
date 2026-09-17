@@ -102,17 +102,17 @@ bool graph_span_direct_matmul(const ElementwisePlan *const plan,
    * unchanged; the graph owns the prepared plan pin for the lifetime of the
    * capture/replay object. */
   if (plan->matmul_kernel_variant ==
-          ::sllm_matmul_kernel::KernelVariant::Fp8Native ||
+          ::sllm_matmul_kernel::HostKernelVariant::Fp8Native ||
       plan->fp8_lt_plan != nullptr) {
     return exact_gfx1201 && plan->matmul_metadata.fp8_outer &&
            plan->matmul_metadata.fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
            plan->matmul_kernel_variant ==
-               ::sllm_matmul_kernel::KernelVariant::Fp8Native &&
+               ::sllm_matmul_kernel::HostKernelVariant::Fp8Native &&
            plan->fp8_lt_plan != nullptr && plan->matmul_workspace != nullptr &&
            plan->matmul_workspace_bytes != 0U;
   }
   if (plan->matmul_kernel_variant ==
-      ::sllm_matmul_kernel::KernelVariant::HipBlas) {
+      ::sllm_matmul_kernel::HostKernelVariant::HipBlas) {
     return false;
   }
   return true;
@@ -242,16 +242,16 @@ bool graph_span_qwen38_pack(const ElementwisePlan *const plan,
   const bool exact_gfx1030 = matches_runtime_gcn_arch(arch_name, "gfx1030");
   if (exact_gfx1201) {
     return plan->qwen38_projection_pack2_kernel_variants[0] ==
-               ::sllm_matmul_kernel::KernelVariant::Fp8Native &&
+               ::sllm_matmul_kernel::HostKernelVariant::Fp8Native &&
            plan->qwen38_projection_pack2_kernel_variants[1] ==
-               ::sllm_matmul_kernel::KernelVariant::Fp8Native &&
+               ::sllm_matmul_kernel::HostKernelVariant::Fp8Native &&
            plan->qwen38_projection_pack2_fp8_lt_plans[0] != nullptr &&
            plan->qwen38_projection_pack2_fp8_lt_plans[1] != nullptr;
   }
   if (exact_gfx1030) {
     const auto variant = plan->qwen38_projection_pack2_kernel_variants[0];
     return variant == plan->qwen38_projection_pack2_kernel_variants[1] &&
-           variant != ::sllm_matmul_kernel::KernelVariant::Fp8Native &&
+           variant != ::sllm_matmul_kernel::HostKernelVariant::Fp8Native &&
            (variant == ::sllm_matmul_kernel::KernelVariant::
                            Fp8OuterDecodeGfx1030Half2Wave4Col32 ||
             variant == ::sllm_matmul_kernel::KernelVariant::

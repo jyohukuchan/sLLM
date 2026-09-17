@@ -9,7 +9,7 @@
 // This is a probe only. Four distinct resident weight matrices are cycled per
 // shape so measurements are not an identical-weight cache warm result.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_runtime.h>
 

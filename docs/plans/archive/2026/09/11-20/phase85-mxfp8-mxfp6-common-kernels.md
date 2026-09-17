@@ -42,8 +42,8 @@ selectorはtarget、format、M/N/K、layout、alignment、資源条件に基づ�
 
 | 入口 | 現行の責務 |
 | --- | --- |
-| [low_precision_block_codec.hpp](../../../../../../native/hip/src/low_precision_block_codec.hpp) | format codec、E3M2 packed access、E8M0、block view、量子化の共有境界 |
-| [low_precision_matmul_provider.hpp](../../../../../../native/hip/src/low_precision_matmul_provider.hpp) | format／layout契約、shape selector、prepared provider |
+| [low_precision_block_codec.hpp](../../../../../../native/lowp/include/lowp/detail/low_precision_block_codec.hpp) | format codec、E3M2 packed access、E8M0、block view、量子化の共有境界 |
+| [low_precision_matmul_provider.hpp](../../../../../../native/lowp/include/lowp/detail/low_precision_matmul_provider.hpp) | format／layout契約、shape selector、prepared provider |
 | [matmul_kernel.hip.cpp](../../../../../../native/hip/src/matmul_kernel.hip.cpp) | activation quantizer、MMQ、half2／WMMA body、format別ingress、launch |
 | [mtp_quantized_sidecar.rs](../../../../../../crates/sllm-core/src/mtp_quantized_sidecar.rs) | MTP専用8行列のsidecar。graphから通常MXFP8／MXFP6 providerへ接続 |
 | [kv_state_kernel.hip.cpp](../../../../../../native/hip/src/kv_state_kernel.hip.cpp) | KV append／quantization。matmulとは別scheduleでcodecを利用 |
@@ -142,7 +142,7 @@ MTP採用率はPhase84の12言語／タスク条件×3 seedを最終候補で再
 | 既存入口 | 再利用・必要な拡張 |
 | --- | --- |
 | [sllm-mxfp-wa-evidence.rs](../../../../../../crates/sllm-hip/src/bin/sllm-mxfp-wa-evidence.rs) | Phase62〜75／84のoperator、oracle、dispatch、repeat／resource出力を再利用し、有限shape集合と候補比較を追加 |
-| [low_precision_block_codec_gpu_test.hip.cpp](../../../../../../native/hip/tests/low_precision_block_codec_gpu_test.hip.cpp) | 全code・packed／scale・provider境界。既存host selector検査と合わせる |
+| [low_precision_block_codec_gpu_test.hip.cpp](../../../../../../native/lowp/tests/low_precision_block_codec_gpu_test.hip.cpp) | 全code・packed／scale・provider境界。既存host selector検査と合わせる |
 | [sllm-qwen35-mx-weight-quality.rs](../../../../../../crates/sllm-hip/src/bin/sllm-qwen35-mx-weight-quality.rs) | 固定10ケースのlogits／top-1／KLD／perplexity。現状MXFP8中心なのでMXFP6比較と最適化前後の同形式対照は不足分を実装 |
 | [sllm-kv-mxfp8-e4-evidence.rs](../../../../../../crates/sllm-hip/src/bin/sllm-kv-mxfp8-e4-evidence.rs) | head dimension 31/32/33/255/256/257のbyte／tail検査と、対応head dimensionのattention oracle |
 | [sllm-qwen35-kv-quality-probe.rs](../../../../../../crates/sllm-hip/src/bin/sllm-qwen35-kv-quality-probe.rs) | 固定10ケースのFP16 KV／MXFP8 E4品質比較。速度行と混同しない |

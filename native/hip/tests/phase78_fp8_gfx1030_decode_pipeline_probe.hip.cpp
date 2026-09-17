@@ -8,7 +8,7 @@
 // scales, and BF16-RNE epilogue.  Four distinct matrices are cycled in every
 // measured set; a repeated single-weight cache warm result is not accepted.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_runtime.h>
 

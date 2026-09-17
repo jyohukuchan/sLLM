@@ -25,7 +25,7 @@
   sllm_id84_probe_unused_wave4col32_lds_f32_const_lut
 #define sllm_matmul_nvfp4_w4a4_decode_dp4a_activation_shared_lds_f32_const_lut_v1 \
   sllm_id84_probe_unused_activation_shared_lds_f32_const_lut
-#include "../src/nvfp4_decode_scale_lut.inc"
+#include "../../lowp/src/nvfp4_decode_scale_lut.inc"
 #undef sllm_matmul_nvfp4_w4a4_decode_dp4a_activation_shared_lds_f32_const_lut_v1
 #undef sllm_matmul_nvfp4_w4a4_decode_dp4a_wave4col32_lds_f32_const_lut_v1
 #undef sllm_matmul_nvfp4_w4a4_decode_dp4a_activation_shared_lds_f32_lut_v1

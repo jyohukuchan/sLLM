@@ -27,7 +27,7 @@
 // gfx1201 routes it through ID67 wave4/col32.  The tiny K48/N37 case always
 // exercises ID67 and its 32-column tail.
 
-#include "../src/nvfp4_decode_scale_lut.inc"
+#include "../../lowp/src/nvfp4_decode_scale_lut.inc"
 
 #include <hip/hip_runtime.h>
 

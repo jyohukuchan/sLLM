@@ -578,6 +578,9 @@ fn prime_requests(
     })
 }
 
+// This helper keeps the target/draft state vectors explicit so the retention
+// and catch-up ordering remains auditable against the production executor.
+#[allow(clippy::too_many_arguments)]
 fn retain_or_catch_up(
     draft_request: &mut QwenExecutionRequest,
     mode: &'static str,
@@ -803,6 +806,9 @@ fn run_entry_t(
     })
 }
 
+// The benchmark entrypoint intentionally owns both resident models, graphs,
+// and fixed-prefix metadata to keep each measured request self-contained.
+#[allow(clippy::too_many_arguments)]
 fn run_entry(
     target_resident: &QwenResidentModel,
     target_graph: &sllm_core::QwenGraph,

@@ -1,9 +1,9 @@
 #include "evidence_abi.h"
-#include "low_precision_matmul_provider.hpp"
 #include "matmul_api.hpp"
 #include "matmul_kernel_internal.hpp"
 #include "public_runtime_internal.hpp"
 #include "rmsnorm_kernel_internal.hpp"
+#include <lowp/detail/low_precision_matmul_provider.hpp>
 
 #include "sllm/hip.h"
 #include <hip/hip_runtime.h>
@@ -6270,10 +6270,10 @@ bool matmul_mxfp_prefill_selector_contract() {
           sllm_matmul_kernel::KernelVariant::Fp8Emulation &&
       sllm_matmul_kernel::select_fp8_outer_variant(17U, 5120U, 17408U,
                                                    "gfx1201") ==
-          sllm_matmul_kernel::KernelVariant::Fp8Native &&
+          sllm_matmul_kernel::HostKernelVariant::Fp8Native &&
       sllm_matmul_kernel::select_fp8_outer_variant(1U, 5120U, 17408U,
                                                    "gfx942:sramecc+:xnack-") ==
-          sllm_matmul_kernel::KernelVariant::Fp8Native &&
+          sllm_matmul_kernel::HostKernelVariant::Fp8Native &&
       sllm_matmul_kernel::select_mxfp8_variant(127U, 2560U, 9216U, "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
       sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, "gfx1201") ==
@@ -7109,6 +7109,7 @@ bool matmul_fp8_outer_decode_selector_contract() {
     }
   };
 
+  using sllm_matmul_kernel::HostKernelVariant;
   using sllm_matmul_kernel::KernelVariant;
   const auto select = [](const uint64_t m, const uint64_t k, const uint64_t n,
                          const char *const target = "gfx1030",
@@ -7154,9 +7155,9 @@ bool matmul_fp8_outer_decode_selector_contract() {
       select(1U, 64U, 0U) == KernelVariant::Fp8Emulation &&
       select(2U, 64U, 33U) !=
           KernelVariant::Fp8OuterDecodeGfx1030Half2Wave4Col32 &&
-      select(1U, 64U, 33U, "gfx1201") == KernelVariant::Fp8Native &&
+      select(1U, 64U, 33U, "gfx1201") == HostKernelVariant::Fp8Native &&
       select(1U, 64U, 33U, "gfx942:sramecc+:xnack-") ==
-          KernelVariant::Fp8Native &&
+          HostKernelVariant::Fp8Native &&
       select(1U, 64U, 33U, "gfx9999") == KernelVariant::Fp8Emulation &&
       select(1U, 64U, 33U, "gfx1030", true) == KernelVariant::Fp8Emulation &&
       std::strcmp(sllm_matmul_kernel::logical_kernel_id(
@@ -7221,7 +7222,7 @@ bool matmul_fp8_outer_decode_selector_contract() {
       select(1U, 64U, 0U) == KernelVariant::Fp8Emulation &&
       select(2U, 5120U, 17408U) !=
           KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32 &&
-      select(1U, 64U, 33U, "gfx1201") == KernelVariant::Fp8Native &&
+      select(1U, 64U, 33U, "gfx1201") == HostKernelVariant::Fp8Native &&
       select(1U, 64U, 33U, "gfx1030", true) == KernelVariant::Fp8Emulation &&
       static_cast<uint32_t>(
           KernelVariant::Fp8OuterDecodeGfx1030LdsLutWave4Col32) == 82U &&
@@ -7350,10 +7351,10 @@ bool matmul_fp8_outer_decode_selector_contract() {
           KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
       select(2U, 6144U, 10240U) !=
           KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
-      select(2U, 5120U, 10240U, "gfx1201") == KernelVariant::Fp8Native &&
+      select(2U, 5120U, 10240U, "gfx1201") == HostKernelVariant::Fp8Native &&
       select(2U, 5120U, 10240U, "gfx1030", true) ==
           KernelVariant::Fp8OuterPrefillTiled16 &&
-      select(1U, 5120U, 17408U, "gfx1201") == KernelVariant::Fp8Native &&
+      select(1U, 5120U, 17408U, "gfx1201") == HostKernelVariant::Fp8Native &&
       select(1U, 5120U, 17408U, "gfx1030", true) ==
           KernelVariant::Fp8Emulation &&
       static_cast<uint32_t>(
@@ -7697,6 +7698,52 @@ bool matmul_fp8_outer_decode_selector_contract() {
          fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
 }
 
+bool fp8_native_selector_n0_regression_contract() {
+  using sllm_matmul_kernel::HostKernelVariant;
+  using sllm_matmul_kernel::KernelVariant;
+  constexpr std::array<const char *const, 5> variables = {
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030Half2Environment,
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030Dword8Environment,
+      sllm_matmul_kernel::kFp8OuterDecodeBaselineEnvironment,
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030ActivationSharedEnvironment,
+      sllm_matmul_kernel::kFp8OuterDecodeGfx1030LdsLutEnvironment,
+  };
+  std::array<bool, variables.size()> present{};
+  std::array<std::string, variables.size()> values{};
+  for (std::size_t index = 0U; index != variables.size(); ++index) {
+    const char *const value = std::getenv(variables[index]);
+    present[index] = value != nullptr;
+    values[index] = value == nullptr ? "" : value;
+    unsetenv(variables[index]);
+  }
+  const auto restore = [&]() {
+    for (std::size_t index = 0U; index != variables.size(); ++index) {
+      if (present[index])
+        setenv(variables[index], values[index].c_str(), 1);
+      else
+        unsetenv(variables[index]);
+    }
+  };
+
+  const auto gfx1201 = sllm_matmul_kernel::select_fp8_outer_decision(
+      1U, 5120U, 1024U, "gfx1201");
+  const auto gfx942 = sllm_matmul_kernel::select_fp8_outer_decision(
+      1U, 5120U, 1024U, "gfx942:sramecc+:xnack-");
+  const auto gfx1030 =
+      sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx1030");
+  const bool valid =
+      static_cast<uint32_t>(HostKernelVariant::Fp8Native) == 5U &&
+      static_cast<uint32_t>(KernelVariant::Fp8Emulation) == 6U &&
+      gfx1201.variant == HostKernelVariant::Fp8Native && gfx1201.supported &&
+      gfx1201.enabled && gfx1201.adopted &&
+      gfx942.variant == HostKernelVariant::Fp8Native && gfx942.supported &&
+      gfx942.enabled && gfx942.adopted &&
+      gfx1030.variant == KernelVariant::Fp8Emulation && gfx1030.supported &&
+      gfx1030.enabled && gfx1030.adopted;
+  restore();
+  return valid;
+}
+
 bool matmul_fp8_gfx1201_decode_rank_table_contract() {
   const auto check =
       [](const char *const arch, const uint32_t dtype, const uint64_t m,
@@ -7898,6 +7945,7 @@ bool matmul_nvfp4_w4a4_selector_contract() {
     }
   };
 
+  using sllm_matmul_kernel::HostKernelVariant;
   using sllm_matmul_kernel::KernelVariant;
   const auto select = [](const uint64_t m, const uint64_t k,
                          const char *const target = "gfx1030",
@@ -8352,6 +8400,7 @@ bool matmul_selector_decision_contract() {
       }
     }
   };
+  using sllm_matmul_kernel::HostKernelVariant;
   using sllm_matmul_kernel::KernelVariant;
   bool valid = true;
 
@@ -8449,7 +8498,7 @@ bool matmul_selector_decision_contract() {
   const auto fp8_unknown =
       sllm_matmul_kernel::select_fp8_outer_decision(1U, 64U, 33U, "gfx900");
   valid =
-      valid && fp8_native.variant == KernelVariant::Fp8Native &&
+      valid && fp8_native.variant == HostKernelVariant::Fp8Native &&
       fp8_native.supported && fp8_native.enabled && fp8_native.adopted &&
       fp8_fused.variant == KernelVariant::Fp8OuterDecodeGfx1030FusedM2_4 &&
       fp8_fused.supported && fp8_fused.enabled && fp8_fused.adopted &&
@@ -8700,6 +8749,7 @@ bool matmul_nvfp4_w4a4_baseline_scope_contract() {
   };
   setenv(baseline_environment, "1", 1);
 
+  using sllm_matmul_kernel::HostKernelVariant;
   using sllm_matmul_kernel::KernelVariant;
   bool valid = true;
   const auto minimum =
@@ -9367,7 +9417,7 @@ bool matmul_short_mixed_rocblas_solution_selector_contract() {
           sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_enabled(
               "gfx1030", m17, k4096, 2560U) &&
           sllm_matmul_kernel::select_variant(m17, k2560, n9216, "gfx1030") ==
-              sllm_matmul_kernel::KernelVariant::PrefillShortMixed;
+              sllm_matmul_kernel::HostKernelVariant::PrefillShortMixed;
 
   setenv(solution_environment, "1", 1);
   valid =
@@ -9387,7 +9437,7 @@ bool matmul_short_mixed_rocblas_solution_selector_contract() {
           !sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_enabled(
               "gfx1030", m17, k4096, 2560U) &&
           sllm_matmul_kernel::select_variant(m17, k2560, n9216, "gfx1030") ==
-              sllm_matmul_kernel::KernelVariant::Baseline;
+              sllm_matmul_kernel::HostKernelVariant::Baseline;
   unsetenv("SLLM_MATMUL_FORCE_BASELINE");
   valid =
       valid && !sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_enabled(
@@ -15254,6 +15304,10 @@ int main() {
   }
   if (!matmul_fp8_outer_decode_selector_contract()) {
     std::cerr << "matmul FP8 outer decode selector contract test failed\n";
+    return 1;
+  }
+  if (!fp8_native_selector_n0_regression_contract()) {
+    std::cerr << "FP8 native selector N0 regression contract test failed\n";
     return 1;
   }
   if (!matmul_fp8_gfx1201_decode_rank_table_contract()) {

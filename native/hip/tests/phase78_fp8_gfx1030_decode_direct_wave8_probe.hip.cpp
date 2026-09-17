@@ -14,7 +14,7 @@
 // are allocated per shape and cycled during measurement so the reported
 // value is not an identical-weight warm-cache number.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_runtime.h>
 

@@ -266,7 +266,7 @@ def _build_inputs_manifest(repo: Path = ROOT, document: Mapping[str, Any] | None
         if path in paths:
             raise ContractError("G2 build-input paths are duplicated")
         paths.append(path)
-    if paths[0] != G2_SOURCE_PATH or paths[-1] != "native/hip/src/rmsnorm_kernel_internal.hpp":
+    if paths[0] != G2_SOURCE_PATH or paths[-1] != "native/lowp/include/lowp/detail/bf16_helpers.inc":
         raise ContractError("G2 build-input source boundary drifted")
     if sha256_json(paths) != document["source_order_sha256"]:
         raise ContractError("G2 build-input source order digest is stale")

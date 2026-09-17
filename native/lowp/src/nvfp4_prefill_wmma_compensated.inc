@@ -10,15 +10,14 @@
 // as the control entry point.
 
 template <bool OrdinaryLoads, uint32_t StageK>
-__device__ __forceinline__ void
-nvfp4_w4a4_gfx1201_wmma128x64_kahan_body(const uint8_t *const packed_activation,
-                                   const uint8_t *const activation_block_scales,
-                                   const uint8_t *const packed_weight,
-                                   const uint8_t *const weight_block_scales,
-                                   const float *const weight_tensor_scale,
-                                   const float *const input_tensor_scale,
-                                   uint16_t *const output, const uint64_t m,
-                                   const uint64_t k, const uint64_t n) {
+__device__ __forceinline__ void nvfp4_w4a4_gfx1201_wmma128x64_kahan_body(
+    const uint8_t *const packed_activation,
+    const uint8_t *const activation_block_scales,
+    const uint8_t *const packed_weight,
+    const uint8_t *const weight_block_scales,
+    const float *const weight_tensor_scale,
+    const float *const input_tensor_scale, uint16_t *const output,
+    const uint64_t m, const uint64_t k, const uint64_t n) {
 #pragma clang fp contract(off)
 #if defined(__gfx1201__)
   static_assert(StageK == 32U || StageK == 64U,
@@ -183,7 +182,7 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_body(const uint8_t *const packed_activation,
             float term = contribution_row_major[slot] *
                          activation_scale_tile[wave][local_row][scale_block];
             term *= weight_scale_tile[column_tile * tile_n + local_column]
-                                         [scale_block];
+                                     [scale_block];
             // Kahan-compensated outer accumulation keeps the exact FP8-WMMA
             // K=16 term order while reducing the long K reduction error.  The
             // surrounding function is compiled with FP contraction disabled.
@@ -224,7 +223,7 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_body(const uint8_t *const packed_activation,
             float term = contribution_row_major[slot] *
                          activation_scale_tile[wave][local_row][scale_block];
             term *= weight_scale_tile[column_tile * tile_n + local_column]
-                                         [scale_block];
+                                     [scale_block];
             // Kahan-compensated outer accumulation keeps the exact FP8-WMMA
             // K=16 term order while reducing the long K reduction error.  The
             // surrounding function is compiled with FP contraction disabled.
@@ -270,10 +269,8 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_body(const uint8_t *const packed_activation,
 #endif
 }
 
-
 extern "C" __global__
-__launch_bounds__(256, 1) void
-sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1(
+__launch_bounds__(256, 1) void sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1(
     const uint8_t *const packed_activation,
     const uint8_t *const activation_block_scales,
     const uint8_t *const packed_weight,
@@ -288,8 +285,7 @@ sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1(
 }
 
 extern "C" __global__
-__launch_bounds__(256, 1) void
-sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_stage64_v1(
+__launch_bounds__(256, 1) void sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_stage64_v1(
     const uint8_t *const packed_activation,
     const uint8_t *const activation_block_scales,
     const uint8_t *const packed_weight,
@@ -329,9 +325,8 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body(
   static_assert(!static_interior ||
                     ((StaticK % 64U) == 0U && (StaticN % 64U) == 0U),
                 "ID89 aligned specialization requires K/N StageK64 tiles");
-  static_assert(!static_interior ||
-                    ((StaticK == 5120U && StaticN == 17408U) ||
-                     (StaticK == 17408U && StaticN == 5120U)),
+  static_assert(!static_interior || ((StaticK == 5120U && StaticN == 17408U) ||
+                                     (StaticK == 17408U && StaticN == 5120U)),
                 "ID89 aligned specialization requires a measured tuple");
   static_assert(!PaddedOperandRows || static_interior,
                 "ID89 padded operands require StaticK/StaticN specialization");
@@ -361,12 +356,10 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body(
   constexpr uint32_t stage_buffers = 2U;
 
   __shared__ __align__(4)
-      rocwmma::float8_t
-          activation_tile[stage_buffers][waves_per_workgroup]
-                        [tile_m * operand_row_bytes];
-  __shared__ __align__(4)
-      rocwmma::float8_t
-          weight_tile[stage_buffers][column_tiles][tile_m * operand_row_bytes];
+      rocwmma::float8_t activation_tile[stage_buffers][waves_per_workgroup]
+                                       [tile_m * operand_row_bytes];
+  __shared__ __align__(4) rocwmma::float8_t
+      weight_tile[stage_buffers][column_tiles][tile_m * operand_row_bytes];
   __shared__ float activation_scale_tile[stage_buffers][waves_per_workgroup]
                                         [tile_m][scale_blocks_per_stage];
   __shared__ float weight_scale_tile[stage_buffers][column_tiles * tile_n]
@@ -417,96 +410,96 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body(
         reinterpret_cast<uint32_t *>(weight_tile[buffer]);
 
     if (stage == 0U) {
-    for (uint32_t group = thread; group < waves_per_workgroup * groups_per_tile;
-         group += blockDim.x) {
-      const uint32_t source_wave = group / groups_per_tile;
-      const uint32_t wave_group = group - source_wave * groups_per_tile;
-      const uint32_t local_row = wave_group / (stage_k / values_per_group);
-      const uint32_t local_group =
-          wave_group - local_row * (stage_k / values_per_group);
-      const uint64_t row = row_group_base +
-                           static_cast<uint64_t>(source_wave) * tile_m +
-                           local_row;
-      uint16_t packed = 0U;
-      if (static_interior ||
-          (row < m && inner_base + local_group * values_per_group < k)) {
-        const auto *const source = reinterpret_cast<const uint16_t *>(
-            packed_activation + row * packed_row_bytes + inner_base / 2U +
-            local_group * 2U);
-        if constexpr (OrdinaryLoads) {
-          packed = *source;
-        } else {
-          packed = __builtin_nontemporal_load(source);
+      for (uint32_t group = thread;
+           group < waves_per_workgroup * groups_per_tile; group += blockDim.x) {
+        const uint32_t source_wave = group / groups_per_tile;
+        const uint32_t wave_group = group - source_wave * groups_per_tile;
+        const uint32_t local_row = wave_group / (stage_k / values_per_group);
+        const uint32_t local_group =
+            wave_group - local_row * (stage_k / values_per_group);
+        const uint64_t row = row_group_base +
+                             static_cast<uint64_t>(source_wave) * tile_m +
+                             local_row;
+        uint16_t packed = 0U;
+        if (static_interior ||
+            (row < m && inner_base + local_group * values_per_group < k)) {
+          const auto *const source = reinterpret_cast<const uint16_t *>(
+              packed_activation + row * packed_row_bytes + inner_base / 2U +
+              local_group * 2U);
+          if constexpr (OrdinaryLoads) {
+            packed = *source;
+          } else {
+            packed = __builtin_nontemporal_load(source);
+          }
         }
+        const uint32_t row_word = source_wave * tile_m * operand_row_words +
+                                  local_row * operand_row_words + local_group;
+        activation_groups[row_word] = e2m1x4_to_e4m3fn_exact_bits(packed);
       }
-      const uint32_t row_word =
-          source_wave * tile_m * operand_row_words +
-          local_row * operand_row_words + local_group;
-      activation_groups[row_word] = e2m1x4_to_e4m3fn_exact_bits(packed);
-    }
-    for (uint32_t group = thread; group < column_tiles * groups_per_tile;
-         group += blockDim.x) {
-      const uint32_t column_tile = group / groups_per_tile;
-      const uint32_t tile_group = group - column_tile * groups_per_tile;
-      const uint32_t local_column = tile_group / (stage_k / values_per_group);
-      const uint32_t local_group =
-          tile_group - local_column * (stage_k / values_per_group);
-      const uint64_t column = column_base + column_tile * tile_n + local_column;
-      uint16_t packed = 0U;
-      if (static_interior ||
-          (column < n && inner_base + local_group * values_per_group < k)) {
-        const auto *const source = reinterpret_cast<const uint16_t *>(
-            packed_weight + column * packed_row_bytes + inner_base / 2U +
-            local_group * 2U);
-        if constexpr (OrdinaryLoads) {
-          packed = *source;
-        } else {
-          packed = __builtin_nontemporal_load(source);
+      for (uint32_t group = thread; group < column_tiles * groups_per_tile;
+           group += blockDim.x) {
+        const uint32_t column_tile = group / groups_per_tile;
+        const uint32_t tile_group = group - column_tile * groups_per_tile;
+        const uint32_t local_column = tile_group / (stage_k / values_per_group);
+        const uint32_t local_group =
+            tile_group - local_column * (stage_k / values_per_group);
+        const uint64_t column =
+            column_base + column_tile * tile_n + local_column;
+        uint16_t packed = 0U;
+        if (static_interior ||
+            (column < n && inner_base + local_group * values_per_group < k)) {
+          const auto *const source = reinterpret_cast<const uint16_t *>(
+              packed_weight + column * packed_row_bytes + inner_base / 2U +
+              local_group * 2U);
+          if constexpr (OrdinaryLoads) {
+            packed = *source;
+          } else {
+            packed = __builtin_nontemporal_load(source);
+          }
         }
+        const uint32_t row_word = column_tile * tile_m * operand_row_words +
+                                  local_column * operand_row_words +
+                                  local_group;
+        weight_groups[row_word] = e2m1x4_to_e4m3fn_exact_bits(packed);
       }
-      const uint32_t row_word =
-          column_tile * tile_m * operand_row_words +
-          local_column * operand_row_words + local_group;
-      weight_groups[row_word] = e2m1x4_to_e4m3fn_exact_bits(packed);
-    }
-    for (uint32_t scale_index = thread;
-         scale_index < waves_per_workgroup * tile_m * scale_blocks_per_stage;
-         scale_index += blockDim.x) {
-      const uint32_t scale_block = scale_index % scale_blocks_per_stage;
-      const uint32_t row_index = scale_index / scale_blocks_per_stage;
-      const uint32_t source_wave = row_index / tile_m;
-      const uint32_t local_row = row_index - source_wave * tile_m;
-      const uint64_t row = row_group_base +
-                           static_cast<uint64_t>(source_wave) * tile_m +
-                           local_row;
-      const uint64_t block = stage * scale_blocks_per_stage + scale_block;
-      activation_scale_tile[buffer][source_wave][local_row][scale_block] =
-          static_interior
-              ? e4m3fn_to_float(
-                    activation_block_scales[row * blocks_per_row + block])
-              : (row < m && block < blocks_per_row
-                     ? e4m3fn_to_float(
-                           activation_block_scales[row * blocks_per_row +
-                                                   block])
-                     : 0.0F);
-    }
-    for (uint32_t scale_index = thread;
-         scale_index < column_tiles * tile_n * scale_blocks_per_stage;
-         scale_index += blockDim.x) {
-      const uint32_t scale_block = scale_index % scale_blocks_per_stage;
-      const uint32_t local_column = scale_index / scale_blocks_per_stage;
-      const uint64_t column = column_base + local_column;
-      const uint64_t block = stage * scale_blocks_per_stage + scale_block;
-      weight_scale_tile[buffer][local_column][scale_block] =
-          static_interior
-              ? e4m3fn_to_float(
-                    weight_block_scales[column * blocks_per_row + block])
-              : (column < n && block < blocks_per_row
-                     ? e4m3fn_to_float(
-                           weight_block_scales[column * blocks_per_row +
-                                                block])
-                     : 0.0F);
-    }
+      for (uint32_t scale_index = thread;
+           scale_index < waves_per_workgroup * tile_m * scale_blocks_per_stage;
+           scale_index += blockDim.x) {
+        const uint32_t scale_block = scale_index % scale_blocks_per_stage;
+        const uint32_t row_index = scale_index / scale_blocks_per_stage;
+        const uint32_t source_wave = row_index / tile_m;
+        const uint32_t local_row = row_index - source_wave * tile_m;
+        const uint64_t row = row_group_base +
+                             static_cast<uint64_t>(source_wave) * tile_m +
+                             local_row;
+        const uint64_t block = stage * scale_blocks_per_stage + scale_block;
+        activation_scale_tile[buffer][source_wave][local_row][scale_block] =
+            static_interior
+                ? e4m3fn_to_float(
+                      activation_block_scales[row * blocks_per_row + block])
+                : (row < m && block < blocks_per_row
+                       ? e4m3fn_to_float(
+                             activation_block_scales[row * blocks_per_row +
+                                                     block])
+                       : 0.0F);
+      }
+      for (uint32_t scale_index = thread;
+           scale_index < column_tiles * tile_n * scale_blocks_per_stage;
+           scale_index += blockDim.x) {
+        const uint32_t scale_block = scale_index % scale_blocks_per_stage;
+        const uint32_t local_column = scale_index / scale_blocks_per_stage;
+        const uint64_t column = column_base + local_column;
+        const uint64_t block = stage * scale_blocks_per_stage + scale_block;
+        weight_scale_tile[buffer][local_column][scale_block] =
+            static_interior
+                ? e4m3fn_to_float(
+                      weight_block_scales[column * blocks_per_row + block])
+                : (column < n && block < blocks_per_row
+                       ? e4m3fn_to_float(
+                             weight_block_scales[column * blocks_per_row +
+                                                 block])
+                       : 0.0F);
+      }
       __syncthreads();
     }
 
@@ -514,20 +507,20 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body(
     for (uint32_t scale_block = 0U; scale_block < scale_blocks_per_stage;
          ++scale_block) {
       AFragment activation_fragment;
-      rocwmma::load_matrix_sync(
-          activation_fragment,
-          activation_tile[buffer][wave] + scale_block * fragment_k,
-          operand_row_bytes);
+      rocwmma::load_matrix_sync(activation_fragment,
+                                activation_tile[buffer][wave] +
+                                    scale_block * fragment_k,
+                                operand_row_bytes);
 #pragma unroll
       for (uint32_t column_tile = 0U; column_tile < column_tiles;
            ++column_tile) {
         BFragment weight_fragment;
         AccumulatorFragment contribution;
         rocwmma::fill_fragment(contribution, 0.0F);
-        rocwmma::load_matrix_sync(
-            weight_fragment,
-            weight_tile[buffer][column_tile] + scale_block * fragment_k,
-            operand_row_bytes);
+        rocwmma::load_matrix_sync(weight_fragment,
+                                  weight_tile[buffer][column_tile] +
+                                      scale_block * fragment_k,
+                                  operand_row_bytes);
         rocwmma::mma_sync(contribution, activation_fragment, weight_fragment,
                           contribution);
         const auto contribution_row_major =
@@ -537,9 +530,9 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body(
           const uint32_t local_row =
               (lane / tile_n) * (output_values / wave_width) + slot;
           const uint32_t local_column = lane % tile_n;
-          float term = contribution_row_major[slot] *
-                       activation_scale_tile[buffer][wave][local_row]
-                                            [scale_block];
+          float term =
+              contribution_row_major[slot] *
+              activation_scale_tile[buffer][wave][local_row][scale_block];
           term *= weight_scale_tile[buffer][column_tile * tile_n + local_column]
                                    [scale_block];
           // Kahan-compensated outer accumulation keeps the exact FP8-WMMA
@@ -563,9 +556,9 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body(
           const uint32_t local_row = wave_group / (stage_k / values_per_group);
           const uint32_t local_group =
               wave_group - local_row * (stage_k / values_per_group);
-          const uint64_t row =
-              row_group_base + static_cast<uint64_t>(source_wave) * tile_m +
-              local_row;
+          const uint64_t row = row_group_base +
+                               static_cast<uint64_t>(source_wave) * tile_m +
+                               local_row;
           uint16_t packed = 0U;
           if (static_interior ||
               (row < m &&
@@ -627,8 +620,7 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body(
                          : 0U);
         }
         const uint32_t scale_index = thread;
-        const uint32_t next_scale_block =
-            scale_index % scale_blocks_per_stage;
+        const uint32_t next_scale_block = scale_index % scale_blocks_per_stage;
         const uint32_t local_column = scale_index / scale_blocks_per_stage;
         const uint64_t column = column_base + local_column;
         const uint64_t block =
@@ -652,8 +644,7 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body(
         const uint32_t group = thread + local * blockDim.x;
         const uint32_t source_wave = group / groups_per_tile;
         const uint32_t wave_group = group - source_wave * groups_per_tile;
-        const uint32_t local_row =
-            wave_group / (stage_k / values_per_group);
+        const uint32_t local_row = wave_group / (stage_k / values_per_group);
         const uint32_t local_group =
             wave_group - local_row * (stage_k / values_per_group);
         const uint32_t row_word =
@@ -667,8 +658,7 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body(
         const uint32_t group = thread + local * blockDim.x;
         const uint32_t column_tile = group / groups_per_tile;
         const uint32_t tile_group = group - column_tile * groups_per_tile;
-        const uint32_t local_column =
-            tile_group / (stage_k / values_per_group);
+        const uint32_t local_column = tile_group / (stage_k / values_per_group);
         const uint32_t local_group =
             tile_group - local_column * (stage_k / values_per_group);
         const uint32_t row_word =
@@ -685,7 +675,7 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body(
         const uint32_t local_row = row_index - source_wave * tile_m;
         activation_scale_tile[next_buffer][source_wave][local_row]
                              [scale_block] =
-            e4m3fn_to_float(next_activation_scale[local]);
+                                 e4m3fn_to_float(next_activation_scale[local]);
       }
       const uint32_t scale_index = thread;
       const uint32_t scale_block = scale_index % scale_blocks_per_stage;
@@ -728,8 +718,7 @@ nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body(
 }
 
 extern "C" __global__
-__launch_bounds__(256, 1) void
-sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_lookahead_v1(
+__launch_bounds__(256, 1) void sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_lookahead_v1(
     const uint8_t *const packed_activation,
     const uint8_t *const activation_block_scales,
     const uint8_t *const packed_weight,
@@ -744,8 +733,7 @@ sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_lookahead_v1(
 }
 
 extern "C" __global__
-__launch_bounds__(256, 1) void
-sllm_nvfp4_gfx1201_wmma128x64_aligned_k5120n17408_v1(
+__launch_bounds__(256, 1) void sllm_nvfp4_gfx1201_wmma128x64_aligned_k5120n17408_v1(
     const uint8_t *const packed_activation,
     const uint8_t *const activation_block_scales,
     const uint8_t *const packed_weight,
@@ -753,16 +741,14 @@ sllm_nvfp4_gfx1201_wmma128x64_aligned_k5120n17408_v1(
     const float *const weight_tensor_scale,
     const float *const input_tensor_scale, uint16_t *const output,
     const uint64_t m, const uint64_t k, const uint64_t n) {
-  nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body<false, 5120U,
-                                                       17408U>(
+  nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body<false, 5120U, 17408U>(
       packed_activation, activation_block_scales, packed_weight,
       weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
       k, n);
 }
 
 extern "C" __global__
-__launch_bounds__(256, 1) void
-sllm_nvfp4_gfx1201_wmma128x64_aligned_k17408n5120_v1(
+__launch_bounds__(256, 1) void sllm_nvfp4_gfx1201_wmma128x64_aligned_k17408n5120_v1(
     const uint8_t *const packed_activation,
     const uint8_t *const activation_block_scales,
     const uint8_t *const packed_weight,
@@ -770,16 +756,14 @@ sllm_nvfp4_gfx1201_wmma128x64_aligned_k17408n5120_v1(
     const float *const weight_tensor_scale,
     const float *const input_tensor_scale, uint16_t *const output,
     const uint64_t m, const uint64_t k, const uint64_t n) {
-  nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body<false, 17408U,
-                                                       5120U>(
+  nvfp4_w4a4_gfx1201_wmma128x64_kahan_lookahead_body<false, 17408U, 5120U>(
       packed_activation, activation_block_scales, packed_weight,
       weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
       k, n);
 }
 
 extern "C" __global__
-__launch_bounds__(256, 1) void
-sllm_nvfp4_gfx1201_wmma128x64_pad68_k5120n17408_v1(
+__launch_bounds__(256, 1) void sllm_nvfp4_gfx1201_wmma128x64_pad68_k5120n17408_v1(
     const uint8_t *const packed_activation,
     const uint8_t *const activation_block_scales,
     const uint8_t *const packed_weight,
@@ -795,8 +779,7 @@ sllm_nvfp4_gfx1201_wmma128x64_pad68_k5120n17408_v1(
 }
 
 extern "C" __global__
-__launch_bounds__(256, 1) void
-sllm_nvfp4_gfx1201_wmma128x64_pad68_k17408n5120_v1(
+__launch_bounds__(256, 1) void sllm_nvfp4_gfx1201_wmma128x64_pad68_k17408n5120_v1(
     const uint8_t *const packed_activation,
     const uint8_t *const activation_block_scales,
     const uint8_t *const packed_weight,

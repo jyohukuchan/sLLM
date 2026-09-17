@@ -1038,6 +1038,8 @@ fn convert_into_directory(
     write_new_file(&manifest_path, &manifest_bytes)
 }
 
+// Keep the explicit record, tensor-layout and payload bounds together.
+#[allow(clippy::too_many_arguments)]
 fn validate_record(
     record: &TensorRecord,
     value: &SafeTensorMetadata,

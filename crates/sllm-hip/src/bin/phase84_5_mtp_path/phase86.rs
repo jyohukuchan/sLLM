@@ -242,6 +242,9 @@ fn audit_is_valid(audit: &QwenExecutionAudit, target: &str) -> bool {
         && audit.all_dispatches_hip()
 }
 
+// The diagnostic keeps the explicit request/state arguments to mirror the
+// Phase84.5 probe ABI and avoid changing its numerical path.
+#[allow(clippy::too_many_arguments)]
 fn truncation_check(
     mtp_resident: &QwenResidentModel,
     mtp_graph: &sllm_core::QwenGraph,

@@ -368,11 +368,11 @@ Fp8GdnMatmulRun run_fp8_gdn_matmul_plan(const sllm_matmul_plan_t *const plan,
     // gfx1201 keeps its native FP8 provider because the baseline control is a
     // gfx1030-only selector.
     const uint32_t expected_provider =
-        gfx1030 ? (expected_baseline ? SLLM_HIP_MATMUL_KERNEL_ID_FP8_BYTE_EMULATION_V1
-                                     : (m == 1U ? 82U : (m <= 4U ? 92U : 71U)))
+        gfx1030 ? (expected_baseline
+                       ? SLLM_HIP_MATMUL_KERNEL_ID_FP8_BYTE_EMULATION_V1
+                       : (m == 1U ? 82U : (m <= 4U ? 92U : 71U)))
                 : SLLM_HIP_MATMUL_KERNEL_ID_HIPBLASLT_FP8_OUTER_V1;
-    const uint32_t expected_grid =
-        static_cast<uint32_t>((m * n + 255U) / 256U);
+    const uint32_t expected_grid = static_cast<uint32_t>((m * n + 255U) / 256U);
     result.valid = result.valid && dispatch.kernel_id == expected_provider &&
                    (!expected_baseline ||
                     (dispatch.grid_size_x == expected_grid &&
@@ -889,8 +889,7 @@ bool run_fp8_gdn_shared_public_gpu_oracle(const uint64_t m = 1U,
               << " direct_dispatch_count=" << direct_dispatch.dispatch_count
               << " direct_fallback=" << direct_dispatch.fallback_used;
   }
-  std::cout
-            << " cleanup=0\n";
+  std::cout << " cleanup=0\n";
   return true;
 }
 
@@ -1594,7 +1593,8 @@ int main() {
     const bool evidence =
         submitted && completion != nullptr && dispatch.dispatch_id != 0U &&
         dispatch.dispatch_count == 3U &&
-        dispatch.grid_size_x == (baseline_oracle ? kK / 16U + 2U * kN : 1128U) &&
+        dispatch.grid_size_x ==
+            (baseline_oracle ? kK / 16U + 2U * kN : 1128U) &&
         dispatch.workspace_bytes ==
             SLLM_HIP_QWEN38_PROJECTION_PACK2_WORKSPACE_BYTES &&
         dispatch.m == kM && dispatch.k == kK && dispatch.n == kN &&

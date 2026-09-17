@@ -22,9 +22,8 @@ __device__ __forceinline__ void sllm_nvfp4_w4a4_small_m_vgpr_reuse_body(
   constexpr uint32_t waves_per_workgroup = 8U;
   constexpr uint32_t prefetch_chunks = 2U;
   static_assert(wave_size * waves_per_workgroup == 256U);
-  if (m != Rows ||
-      !((k == UINT64_C(5120) && n == UINT64_C(17408)) ||
-        (k == UINT64_C(17408) && n == UINT64_C(5120)))) {
+  if (m != Rows || !((k == UINT64_C(5120) && n == UINT64_C(17408)) ||
+                     (k == UINT64_C(17408) && n == UINT64_C(5120)))) {
     return;
   }
 
@@ -40,55 +39,59 @@ __device__ __forceinline__ void sllm_nvfp4_w4a4_small_m_vgpr_reuse_body(
 #pragma unroll 1
   for (uint64_t group = lane; group < blocks_per_row;
        group += static_cast<uint64_t>(wave_size) * prefetch_chunks) {
-    sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_prefetch2_weight_block prefetched[prefetch_chunks];
+    sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_prefetch2_weight_block
+        prefetched[prefetch_chunks];
 #pragma unroll
     for (uint32_t chunk = 0U; chunk < prefetch_chunks; ++chunk) {
       sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_prefetch2_weight_load(
           packed_weight, weight_block_scales, blocks_per_row, column_base, n,
-          group + static_cast<uint64_t>(chunk) * wave_size,
-          &prefetched[chunk]);
+          group + static_cast<uint64_t>(chunk) * wave_size, &prefetched[chunk]);
     }
 
 #pragma unroll
     for (uint32_t chunk = 0U; chunk < prefetch_chunks; ++chunk) {
-      const uint64_t block =
-          group + static_cast<uint64_t>(chunk) * wave_size;
+      const uint64_t block = group + static_cast<uint64_t>(chunk) * wave_size;
       if (block >= blocks_per_row) {
         continue;
       }
 
-      sllm_id84_nvfp4_scale_lut_detail::ScaledPacks weight_pack0[columns_per_wave];
-      sllm_id84_nvfp4_scale_lut_detail::ScaledPacks weight_pack1[columns_per_wave];
+      sllm_id84_nvfp4_scale_lut_detail::ScaledPacks
+          weight_pack0[columns_per_wave];
+      sllm_id84_nvfp4_scale_lut_detail::ScaledPacks
+          weight_pack1[columns_per_wave];
       float weight_scales[columns_per_wave];
 #pragma unroll
       for (uint32_t local_column = 0U; local_column < columns_per_wave;
            ++local_column) {
-        weight_pack0[local_column] = sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_scaled_packs(
-            prefetched[chunk].weight_word0[local_column]);
-        weight_pack1[local_column] = sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_scaled_packs(
-            prefetched[chunk].weight_word1[local_column]);
-        weight_scales[local_column] = sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_load_scale(
-            prefetched[chunk].weight_scale[local_column], scale_lut);
+        weight_pack0[local_column] =
+            sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_scaled_packs(
+                prefetched[chunk].weight_word0[local_column]);
+        weight_pack1[local_column] =
+            sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_scaled_packs(
+                prefetched[chunk].weight_word1[local_column]);
+        weight_scales[local_column] =
+            sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_load_scale(
+                prefetched[chunk].weight_scale[local_column], scale_lut);
       }
 
 #pragma unroll
       for (uint32_t row = 0U; row < Rows; ++row) {
         const uint8_t *const row_activation =
             packed_activation + static_cast<uint64_t>(row) * packed_row_bytes;
-        const auto *const activation_words =
-            reinterpret_cast<const uint32_t *>(
-                row_activation + block * UINT64_C(8));
+        const auto *const activation_words = reinterpret_cast<const uint32_t *>(
+            row_activation + block * UINT64_C(8));
         const sllm_id84_nvfp4_scale_lut_detail::ScaledPacks activation_pack0 =
             sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_scaled_packs(
                 __builtin_nontemporal_load(activation_words + 0U));
         const sllm_id84_nvfp4_scale_lut_detail::ScaledPacks activation_pack1 =
             sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_scaled_packs(
                 __builtin_nontemporal_load(activation_words + 1U));
-        float activation_scale = sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_load_scale(
-            __builtin_nontemporal_load(
-                activation_block_scales +
-                static_cast<uint64_t>(row) * blocks_per_row + block),
-            scale_lut);
+        float activation_scale =
+            sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_load_scale(
+                __builtin_nontemporal_load(
+                    activation_block_scales +
+                    static_cast<uint64_t>(row) * blocks_per_row + block),
+                scale_lut);
 #if defined(__gfx1030__)
         // E2M1 dot coefficients and E4M3 scales make this regrouping exact.
         // Computing the quarter scale once removes three repeated multiplies.
@@ -112,9 +115,9 @@ __device__ __forceinline__ void sllm_nvfp4_w4a4_small_m_vgpr_reuse_body(
 #if !defined(__gfx1030__)
           scaled_dot *= 0.25F;
 #endif
-          accumulators[row][local_column] = fmaf(
-              scaled_dot * activation_scale, weight_scales[local_column],
-              accumulators[row][local_column]);
+          accumulators[row][local_column] =
+              fmaf(scaled_dot * activation_scale, weight_scales[local_column],
+                   accumulators[row][local_column]);
         }
       }
     }
@@ -142,8 +145,8 @@ __device__ __forceinline__ void sllm_nvfp4_w4a4_small_m_vgpr_reuse_body(
         if (column < n) {
           output[static_cast<uint64_t>(row) * n + column] =
               sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_bf16_rne(
-                  accumulators[row][local_column] *
-                  weight_tensor_scale[0] * input_tensor_scale[0]);
+                  accumulators[row][local_column] * weight_tensor_scale[0] *
+                  input_tensor_scale[0]);
         }
       }
     }
@@ -196,8 +199,8 @@ sllm_nvfp4_w4a4_small_m_vgpr_reuse_activation_lds_body(
 
     // Every thread participates in the tile stores. The trailing barrier is
     // the before-overwrite barrier for the next tile.
-    for (uint32_t index = threadIdx.x;
-         index < Rows * stage_blocks * 4U; index += threads_per_workgroup) {
+    for (uint32_t index = threadIdx.x; index < Rows * stage_blocks * 4U;
+         index += threads_per_workgroup) {
       const uint32_t row = index / (stage_blocks * 4U);
       const uint32_t remainder = index % (stage_blocks * 4U);
       const uint32_t block = remainder / 4U;
@@ -211,10 +214,10 @@ sllm_nvfp4_w4a4_small_m_vgpr_reuse_activation_lds_body(
         const uint32_t raw = __builtin_nontemporal_load(words + (pack / 2U));
         const auto decoded =
             sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_scaled_packs(raw);
-        value = pack == 0U ? decoded.even
-                           : pack == 1U ? decoded.odd
-                                        : pack == 2U ? decoded.even
-                                                     : decoded.odd;
+        value = pack == 0U   ? decoded.even
+                : pack == 1U ? decoded.odd
+                : pack == 2U ? decoded.even
+                             : decoded.odd;
       }
       activation_packs[row][block][pack] = static_cast<int32_t>(value);
     }
@@ -226,10 +229,10 @@ sllm_nvfp4_w4a4_small_m_vgpr_reuse_activation_lds_body(
       activation_scales[row][block] =
           source_block < blocks_per_row
               ? sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_load_scale(
-                    __builtin_nontemporal_load(
-                        activation_block_scales +
-                        static_cast<uint64_t>(row) * blocks_per_row +
-                        source_block),
+                    __builtin_nontemporal_load(activation_block_scales +
+                                               static_cast<uint64_t>(row) *
+                                                   blocks_per_row +
+                                               source_block),
                     scale_lut)
               : 0.0F;
     }
@@ -250,8 +253,7 @@ sllm_nvfp4_w4a4_small_m_vgpr_reuse_activation_lds_body(
 
 #pragma unroll
       for (uint32_t chunk = 0U; chunk < prefetch_chunks; ++chunk) {
-        const uint64_t block =
-            group + static_cast<uint64_t>(chunk) * wave_size;
+        const uint64_t block = group + static_cast<uint64_t>(chunk) * wave_size;
         const uint64_t source_block = block_base + block;
         if (source_block >= blocks_per_row) {
           continue;
@@ -262,8 +264,8 @@ sllm_nvfp4_w4a4_small_m_vgpr_reuse_activation_lds_body(
             weight_pack1[columns_per_wave];
         float weight_scales[columns_per_wave];
 #pragma unroll
-        for (uint32_t local_column = 0U;
-             local_column < columns_per_wave; ++local_column) {
+        for (uint32_t local_column = 0U; local_column < columns_per_wave;
+             ++local_column) {
           weight_pack0[local_column] =
               sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_scaled_packs(
                   prefetched[chunk].weight_word0[local_column]);
@@ -286,8 +288,8 @@ sllm_nvfp4_w4a4_small_m_vgpr_reuse_activation_lds_body(
                   static_cast<uint32_t>(activation_packs[row][block][3])};
           const float activation_scale = activation_scales[row][block];
 #pragma unroll
-          for (uint32_t local_column = 0U;
-               local_column < columns_per_wave; ++local_column) {
+          for (uint32_t local_column = 0U; local_column < columns_per_wave;
+               ++local_column) {
             int32_t block_sum = 0;
             block_sum = sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_dot4(
                 activation_pack0.even, weight_pack0[local_column].even,
@@ -341,9 +343,8 @@ sllm_nvfp4_w4a4_small_m_vgpr_reuse_activation_lds_body(
   }
 }
 
-
-extern "C" __global__ __launch_bounds__(256, 1)
-void sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1(
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1(
     const uint8_t *const packed_activation,
     const uint8_t *const activation_block_scales,
     const uint8_t *const packed_weight,
@@ -359,8 +360,8 @@ void sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1(
   if (m == 3U && k == UINT64_C(17408) && n == UINT64_C(5120)) {
     sllm_nvfp4_w4a4_small_m_vgpr_reuse_activation_lds_body<3U>(
         packed_activation, activation_block_scales, packed_weight,
-        weight_block_scales, weight_tensor_scale, input_tensor_scale, output,
-        m, k, n, scale_lut);
+        weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
+        k, n, scale_lut);
     return;
   }
 #endif

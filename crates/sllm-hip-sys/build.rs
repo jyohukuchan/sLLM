@@ -142,7 +142,7 @@ fn generate_g2_build_identity(manifest_dir: &Path, out_dir: &Path) {
     assert_eq!(paths.first().map(String::as_str), Some(G2_SOURCE_PATH));
     assert_eq!(
         paths.last().map(String::as_str),
-        Some("native/hip/src/rmsnorm_kernel_internal.hpp")
+        Some("native/lowp/include/lowp/detail/bf16_helpers.inc")
     );
     let path_value = Value::Array(paths.iter().cloned().map(Value::String).collect());
     let order_sha = sha256(canonical_json(&path_value).as_bytes());
@@ -271,17 +271,28 @@ fn main() {
     let gemma_attention_kernel = source_dir.join("src/gemma_attention_kernel.hip.cpp");
     let matmul_api_header = source_dir.join("src/matmul_api.hpp");
     let matmul_api = source_dir.join("src/matmul_api.cpp");
-    let low_precision_block_codec = source_dir.join("src/low_precision_block_codec.hpp");
-    let low_precision_matmul_provider = source_dir.join("src/low_precision_matmul_provider.hpp");
     let matmul_kernel_internal = source_dir.join("src/matmul_kernel_internal.hpp");
     let matmul_kernel = source_dir.join("src/matmul_kernel.hip.cpp");
     let matmul_runtime = source_dir.join("src/matmul_runtime.inc");
     let graph_span_runtime = source_dir.join("src/graph_span_runtime.inc");
     let qwen38_projection_pack_runtime = source_dir.join("src/qwen38_projection_pack_runtime.inc");
-    let nvfp4_decode_scale_lut = source_dir.join("src/nvfp4_decode_scale_lut.inc");
-    let fp8_prefill_short_m32 = source_dir.join("src/fp8_prefill_short_m32.inc");
-    let nvfp4_prefill_wmma_compensated = source_dir.join("src/nvfp4_prefill_wmma_compensated.inc");
-    let nvfp4_small_m_vgpr_reuse = source_dir.join("src/nvfp4_small_m_vgpr_reuse.inc");
+    let lowp_dir = manifest_dir.join("../../native/lowp");
+    let lowp_cmake = lowp_dir.join("CMakeLists.txt");
+    let lowp_public_header = lowp_dir.join("include/lowp/lowp.h");
+    let lowp_plan = lowp_dir.join("src/lowp_plan.cpp");
+    let lowp_launch = lowp_dir.join("src/lowp_launch.cpp");
+    let lowp_kernel = lowp_dir.join("src/lowp_kernel.hip.cpp");
+    let lowp_bf16_helpers = lowp_dir.join("include/lowp/detail/bf16_helpers.inc");
+    let lowp_kernel_internal = lowp_dir.join("include/lowp/detail/lowp_kernel_internal.hpp");
+    let lowp_block_codec = lowp_dir.join("include/lowp/detail/low_precision_block_codec.hpp");
+    let lowp_provider = lowp_dir.join("include/lowp/detail/low_precision_matmul_provider.hpp");
+    let lowp_api_internal = lowp_dir.join("include/lowp/detail/lowp_api_internal.hpp");
+    let lowp_provider_plan = lowp_dir.join("include/lowp/detail/lowp_provider_plan.hpp");
+    let lowp_fp8_prefill = lowp_dir.join("src/fp8_prefill_short_m32.inc");
+    let lowp_nvfp4_lut = lowp_dir.join("src/nvfp4_decode_scale_lut.inc");
+    let lowp_nvfp4_wmma = lowp_dir.join("src/nvfp4_prefill_wmma_compensated.inc");
+    let lowp_nvfp4_vgpr = lowp_dir.join("src/nvfp4_small_m_vgpr_reuse.inc");
+    let lowp_host_stub = lowp_dir.join("tests/host_stubs/hip/hip_runtime.h");
     let mlp_gate_up_silu_bundle_kernel_internal =
         source_dir.join("src/mlp_gate_up_silu_bundle_kernel_internal.hpp");
     let mlp_gate_up_silu_bundle_kernel =
@@ -454,14 +465,6 @@ fn main() {
     println!("cargo:rerun-if-changed={}", matmul_api.display());
     println!(
         "cargo:rerun-if-changed={}",
-        low_precision_block_codec.display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        low_precision_matmul_provider.display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
         matmul_kernel_internal.display()
     );
     println!("cargo:rerun-if-changed={}", matmul_kernel.display());
@@ -471,19 +474,26 @@ fn main() {
         "cargo:rerun-if-changed={}",
         qwen38_projection_pack_runtime.display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        nvfp4_decode_scale_lut.display()
-    );
-    println!("cargo:rerun-if-changed={}", fp8_prefill_short_m32.display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        nvfp4_prefill_wmma_compensated.display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        nvfp4_small_m_vgpr_reuse.display()
-    );
+    for path in [
+        &lowp_cmake,
+        &lowp_public_header,
+        &lowp_plan,
+        &lowp_launch,
+        &lowp_kernel,
+        &lowp_bf16_helpers,
+        &lowp_kernel_internal,
+        &lowp_block_codec,
+        &lowp_provider,
+        &lowp_api_internal,
+        &lowp_provider_plan,
+        &lowp_fp8_prefill,
+        &lowp_nvfp4_lut,
+        &lowp_nvfp4_wmma,
+        &lowp_nvfp4_vgpr,
+        &lowp_host_stub,
+    ] {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
     println!(
         "cargo:rerun-if-changed={}",
         mlp_gate_up_silu_bundle_kernel_internal.display()
@@ -956,9 +966,49 @@ fn main() {
         "native archive was not produced: {}",
         archive.display()
     );
+    let lowp_archive_dir = build_dir.join("lowp");
+    let lowp_plan_archive = if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        lowp_archive_dir.join("sllm_lowp_plan.lib")
+    } else {
+        lowp_archive_dir.join("libsllm_lowp_plan.a")
+    };
+    assert!(
+        lowp_plan_archive.is_file(),
+        "lowp plan archive was not produced: {}",
+        lowp_plan_archive.display()
+    );
+    if hip_configuration.is_some() {
+        let lowp_archive = if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            lowp_archive_dir.join("sllm_lowp.lib")
+        } else {
+            lowp_archive_dir.join("libsllm_lowp.a")
+        };
+        assert!(
+            lowp_archive.is_file(),
+            "lowp HIP archive was not produced: {}",
+            lowp_archive.display()
+        );
+    }
     verify_checked_in_bindings(&manifest_dir, &layout_probe, &bindings, &out_dir);
+    // lowp is a separate static-library boundary below the native/hip
+    // project. A static archive does not carry its transitive CMake link
+    // interface to rustc, so list both lowp archives after sllm_hip_stub.
+    let lowp_build_dir = build_dir.join("lowp");
+    println!(
+        "cargo:rustc-link-search=native={}",
+        lowp_build_dir.display()
+    );
+    // Prefer the current lowp output over archives left in the parent build
+    // directory by an earlier CMake configuration of this same checkout.
     println!("cargo:rustc-link-search=native={}", build_dir.display());
     println!("cargo:rustc-link-lib=static=sllm_hip_stub");
+    // Host-only CMake exposes sllm_lowp as an interface target because the
+    // launch object is HIP-only; the HIP configuration produces the concrete
+    // archive and must be listed before its plan dependency.
+    if hip_configuration.is_some() {
+        println!("cargo:rustc-link-lib=static=sllm_lowp");
+    }
+    println!("cargo:rustc-link-lib=static=sllm_lowp_plan");
     if hip_runtime || public_runtime_enabled {
         let runtime_rocm_lib = hip_configuration
             .as_ref()

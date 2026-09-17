@@ -10,7 +10,7 @@
 // This file is intentionally a standalone probe and is not linked into the
 // public runtime.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>

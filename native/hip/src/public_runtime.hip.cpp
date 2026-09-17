@@ -15,7 +15,6 @@
 #include "kv_state_kernel_internal.hpp"
 #include "linear_attention_api.hpp"
 #include "linear_attention_kernel_internal.hpp"
-#include "low_precision_matmul_provider.hpp"
 #include "matmul_api.hpp"
 #include "matmul_kernel_internal.hpp"
 #include "ministral3_yarn_api.hpp"
@@ -36,6 +35,9 @@
 #include "token_selector_kernel_internal.hpp"
 #include "token_selector_pq_internal.hpp"
 #include "windowed_attention_api.hpp"
+#include <lowp/detail/low_precision_matmul_provider.hpp>
+#include <lowp/detail/lowp_api_internal.hpp>
+#include <lowp/lowp.h>
 
 #include <hip/hip_runtime.h>
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
@@ -2160,17 +2162,19 @@ struct ElementwisePlan final : QuarantineNode {
   std::array<sllm_matmul_kernel::KernelVariant, 2>
       qwen38_projection_pack2_kernel_variants{};
   std::array<Fp8LtPlan *, 2> qwen38_projection_pack2_fp8_lt_plans{};
+  std::array<lowp_matmul_plan_t, 2> qwen38_projection_pack2_lowp_plans{};
   bool argmax;
   void *matmul_workspace;
   uint64_t matmul_workspace_bytes;
   uint64_t matmul_context_workspace_bytes = 0U;
   bool matmul_queue_workspace = false;
   sllm_matmul_kernel::KernelVariant matmul_kernel_variant =
-      sllm_matmul_kernel::KernelVariant::Baseline;
+      sllm_matmul_kernel::HostKernelVariant::Baseline;
   sllm_matmul_kernel::SelectorDecision matmul_selector_decision = {
-      sllm_matmul_kernel::KernelVariant::Baseline, true, true, true,
+      sllm_matmul_kernel::HostKernelVariant::Baseline, true, true, true,
       sllm_matmul_kernel::kSelectorReasonBaseline};
   std::optional<sllm_lowp::PreparedProviderPlan> matmul_provider_plan;
+  std::optional<lowp_matmul_plan_t> matmul_lowp_c_plan;
   Fp8LtPlan *fp8_lt_plan;
   bool release_active;
   bool in_flight;
@@ -4375,7 +4379,8 @@ void initialize_matmul_dispatch_info(
       : fp8_id82_tuple ? 2U
       : metadata.fp8_outer || metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ||
               metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6 ||
-              variant == ::sllm_matmul_kernel::KernelVariant::PrefillShortMixed
+              variant ==
+                  ::sllm_matmul_kernel::HostKernelVariant::PrefillShortMixed
           ? 2U
           : 1U;
   info->kernel_id = static_cast<uint32_t>(variant);

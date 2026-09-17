@@ -94,6 +94,16 @@ option(SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST
     OFF
 )
 
+option(SLLM_ENABLE_LOWP_MATMUL_GPU_TESTS
+    "Build the lowp matrix multiplication oracle, example, and microbench"
+    OFF
+)
+
+option(LOWP_BUILD_HOST_API_TEST
+    "Build the host-only lowp public C API contract test"
+    ON
+)
+
 option(SLLM_ENABLE_HIPBLASLT_FP8_GRAPH_GPU_TEST
     "Build the focused gfx1201 hipBLASLt FP8 graph-capture probe"
     OFF
@@ -208,6 +218,7 @@ endif()
 if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
    SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR
    SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST OR
+   SLLM_ENABLE_LOWP_MATMUL_GPU_TESTS OR
    SLLM_ENABLE_HIPBLASLT_FP8_GRAPH_GPU_TEST)
     if(NOT DEFINED ROCM_PATH OR ROCM_PATH STREQUAL "")
         message(FATAL_ERROR "HIP build requires an explicit ROCM_PATH")
@@ -405,6 +416,7 @@ endif()
 if((SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
    SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR
    SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST OR
+   SLLM_ENABLE_LOWP_MATMUL_GPU_TESTS OR
    SLLM_ENABLE_HIPBLASLT_FP8_GRAPH_GPU_TEST) AND
    NOT SLLM_SEMANTIC_G1_AUTHORITY)
     set(CMAKE_HIP_STANDARD 17)
@@ -521,6 +533,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             -fPIC
             -I "${PROJECT_SOURCE_DIR}/../../include"
             -I "${PROJECT_SOURCE_DIR}/src"
+            -I "${PROJECT_SOURCE_DIR}/../lowp/include"
             "--offload-arch=${CMAKE_HIP_ARCHITECTURES}"
             -mcode-object-version=6
             ${SLLM_WAVEFRONT_FLAG}
@@ -572,9 +585,9 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             DEPENDS src/minimax_m3_moe_route_public_runtime.hip.cpp
                 src/public_runtime.hip.cpp src/matmul_runtime.inc
                 src/graph_span_runtime.inc
-                src/low_precision_matmul_provider.hpp
-                src/nvfp4_decode_scale_lut.inc
-                src/fp8_prefill_short_m32.inc
+                ../lowp/include/lowp/detail/low_precision_matmul_provider.hpp
+                ../lowp/src/nvfp4_decode_scale_lut.inc
+                ../lowp/src/fp8_prefill_short_m32.inc
                 src/mlp_gate_up_silu_bundle_runtime.inc
                 src/qwen38_projection_pack_runtime.inc
                 src/mlp_gate_up_silu_bundle_kernel_internal.hpp
@@ -658,10 +671,11 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 "${PROJECT_SOURCE_DIR}/src/matmul_kernel.hip.cpp"
                 -o "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
             DEPENDS src/matmul_kernel.hip.cpp src/matmul_kernel_internal.hpp
-                src/low_precision_block_codec.hpp
-                src/nvfp4_decode_scale_lut.inc
-                src/fp8_prefill_short_m32.inc
-                src/nvfp4_prefill_wmma_compensated.inc
+                ../lowp/include/lowp/detail/low_precision_block_codec.hpp
+                ../lowp/include/lowp/detail/bf16_helpers.inc
+                ../lowp/src/nvfp4_decode_scale_lut.inc
+                ../lowp/src/fp8_prefill_short_m32.inc
+                ../lowp/src/nvfp4_prefill_wmma_compensated.inc
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -786,7 +800,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
             DEPENDS src/kv_state_kernel.hip.cpp
                 src/kv_state_kernel_internal.hpp
-                src/low_precision_block_codec.hpp
+                ../lowp/include/lowp/detail/low_precision_block_codec.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -798,7 +812,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
             DEPENDS src/causal_attention_kernel.hip.cpp
                 src/causal_attention_kernel_internal.hpp
-                src/low_precision_block_codec.hpp
+                ../lowp/include/lowp/detail/low_precision_block_codec.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -951,6 +965,18 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
     endif()
 endif()
 
+# Low-precision kernels are maintained as a one-way dependency of the native
+# runtime.  The child inherits the exact HIP compiler, architecture and
+# wavefront settings established above; its own CMakeLists also supports a
+# standalone configure for library extraction.
+if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST OR
+   LOWP_BUILD_HOST_API_TEST OR LOWP_BUILD_HOST_SELECTION_TEST OR
+   SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST OR
+   SLLM_ENABLE_LOWP_MATMUL_GPU_TESTS)
+    enable_testing()
+endif()
+add_subdirectory(../lowp lowp)
+
 add_library(sllm_hip_stub STATIC ${SLLM_HIP_NATIVE_SOURCES})
 
 target_compile_definitions(sllm_hip_stub PRIVATE
@@ -967,6 +993,8 @@ target_include_directories(sllm_hip_stub
     PUBLIC
         "${PROJECT_SOURCE_DIR}/../../include"
 )
+
+target_link_libraries(sllm_hip_stub PRIVATE sllm_lowp)
 
 if(MSVC)
     target_compile_options(sllm_hip_stub PRIVATE /W4 /WX)
@@ -1114,7 +1142,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         -Wshadow
         -Werror
     )
-    target_link_libraries(sllm_public_runtime_host_test PRIVATE Threads::Threads)
+    target_link_libraries(sllm_public_runtime_host_test PRIVATE
+        Threads::Threads sllm_lowp_plan)
     add_test(NAME sllm_public_runtime_host_test
         COMMAND sllm_public_runtime_host_test
     )
@@ -1164,7 +1193,7 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
     )
     target_link_libraries(sllm_ministral3_yarn_public_c_abi_host_test PRIVATE
-        Threads::Threads
+        Threads::Threads sllm_lowp_plan
     )
     add_test(NAME sllm_ministral3_yarn_public_c_abi_host_test
         COMMAND sllm_ministral3_yarn_public_c_abi_host_test
@@ -1212,7 +1241,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
     target_compile_options(sllm_argmax_public_c_abi_host_test PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
     )
-    target_link_libraries(sllm_argmax_public_c_abi_host_test PRIVATE Threads::Threads)
+    target_link_libraries(sllm_argmax_public_c_abi_host_test PRIVATE
+        Threads::Threads sllm_lowp_plan)
     add_test(NAME sllm_argmax_public_c_abi_host_test
         COMMAND sllm_argmax_public_c_abi_host_test
     )
@@ -1259,7 +1289,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
     target_compile_options(sllm_token_selector_public_c_abi_host_test PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
     )
-    target_link_libraries(sllm_token_selector_public_c_abi_host_test PRIVATE Threads::Threads)
+    target_link_libraries(sllm_token_selector_public_c_abi_host_test PRIVATE
+        Threads::Threads sllm_lowp_plan)
     add_test(NAME sllm_token_selector_public_c_abi_host_test
         COMMAND sllm_token_selector_public_c_abi_host_test
     )
@@ -1472,34 +1503,6 @@ if(SLLM_ENABLE_RMSNORM_DIRECT_GPU_TEST)
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
     )
     target_link_libraries(sllm_rmsnorm_direct_gpu_test PRIVATE sllm_hip_stub)
-endif()
-
-if(SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST)
-    add_executable(sllm_low_precision_codec_gpu_test
-        tests/low_precision_block_codec_gpu_test.hip.cpp
-    )
-    set_source_files_properties(
-        tests/low_precision_block_codec_gpu_test.hip.cpp
-        PROPERTIES LANGUAGE HIP
-    )
-    target_compile_features(sllm_low_precision_codec_gpu_test PRIVATE cxx_std_17)
-    target_compile_definitions(sllm_low_precision_codec_gpu_test PRIVATE
-        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
-        __HIP_PLATFORM_AMD__=1
-    )
-    target_compile_options(sllm_low_precision_codec_gpu_test PRIVATE
-        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
-        $<$<COMPILE_LANGUAGE:HIP>:-mcode-object-version=6>
-        $<$<COMPILE_LANGUAGE:HIP>:${SLLM_WAVEFRONT_FLAG}>
-        $<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>
-    )
-    target_include_directories(sllm_low_precision_codec_gpu_test PRIVATE
-        "${PROJECT_SOURCE_DIR}/src"
-        "${ROCM_PATH}/include"
-    )
-    target_link_libraries(sllm_low_precision_codec_gpu_test PRIVATE
-        "${ROCM_PATH}/lib/libamdhip64.so"
-    )
 endif()
 
 if(SLLM_ENABLE_HIPBLASLT_FP8_GRAPH_GPU_TEST)

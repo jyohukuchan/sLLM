@@ -231,6 +231,10 @@ implemented with `__builtin_amdgcn_perm`. sLLM replaces the generic table
 pointer with fixed OCP E2M1 signed-byte tables and returns two local packed
 integer words for its block-16 scale domains.
 
+The lowp boundary move relocated the imported implementation into
+`native/lowp/src/`. The historical `native/hip/src` entries below are retained
+as the original import record; no new upstream import event was created.
+
 ```yaml
 schema_version: 1
 id: llama-cpp-phase78-nvfp4-byte-permute-001
@@ -249,6 +253,12 @@ local:
       imported_sha256: dfa24fc6c44645bf71275ddf398abaa6e9bf617449eb87d0da37e3287c0126a1
     - path: native/hip/src/nvfp4_decode_scale_lut.inc
       imported_sha256: e4606024ea3312a89cf057789df9d6a9934ffd84bf8be5be7552cf8718990c95
+    - path: native/lowp/src/lowp_kernel.hip.cpp
+      moved_from: native/hip/src/matmul_kernel.hip.cpp
+      provenance_status: existing import after internal boundary move; current-path hash not recomputed here
+    - path: native/lowp/src/nvfp4_decode_scale_lut.inc
+      moved_from: native/hip/src/nvfp4_decode_scale_lut.inc
+      provenance_status: existing import after internal boundary move; current-path hash not recomputed here
     - path: native/hip/tests/phase78_nvfp4_decode_dot_probe.hip.cpp
       imported_sha256: 22d802cabd8c0a43c05b91cc1c7bbe65c316b531a65c913815bb2f04a7467d11
     - path: native/hip/tests/phase78_nvfp4_decode_prefetch_probe.hip.cpp

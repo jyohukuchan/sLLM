@@ -377,6 +377,9 @@ EXPECTED_H3_PUBLIC_RUNTIME_PATH_RULES = {
     "native/hip/src/rmsnorm_kernel.hip.cpp",
     "native/hip/src/rmsnorm_kernel_internal.hpp",
     "crates/sllm-hip-sys/build.rs",
+    "native/lowp/CMakeLists.txt",
+    "native/lowp/include/lowp/lowp.h",
+    "native/lowp/src/lowp_kernel.hip.cpp",
 }
 EXPECTED_H3_RMSNORM_PATH_RULES = {
     "ci/schema/rmsnorm-h3-compile-v1.schema.json",
@@ -999,12 +1002,12 @@ def main() -> int:
             raise ContractError("host-v1 has unknown or missing top-level key")
         if set(paths) != {"schema_version", "revision", "default_suite_ids", "rules"}:
             raise ContractError("path-to-suite-v1 has unknown or missing top-level key")
-        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 35:
-            raise ContractError("suites-v1 identity is not revision 35")
-        if host.get("schema_version") != "host-v1" or host.get("revision") != 22:
-            raise ContractError("host-v1 identity is not revision 22")
-        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 47:
-            raise ContractError("path-to-suite-v1 identity is not revision 47")
+        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 36:
+            raise ContractError("suites-v1 identity is not revision 36")
+        if host.get("schema_version") != "host-v1" or host.get("revision") != 23:
+            raise ContractError("host-v1 identity is not revision 23")
+        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 48:
+            raise ContractError("path-to-suite-v1 identity is not revision 48")
         for suite in suites["suites"]:
             sid = suite["suite_id"]
             if set(suite) != {"suite_id", "tier", "marker", "attributes", "test_ids", "commands"}:

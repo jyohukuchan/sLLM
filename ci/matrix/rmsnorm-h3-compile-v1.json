@@ -59,7 +59,7 @@
         },
         {
           "path": "native/hip/src/public_runtime.hip.cpp",
-          "sha256": "d5114d24c31f115f894ca3440060ef16a9a9df96bd20aec8e4c3261b9cf347d4"
+          "sha256": "b6acd284fa0668dbb4d43caf6ac6b5ba6d15a235836d831949363eca8bd4bd31"
         },
         {
           "path": "native/hip/src/public_runtime_internal.hpp",
@@ -74,7 +74,7 @@
           "sha256": "62675cd693719f711541768a2f52182fdc22a98fc70d21fe66f6ea041df4be19"
         }
       ],
-      "source_set_sha256": "8c5ccbc699b11a8ddfbf22068ce288d5d6bfbcfddfdcf7695d9967ff35b52d2b"
+      "source_set_sha256": "4f8183d42b98c9b75e5b2403b7fc159ce0695862287563f0182ce9084fa17ef7"
     },
     "binding_build": {
       "canonical_order": [
@@ -87,7 +87,7 @@
       "files": [
         {
           "path": "crates/sllm-hip-sys/build.rs",
-          "sha256": "956db57119eb6f798088757889568ca02bd9b41ed47946c6b6dfd1349fb2b898"
+          "sha256": "585895588e93387a2250c79726c394d12cb651c98d8350eee48ee8fe0abd6e7c"
         },
         {
           "path": "crates/sllm-hip-sys/src/bindings.rs",
@@ -103,10 +103,10 @@
         },
         {
           "path": "native/hip/CMakeLists.txt",
-          "sha256": "9ec7d84d99031c167c0aafce4f95c87756b9ffcfc7bfd96ff1a5649790f74b4c"
+          "sha256": "13d1c87df2acfeaaec733b92eb3bb101c113571dfba187f93385b84a0f6f7a15"
         }
       ],
-      "source_set_sha256": "842508de1680bd2df557581169aad3e0c0bebf76a6efbd023cfe0cbacb87bd12"
+      "source_set_sha256": "85b2d03080665ad4ce4bb91a502df62605b98de53483fd04770a742f58e889bb"
     },
     "ci_contract": {
       "canonical_order": [
@@ -148,15 +148,15 @@
         },
         {
           "path": "ci/tools/run_rmsnorm_h3_compile.py",
-          "sha256": "971e8245d182cea419e3bf1a0ed805408c6211cd11a5a16d5b9b19281381a38a"
+          "sha256": "572766f259e5c5f5ba6e51066a349384e34a72dec652e6ab8e4d55be99fe6768"
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "a6d3bb872bf963ab9919d9804ce197aff7c092e0a78cc98cd70be6d32a392d68"
+          "sha256": "34379adbc2575243a33504770d04bd1d08dc3bd0a17f83cae6a694dc67a564ea"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "5f85dd315f48ddfb21a017de98e4f83027053fbf9fe86878f09a4028fea8550a"
+          "sha256": "eebfc0f3c94c998daecf7e90e2bad32fb17f0e31a9fe52c03618ae0af31fb67a"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -183,7 +183,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "c29095cab4eb712178fc3fa9bd409003790a1e4bf668a642076dc85f2a2aa989"
+      "source_set_sha256": "0dde9e413f203196cc1c8ed7c0c6ba8bde11c6959a7e9d8014169f7064020ce3"
     }
   },
   "source_symbol_map": [
@@ -380,13 +380,17 @@
             "/opt/rocm/bin/amdclang++",
             "-D__HIP_ROCclr__=1",
             "-O3",
+            "-ffp-contract=off",
             "-DNDEBUG",
             "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
+            "-DLOWP_COMPILED_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
             "-I",
             "{repo}/native/hip/src",
+            "-I",
+            "{repo}/native/lowp/include",
             "--offload-arch={target}",
             "-mcode-object-version=6",
             "-mno-wavefrontsize64",
@@ -402,13 +406,17 @@
             "/opt/rocm/bin/amdclang++",
             "-D__HIP_ROCclr__=1",
             "-O3",
+            "-ffp-contract=off",
             "-DNDEBUG",
             "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
+            "-DLOWP_COMPILED_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
             "-I",
             "{repo}/native/hip/src",
+            "-I",
+            "{repo}/native/lowp/include",
             "--offload-arch={target}",
             "-mcode-object-version=6",
             "-mno-wavefrontsize64",
@@ -423,13 +431,17 @@
           [
             "/opt/rocm/bin/amdclang++",
             "-O3",
+            "-ffp-contract=off",
             "-DNDEBUG",
             "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
+            "-DLOWP_COMPILED_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
             "-I",
             "{repo}/native/hip/src",
+            "-I",
+            "{repo}/native/lowp/include",
             "--offload-arch={target}",
             "-mcode-object-version=6",
             "-mno-wavefrontsize64",
@@ -442,9 +454,8 @@
           [
             "/opt/rocm/bin/amdclang++",
             "-O3",
+            "-ffp-contract=off",
             "-DNDEBUG",
-            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
-            "-std=gnu++17",
             "--offload-arch={target}",
             "-mcode-object-version=6",
             "-mno-wavefrontsize64",
@@ -457,10 +468,18 @@
             "{build_dir}/public-runtime-{target}.o",
             "{build_dir}/rmsnorm-api-{target}.o",
             "-D__HIP_ROCclr__=1",
+            "-D__HIP_PLATFORM_AMD__",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
+            "-DLOWP_COMPILED_TARGET=\"{target}\"",
+            "-std=gnu++17",
             "-I",
             "{repo}/include",
             "-I",
             "{repo}/native/hip/src",
+            "-I",
+            "{repo}/native/lowp/include",
+            "-I",
+            "/opt/rocm/include",
             "-x",
             "c++",
             "{repo}/native/hip/src/argmax_api.cpp",
@@ -471,6 +490,8 @@
             "{repo}/native/hip/src/embedding_api.cpp",
             "{repo}/native/hip/src/kv_state_api.cpp",
             "{repo}/native/hip/src/linear_attention_api.cpp",
+            "{repo}/native/lowp/src/lowp_plan.cpp",
+            "{repo}/native/lowp/src/lowp_launch.cpp",
             "{repo}/native/hip/src/matmul_api.cpp",
             "{repo}/native/hip/src/minimax_m3_moe_route_api.cpp",
             "{repo}/native/hip/src/ministral3_yarn_api.cpp",
@@ -493,6 +514,7 @@
             "{repo}/native/hip/src/kv_state_kernel.hip.cpp",
             "{repo}/native/hip/src/linear_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/matmul_kernel.hip.cpp",
+            "{repo}/native/lowp/src/lowp_kernel.hip.cpp",
             "{repo}/native/hip/src/minimax_m3_moe_route_kernel.hip.cpp",
             "{repo}/native/hip/src/ministral3_yarn_kernel.hip.cpp",
             "{repo}/native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp",
@@ -574,13 +596,17 @@
             "/opt/rocm/bin/amdclang++",
             "-D__HIP_ROCclr__=1",
             "-O3",
+            "-ffp-contract=off",
             "-DNDEBUG",
             "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
+            "-DLOWP_COMPILED_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
             "-I",
             "{repo}/native/hip/src",
+            "-I",
+            "{repo}/native/lowp/include",
             "--offload-arch={target}",
             "-mcode-object-version=6",
             "-mno-wavefrontsize64",
@@ -596,13 +622,17 @@
             "/opt/rocm/bin/amdclang++",
             "-D__HIP_ROCclr__=1",
             "-O3",
+            "-ffp-contract=off",
             "-DNDEBUG",
             "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
+            "-DLOWP_COMPILED_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
             "-I",
             "{repo}/native/hip/src",
+            "-I",
+            "{repo}/native/lowp/include",
             "--offload-arch={target}",
             "-mcode-object-version=6",
             "-mno-wavefrontsize64",
@@ -617,13 +647,17 @@
           [
             "/opt/rocm/bin/amdclang++",
             "-O3",
+            "-ffp-contract=off",
             "-DNDEBUG",
             "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
+            "-DLOWP_COMPILED_TARGET=\"{target}\"",
             "-std=gnu++17",
             "-I",
             "{repo}/include",
             "-I",
             "{repo}/native/hip/src",
+            "-I",
+            "{repo}/native/lowp/include",
             "--offload-arch={target}",
             "-mcode-object-version=6",
             "-mno-wavefrontsize64",
@@ -636,9 +670,8 @@
           [
             "/opt/rocm/bin/amdclang++",
             "-O3",
+            "-ffp-contract=off",
             "-DNDEBUG",
-            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
-            "-std=gnu++17",
             "--offload-arch={target}",
             "-mcode-object-version=6",
             "-mno-wavefrontsize64",
@@ -651,10 +684,18 @@
             "{build_dir}/public-runtime-{target}.o",
             "{build_dir}/rmsnorm-api-{target}.o",
             "-D__HIP_ROCclr__=1",
+            "-D__HIP_PLATFORM_AMD__",
+            "-DSLLM_HIP_COMPILE_TARGET=\"{target}\"",
+            "-DLOWP_COMPILED_TARGET=\"{target}\"",
+            "-std=gnu++17",
             "-I",
             "{repo}/include",
             "-I",
             "{repo}/native/hip/src",
+            "-I",
+            "{repo}/native/lowp/include",
+            "-I",
+            "/opt/rocm/include",
             "-x",
             "c++",
             "{repo}/native/hip/src/argmax_api.cpp",
@@ -665,6 +706,8 @@
             "{repo}/native/hip/src/embedding_api.cpp",
             "{repo}/native/hip/src/kv_state_api.cpp",
             "{repo}/native/hip/src/linear_attention_api.cpp",
+            "{repo}/native/lowp/src/lowp_plan.cpp",
+            "{repo}/native/lowp/src/lowp_launch.cpp",
             "{repo}/native/hip/src/matmul_api.cpp",
             "{repo}/native/hip/src/minimax_m3_moe_route_api.cpp",
             "{repo}/native/hip/src/ministral3_yarn_api.cpp",
@@ -687,6 +730,7 @@
             "{repo}/native/hip/src/kv_state_kernel.hip.cpp",
             "{repo}/native/hip/src/linear_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/matmul_kernel.hip.cpp",
+            "{repo}/native/lowp/src/lowp_kernel.hip.cpp",
             "{repo}/native/hip/src/minimax_m3_moe_route_kernel.hip.cpp",
             "{repo}/native/hip/src/ministral3_yarn_kernel.hip.cpp",
             "{repo}/native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp",

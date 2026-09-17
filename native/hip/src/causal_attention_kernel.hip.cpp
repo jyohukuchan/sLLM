@@ -13,8 +13,8 @@
 #endif
 
 #include "causal_attention_kernel_internal.hpp"
-#include "low_precision_block_codec.hpp"
 #include "sllm/hip.h"
+#include <lowp/detail/low_precision_block_codec.hpp>
 
 namespace sllm_causal_attention_kernel {
 namespace {

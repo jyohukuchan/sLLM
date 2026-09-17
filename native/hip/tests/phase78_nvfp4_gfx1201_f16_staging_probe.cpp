@@ -14,7 +14,7 @@
 // rocBLAS F16/F16->F32 GEMM, then applies the tensor scale and BF16-RNE output
 // epilogue.  This is developer evidence only; no runtime selector is changed.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>

@@ -20,7 +20,7 @@
 // This developer probe is intentionally outside the production build and
 // does not alter provider selection.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>

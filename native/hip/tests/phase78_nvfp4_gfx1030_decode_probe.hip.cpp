@@ -12,7 +12,7 @@
 // variant, and a workgroup-shared activation decode variant.  No public
 // selector or existing source file is modified by this probe.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_runtime.h>
 

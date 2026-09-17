@@ -1,5 +1,5 @@
 #include "kv_state_kernel_internal.hpp"
-#include "low_precision_block_codec.hpp"
+#include <lowp/detail/low_precision_block_codec.hpp>
 
 #include <cmath>
 #include <cstdint>

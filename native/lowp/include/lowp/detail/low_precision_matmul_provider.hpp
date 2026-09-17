@@ -508,7 +508,8 @@ prepare_provider_plan(const ProviderRequest &request) noexcept {
   const bool valid_activation_layout =
       request.format == MatmulFormat::Nvfp4W4A16 ||
               request.format == MatmulFormat::Mxfp8E4M3W8A16 ||
-              request.format == MatmulFormat::Mxfp6E3M2W6A16 || outer_vector_format
+              request.format == MatmulFormat::Mxfp6E3M2W6A16 ||
+              outer_vector_format
           ? request.activation_layout == BlockLayout::RowMajor
           : is_block_scaled_layout(request.activation_layout);
   if (!valid_weight_layout || !valid_activation_layout) {

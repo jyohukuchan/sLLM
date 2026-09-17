@@ -6,7 +6,7 @@
 // converted exactly to FP16, products are accumulated in FP32, outer F32
 // scales are applied in the epilogue, and the result is BF16 RNE.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>

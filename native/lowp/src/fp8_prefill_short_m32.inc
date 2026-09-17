@@ -7,7 +7,7 @@
 // has selected a short-M shape; the launcher keeps the existing ID71 body for
 // every other shape.
 
-#include "low_precision_block_codec.hpp"
+#include <lowp/detail/low_precision_block_codec.hpp>
 
 #include <hip/hip_fp16.h>
 

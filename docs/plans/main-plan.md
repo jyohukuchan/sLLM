@@ -648,10 +648,10 @@ Phase 76以降は、Qwen3.8 27B NVFP4を単一GPUで実用速度にすること�
 ## 現在の状態と次の作業
 
 - **完了**: Phase 86まで完了した。現在の既定はBF16 MTP companion、catch-up無効、Qwen3.8のMXFP8 E4 KVである。
-- **次**: 低精度カーネルのライブラリ境界化、Phase 87（他精度の残差最適化）、Phase 88（NVFP4リクエストバッチ処理）の順。
+- **次**: Phase 87（他精度の残差最適化）、Phase 88（NVFP4リクエストバッチ処理）の順。
   詳細と受入条件は[Phase 76〜88計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)に従う。
-- **計画済み（番号なし）**: MXFP8／MXFP6／NVFP4／MXFP4の行列積カーネルを`native/lowp`へライブラリとして切り出す
-  [境界化計画](active/2026/09/11-20/lowp-kernel-library-boundary.md)。2026-09-17のユーザー決定により、Phase 87より先に実施する。
+- **完了（番号なし）**: MXFP8／MXFP6／NVFP4／内部MXFP4の行列積カーネルを`native/lowp`へ切り出した
+  [境界化計画](archive/2026/09/11-20/lowp-kernel-library-boundary.md)。両GPUの指定モデルでtoken列・logits一致、選択表4,700件、host/HIP検証を完了した。公開MXFP4 W4A8は契約定義のみで、実装はPhase 87へ残す。
 - **承認待ち・自動開始しないもの**:
   - Phase 47（組込みtool/MCP実行）は承認制の独立laneとして維持する。
   - Phase 48はGPU／throughput dashboard主画面、chat副画面の最小WebUI、server側model library、Hugging Face検索／download、

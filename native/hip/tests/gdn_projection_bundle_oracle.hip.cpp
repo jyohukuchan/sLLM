@@ -110,8 +110,8 @@ int main() {
   for (uint32_t role = 0U; role != 4U; ++role) {
     launch_status = sllm_matmul_kernel::launch(
         activation_device, weights_device[role], baseline_outputs_device[role],
-        1U, k, widths[role], sllm_matmul_kernel::KernelVariant::DecodeReduction,
-        nullptr);
+        1U, k, widths[role],
+        sllm_matmul_kernel::HostKernelVariant::DecodeReduction, nullptr);
     if (!check(launch_status, "baseline launch") ||
         !check(hipDeviceSynchronize(), "baseline synchronize"))
       return 2;
@@ -158,7 +158,7 @@ int main() {
       launch_status = sllm_matmul_kernel::launch(
           activation_device, weights_device[role],
           baseline_outputs_device[role], 1U, k, widths[role],
-          sllm_matmul_kernel::KernelVariant::DecodeReduction, nullptr);
+          sllm_matmul_kernel::HostKernelVariant::DecodeReduction, nullptr);
       if (!check(launch_status, "baseline timing launch"))
         return 2;
     }

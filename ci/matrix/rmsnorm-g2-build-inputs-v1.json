@@ -4,7 +4,7 @@
   "role": "dedicated-g2-runtime",
   "binary_name": "sllm-rmsnorm-g2-evidence",
   "source_path": "crates/sllm-hip/src/bin/sllm-rmsnorm-g2-evidence.rs",
-  "source_order_sha256": "ad634ccc2e90b3593589aab37590b9224bd17cd06beb74db268c665adaabf8d9",
+  "source_order_sha256": "de00bf215d697ca84728bb592d5cbb6fdc245c69e0a3bcb5a3fc143909aa57b9",
   "source_paths": [
     {
       "order": 0,
@@ -272,11 +272,11 @@
     },
     {
       "order": 66,
-      "path": "native/hip/src/low_precision_block_codec.hpp"
+      "path": "native/lowp/include/lowp/detail/low_precision_block_codec.hpp"
     },
     {
       "order": 67,
-      "path": "native/hip/src/low_precision_matmul_provider.hpp"
+      "path": "native/lowp/include/lowp/detail/low_precision_matmul_provider.hpp"
     },
     {
       "order": 68,
@@ -288,15 +288,15 @@
     },
     {
       "order": 70,
-      "path": "native/hip/src/matmul_kernel.hip.cpp"
+      "path": "native/lowp/src/lowp_kernel.hip.cpp"
     },
     {
       "order": 71,
-      "path": "native/hip/src/nvfp4_prefill_wmma_compensated.inc"
+      "path": "native/lowp/src/nvfp4_prefill_wmma_compensated.inc"
     },
     {
       "order": 72,
-      "path": "native/hip/src/matmul_kernel_internal.hpp"
+      "path": "native/lowp/include/lowp/detail/lowp_kernel_internal.hpp"
     },
     {
       "order": 73,
@@ -329,6 +329,46 @@
     {
       "order": 80,
       "path": "native/hip/src/rmsnorm_kernel_internal.hpp"
+    },
+    {
+      "order": 81,
+      "path": "native/lowp/CMakeLists.txt"
+    },
+    {
+      "order": 82,
+      "path": "native/lowp/include/lowp/lowp.h"
+    },
+    {
+      "order": 83,
+      "path": "native/lowp/src/fp8_prefill_short_m32.inc"
+    },
+    {
+      "order": 84,
+      "path": "native/lowp/include/lowp/detail/lowp_api_internal.hpp"
+    },
+    {
+      "order": 85,
+      "path": "native/lowp/include/lowp/detail/lowp_provider_plan.hpp"
+    },
+    {
+      "order": 86,
+      "path": "native/lowp/src/lowp_launch.cpp"
+    },
+    {
+      "order": 87,
+      "path": "native/lowp/src/lowp_plan.cpp"
+    },
+    {
+      "order": 88,
+      "path": "native/lowp/src/nvfp4_decode_scale_lut.inc"
+    },
+    {
+      "order": 89,
+      "path": "native/lowp/src/nvfp4_small_m_vgpr_reuse.inc"
+    },
+    {
+      "order": 90,
+      "path": "native/lowp/include/lowp/detail/bf16_helpers.inc"
     }
   ]
 }

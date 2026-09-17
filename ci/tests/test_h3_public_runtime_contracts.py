@@ -380,7 +380,62 @@ def _build_script_rerun_paths(build_script: Path) -> list[tuple[str, str]]:
     path_bindings: dict[str, str] = {}
     registrations: list[tuple[str, str]] = []
 
-    for index, token in enumerate(tokens):
+    def literal_path_loop(index: int) -> tuple[int, list[str]] | None:
+        """Expand the bounded ``for path in [&binding, ...]`` form."""
+
+        if (
+            index + 4 >= len(tokens)
+            or tokens[index] != ("ident", "for")
+            or tokens[index + 1][0] != "ident"
+            or tokens[index + 2] != ("ident", "in")
+            or tokens[index + 3] != ("punct", "[")
+        ):
+            return None
+        variable = tokens[index + 1][1]
+        cursor = index + 4
+        bindings: list[str] = []
+        while cursor < len(tokens) and tokens[cursor] != ("punct", "]"):
+            if tokens[cursor] != ("punct", "&") or cursor + 1 >= len(tokens):
+                return None
+            binding = tokens[cursor + 1]
+            if binding[0] != "ident" or binding[1] not in known_paths:
+                return None
+            bindings.append(binding[1])
+            cursor += 2
+            if cursor >= len(tokens) or tokens[cursor] != ("punct", ","):
+                return None
+            cursor += 1
+        if not bindings or cursor + 14 >= len(tokens) or tokens[cursor] != ("punct", "]"):
+            return None
+        expected = [
+            ("punct", "{"),
+            ("ident", "println"),
+            ("punct", "!"),
+            ("punct", "("),
+            ("string", "cargo:rerun-if-changed={}"),
+            ("punct", ","),
+            ("ident", variable),
+            ("punct", "."),
+            ("ident", "display"),
+            ("punct", "("),
+            ("punct", ")"),
+            ("punct", ")"),
+            ("punct", ";"),
+            ("punct", "}"),
+        ]
+        end = cursor + 1
+        if tokens[end : end + len(expected)] != expected:
+            return None
+        return end + len(expected), bindings
+
+    index = 0
+    while index < len(tokens):
+        loop = literal_path_loop(index)
+        if loop is not None:
+            index, bindings = loop
+            registrations.extend((binding, path_bindings[binding]) for binding in bindings)
+            continue
+        token = tokens[index]
         if (
             token == ("ident", "let")
             and index + 9 < len(tokens)
@@ -397,6 +452,7 @@ def _build_script_rerun_paths(build_script: Path) -> list[tuple[str, str]]:
             name = tokens[index + 1][1]
             base = tokens[index + 3][1]
             if base not in known_paths:
+                index += 1
                 continue
             path = posixpath.normpath(posixpath.join(known_paths[base], tokens[index + 7][1]))
             if path == "." or path.startswith("../"):
@@ -425,6 +481,7 @@ def _build_script_rerun_paths(build_script: Path) -> list[tuple[str, str]]:
             if name not in path_bindings:
                 raise AssertionError(f"rerun registration uses an unknown path binding: {name}")
             registrations.append((name, path_bindings[name]))
+        index += 1
 
     return registrations
 
@@ -734,11 +791,13 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n12288_v1",
             "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n17408_v1",
             "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k6144n5120_v1",
+            "sllm_mxfp6_w6a16_m1_col2_v1",
+            "sllm_mxfp8_w8a16_m1_col2_v1",
         }
-        self.assertEqual(len(KERNEL_SYMBOLS), 180)
+        self.assertEqual(len(KERNEL_SYMBOLS), 182)
         self.assertEqual(tuple(sorted(KERNEL_SYMBOLS)), KERNEL_SYMBOLS)
         self.assertTrue(expected_additions <= set(KERNEL_SYMBOLS))
-        self.assertEqual(len(expected_additions), 77)
+        self.assertEqual(len(expected_additions), 79)
 
     def test_causal_attention_stub_allowlist_is_exact_and_duplicate_free(self) -> None:
         expected = (
@@ -979,20 +1038,28 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
         self.assertTrue(required.issubset(binding_by_path))
         for relative_path in sorted(required):
             binding = binding_by_path[relative_path]
+            loop_binding = f"&{binding},"
+            is_literal_loop_binding = loop_binding in source
             registration = f'println!("cargo:rerun-if-changed={{}}", {binding}.display());'
             with self.subTest(label=f"missing {relative_path}"):
-                missing = source.replace(
-                    f"{binding}.display()",
-                    "missing_h3_build_input.display()",
-                    1,
-                )
+                if is_literal_loop_binding:
+                    missing = source.replace(loop_binding, "&missing_h3_build_input,", 1)
+                else:
+                    missing = source.replace(
+                        f"{binding}.display()",
+                        "missing_h3_build_input.display()",
+                        1,
+                    )
                 with tempfile.TemporaryDirectory(prefix="sllm-h3-build-script-missing-") as directory:
                     mutated_build_script = Path(directory) / "build.rs"
                     mutated_build_script.write_text(missing, encoding="utf-8")
                     with self.assertRaises(AssertionError):
                         _assert_h3_build_inputs_registered(mutated_build_script)
             with self.subTest(label=f"duplicate {relative_path}"):
-                duplicate = source + "\n" + registration + "\n"
+                if is_literal_loop_binding:
+                    duplicate = source.replace(loop_binding, f"{loop_binding} {loop_binding}", 1)
+                else:
+                    duplicate = source + "\n" + registration + "\n"
                 with tempfile.TemporaryDirectory(prefix="sllm-h3-build-script-duplicate-") as directory:
                     mutated_build_script = Path(directory) / "build.rs"
                     mutated_build_script.write_text(duplicate, encoding="utf-8")
@@ -1001,11 +1068,14 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             other_path = next(path for path in sorted(required) if path != relative_path)
             other_binding = binding_by_path[other_path]
             with self.subTest(label=f"substituted {relative_path}"):
-                substituted = source.replace(
-                    f"{binding}.display()",
-                    f"{other_binding}.display()",
-                    1,
-                )
+                if is_literal_loop_binding:
+                    substituted = source.replace(loop_binding, f"&{other_binding},", 1)
+                else:
+                    substituted = source.replace(
+                        f"{binding}.display()",
+                        f"{other_binding}.display()",
+                        1,
+                    )
                 with tempfile.TemporaryDirectory(prefix="sllm-h3-build-script-substituted-") as directory:
                     mutated_build_script = Path(directory) / "build.rs"
                     mutated_build_script.write_text(substituted, encoding="utf-8")

@@ -12,7 +12,7 @@
 // rocBLAS F16/F16->F32, then applies tensor scales and BF16 RNE.  This file is
 // evidence-only; no production selector or existing file is modified.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>

@@ -13,7 +13,7 @@
 // E4M3FN block-scale conversion is changed: direct decode, a read-only FP16
 // LUT, a bank-padded LDS FP16 LUT, and a bank-padded LDS FP32 LUT.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_runtime.h>
 

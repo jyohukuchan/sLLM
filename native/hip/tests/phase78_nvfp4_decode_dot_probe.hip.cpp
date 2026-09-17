@@ -14,7 +14,7 @@
 // eight packed E2M1 bytes per block16, one positive E4M3FN block scale per
 // block, and one output per weight column.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_runtime.h>
 

@@ -357,6 +357,20 @@ NVFP4と同一packingへ畳み込まない。NVFP4／MXFP4 W4A4は既存device k
 既存W4A4をW4A8として報告または自動選択してはならない。MXFP4 weightはOCP E2M1／block 32／E8M0 scale、
 ActivationはOCP MXFP8 E4M3／K-axis block 32／E8M0 scaleとし、この組合せを新しいversioned W4A8 provider contractで固定する。
 
+低精度行列積のdevice実装は`native/lowp`へ境界化し、sLLMのRust実行層とHIP kernel本体を分離する。
+呼び出し側はdevice buffer、workspace、HIP streamを所有してC APIへ渡す。lowp libraryはplan作成・kernel選択・launchを行うが、
+launch中にdevice allocationや同期を行わず、caller-owned buffer以外へ状態を保持しない。`PreparedProviderPlan`はexact target、format/layout、
+M/N/K、provider、variant、tile、inner product、activation packとfootprintをprepare時に固定し、executeとdispatch監査は同じ値を使う。
+対象はexact `gfx1030`／`gfx1201`のMXFP8 W8A8、MXFP6 W6A6、weight-MXのW8A16／W6A16、NVFP4 W4A16／W4A4であり、
+累積はFP32、出力境界はBF16-RNEである。FP8 outerはsoftware providerを`gfx1030`に限定し、`gfx1201` native FP8はsLLM側の別経路として扱う。
+
+公開C APIはMXFP4 W4A8をversioned contractとして定義するが、実装が未対応の間はplanをunsupportedとして返す。
+既存のMXFP4 W4A4は移動対象の内部providerとして保持し、公開format enumへは追加しない。reserved format value 4も公開APIでは拒否する。
+BF16／FP8 native／hipBLAS経路はlowp libraryの対象外であり、lowpのplan failureを別dtypeやCPU providerへ暗黙にfallbackさせない。
+sLLMはlowpの公開C APIと`native/lowp/include/lowp/detail/`のC++連携ヘッダだけを使い、`native/lowp/src/`へ依存しない。
+BF16／hipBLAS／FP8 nativeのkernel IDと名前はsLLM側の`HostKernelVariant`が持ち、lowpの`KernelVariant`は低精度providerの値だけを持つ。
+両者は同じ監査ID空間を共有し、lowpは統合側の値を予約値として再利用しない。
+
 MXFP8のID37はID36の独立output列をN128へ広げ、各outputのFP32 treeを変えない。exact gfx1201かつPhase 65 direct-both family、
 N%128=0へ限定採用し、N64、small-K、tail、vocabulary、別targetは既存providerへ戻す。causal attentionはweight形式と分離し、
 Q/K/V、KV encoding、head geometry、query/context長、`sliding_window`、明示`score_scale`からFP16／MXFP8 E4のtyped

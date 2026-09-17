@@ -1,5 +1,5 @@
-#include "low_precision_block_codec.hpp"
-#include "low_precision_matmul_provider.hpp"
+#include <lowp/detail/low_precision_block_codec.hpp>
+#include <lowp/detail/low_precision_matmul_provider.hpp>
 
 #include <hip/hip_runtime.h>
 

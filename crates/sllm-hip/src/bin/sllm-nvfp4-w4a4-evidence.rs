@@ -542,7 +542,7 @@ fn validate_baseline_oracle_shape(shape: Shape) -> Result<(), String> {
 
 fn parse_baseline_oracle_shape(value: &str) -> Result<Shape, String> {
     let dimensions = value
-        .split(|character: char| matches!(character, 'x' | 'X' | ',' | ':' | ' '))
+        .split(['x', 'X', ',', ':', ' '])
         .filter(|part| !part.is_empty())
         .map(|part| {
             part.parse::<usize>().map_err(|_| {

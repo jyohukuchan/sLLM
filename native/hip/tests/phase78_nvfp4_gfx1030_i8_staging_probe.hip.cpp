@@ -14,7 +14,7 @@
 // workspace.  The resident model representation and production selector are
 // not changed by this file.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_runtime.h>
 

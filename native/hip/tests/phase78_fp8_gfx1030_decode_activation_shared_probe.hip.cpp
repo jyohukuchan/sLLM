@@ -14,7 +14,7 @@
 // layers 56..63 MLP, 16 full-attention layers, 48 linear-attention layers,
 // and one lm_head, totaling 233 FP8 tensors.
 
-#include "low_precision_block_codec.hpp"
+#include "../../lowp/include/lowp/detail/low_precision_block_codec.hpp"
 
 #include <hip/hip_runtime.h>
 

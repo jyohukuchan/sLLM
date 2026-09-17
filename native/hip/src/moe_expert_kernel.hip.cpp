@@ -1,5 +1,5 @@
-#include "matmul_kernel_internal.hpp"
 #include "moe_expert_kernel_internal.hpp"
+#include <lowp/detail/lowp_kernel_internal.hpp>
 
 #include <cmath>
 

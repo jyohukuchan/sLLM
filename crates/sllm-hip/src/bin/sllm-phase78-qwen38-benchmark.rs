@@ -824,6 +824,8 @@ struct Stage0SuiteCase {
     message: String,
 }
 
+type Stage0Prompt = (String, String, String, Vec<i32>);
+
 #[derive(Serialize)]
 struct Stage0TopLogit {
     token_id: usize,
@@ -1749,7 +1751,7 @@ fn stage0_fixed_entries(
 fn stage0_suite_prompts(
     artifact: &sllm_core::VerifiedUnslothQwen38Nvfp4,
     suite: &Stage0Suite,
-) -> Result<Vec<(String, String, String, Vec<i32>)>, String> {
+) -> Result<Vec<Stage0Prompt>, String> {
     let tokenizer = TokenizerFrontendV1::from_unsloth_qwen38_nvfp4(artifact)
         .map_err(|error| format!("load Stage0 suite tokenizer: {error}"))?;
     let renderer = Qwen35ChatTemplateV1::from_unsloth_qwen38_nvfp4(artifact)
@@ -1789,6 +1791,9 @@ fn stage0_suite_prompts(
     Ok(prompts)
 }
 
+// The generation helper mirrors the existing benchmark request interface;
+// keeping its explicit model/session arguments avoids changing measured setup.
+#[allow(clippy::too_many_arguments)]
 fn stage0_generate_prefixes(
     artifact: &sllm_core::VerifiedUnslothQwen38Nvfp4,
     suite_path: &Path,
@@ -1886,6 +1891,9 @@ fn stage0_generate_prefixes(
     })
 }
 
+// The secondary benchmark intentionally shares the same explicit request
+// arguments as the primary Stage0 path for apples-to-apples diagnostics.
+#[allow(clippy::too_many_arguments)]
 fn stage0_secondary_mtp(
     artifact: &sllm_core::VerifiedUnslothQwen38Nvfp4,
     suite_path: &Path,
@@ -2220,7 +2228,7 @@ fn run_stage0(config: Config) -> Result<Stage0Report, String> {
             .map(|sidecar| sidecar.encoding().manifest_name().to_owned()),
         companion_digest: mtp_companion
             .as_deref()
-            .map(|sidecar| sidecar.combined_recipe_digest(&artifact.recipe_digest())),
+            .map(|sidecar| sidecar.combined_recipe_digest(artifact.recipe_digest())),
         fixed_prefix: payload.0,
         generation: payload.1,
         secondary_mtp: payload.2,
