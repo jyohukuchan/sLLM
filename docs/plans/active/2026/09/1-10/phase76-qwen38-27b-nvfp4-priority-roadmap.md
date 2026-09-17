@@ -1,9 +1,18 @@
 # Phase 76以降: Qwen3.8-27B NVFP4優先ロードマップ
 
-> 状態: Phase 76〜84.5（83.5を含む）完了。2026-09-13のユーザー指示により、新Phase85をMXFP8／MXFP6共通kernel改善とし、旧85・86を86・87へ繰り下げた。同日の追加指示によりPhase85は実行中、Phase86〜87は計画済み・未着手。Phase78の旧目標の未達・未実施を記録した完了判断は維持する。
+> 状態: Phase 76〜86（83.5・84.5を含む）完了。2026-09-17のユーザー決定により、新Phase86をMTP catch-upの条件付け検証とし、旧86・87を87・88へ繰り下げた。Phase86は有意な改善を確認できず既定採用せず完了。Phase87〜88は計画済み・未着手。Phase78の旧目標の未達・未実施を記録した完了判断は維持する。
 > 作成日: 2026-09-03
 
-## 2026-09-13の最新状態
+## 2026-09-17の最新状態
+
+新[Phase86](../../../../archive/2026/09/11-20/phase86-mtp-catch-up-conditioning.md)で、Qwen MTPのcatch-upの条件付けを外部エンジン準拠で検証する。
+vLLM／SGLang／llama.cppは検証済み位置のdraftをtargetのhiddenで再計算するが、sLLMのQwen MTP経路は
+chain 2歩目以降をdraft自身のhiddenで作ったKVを受理後も保持している。これが採用率を下げているかを、
+BF16 companion（本番既定）から両GPU26条件で測定した。有意な改善を確認できず、既定採用せず完了した。
+旧Phase86の他精度残差はPhase87、旧Phase87のNVFP4リクエストバッチ処理はPhase88へ繰り下げる。
+以下の2026-09-13以前の節に残るPhase86・87の番号は当時の決定であり、現在の順序を上書きしない。
+
+## 2026-09-13の状態（再編前）
 
 新[Phase85](../../../../archive/2026/09/11-20/phase85-mxfp8-mxfp6-common-kernels.md)で、MXFP8／MXFP6共通kernelを広範な行列形状で最適化し、モデル本体量子化・MXFP8 KV・MXFP8／MXFP6 MTPを使う推論が改善したかを検証する。旧Phase85の他精度最適化はPhase86、旧Phase86のNVFP4リクエストバッチ処理はPhase87へ繰り下げる。Phase86では新85の成果を再実装せず残差を扱う。BF16 MTP既定を比較開始時の基準とする。
 
@@ -38,10 +47,10 @@ Phase 80のCI修復とPhase 81の固定GPU samplingを完了した。2026-09-08�
 `unsloth/Qwen3.8-27B-NVFP4`を実用的な単一要求速度で文章生成できる状態とする。
 現在はPhase 78のユーザー承認済み完了判断とPhase 81の固定GPU sampling完了を踏まえ、Phase 82で未採用最適化を整理し、
 現行target・shape・KV範囲だけを条件付きで既定採用する。続いてPhase 83で標準OCP MXFP8 E4 KV／MTP／文章生成の実用closeout、
-Phase83.5の追加最適化、Phase84のMTP量子化、Phase84.5の限定診断、Phase85のMXFP8／MXFP6共通kernel改善、Phase86の他精度残差、Phase87のNVFP4リクエストバッチ処理の順とする。Phase 81の共通samplerは既存モデル経路を
+Phase83.5の追加最適化、Phase84のMTP量子化、Phase84.5の限定診断、Phase85のMXFP8／MXFP6共通kernel改善、Phase86のMTP catch-up条件付け検証、Phase87の他精度残差、Phase88のNVFP4リクエストバッチ処理の順とする。Phase 81の共通samplerは既存モデル経路を
 対象として完了した。旧exact-model目標の再達成や実用closeout（現在のPhase 83）の完了は開始条件にしなかった。
 2026-09-07の変更により、既存NVFP4/FP8経路のモデル横断共通化は新Phase 79として先行する。
-この既存経路の共通化に旧exact-model優先条件を適用せず、他精度最適化は新Phase85の共通改善とPhase86の残差に分ける。
+この既存経路の共通化に旧exact-model優先条件を適用せず、他精度最適化は新Phase85の共通改善とPhase87の残差に分ける。
 
 2026-09-13変更後の番号上の既定順は次とする。
 
@@ -57,8 +66,9 @@ Phase83.5の追加最適化、Phase84のMTP量子化、Phase84.5の限定診断�
 10. Phase 84: MTPをMXFP8 W8A8から量子化し、問題がなければ同PhaseでMXFP6 W6A6へ進む。固定sampling・公開経路へ統合。
 11. Phase 84.5: 固定履歴でMTP接続・sampling・採否後状態を限定診断。
 12. Phase 85: MXFP8／MXFP6共通kernelの広範shape最適化と、モデル本体・MXFP8 KV・量子化MTPの推論効果検証。
-13. Phase 86: 他精度の残る単一要求最適化（2026-09-13再編前のPhase85）。
-14. Phase 87: NVFP4のGPUリクエストバッチ処理最適化（2026-09-13再編前のPhase86）。
+13. Phase 86: Qwen MTP catch-upの条件付けを外部エンジン準拠で検証（2026-09-17新設）。
+14. Phase 87: 他精度の残る単一要求最適化（2026-09-17再編前のPhase86、2026-09-13再編前のPhase85）。
+15. Phase 88: NVFP4のGPUリクエストバッチ処理最適化（2026-09-17再編前のPhase87、2026-09-13再編前のPhase86）。
 
 Phase 76〜84の途中で一般的なFP8 artifact互換、vision、tensor parallel、continuous batchingへscopeを
 広げない。Qwen3.8 artifact内に実在する限定FP8 recipeは対象modelを動かすために扱うが、これを汎用FP8対応とは呼ばない。
@@ -1401,28 +1411,38 @@ KV形式を跨ぐ差は別列とし、FP16の過去実測値をMXFP8 baselineと
 
 shared codecとmatmul／attentionのscheduleは別の共有境界として扱う。MXFP6 KVの新設や全shapeの一律高速化は含めない。詳細なshape選定、段階、測定・数値判定は[Phase85専用計画](../../../../archive/2026/09/11-20/phase85-mxfp8-mxfp6-common-kernels.md)を正本とする。
 
-## Phase 86: 他精度の単一要求最適化（旧Phase85）
+## Phase 86: MTP catch-upの条件付け検証（完了・既定採用せず）
 
-新Phase85完了後に、次の順で残件を閉じる。Phase84のsidecar・既存provider接続・比較結果と、Phase85の共通kernel採用範囲を引き継ぐ。未対応shape・一般経路を再棚卸しし、完了したMXFP8／MXFP6改善を重複実装・全面再測定しない。
+2026-09-17ユーザー決定による新設。Qwen MTPの検証後に、確定位置のdraft状態をtargetのhiddenで作り直すか
+（vLLM／SGLang／llama.cpp型）、提案時にdraft自身のhiddenで作った状態を保持するか（現行sLLM）の差を、
+BF16 companionから両GPUで測る。まず差分を実装から特定し、既存のteacher-forced harnessへ本番忠実な強制モードを加え、
+opt-inの分離catch-up、効果があれば融合catch-upの順で進める。既定は採否まで変えない。
+これまでのM1測定がtarget条件付け・chain 1歩目型だけを測っていた限界も記録する。
+tree／並列drafting、batching、greedy受理規則は含めない。
+詳細は[Phase86専用計画](../../../../archive/2026/09/11-20/phase86-mtp-catch-up-conditioning.md)を正本とする。
+
+## Phase 87: 他精度の単一要求最適化（旧Phase86、さらに前は旧Phase85）
+
+Phase86と[低精度カーネルのライブラリ境界化](../11-20/lowp-kernel-library-boundary.md)（2026-09-17ユーザー決定によりPhase87より先に実施）の完了後に、次の順で残件を閉じる。変更は境界化後の`native/lowp`へ入れる。Phase84のsidecar・既存provider接続・比較結果と、Phase85の共通kernel採用範囲を引き継ぐ。未対応shape・一般経路を再棚卸しし、完了したMXFP8／MXFP6改善を重複実装・全面再測定しない。
 
 1. MXFP8 W8A8 decodeの残差。Phase85で得たMXFP8 activation decodeを後続MXFP4 W4A8へ再利用する。
 2. MXFP6 W6A6 decodeの残差。共通tile/reductionとE3M2 ingressの採否・制約を引き継ぐ。
 3. MXFP4 W4A8 prefill/decode。weightはMXFP4 block32/E8M0、activationはMXFP8 E4M3 block32/E8M0とする。
 4. NVFP4 W4A16 decode残差と、必要なら既存prefill providerの追加改善。
 
-一般的なFP8 artifact互換は保留を維持する。Phase 76〜83のexact Qwen3.8 recipe対応を汎用化する作業はPhase 86へ
+一般的なFP8 artifact互換は保留を維持する。Phase 76〜83のexact Qwen3.8 recipe対応を汎用化する作業はPhase 87へ
 自動的に含めない。
 
-## Phase 87: NVFP4リクエストバッチ処理（旧Phase86）
+## Phase 88: NVFP4リクエストバッチ処理（旧Phase87、さらに前は旧Phase86）
 
-Phase86完了後に開始する。最初はQwen3.8-27B NVFP4 W4A4へ限定する。
+Phase87完了後に開始する。最初はQwen3.8-27B NVFP4 W4A4へ限定する。
 
 1. 同一decode stepのB=`2/4/8`でactivation pack、weight tile、scale loadをrequest間共有し、単一要求TPOTとaggregate throughputを測る。
 2. Phase 26のhost planningを再利用し、GPU B>1 executionへ接続する。単一要求providerを暗黙にB>1へ流用しない。
 3. decode-only batchingを成立させた後、prefill/decode混在、continuous admission、cancellation、KV ownershipへ進む。
 4. fairness、p50/p99 latency、aggregate tok/s、resident/request workspace、OOM admissionを別指標として記録する。
 
-tensor parallel、multi-GPU、RDMAはPhase 87へ含めず、リクエストバッチ処理と通信最適化を同時に導入しない。
+tensor parallel、multi-GPU、RDMAはPhase 88へ含めず、リクエストバッチ処理と通信最適化を同時に導入しない。
 
 ## 共通停止・再計画条件
 
@@ -1432,3 +1452,8 @@ tensor parallel、multi-GPU、RDMAはPhase 87へ含めず、リクエストバ�
 - GPU PASSはexact target、数値oracle、fallback 0、GTT spill 0、cleanup成功を必要とする。
 
 [メイン計画](../../../../main-plan.md)
+
+Phase86は両GPU26条件の強制列比較と自由生成、状態・rewind検査を完了した。
+採用率・導出速度ともprompt clusterで有意な改善を確認できず、BF16とcatch-up無効の既定を維持する。
+[検証履歴](../../../../../history/2026/09/11-20/phase86-mtp-catch-up-conditioning.md)と
+[保存済み計画](../../../../archive/2026/09/11-20/phase86-mtp-catch-up-conditioning.md)を参照する。
