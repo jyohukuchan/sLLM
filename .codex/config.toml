@@ -1,7 +1,6 @@
-# sLLM: keep bounded subagent work on Luna; custom escalation roles may override.
-[agents]
-default_subagent_model = "gpt-5.6-luna"
-default_subagent_reasoning_effort = "xhigh"
+# sLLM: the subagent model comes from the active Codex profile.  The default
+# OpenAI profile uses Luna (see ~/.codex/config.toml); alternate provider
+# profiles such as deepseek-flash set their own default subagent model.
 
 # Public model, paper, and documentation lookup; no local token is required.
 [mcp_servers.huggingface]

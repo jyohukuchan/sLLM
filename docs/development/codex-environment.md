@@ -5,12 +5,16 @@
 
 ## Subagent
 
-[プロジェクト設定](../../.codex/config.toml)で既定を `gpt-5.6-luna`、reasoningを `xhigh` に固定する。
-個別agentがmodelを指定した場合は、その指定が優先される。メインモデルは変更しない。
+subagentの既定modelは使用中のCodex profileが決める。[プロジェクト設定](../../.codex/config.toml)では固定しない
+（2026-09-19変更。以前はprojectでも `gpt-5.6-luna` を固定しており、別provider profileと衝突した）。
+個別agentがmodelを指定した場合は、その指定が優先される。
 
-このhostの `~/.codex/config.toml` にも同じ既定値を設定した。
-`~/.codex/agents/{luna,terra,sol}.toml` は、Lunaを通常作業、Terraを横断調査・統合、
-Solを反復失敗後や特に深い専門推論が必要な場合に使う役割へ同期した。
+- 既定のOpenAI profile: このhostの `~/.codex/config.toml` で既定を `gpt-5.6-luna`、reasoningを `xhigh` にしている。
+  `~/.codex/agents/{luna,terra,sol}.toml` は、Lunaを通常作業、Terraを横断調査・統合、
+  Solを反復失敗後や特に深い専門推論が必要な場合に使う役割へ同期した。
+- `codex -p deepseek-flash`: `~/.codex/deepseek-flash.config.toml` を基本設定に重ね、main modelとsubagentの既定を
+  `deepseek-flash`（reasoning `medium`）にする。基本設定のLuna/Terra/SolはOpenAI modelに固定されているため、
+  このprofileでは起動しない（`AGENTS.md`の規則）。変更前のprofileは同じ場所に `.bak-20260919` として残した。
 全履歴の複製を一律に要求せず、独立した委譲には対象file・目的・期待結果を簡潔に渡す。
 
 ## Skills

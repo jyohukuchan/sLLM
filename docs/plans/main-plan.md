@@ -430,9 +430,10 @@ Phase 79の共通化内容は[Phase 79計画](archive/2026/09/1-10/phase79-commo
 - 無人での進行を優先しつつsecret露出を最小化する。専用ローカルホストでは`homelab1`への`NOPASSWD: ALL`を意図的なtrade-offとして受容し、main agentが作業範囲内で`sudo -n`を使う。恒久方針は[認証情報方針](../security/credentials.md)を正本とする。
 - 現在の既定profileは`trusted-solo-development`とし、外部contribution実行時とrelease時の要件を分離する。使っていないprofileの要件は現在の開発を阻害しない。
 - main agentは調査・実装を直接行える。独立して進められる範囲限定のコーディング、調査、絞り込んだtest、要約、反復作業は
-  subagentへ積極的に委譲し、資源または依存上の理由がなければ利用可能な並列枠で同時実行する。通常のnative coding workerは
-  速度に優れるxhighのLunaを優先する。Terra/SolはLunaとmain agentで効率的に扱えない横断調査、反復失敗後の上位対応、
-  または特に深い専門推論が必要な場合だけ使う。main agentは編集確認、共有作業領域の競合解消、関連検査に責任を持ち、
+  subagentへ積極的に委譲し、資源または依存上の理由がなければ利用可能な並列枠で同時実行する。subagentのmodelは使用中のCodex profileに従う。
+  既定のOpenAI profileでは速度に優れるxhighのLunaを優先し、Terra/SolはLunaとmain agentで効率的に扱えない横断調査、
+  反復失敗後の上位対応、または特に深い専門推論が必要な場合だけ使う。`codex -p deepseek-flash`等の別provider profileでは、
+  OpenAI modelに固定されたLuna/Terra/Solを起動せず、そのprofileの既定subagentだけを使う（2026-09-19ユーザー指示）。main agentは編集確認、共有作業領域の競合解消、関連検査に責任を持ち、
   subagent利用や特定の`codex exec`実行方式を完了条件にしない。
 - 各フェーズは受入条件、検証、計画・履歴の完了処理後に、そのフェーズだけを必要最小限のcommitへ整理して現在のGitHub branchへ
   pushする。次フェーズの変更を同じcommitへ混ぜず、共有済み履歴の書換えや強制pushを行わない。

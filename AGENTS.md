@@ -38,16 +38,22 @@
   instead of serializing them without a resource or dependency reason. This
   standing authorization applies within the current user-approved task and
   does not expand its scope or authorize external writes, commits, or pushes.
-- Prefer the `luna` subagent with its fixed xhigh reasoning profile for ordinary
-  bounded coding and verification because its lower latency makes it the most
-  useful native coding worker. Give each editing agent explicit, non-overlapping
-  file ownership and tell it that other agents share the workspace and that it
-  must preserve their changes.
-- Do not select `terra` or `sol` by default for routine work; their additional
-  overhead usually provides little benefit here. Use `terra` only for a broad
-  cross-cutting investigation or integration task that the main agent and Luna
-  cannot handle efficiently, and use `sol` only as an escalation after repeated
-  failure or when unusually deep specialist reasoning is demonstrably needed.
+- The subagent model follows the active Codex profile. Use the profile's
+  default subagent for ordinary bounded coding and verification. Give each
+  editing agent explicit, non-overlapping file ownership and tell it that other
+  agents share the workspace and that it must preserve their changes.
+- Under the default OpenAI profile, the default subagent is `luna` with a fixed
+  xhigh reasoning profile; prefer it because its lower latency makes it the
+  most useful native coding worker. Do not select `terra` or `sol` by default
+  for routine work; their additional overhead usually provides little benefit
+  here. Use `terra` only for a broad cross-cutting investigation or integration
+  task that the main agent and Luna cannot handle efficiently, and use `sol`
+  only as an escalation after repeated failure or when unusually deep
+  specialist reasoning is demonstrably needed.
+- Under an alternate provider profile such as `codex -p deepseek-flash`, the
+  named `luna`, `terra`, and `sol` agents remain bound to OpenAI models. Do not
+  spawn them; use only default subagents, which that profile maps to its own
+  model. If a subagent cannot be started, continue the work directly.
 - The main agent remains responsible for inspecting subagent edits, reconciling
   shared-workspace changes, and running relevant checks. Subagents must not
   commit or push unless the user explicitly requests publication.
@@ -56,7 +62,7 @@
 
 - Use the `qwen38-subagent` skill when a task materially benefits from a local,
   offline, long-context second opinion or the Qwen/Pi environment. Ordinary
-  bounded coding defaults to native Luna because it is faster. Qwen is a
+  bounded coding defaults to the native default subagent because it is faster. Qwen is a
   command-backed Pi agent, not a native Codex subagent and not a replacement
   for the main agent.
 - Check it with `/home/homelab1/.local/bin/qwen38-subagent-server status`, then
