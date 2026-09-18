@@ -614,6 +614,8 @@ Phase 76以降は、Qwen3.8 27B NVFP4を単一GPUで実用速度にすること�
 | 2026-09-15 | MXFP8のGPU間差 | GPU間ではtarget hiddenが一致せず、native codecと復号経路は原因から除外。WMMAは寄与要因の一つ。残りの帰属は未特定 | [履歴](../history/2026/09/11-20/mxfp8-gpu-divergence.md) |
 | 2026-09-17 | FORCE_BASELINEの参照経路化 | 本番rollbackとしては直さず、host独立FP32 oracle（T1）とGPU上の帰属用参照経路（T2）に役割を限定。NVFP4 W4A4参照kernelのlaunch分割等で両GPUの実モデルを完走 | [履歴](../history/2026/09/11-20/force-baseline-reference-oracle.md) |
 | 2026-09-17 | rocm_exl3調査 | 固定revisionをR9700で調査・局所修正。Qwen3.5-2BではQ4_K_Mがprefill、EXL3がdecodeで速く、9Bでは長いprefillだけEXL3が速い。sLLMへの形式採用とは分離 | [調査](../history/2026/09/11-20/rocm-exl3-investigation.md)、[9B比較](../history/2026/09/11-20/rocm-exl3-qwen35-9b-comparison.md) |
+| 2026-09-18 | Qwen3.8-27B全語彙KLD | 初期8構成とKV・chunk・長文の40条件、64組のKLD比較を取得。非対応条件を区別し、NVFP4 E5はV620で取得。形式・GPU・実装の差を含む実測として記録 | [計画](archive/2026/09/11-20/qwen38-cross-engine-kld.md)、[履歴](../history/2026/09/11-20/qwen38-cross-engine-kld.md) |
+| 2026-09-18 | Qwen3.8 MXFP8とvLLM FP8のKLD差 | 主因はMXFP8の重み・活性値のE8M0 scale選択（最大値の指数切り捨て）による飽和。両方を飽和回避scaleにすると平均KLD 0.0459→0.0178（vLLM FP8 0.0145）。活性値側の寄与が大きい。既定は未変更で、診断opt-inだけを追加 | [計画](archive/2026/09/11-20/qwen38-mxfp8-vllm-fp8-attribution.md)、[履歴](../history/2026/09/11-20/qwen38-mxfp8-vllm-fp8-attribution.md) |
 
 ### llama.cppとの機能差
 
@@ -648,7 +650,9 @@ Phase 76以降は、Qwen3.8 27B NVFP4を単一GPUで実用速度にすること�
 ## 現在の状態と次の作業
 
 - **完了**: Phase 86まで完了した。現在の既定はBF16 MTP companion、catch-up無効、Qwen3.8のMXFP8 E4 KVである。
-- **次**: Phase 87（他精度の残差最適化）、Phase 88（NVFP4リクエストバッチ処理）の順。
+- **次**: [低精度形式のscale選択の修正](active/2026/09/11-20/low-precision-scale-selection.md)（番号なし）を2026-09-18のユーザー決定ですぐに実施する。
+  MXFP8／MXFP6／MXFP4／NVFP4の重み・活性値・KVで、飽和しない規則またはブロックごとの誤差最小規則へ直し、
+  既定への採用は形式ごとにユーザーが判断する。その後、Phase 87（他精度の残差最適化）、Phase 88（NVFP4リクエストバッチ処理）の順。
   詳細と受入条件は[Phase 76〜88計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)に従う。
 - **完了（番号なし）**: MXFP8／MXFP6／NVFP4／内部MXFP4の行列積カーネルを`native/lowp`へ切り出した
   [境界化計画](archive/2026/09/11-20/lowp-kernel-library-boundary.md)。両GPUの指定モデルでtoken列・logits一致、選択表4,700件、host/HIP検証を完了した。公開MXFP4 W4A8は契約定義のみで、実装はPhase 87へ残す。

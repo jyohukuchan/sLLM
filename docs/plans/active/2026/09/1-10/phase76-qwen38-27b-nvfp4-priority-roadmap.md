@@ -1423,7 +1423,7 @@ tree／並列drafting、batching、greedy受理規則は含めない。
 
 ## Phase 87: 他精度の単一要求最適化（旧Phase86、さらに前は旧Phase85）
 
-Phase86と[低精度カーネルのライブラリ境界化](../../../../archive/2026/09/11-20/lowp-kernel-library-boundary.md)（2026-09-17ユーザー決定によりPhase87より先に実施）の完了後に、次の順で残件を閉じる。変更は境界化後の`native/lowp`へ入れる。Phase84のsidecar・既存provider接続・比較結果と、Phase85の共通kernel採用範囲を引き継ぐ。未対応shape・一般経路を再棚卸しし、完了したMXFP8／MXFP6改善を重複実装・全面再測定しない。
+Phase86と[低精度カーネルのライブラリ境界化](../../../../archive/2026/09/11-20/lowp-kernel-library-boundary.md)（2026-09-17ユーザー決定によりPhase87より先に実施）と[低精度形式のscale選択の修正](../11-20/low-precision-scale-selection.md)（2026-09-18ユーザー決定によりPhase87より先に実施）の完了後に、次の順で残件を閉じる。変更は境界化後の`native/lowp`へ入れ、scale選択の修正で確定した規則を基準にする。Phase84のsidecar・既存provider接続・比較結果と、Phase85の共通kernel採用範囲を引き継ぐ。未対応shape・一般経路を再棚卸しし、完了したMXFP8／MXFP6改善を重複実装・全面再測定しない。
 
 1. MXFP8 W8A8 decodeの残差。Phase85で得たMXFP8 activation decodeを後続MXFP4 W4A8へ再利用する。
 2. MXFP6 W6A6 decodeの残差。共通tile/reductionとE3M2 ingressの採否・制約を引き継ぐ。
