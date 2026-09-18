@@ -50,6 +50,10 @@ pub const QWEN35_27B_REPO_ID: &str = "Qwen/Qwen3.5-27B";
 pub const QWEN35_27B_REVISION: &str = "fc05daec18b0a78c049392ed2e771dde82bdf654";
 pub const QWEN35_27B_FINGERPRINT: &str =
     "sha256:a4a0a6192babfdb7b1fc3ac75cc340e96df87fe2b0e629cc1510085bfeced97f";
+pub const QWEN38_27B_REPO_ID: &str = "Qwen/Qwen3.8-27B";
+pub const QWEN38_27B_REVISION: &str = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0";
+pub const QWEN38_27B_FINGERPRINT: &str =
+    "sha256:0498226db11f8c2446344aa23e185d934050cee7b8b8b90f34587f3283f42276";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Qwen35ReviewedSpec {
@@ -79,7 +83,7 @@ pub struct Qwen35ReviewedSpec {
     pub tied_embeddings: bool,
 }
 
-const QWEN35_REVIEWED_SPECS: [Qwen35ReviewedSpec; 4] = [
+const QWEN35_REVIEWED_SPECS: [Qwen35ReviewedSpec; 5] = [
     Qwen35ReviewedSpec {
         repo_id: QWEN35_2B_REPO_ID,
         revision: QWEN35_2B_REVISION,
@@ -182,6 +186,32 @@ const QWEN35_REVIEWED_SPECS: [Qwen35ReviewedSpec; 4] = [
         text_tensor_count: 851,
         indexed_tensor_count: 1199,
         shard_count: 11,
+        tied_embeddings: false,
+    },
+    Qwen35ReviewedSpec {
+        repo_id: QWEN38_27B_REPO_ID,
+        revision: QWEN38_27B_REVISION,
+        fingerprint: QWEN38_27B_FINGERPRINT,
+        alias: "qwen3.8-27b-bf16",
+        base_repo_id: None,
+        generation_config_path: Some("generation_config.json"),
+        hidden_size: 5120,
+        layer_count: 64,
+        attention_heads: 24,
+        kv_heads: 4,
+        head_dim: 256,
+        intermediate_size: 17408,
+        linear_qk_heads: 16,
+        linear_value_heads: 48,
+        linear_head_dim: 128,
+        vision_depth: 27,
+        vision_hidden_size: 1152,
+        vision_intermediate_size: 4304,
+        vision_output_size: 5120,
+        vision_tensor_count: 333,
+        text_tensor_count: 851,
+        indexed_tensor_count: 1199,
+        shard_count: 18,
         tied_embeddings: false,
     },
 ];
@@ -798,6 +828,7 @@ pub fn builtin_reviewed_model_lock(
         include_bytes!("../../../docs/models/locks/qwen3.5-4b-bf16.json"),
         include_bytes!("../../../docs/models/locks/qwen3.5-9b-bf16.json"),
         include_bytes!("../../../docs/models/locks/qwen3.5-27b-bf16.json"),
+        include_bytes!("../../../docs/models/locks/qwen3.8-27b-bf16.json"),
         include_bytes!("../../../docs/models/locks/gemma4-12b-bf16.json"),
         include_bytes!("../../../docs/models/locks/gemma4-12b-it-bf16.json"),
     ];
@@ -1409,7 +1440,10 @@ fn validate_qwen_shape_inputs(
     })
 }
 
-fn qwen_tensor_catalog(inputs: &QwenShapeInputs) -> Result<QwenTensorCatalog, ModelError> {
+fn qwen_tensor_catalog(
+    inputs: &QwenShapeInputs,
+    qwen38_bf16_scalars: bool,
+) -> Result<QwenTensorCatalog, ModelError> {
     let mut catalog = BTreeMap::new();
     let mut add = |name: String,
                    class: &'static str,
@@ -1428,6 +1462,11 @@ fn qwen_tensor_catalog(inputs: &QwenShapeInputs) -> Result<QwenTensorCatalog, Mo
     };
     let text = &inputs.text;
     let vision = &inputs.vision;
+    let linear_scalar_dtype = if qwen38_bf16_scalars {
+        TensorDType::Bf16
+    } else {
+        TensorDType::F32
+    };
     let linear_projection_width = checked_shape_mul(
         text.linear_num_value_heads,
         text.linear_value_head_dim,
@@ -1543,7 +1582,7 @@ fn qwen_tensor_catalog(inputs: &QwenShapeInputs) -> Result<QwenTensorCatalog, Mo
                 add(
                     format!("{prefix}.linear_attn.A_log"),
                     "text",
-                    TensorDType::F32,
+                    linear_scalar_dtype,
                     vec![text.linear_num_value_heads],
                 )?;
                 add(
@@ -1555,7 +1594,7 @@ fn qwen_tensor_catalog(inputs: &QwenShapeInputs) -> Result<QwenTensorCatalog, Mo
                 add(
                     format!("{prefix}.linear_attn.norm.weight"),
                     "text",
-                    TensorDType::F32,
+                    linear_scalar_dtype,
                     vec![text.linear_value_head_dim],
                 )?;
                 add(
@@ -1860,7 +1899,7 @@ mod qwen_shape_tests {
 
     #[test]
     fn representative_shapes_cover_rank_width_dtype_and_counts() {
-        let catalog = qwen_tensor_catalog(&inputs()).expect("reviewed shape inputs build");
+        let catalog = qwen_tensor_catalog(&inputs(), false).expect("reviewed shape inputs build");
         assert_eq!(catalog.len(), 738);
         assert_eq!(
             catalog["model.language_model.layers.0.linear_attn.in_proj_qkv.weight"].2,
@@ -1901,6 +1940,24 @@ mod qwen_shape_tests {
     }
 
     #[test]
+    fn qwen38_catalog_accepts_bf16_gdn_scalars_without_widening_qwen35() {
+        let catalog = qwen_tensor_catalog(&inputs(), true).expect("Qwen3.8 catalog builds");
+        assert_eq!(
+            catalog["model.language_model.layers.0.linear_attn.A_log"].1,
+            TensorDType::Bf16
+        );
+        assert_eq!(
+            catalog["model.language_model.layers.0.linear_attn.norm.weight"].1,
+            TensorDType::Bf16
+        );
+        let qwen35 = qwen_tensor_catalog(&inputs(), false).expect("Qwen3.5 catalog builds");
+        assert_eq!(
+            qwen35["model.language_model.layers.0.linear_attn.A_log"].1,
+            TensorDType::F32
+        );
+    }
+
+    #[test]
     fn shape_arithmetic_rejects_overflow_and_accepts_non_aligned_boundaries() {
         for value in [1, 3, 17, u64::MAX] {
             assert_eq!(checked_shape_mul(value, 1, "test"), Ok(value));
@@ -1922,7 +1979,7 @@ mod qwen_shape_tests {
 
     #[test]
     fn exact_header_catalog_rejects_qwen_name_shape_rank_dimension_and_dtype_mutations() {
-        let expected = qwen_tensor_catalog(&inputs()).expect("reviewed shape inputs build");
+        let expected = qwen_tensor_catalog(&inputs(), false).expect("reviewed shape inputs build");
         let classifications = [
             TensorClassification {
                 id: "text".to_owned(),
@@ -3105,13 +3162,25 @@ pub fn verify_model_cache(
     assert_cache_root_stable(cache_root, &root_before, "hash verification")?;
     assert_cache_path_bindings(cache_root, &owned_files, "hash verification")?;
 
-    let index_value = read_verified_json(
+    // The Qwen3.8-27B source index published by Hugging Face encodes
+    // `metadata.total_size` as an integral JSON float.  This metadata is not
+    // used for tensor ranges (the hash-verified safetensors headers are
+    // authoritative)
+    // and is accepted only for the independently reviewed Qwen3.8 identity.
+    let reject_index_floats = lock.model.repo_id != QWEN38_27B_REPO_ID;
+    let mut index_value = read_verified_json(
         &owned_files,
         lock.model.tensor_contract.index_path.as_str(),
         MAX_INDEX_JSON_BYTES,
-        true,
+        reject_index_floats,
         "safetensors index",
     )?;
+    if !reject_index_floats {
+        // `SafetensorsIndex` intentionally uses an integer for total_size;
+        // canonicalize the known Qwen3.8 integral-float spelling before
+        // deserializing the structural index contract.
+        normalize_qwen38_index_total_size(&mut index_value);
+    }
     let config = read_verified_bytes(
         &owned_files,
         "config.json",
@@ -3142,6 +3211,33 @@ pub fn verify_model_cache(
         cache_root: cache_root.to_path_buf(),
         root_identity: root_before,
     })
+}
+
+fn normalize_qwen38_index_total_size(value: &mut Value) {
+    let Some(total_size) = value
+        .get("metadata")
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("total_size"))
+        .and_then(Value::as_f64)
+    else {
+        return;
+    };
+    // Keep the conversion exact under JSON's IEEE-754 integer safety range;
+    // larger values cannot be represented without loss even when they fit in
+    // u64.
+    if !total_size.is_finite()
+        || total_size < 0.0
+        || total_size.fract() != 0.0
+        || total_size > 9_007_199_254_740_991.0
+    {
+        return;
+    }
+    if let Some(metadata) = value.get_mut("metadata").and_then(Value::as_object_mut) {
+        metadata.insert(
+            "total_size".to_owned(),
+            Value::Number(Number::from(total_size as u64)),
+        );
+    }
 }
 
 /// Verify the reviewed Gemma 4 cache whose payload is one direct safetensors
@@ -3355,26 +3451,34 @@ fn validate_qwen_config_constants(
     root: &Map<String, Value>,
     spec: Qwen35ReviewedSpec,
 ) -> Result<(), ModelError> {
-    expect_exact_keys(
-        root,
-        &[
-            "architectures",
-            "image_token_id",
-            "model_type",
-            "text_config",
-            "tie_word_embeddings",
-            "transformers_version",
-            "video_token_id",
-            "vision_config",
-            "vision_end_token_id",
-            "vision_start_token_id",
-        ],
-        "Qwen config root",
-    )?;
+    let mut expected_root_keys = vec![
+        "architectures",
+        "image_token_id",
+        "model_type",
+        "text_config",
+        "tie_word_embeddings",
+        "transformers_version",
+        "video_token_id",
+        "vision_config",
+        "vision_end_token_id",
+        "vision_start_token_id",
+    ];
+    if spec.repo_id == QWEN38_27B_REPO_ID {
+        expected_root_keys.push("language_model_only");
+    }
+    expect_exact_keys(root, &expected_root_keys, "Qwen config root")?;
     expect_string_array(root, "architectures", &["Qwen3_5ForConditionalGeneration"])?;
     expect_string(root, "model_type", "qwen3_5")?;
     expect_bool(root, "tie_word_embeddings", spec.tied_embeddings)?;
-    expect_string(root, "transformers_version", "4.57.0.dev0")?;
+    if spec.repo_id == QWEN38_27B_REPO_ID {
+        expect_bool(root, "language_model_only", false)?;
+    }
+    let transformers_version = if spec.repo_id == QWEN38_27B_REPO_ID {
+        "5.8.0.dev0"
+    } else {
+        "4.57.0.dev0"
+    };
+    expect_string(root, "transformers_version", transformers_version)?;
     for (field, expected) in [
         ("image_token_id", 248056),
         ("video_token_id", 248057),
@@ -3457,7 +3561,6 @@ fn validate_qwen_config_constants(
         "linear_value_head_dim",
         "mamba_ssm_dtype",
         "max_position_embeddings",
-        "mlp_only_layers",
         "model_type",
         "mtp_num_hidden_layers",
         "mtp_use_dedicated_embeddings",
@@ -3469,6 +3572,17 @@ fn validate_qwen_config_constants(
         "use_cache",
         "vocab_size",
     ];
+    if spec.repo_id == QWEN38_27B_REPO_ID {
+        expected_text_keys.extend([
+            "bos_token_id",
+            "output_gate_type",
+            "pad_token_id",
+            "partial_rotary_factor",
+            "tie_word_embeddings",
+        ]);
+    } else {
+        expected_text_keys.push("mlp_only_layers");
+    }
     if spec.tied_embeddings {
         expected_text_keys.push("tie_word_embeddings");
     }
@@ -3476,7 +3590,15 @@ fn validate_qwen_config_constants(
     expect_bool(text, "attention_bias", false)?;
     expect_bool(text, "attn_output_gate", true)?;
     expect_bool(text, "mtp_use_dedicated_embeddings", false)?;
-    if spec.tied_embeddings {
+    if spec.repo_id == QWEN38_27B_REPO_ID {
+        expect_u64(text, "bos_token_id", 248044)?;
+        if !text.get("pad_token_id").is_some_and(Value::is_null) {
+            return Err(invalid("Qwen text pad_token_id differs"));
+        }
+        expect_string(text, "output_gate_type", "swish")?;
+        expect_f64(text, "partial_rotary_factor", 0.25)?;
+        expect_bool(text, "tie_word_embeddings", spec.tied_embeddings)?;
+    } else if spec.tied_embeddings {
         expect_bool(text, "tie_word_embeddings", true)?;
     } else if text.contains_key("tie_word_embeddings") {
         return Err(invalid(
@@ -3489,10 +3611,11 @@ fn validate_qwen_config_constants(
     expect_f64(text, "attention_dropout", 0.0)?;
     expect_f64(text, "initializer_range", 0.02)?;
     expect_f64(text, "rms_norm_eps", 0.000001)?;
-    if text
-        .get("mlp_only_layers")
-        .and_then(Value::as_array)
-        .is_none_or(|values| !values.is_empty())
+    if spec.repo_id != QWEN38_27B_REPO_ID
+        && text
+            .get("mlp_only_layers")
+            .and_then(Value::as_array)
+            .is_none_or(|values| !values.is_empty())
     {
         return Err(invalid("Qwen text mlp_only_layers differs"));
     }
@@ -4270,7 +4393,7 @@ fn validate_safetensors(
     if qwen35_reviewed_spec(&lock.model.repo_id).is_some() {
         let shape_inputs = qwen_shape_inputs
             .ok_or_else(|| invalid("Qwen safetensors validation lacks parsed config shapes"))?;
-        let catalog = qwen_tensor_catalog(shape_inputs)?;
+        let catalog = qwen_tensor_catalog(shape_inputs, lock.model.repo_id == QWEN38_27B_REPO_ID)?;
         validate_qwen_header_catalog(&tensors, &contract.classifications, &catalog)?;
     }
     let slice = &lock.model.slice_contract;
@@ -4791,5 +4914,37 @@ mod tests {
         for (kind, expected_name, expected_cap) in specifications {
             assert_eq!(kind.specification(), (expected_name, expected_cap));
         }
+    }
+
+    #[test]
+    fn qwen38_27b_lock_parses_as_a_distinct_reviewed_identity() {
+        let lock = parse_model_lock(include_bytes!(
+            "../../../docs/models/locks/qwen3.8-27b-bf16.json"
+        ))
+        .expect("Qwen3.8-27B BF16 lock parses");
+        assert_eq!(lock.model.repo_id, QWEN38_27B_REPO_ID);
+        assert_eq!(lock.model.resolved_revision, QWEN38_27B_REVISION);
+        assert_eq!(lock.fingerprint, QWEN38_27B_FINGERPRINT);
+        assert_eq!(reviewed_qwen35_spec(&lock).unwrap().shard_count, 18);
+    }
+
+    #[test]
+    fn qwen38_index_integral_float_total_size_normalizes_exactly() {
+        let mut index = serde_json::json!({
+            "metadata": {"total_size": 55_562_855_904.0},
+            "weight_map": {}
+        });
+        normalize_qwen38_index_total_size(&mut index);
+        assert_eq!(
+            index["metadata"]["total_size"].as_u64(),
+            Some(55_562_855_904)
+        );
+
+        let mut unsafe_index = serde_json::json!({
+            "metadata": {"total_size": 9_007_199_254_740_992.0},
+            "weight_map": {}
+        });
+        normalize_qwen38_index_total_size(&mut unsafe_index);
+        assert!(unsafe_index["metadata"]["total_size"].as_u64().is_none());
     }
 }

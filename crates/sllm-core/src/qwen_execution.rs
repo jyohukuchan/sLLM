@@ -4728,6 +4728,57 @@ impl QwenProvisionSource for GgufProvisionSource {
                 "GGUF FP8 weight/scale upload",
             );
         }
+        if self.source.lock_fingerprint() == crate::QWEN38_27B_FINGERPRINT
+            && resident_dtype == DType::F32
+            && is_qwen38_gdn_scalar_binding(binding.tensor_name())
+        {
+            // Qwen3.8's BF16 source stores A_log and GDN norm vectors in
+            // BF16, while the native linear-attention ABI consumes F32.
+            // Promote only these two known scalar bindings at upload time;
+            // every other unquantized GGUF tensor remains byte-preserving.
+            let tensor = self
+                .source
+                .gguf()
+                .tensor(binding.tensor_name())
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "Qwen3.8 GDN scalar is absent after GGUF verification".to_owned(),
+                    )
+                })?;
+            let length = usize::try_from(tensor.byte_length()).map_err(|_| {
+                QwenExecutionError::InvalidRequest("Qwen3.8 GDN scalar is too large".to_owned())
+            })?;
+            let source = self
+                .source
+                .gguf()
+                .read_tensor_range(binding.tensor_name(), 0, length)
+                .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+            if source.len() % 2 != 0 {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "Qwen3.8 GDN scalar BF16 source is not word-aligned".to_owned(),
+                ));
+            }
+            let mut promoted = Vec::with_capacity(source.len() * 2);
+            for word in source.chunks_exact(2) {
+                promoted.extend_from_slice(
+                    &f32::from_bits(u32::from(u16::from_le_bytes([word[0], word[1]])) << 16)
+                        .to_le_bytes(),
+                );
+            }
+            if u64::try_from(promoted.len()).ok() != Some(destination.size_bytes()) {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "Qwen3.8 GDN scalar promoted size differs".to_owned(),
+                ));
+            }
+            return upload_buffer_bytes(
+                session,
+                queue,
+                &destination,
+                &promoted,
+                completion_timeout,
+                "Qwen3.8 GDN BF16-to-F32 scalar upload",
+            );
+        }
         if self.source.has_quantized_linear_recipe() {
             let tensor = self
                 .source
@@ -4812,6 +4863,14 @@ fn gguf_fp8_resident_payload(
     let mut combined = values;
     combined.extend_from_slice(&scales);
     Ok(combined)
+}
+
+fn is_qwen38_gdn_scalar_binding(name: &str) -> bool {
+    name.strip_prefix("model.language_model.layers.")
+        .and_then(|rest| rest.split_once(".linear_attn."))
+        .is_some_and(|(layer, suffix)| {
+            layer.parse::<u32>().is_ok() && matches!(suffix, "A_log" | "norm.weight")
+        })
 }
 
 /// Convert GGUF's canonical 36-byte NVFP4 block (a little-endian FP32
@@ -12119,11 +12178,20 @@ fn validate_graph_plan_with_terminal_mode(
         let tensor = &graph.tensor_metadata()[tensor_id];
         let source_dtype = tensor.view().dtype() == model_dtype(binding.dtype())?
             && tensor.view().encoding() == Encoding::Unquantized;
+        let qwen38_promoted_gdn_dtype = graph.model_fingerprint() == crate::QWEN38_27B_FINGERPRINT
+            && binding.dtype() == TensorDType::Bf16
+            && is_qwen38_gdn_scalar_binding(binding.tensor_name())
+            && tensor.view().dtype() == DType::F32
+            && tensor.view().encoding() == Encoding::Unquantized;
         let fp8_dtype = is_fp8_weight_view(tensor.view());
         let nvfp4_dtype = is_nvfp4_weight_view(tensor.view());
         let mx_weight_activation_dtype = is_mx_weight_activation_view(tensor.view());
         if tensor.backing() != QwenGraphTensorBacking::Owned
-            || (!source_dtype && !fp8_dtype && !nvfp4_dtype && !mx_weight_activation_dtype)
+            || (!source_dtype
+                && !qwen38_promoted_gdn_dtype
+                && !fp8_dtype
+                && !nvfp4_dtype
+                && !mx_weight_activation_dtype)
             || !shape_matches(tensor.view().shape(), binding.shape())?
         {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -17887,6 +17955,28 @@ mod tests {
                 .len(),
             3 * 2_560
         );
+    }
+
+    #[test]
+    fn qwen38_gdn_scalar_promotion_scope_is_exact() {
+        assert!(is_qwen38_gdn_scalar_binding(
+            "model.language_model.layers.0.linear_attn.A_log"
+        ));
+        assert!(is_qwen38_gdn_scalar_binding(
+            "model.language_model.layers.63.linear_attn.norm.weight"
+        ));
+        for name in [
+            "model.language_model.layers.0.linear_attn.dt_bias",
+            "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+            "model.language_model.layers.0.self_attn.q_proj.weight",
+            "model.language_model.layers.x.linear_attn.A_log",
+            "model.language_model.layers.0.linear_attn.A_log.extra",
+        ] {
+            assert!(
+                !is_qwen38_gdn_scalar_binding(name),
+                "unexpected GDN scalar promotion match: {name}"
+            );
+        }
     }
 
     #[test]

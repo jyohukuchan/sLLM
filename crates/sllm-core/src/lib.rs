@@ -334,10 +334,13 @@ pub use gguf_convert::{
     QwenMxWeightActivationFormat, build_gemma4_moe_nvfp4_gguf_plan,
     build_gemma4_mtp_bf16_gguf_plan, build_gemma4_nvfp4_gguf_plan, build_qwen35_bf16_gguf_plan,
     build_qwen35_fp8_gguf_plan, build_qwen35_moe_mxfp4_gguf_plan,
-    build_qwen35_mx_weight_activation_gguf_plan, gemma4_mtp_pair_semantic_id,
+    build_qwen35_mx_weight_activation_gguf_plan,
+    build_qwen35_mx_weight_activation_gguf_plan_with_options, gemma4_mtp_pair_semantic_id,
     repack_mxfp4_standard, repack_nvfp4_standard, write_gemma4_moe_nvfp4_gguf,
     write_gemma4_mtp_bf16_gguf, write_gemma4_nvfp4_gguf, write_qwen35_bf16_gguf,
     write_qwen35_fp8_gguf, write_qwen35_moe_mxfp4_gguf, write_qwen35_mx_weight_activation_gguf,
+    write_qwen35_mx_weight_activation_gguf_with_options,
+    write_qwen35_mx_weight_activation_gguf_with_retention,
 };
 pub use gguf_writer::{
     DerivedGgufConverter, DerivedGgufLock, DerivedGgufOutput, GgufWritePlan, GgufWriteReport,
@@ -523,13 +526,14 @@ pub use model::{
     NormalizationKind, PromptEvaluation, QWEN35_2B_FINGERPRINT, QWEN35_2B_REPO_ID,
     QWEN35_2B_REVISION, QWEN35_4B_FINGERPRINT, QWEN35_4B_REPO_ID, QWEN35_4B_REVISION,
     QWEN35_9B_FINGERPRINT, QWEN35_9B_REPO_ID, QWEN35_9B_REVISION, QWEN35_27B_FINGERPRINT,
-    QWEN35_27B_REPO_ID, QWEN35_27B_REVISION, Qwen35ReviewedSpec, ReviewedModelKind,
-    ReviewedModelLock, ReviewedModelRegistry, RopeParameters, RopeType, ScaleMode, SliceContract,
-    StopEvaluation, StopIdentity, StopTokenHandling, TensorClassification, TensorContract,
-    TensorDType, TensorDescriptor, TextConfig, TokenizerContract, TokenizerEos, VerifiedCache,
-    VerifiedFile, builtin_reviewed_model_lock, fingerprint_for_json, parse_model_lock,
-    parse_reviewed_model_lock, qwen35_reviewed_spec, read_model_lock, read_reviewed_model_lock,
-    reviewed_qwen35_spec, validate_model_config, verify_gemma4_model_cache, verify_model_cache,
+    QWEN35_27B_REPO_ID, QWEN35_27B_REVISION, QWEN38_27B_FINGERPRINT, QWEN38_27B_REPO_ID,
+    QWEN38_27B_REVISION, Qwen35ReviewedSpec, ReviewedModelKind, ReviewedModelLock,
+    ReviewedModelRegistry, RopeParameters, RopeType, ScaleMode, SliceContract, StopEvaluation,
+    StopIdentity, StopTokenHandling, TensorClassification, TensorContract, TensorDType,
+    TensorDescriptor, TextConfig, TokenizerContract, TokenizerEos, VerifiedCache, VerifiedFile,
+    builtin_reviewed_model_lock, fingerprint_for_json, parse_model_lock, parse_reviewed_model_lock,
+    qwen35_reviewed_spec, read_model_lock, read_reviewed_model_lock, reviewed_qwen35_spec,
+    validate_model_config, verify_gemma4_model_cache, verify_model_cache,
 };
 pub use moe::{
     GEMMA4_MOE_EXPERT_COUNT, GEMMA4_MOE_HIDDEN_SIZE, GEMMA4_MOE_ROUTER_EPSILON,
@@ -548,6 +552,7 @@ pub use mtp_quantized_sidecar::{
 pub use mxfp::{
     MX_BLOCK_SIZE, MxElementFormat, MxError, QuantizedMx, decode_e3m2, decode_e8m0, decode_mxfp4,
     decode_mxfp6, decode_mxfp8, encode_e3m2, quantize_mxfp6_e3m2, quantize_mxfp8_e4m3,
+    quantize_mxfp8_e4m3_no_clipping_scale,
 };
 pub use nvfp4::{
     E2M1_MAX, NVFP4_BLOCK_SIZE, NVFP4_E4M3_MAX, Nvfp4Error, Nvfp4Provider, QuantizedNvfp4,

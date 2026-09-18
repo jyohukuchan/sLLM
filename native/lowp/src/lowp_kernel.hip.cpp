@@ -23,6 +23,7 @@
 #endif
 
 #include <cstdint>
+#include <cstdlib>
 
 namespace {
 
@@ -167,6 +168,43 @@ __device__ __forceinline__ float e8m0_to_float(const uint8_t bits) noexcept {
 __device__ __forceinline__ uint8_t
 mxfp4_even_scale_code(const float maximum) noexcept {
   return sllm_lowp::mxfp4_even_scale_code(maximum);
+}
+
+// OCP MXFP8 normally chooses floor(log2(maximum)) - 8 for its E8M0 scale.
+// That leaves the representable E4M3FN range at [0, 448], but the largest
+// values in a block can be above 448 after division and are then saturated by
+// the element encoder.  This opt-in specialization advances the scale by one
+// E8M0 step only when that saturation would occur.  The exceptional-value
+// behavior is deliberately inherited from BlockCodec::scale_code.
+template <bool NoClipScale>
+__device__ __forceinline__ uint8_t mxfp8_e4m3_activation_scale_code(
+    const float maximum, const bool has_nan) noexcept {
+  const uint8_t scale =
+      sllm_lowp::BlockCodec<sllm_lowp::Mxfp8E4Block32>::scale_code(maximum,
+                                                                   has_nan);
+  if constexpr (!NoClipScale) {
+    return scale;
+  }
+  if (has_nan || isnan(maximum) || maximum == 0.0F || isinf(maximum)) {
+    return scale;
+  }
+  const float decoded_scale = e8m0_to_float(scale);
+  if (!isfinite(decoded_scale) || decoded_scale <= 0.0F ||
+      !(maximum > 448.0F * decoded_scale)) {
+    return scale;
+  }
+  const uint32_t incremented = static_cast<uint32_t>(scale) + 1U;
+  // 0xff is reserved for the NaN scale marker by the existing codec.
+  return static_cast<uint8_t>(incremented >= 255U ? 254U : incremented);
+}
+
+bool mxfp8_activation_no_clip_scale_enabled() noexcept {
+  static const bool enabled = []() noexcept {
+    const char *const setting =
+        std::getenv("SLLM_MXFP8_ACTIVATION_NO_CLIP_SCALE");
+    return setting != nullptr && setting[0] == '1' && setting[1] == '\0';
+  }();
+  return enabled;
 }
 
 __device__ __forceinline__ uint8_t
@@ -4227,6 +4265,37 @@ __launch_bounds__(32, 1) void sllm_matmul_bf16_to_mxfp8_e4m3_block32_v1(
 }
 
 extern "C" __global__
+__launch_bounds__(32, 1) void sllm_matmul_bf16_to_mxfp8_e4m3_block32_no_clip_scale_v1(
+    const uint16_t *const activation, uint8_t *const quantized,
+    uint8_t *const block_scales, const uint64_t m, const uint64_t k) {
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  const uint64_t block_index = blockIdx.x;
+  if (block_index >= m * blocks_per_row) {
+    return;
+  }
+  const uint64_t row = block_index / blocks_per_row;
+  const uint64_t block = block_index - row * blocks_per_row;
+  const uint64_t base = block * UINT64_C(32);
+  const uint32_t lane = threadIdx.x;
+  const float value = bf16_to_float(activation[row * k + base + lane]);
+  uint32_t has_nan = static_cast<uint32_t>(isnan(value));
+  float maximum = has_nan != 0U ? 0.0F : fabsf(value);
+  maximum = sllm_lowp::wave_amax(maximum);
+  has_nan = sllm_lowp::wave_or(has_nan);
+  uint32_t scale = 0U;
+  if (lane == 0U) {
+    scale = mxfp8_e4m3_activation_scale_code<true>(maximum, has_nan != 0U);
+    block_scales[block_index] = static_cast<uint8_t>(scale);
+  }
+  scale = __shfl(scale, 0U, 32U);
+  const float decoded_scale = e8m0_to_float(static_cast<uint8_t>(scale));
+  quantized[row * k + base + lane] =
+      isfinite(decoded_scale) && decoded_scale > 0.0F
+          ? float_to_e4m3fn(value / decoded_scale)
+          : 0U;
+}
+
+extern "C" __global__
 __launch_bounds__(32, 1) void sllm_matmul_bf16_to_mxfp6_e3m2_block32_v1(
     const uint16_t *const activation, uint8_t *const packed_activation,
     uint8_t *const block_scales, const uint64_t m, const uint64_t k) {
@@ -7668,9 +7737,17 @@ hipError_t launch_mxfp8_quantize(const uint16_t *const activation,
                                  const uint64_t k,
                                  const hipStream_t stream) noexcept {
   const uint64_t blocks_per_row = k / UINT64_C(32);
-  hipLaunchKernelGGL(sllm_matmul_bf16_to_mxfp8_e4m3_block32_v1,
-                     dim3(static_cast<uint32_t>(m * blocks_per_row)), dim3(32U),
-                     0U, stream, activation, quantized, block_scales, m, k);
+  if (mxfp8_activation_no_clip_scale_enabled()) {
+    hipLaunchKernelGGL(sllm_matmul_bf16_to_mxfp8_e4m3_block32_no_clip_scale_v1,
+                       dim3(static_cast<uint32_t>(m * blocks_per_row)),
+                       dim3(32U), 0U, stream, activation, quantized,
+                       block_scales, m, k);
+  } else {
+    hipLaunchKernelGGL(sllm_matmul_bf16_to_mxfp8_e4m3_block32_v1,
+                       dim3(static_cast<uint32_t>(m * blocks_per_row)),
+                       dim3(32U), 0U, stream, activation, quantized,
+                       block_scales, m, k);
+  }
   return hipGetLastError();
 }
 

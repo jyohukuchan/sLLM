@@ -11,6 +11,7 @@ use sllm_core::{
     AccessMode, Backend, BoundSemanticOp, DType, DispatchEvidence, Encoding,
     ExecutionSessionRequest, ExecutionState, MxElementFormat, QuantizedMx, SemanticOpDescriptor,
     SemanticOpKind, TensorView, quantize_mxfp6_e3m2, quantize_mxfp8_e4m3,
+    quantize_mxfp8_e4m3_no_clipping_scale,
 };
 use sllm_hip::{Context, HipBackend};
 
@@ -89,6 +90,7 @@ const PHASE85_MXFP6_SMALL_M_KERNEL_SYMBOL: &str = "matmul.mxfp6.w6a6.mmq.rows4.c
 const PHASE85_MXFP6_SMALL_M_DEVICE_SYMBOL: &str = "sllm_mxfp6_w6a6_mmq_rows4_col8_v1";
 const PHASE85_SMALL_M_FORCE_ENV: &str = "SLLM_PHASE85_MX_WA_FORCE_SMALL_M";
 const PHASE85_M1_A16_ENV: &str = "SLLM_MX_WA_M1_A16";
+const MXFP8_ACTIVATION_NO_CLIP_SCALE_ENV: &str = "SLLM_MXFP8_ACTIVATION_NO_CLIP_SCALE";
 const PHASE85_MXFP8_M1_A16_KERNEL_ID: u32 = 101;
 const PHASE85_MXFP6_M1_A16_KERNEL_ID: u32 = 102;
 const PHASE85_MXFP8_M1_A16_KERNEL_SYMBOL: &str = "matmul.mxfp8.w8a16.m1.col2.v1";
@@ -2251,11 +2253,18 @@ fn run_case(
         oracle,
     } = spec;
     let a16 = m == 1 && std::env::var(PHASE85_M1_A16_ENV).as_deref() == Ok("1");
+    let activation_no_clip = format == Format::Mxfp8
+        && std::env::var(MXFP8_ACTIVATION_NO_CLIP_SCALE_ENV).as_deref() == Ok("1");
     let activation_words = matrix(m, k, phase);
     let weight_words = matrix(n, k, phase + 11);
     let activation_source: Vec<_> = activation_words.iter().copied().map(from_bf16).collect();
     let weight_source: Vec<_> = weight_words.iter().copied().map(from_bf16).collect();
-    let activation_quantized = format.quantize(&activation_source, m, k)?;
+    let activation_quantized = if activation_no_clip {
+        quantize_mxfp8_e4m3_no_clipping_scale(&activation_source, m, k)
+            .map_err(|error| error.to_string())?
+    } else {
+        format.quantize(&activation_source, m, k)?
+    };
     let weight_quantized = format.quantize(&weight_source, n, k)?;
     if phase == 100 {
         validate_special_encoding(

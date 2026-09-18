@@ -165,7 +165,7 @@
       "native/lowp/src/nvfp4_prefill_wmma_compensated.inc",
       "native/lowp/src/nvfp4_small_m_vgpr_reuse.inc"
     ],
-    "source_set_sha256": "3b95d01f351641e75fc55d0c02aa9d36bb877866706cf5119b24d67b96b6c9e9",
+    "source_set_sha256": "da1ce450d92f46a160bac7e6710c4b24f601481834bc59e3936063f392bacd51",
     "files": [
       {
         "path": "include/sllm/hip.h",
@@ -625,7 +625,7 @@
       },
       {
         "path": "native/lowp/src/lowp_kernel.hip.cpp",
-        "sha256": "4fe192dd9d89823381eb7af51856c66b09b2b3030772aceab784141631905976"
+        "sha256": "cd131365275f726fb3a785a9c3cc021480a3b897d0c2ef9d440ffb8dea6da29f"
       },
       {
         "path": "native/lowp/src/lowp_launch.cpp",

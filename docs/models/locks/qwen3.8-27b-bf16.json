@@ -1,0 +1,653 @@
+{
+  "schema_version": "model-lock-v1",
+  "model": {
+    "repo_id": "Qwen/Qwen3.8-27B",
+    "repo_type": "model",
+    "requested_revision": "main",
+    "resolved_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "license": {
+      "id": "Apache-2.0",
+      "statement": "Apache-2.0",
+      "evidence_paths": [
+        "LICENSE",
+        "README.md"
+      ]
+    },
+    "base_models": [],
+    "evidence_files": [
+      "LICENSE",
+      "README.md"
+    ],
+    "files": [
+      {
+        "path": ".gitattributes",
+        "size_bytes": 1570,
+        "sha256": "34448b82c17d60fec9b65b1f093c115ddbaadc04beb1b0140b6bfed2e012a930",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/.gitattributes",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/.gitattributes",
+        "lfs_oid": null
+      },
+      {
+        "path": "LICENSE",
+        "size_bytes": 11544,
+        "sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/LICENSE",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/LICENSE",
+        "lfs_oid": null
+      },
+      {
+        "path": "README.md",
+        "size_bytes": 65012,
+        "sha256": "57e4bdb258ee1a7d2635c5174ebd4e56abe392505cdb5f8bbb356b0dc4293641",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/README.md",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/README.md",
+        "lfs_oid": null
+      },
+      {
+        "path": "chat_template.jinja",
+        "size_bytes": 8952,
+        "sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/chat_template.jinja",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/chat_template.jinja",
+        "lfs_oid": null
+      },
+      {
+        "path": "config.json",
+        "size_bytes": 4312,
+        "sha256": "191e0af232104ed8b65258cf3fb2b842e288008baca7633c11b82a1ac7203aab",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/config.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/config.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "crc32.txt",
+        "size_bytes": 238,
+        "sha256": "b42dd291f5f98b05807e458f5b47849969a9b3326acbf0c97d28b05826740b83",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/crc32.txt",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/crc32.txt",
+        "lfs_oid": null
+      },
+      {
+        "path": "generation_config.json",
+        "size_bytes": 202,
+        "sha256": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/generation_config.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/generation_config.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "merges.txt",
+        "size_bytes": 3353259,
+        "sha256": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/merges.txt",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/merges.txt",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00001-of-00018.safetensors",
+        "size_bytes": 3966730552,
+        "sha256": "ba0ce20aae489ad196733da5064bcdf159a1fe84f53336648196e1ebb7751b1c",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00001-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00001-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00002-of-00018.safetensors",
+        "size_bytes": 3043080328,
+        "sha256": "06a148c01bfbe3faa14a5f184a7ff29a706f7ae1c8b2705d2058e26d17a001fb",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00002-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00002-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00003-of-00018.safetensors",
+        "size_bytes": 2542796952,
+        "sha256": "2e1bf62cbcd406eaa64b60d10353e1f0ef4039d0976e56f05cabe953454f9968",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00003-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00003-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00004-of-00018.safetensors",
+        "size_bytes": 3988973152,
+        "sha256": "511e34063187882659753c4d93f3859f93c019fd438d8813071921c81d9a3f1a",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00004-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00004-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00005-of-00018.safetensors",
+        "size_bytes": 2099339864,
+        "sha256": "635cb53446dc74f219740fc59e18b774f877b803b9722e289ca62575a6efa701",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00005-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00005-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00006-of-00018.safetensors",
+        "size_bytes": 3979553696,
+        "sha256": "0bc5214fac607f0e6cc92eec3789d4b8559410ef9fce66621ba8158e8410dae0",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00006-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00006-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00007-of-00018.safetensors",
+        "size_bytes": 2108759344,
+        "sha256": "80b0c49033e9a0d5762562aa12f4acdb7f54da586f3d0110f28c48d91cf07892",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00007-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00007-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00008-of-00018.safetensors",
+        "size_bytes": 3979553696,
+        "sha256": "7192c5b66185d3592927daabee1cc19e6f6e0ce75988ee20e824b624765fda79",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00008-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00008-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00009-of-00018.safetensors",
+        "size_bytes": 2108759344,
+        "sha256": "af3c48cc37af44f3db6ae0579baf019180d48d9c527caa0a1f03ff85813a56d8",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00009-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00009-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00010-of-00018.safetensors",
+        "size_bytes": 3979553696,
+        "sha256": "163490a76f3bea3a40855b7efc04ce6d27afaf1a34f0bbde495b9491f76457c9",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00010-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00010-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00011-of-00018.safetensors",
+        "size_bytes": 2108759344,
+        "sha256": "5f3ae1b948aeee39da77aec558e8236cd65fe4d7cb7686a76bb007acc563c6d8",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00011-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00011-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00012-of-00018.safetensors",
+        "size_bytes": 3979553696,
+        "sha256": "a3de1c7114677a8f5ac5c4892c90e8238ea5c1e2038c80e757dfc87c3902ca55",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00012-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00012-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00013-of-00018.safetensors",
+        "size_bytes": 2108759344,
+        "sha256": "06ab79a41f74c9c5cb734816feb0c7fc364104b227165ee7391231e1155aa02a",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00013-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00013-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00014-of-00018.safetensors",
+        "size_bytes": 3979553696,
+        "sha256": "4138ed94603065ba884bbcadedb04d7718bb40117e85e6f5c6fc5b9c05b7a85b",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00014-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00014-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00015-of-00018.safetensors",
+        "size_bytes": 2108759344,
+        "sha256": "69224e27b9de4e7dbf6fc936c6eaae08447bda3b80a6c31a871ab451173afd22",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00015-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00015-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00016-of-00018.safetensors",
+        "size_bytes": 3979564040,
+        "sha256": "73cb9a1089fb6155cb648609478d6633be8a5c7d9ca5a05bc8925ce8a553cefe",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00016-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00016-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00017-of-00018.safetensors",
+        "size_bytes": 2108759344,
+        "sha256": "beb51f01056142ac4984bd800507b0dd0fd18de57f8e9ef6ea41d1a3598983a8",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00017-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00017-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model-00018-of-00018.safetensors",
+        "size_bytes": 3392197344,
+        "sha256": "1d3479509e21494658f9b64d317f5ea8e55c4025d28c702d6c4d0b356ce8ea06",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00018-of-00018.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model-00018-of-00018.safetensors",
+        "lfs_oid": null
+      },
+      {
+        "path": "model.safetensors.index.json",
+        "size_bytes": 112216,
+        "sha256": "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model.safetensors.index.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/model.safetensors.index.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "preprocessor_config.json",
+        "size_bytes": 390,
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/preprocessor_config.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/preprocessor_config.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "tokenizer.json",
+        "size_bytes": 12809320,
+        "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/tokenizer.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/tokenizer.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size_bytes": 17928,
+        "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/tokenizer_config.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/tokenizer_config.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "video_preprocessor_config.json",
+        "size_bytes": 385,
+        "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/video_preprocessor_config.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/video_preprocessor_config.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "vocab.json",
+        "size_bytes": 6722759,
+        "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
+        "git_blob": "0000000000000000000000000000000000000000",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/vocab.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/vocab.json",
+        "lfs_oid": null
+      }
+    ],
+    "excluded_files": [],
+    "architecture": {
+      "architectures": [
+        "Qwen3_5ForConditionalGeneration"
+      ],
+      "top_level_architecture": "Qwen3_5ForConditionalGeneration",
+      "model_type": "qwen3_5",
+      "text_model_type": "qwen3_5_text",
+      "phase_scope": "text-only",
+      "custom_code": false,
+      "converted": false,
+      "moe": false,
+      "vision": {
+        "present": true,
+        "tensor_prefix": "model.visual.",
+        "tensor_count": 333,
+        "phase3_status": "known-unconsumed"
+      },
+      "mtp": {
+        "present": true,
+        "tensor_prefix": "mtp.",
+        "tensor_count": 15,
+        "phase3_status": "known-unconsumed"
+      },
+      "text_config": {
+        "model_type": "qwen3_5_text",
+        "hidden_size": 5120,
+        "num_hidden_layers": 64,
+        "num_attention_heads": 24,
+        "num_key_value_heads": 4,
+        "head_dim": 256,
+        "intermediate_size": 17408,
+        "dtype": "BF16",
+        "rms_norm_eps": "1e-6",
+        "attention_bias": false,
+        "attention_dropout": "0",
+        "attn_output_gate": true,
+        "full_attention_interval": 4,
+        "layer_types": [
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention"
+        ],
+        "max_position_embeddings": 262144,
+        "rope_parameters": {
+          "rope_type": "default",
+          "rope_theta": 10000000,
+          "partial_rotary_factor": "0.25",
+          "mrope_interleaved": true,
+          "mrope_section": [
+            11,
+            11,
+            10
+          ]
+        },
+        "tie_word_embeddings": false,
+        "use_cache": true,
+        "vocab_size": 248320,
+        "mtp_num_hidden_layers": 1
+      },
+      "layer_schedule": {
+        "kind": "explicit",
+        "num_hidden_layers": 64,
+        "full_attention_interval": 4,
+        "layer_types": [
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention"
+        ],
+        "allowed_types": [
+          "linear_attention",
+          "full_attention"
+        ]
+      }
+    },
+    "tensor_contract": {
+      "index_path": "model.safetensors.index.json",
+      "indexed_tensor_count": 1199,
+      "shards": [
+        "model-00001-of-00018.safetensors",
+        "model-00002-of-00018.safetensors",
+        "model-00003-of-00018.safetensors",
+        "model-00004-of-00018.safetensors",
+        "model-00005-of-00018.safetensors",
+        "model-00006-of-00018.safetensors",
+        "model-00007-of-00018.safetensors",
+        "model-00008-of-00018.safetensors",
+        "model-00009-of-00018.safetensors",
+        "model-00010-of-00018.safetensors",
+        "model-00011-of-00018.safetensors",
+        "model-00012-of-00018.safetensors",
+        "model-00013-of-00018.safetensors",
+        "model-00014-of-00018.safetensors",
+        "model-00015-of-00018.safetensors",
+        "model-00016-of-00018.safetensors",
+        "model-00017-of-00018.safetensors",
+        "model-00018-of-00018.safetensors"
+      ],
+      "classifications": [
+        {
+          "id": "text",
+          "prefix": "model.language_model.",
+          "tensor_count": 850,
+          "phase3_status": "partially-consumed"
+        },
+        {
+          "id": "output",
+          "prefix": "lm_head.",
+          "tensor_count": 1,
+          "phase3_status": "consumed"
+        },
+        {
+          "id": "vision",
+          "prefix": "model.visual.",
+          "tensor_count": 333,
+          "phase3_status": "known-unconsumed"
+        },
+        {
+          "id": "mtp",
+          "prefix": "mtp.",
+          "tensor_count": 15,
+          "phase3_status": "known-unconsumed"
+        }
+      ],
+      "unknown_policy": "reject",
+      "duplicate_policy": "reject",
+      "index_policy": "exact-weight-map-and-shard-metadata"
+    },
+    "slice_contract": {
+      "tensor_name": "model.language_model.layers.0.input_layernorm.weight",
+      "source_file": "model-00001-of-00018.safetensors",
+      "dtype": "BF16",
+      "shape": [
+        5120
+      ],
+      "header_length_field_bytes": 8,
+      "header_length_bytes": 45392,
+      "data_buffer_start": 45400,
+      "data_offset_basis": "data-buffer-relative",
+      "data_offsets": [
+        0,
+        10240
+      ],
+      "absolute_byte_range": [
+        45400,
+        55640
+      ],
+      "byte_size": 10240,
+      "normalization": {
+        "kind": "rmsnorm",
+        "scale_mode": "offset-one",
+        "effective_scale": "1 + raw_weight",
+        "epsilon": "1e-6",
+        "activation_dtype": "BF16",
+        "weight_dtype": "BF16",
+        "accumulation_dtype": "FP32",
+        "output_dtype": "BF16"
+      }
+    },
+    "tokenizer_contract": {
+      "files": [
+        "chat_template.jinja",
+        "merges.txt",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json"
+      ],
+      "chat_template_path": "chat_template.jinja",
+      "vocab_size": 248320,
+      "eos_token_id": 248044,
+      "special_token_ids": {
+        "vision_start": 248053,
+        "vision_end": 248054,
+        "vision_pad": 248055,
+        "image_pad": 248056,
+        "video_pad": 248057
+      },
+      "stop_identity": {
+        "config_eos": {
+          "token": "<|endoftext|>",
+          "token_id": 248044,
+          "source_file": "config.json"
+        },
+        "tokenizer_eos": {
+          "token": "<|im_end|>",
+          "token_id": 248046,
+          "source_files": [
+            "tokenizer_config.json",
+            "tokenizer.json"
+          ]
+        }
+      },
+      "generation_stop_policy": {
+        "version": 1,
+        "stop_token_ids": [
+          248046,
+          248044
+        ],
+        "evaluation": "newly_generated_after_argmax",
+        "prompt_evaluation": "never_stop",
+        "stop_token": {
+          "visible_output": false,
+          "subsequent_decode_input": false
+        },
+        "budget_boundary": "stop_token_wins",
+        "max_new_tokens_zero": "max_new_tokens_before_decode",
+        "reason_version": 1
+      }
+    },
+    "generation_config": {
+      "present": true,
+      "path": "generation_config.json"
+    },
+    "derivation": null
+  },
+  "fingerprint": "sha256:0498226db11f8c2446344aa23e185d934050cee7b8b8b90f34587f3283f42276",
+  "aliases": [
+    "qwen3.8-27b-bf16"
+  ],
+  "generated_at": "2026-09-18T00:00:00Z"
+}

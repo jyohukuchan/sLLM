@@ -175,7 +175,35 @@ pub fn quantize_mxfp8_e4m3(
     rows: usize,
     columns: usize,
 ) -> Result<QuantizedMx, MxError> {
-    quantize_mx(input, rows, columns, MxElementFormat::E4M3Fn)
+    quantize_mx(
+        input,
+        rows,
+        columns,
+        MxElementFormat::E4M3Fn,
+        MxScalePolicy::Clipped,
+    )
+}
+
+/// Quantize OCP MXFP8 E4M3 with a scale chosen to avoid finite E4M3
+/// saturation.  The historical [`quantize_mxfp8_e4m3`] policy chooses the
+/// lower power-of-two scale and consequently clips values above 448 times
+/// that scale.  This diagnostic policy chooses the smallest E8M0 scale for
+/// which every finite input in the block is representable without clipping.
+///
+/// NaN blocks and blocks containing infinity retain the historical handling;
+/// this function only changes scale selection for finite, non-zero blocks.
+pub fn quantize_mxfp8_e4m3_no_clipping_scale(
+    input: &[f32],
+    rows: usize,
+    columns: usize,
+) -> Result<QuantizedMx, MxError> {
+    quantize_mx(
+        input,
+        rows,
+        columns,
+        MxElementFormat::E4M3Fn,
+        MxScalePolicy::NoClipping,
+    )
 }
 
 pub fn quantize_mxfp6_e3m2(
@@ -183,7 +211,19 @@ pub fn quantize_mxfp6_e3m2(
     rows: usize,
     columns: usize,
 ) -> Result<QuantizedMx, MxError> {
-    quantize_mx(input, rows, columns, MxElementFormat::E3M2)
+    quantize_mx(
+        input,
+        rows,
+        columns,
+        MxElementFormat::E3M2,
+        MxScalePolicy::Clipped,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MxScalePolicy {
+    Clipped,
+    NoClipping,
 }
 
 fn quantize_mx(
@@ -191,6 +231,7 @@ fn quantize_mx(
     rows: usize,
     columns: usize,
     format: MxElementFormat,
+    scale_policy: MxScalePolicy,
 ) -> Result<QuantizedMx, MxError> {
     if rows == 0 || columns == 0 {
         return Err(MxError::Empty);
@@ -239,6 +280,7 @@ fn quantize_mx(
                     columns,
                     blocks_per_row,
                     format,
+                    scale_policy,
                 );
             });
         }
@@ -259,6 +301,7 @@ fn quantize_mx_rows(
     columns: usize,
     blocks_per_row: usize,
     format: MxElementFormat,
+    scale_policy: MxScalePolicy,
 ) {
     for row in 0..input.len() / columns {
         for block in 0..blocks_per_row {
@@ -279,10 +322,23 @@ fn quantize_mx_rows(
             } else if maximum == 0.0 || maximum.is_infinite() {
                 127
             } else {
-                (floor_log2(maximum)
-                    .saturating_sub(element_power)
-                    .clamp(-127, 127)
-                    + 127) as u8
+                let exponent = match scale_policy {
+                    MxScalePolicy::Clipped => floor_log2(maximum).saturating_sub(element_power),
+                    MxScalePolicy::NoClipping => {
+                        // E4M3FN's largest finite magnitude is 448 =
+                        // 1.75 * 2^8.  Start at floor(log2(max))-8, then
+                        // move up one E8M0 step when the exact ratio still
+                        // exceeds 448.  This is ceil(log2(max / 448)) while
+                        // avoiding a lossy logarithm at the 448 boundary.
+                        let mut exponent = floor_log2(maximum).saturating_sub(8);
+                        let scale_bits = exponent.clamp(-127, 127) + 127;
+                        if maximum / decode_e8m0(scale_bits as u8) > 448.0 {
+                            exponent = exponent.saturating_add(1);
+                        }
+                        exponent
+                    }
+                };
+                (exponent.clamp(-127, 127) + 127) as u8
             };
             scales[row * blocks_per_row + block] = scale_bits;
             let scale = decode_e8m0(scale_bits);
@@ -549,6 +605,69 @@ mod tests {
         let decoded = fp6.dequantize().unwrap();
         assert_eq!(decoded[0], 448.0);
         assert_eq!(decoded[32], 28.0);
+    }
+
+    #[test]
+    fn mxfp8_no_clipping_scale_uses_smallest_scale_at_448_boundary() {
+        let mut input = vec![0.0_f32; 128];
+        input[0] = 448.0;
+        input[32] = 449.0;
+        input[64] = 896.0;
+        input[96] = 0.5;
+        let fp8 = quantize_mxfp8_e4m3_no_clipping_scale(&input, 1, 128).unwrap();
+
+        // 448 itself is representable with scale 1.  The first value above
+        // that boundary requires scale 2, as does 896.  For 0.5 the smallest
+        // admissible scale is 2^-9 (E8M0 exponent field 118).
+        assert_eq!(fp8.scales(), &[127, 128, 128, 118]);
+        let decoded = fp8.dequantize().unwrap();
+        assert_eq!(decoded[0], 448.0);
+        assert!(decoded[32] <= 448.0 * 2.0);
+        assert_eq!(decoded[64], 896.0);
+        assert_eq!(decoded[96], 0.5);
+
+        let mut half_scale_boundary = vec![0.0_f32; 64];
+        half_scale_boundary[0] = 224.0;
+        half_scale_boundary[32] = 225.0;
+        let boundary = quantize_mxfp8_e4m3_no_clipping_scale(&half_scale_boundary, 1, 64).unwrap();
+        assert_eq!(boundary.scales(), &[126, 127]);
+    }
+
+    #[test]
+    fn mxfp8_no_clipping_scale_preserves_nonfinite_policy() {
+        let nan = quantize_mxfp8_e4m3_no_clipping_scale(&[f32::NAN; 32], 1, 32).unwrap();
+        assert_eq!(nan.scales(), &[255]);
+        assert!(nan.dequantize().unwrap().iter().all(|value| value.is_nan()));
+
+        let infinity = quantize_mxfp8_e4m3_no_clipping_scale(&[f32::INFINITY; 32], 1, 32).unwrap();
+        assert_eq!(infinity.scales(), &[127]);
+        assert!(
+            infinity
+                .dequantize()
+                .unwrap()
+                .iter()
+                .all(|value| *value == 448.0)
+        );
+
+        let zeros = quantize_mxfp8_e4m3_no_clipping_scale(&[0.0; 32], 1, 32).unwrap();
+        assert_eq!(zeros.scales(), &[127]);
+        assert!(
+            zeros
+                .dequantize()
+                .unwrap()
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+    }
+
+    #[test]
+    fn mxfp8_no_clipping_scale_rejects_non_aligned_columns() {
+        for columns in [31, 33] {
+            assert_eq!(
+                quantize_mxfp8_e4m3_no_clipping_scale(&vec![0.0; columns], 1, columns),
+                Err(MxError::ColumnsNotBlockAligned { columns })
+            );
+        }
     }
 
     #[test]

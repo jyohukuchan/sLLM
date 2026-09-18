@@ -2544,6 +2544,8 @@ pub fn build_qwen35_gguf_mx_weight_activation_graph(
         });
     }
     let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
+    let recipe_options = qwen_mx_recipe_options(lock, source)?;
+    let retain_gdn_input_gates = recipe_options.retain_gdn_input_gates;
     let by_name: BTreeMap<_, _> = bindings
         .iter()
         .map(|binding| (binding.tensor_name.as_str(), binding))
@@ -2581,13 +2583,20 @@ pub fn build_qwen35_gguf_mx_weight_activation_graph(
                     scale_dtype: DType::U8,
                 },
             ),
-            crate::GgufRecipeEncoding::Mxfp6E3m2Block32E8m0 => (
-                DType::U8,
-                Encoding::Mxfp6W6A6 {
-                    block_size: 32,
-                    scale_dtype: DType::U8,
-                },
-            ),
+            crate::GgufRecipeEncoding::Mxfp6E3m2Block32E8m0 => {
+                if recipe_options.no_clipping_scale {
+                    return Err(QwenGraphError::InvalidPlan(
+                        "GGUF MXFP6 recipe cannot declare MXFP8 no-clipping scale mode".to_owned(),
+                    ));
+                }
+                (
+                    DType::U8,
+                    Encoding::Mxfp6W6A6 {
+                        block_size: 32,
+                        scale_dtype: DType::U8,
+                    },
+                )
+            }
             _ => unreachable!("MX recipe predicate excluded other encodings"),
         };
         if resident_contract.is_some_and(|current| current != contract) {
@@ -2599,7 +2608,11 @@ pub fn build_qwen35_gguf_mx_weight_activation_graph(
     }
     let expected: BTreeSet<_> = bindings
         .iter()
-        .filter(|binding| is_fp8_linear_consumer(binding.consumer.role))
+        .filter(|binding| {
+            is_fp8_linear_consumer(binding.consumer.role)
+                && !(retain_gdn_input_gates
+                    && is_qwen_gdn_input_gate_consumer(binding.consumer.role))
+        })
         .map(|binding| binding.tensor_name.clone())
         .collect();
     if tensor_names != expected {
@@ -2610,6 +2623,29 @@ pub fn build_qwen35_gguf_mx_weight_activation_graph(
     let (dtype, encoding) = resident_contract.ok_or_else(|| {
         QwenGraphError::InvalidPlan("GGUF MX recipe contains no linear weights".to_owned())
     })?;
+    if retain_gdn_input_gates {
+        // A retained tensor must still be physically BF16.  The GGUF weight
+        // plan intentionally maps I8 carriers to the logical BF16 dtype, so
+        // checking the verified tensor catalog here closes that ambiguity
+        // before the upload path can observe a malformed mixed artifact.
+        for binding in bindings
+            .iter()
+            .filter(|binding| is_qwen_gdn_input_gate_consumer(binding.consumer.role))
+        {
+            let tensor = source.gguf().tensor(&binding.tensor_name).ok_or_else(|| {
+                QwenGraphError::InvalidPlan(format!(
+                    "retained Qwen3.8 GDN input gate tensor is absent: {}",
+                    binding.tensor_name
+                ))
+            })?;
+            if tensor.tensor_type != crate::GgufTensorType::Bf16 {
+                return Err(QwenGraphError::InvalidPlan(format!(
+                    "retained Qwen3.8 GDN input gate tensor is not BF16: {}",
+                    binding.tensor_name
+                )));
+            }
+        }
+    }
     GraphBuilder::new(GraphBuilderConfig {
         layer_types: lock.model.architecture.text_config.layer_types.clone(),
         dimensions,
@@ -3150,6 +3186,89 @@ fn is_fp8_linear_consumer(consumer: WeightConsumer) -> bool {
     )
 }
 
+fn is_qwen_gdn_input_gate_consumer(consumer: WeightConsumer) -> bool {
+    matches!(
+        consumer,
+        WeightConsumer::GdnInProjA | WeightConsumer::GdnInProjB
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QwenMxRecipeOptions {
+    retain_gdn_input_gates: bool,
+    no_clipping_scale: bool,
+}
+
+fn qwen_mx_recipe_options(
+    lock: &ModelLock,
+    source: &VerifiedGgufWeightSource,
+) -> Result<QwenMxRecipeOptions, QwenGraphError> {
+    let recipe = source
+        .gguf()
+        .extension()
+        .ok_or_else(|| QwenGraphError::InvalidModel("GGUF MX recipe is missing".to_owned()))?;
+    qwen_mx_recipe_options_from_semantic_model_id(lock, &recipe.recipe.semantic_model_id)
+}
+
+fn qwen_mx_recipe_options_from_semantic_model_id(
+    lock: &ModelLock,
+    semantic_model_id: &str,
+) -> Result<QwenMxRecipeOptions, QwenGraphError> {
+    let semantic_prefix = if lock.model.repo_id == crate::QWEN38_27B_REPO_ID {
+        "qwen38"
+    } else {
+        "qwen35"
+    };
+    let base = format!("{semantic_prefix}:{}", lock.fingerprint());
+    // The first Qwen3.8 MX artifacts were emitted before their family-specific
+    // namespace was corrected. Their lock fingerprint is authentic, and the
+    // old spelling denotes only the original full-MX coverage. Diagnostic
+    // tags are accepted only on the current family-specific namespace.
+    if semantic_model_id == base
+        || (lock.model.repo_id == crate::QWEN38_27B_REPO_ID
+            && semantic_model_id == format!("qwen35:{}", lock.fingerprint()))
+    {
+        return Ok(QwenMxRecipeOptions {
+            retain_gdn_input_gates: false,
+            no_clipping_scale: false,
+        });
+    }
+    let retained = format!(
+        "{base}:mx-coverage={}",
+        crate::gguf_convert::QWEN_MX_DIAGNOSTIC_GDN_INPUT_GATES
+    );
+    if semantic_model_id == retained {
+        return Ok(QwenMxRecipeOptions {
+            retain_gdn_input_gates: true,
+            no_clipping_scale: false,
+        });
+    }
+    let no_clipping = format!(
+        "{base}:mx-scale={}",
+        crate::gguf_convert::QWEN_MX_DIAGNOSTIC_NO_CLIPPING_SCALE
+    );
+    if semantic_model_id == no_clipping {
+        return Ok(QwenMxRecipeOptions {
+            retain_gdn_input_gates: false,
+            no_clipping_scale: true,
+        });
+    }
+    let no_clipping_retained = format!(
+        "{no_clipping}:mx-coverage={}",
+        crate::gguf_convert::QWEN_MX_DIAGNOSTIC_GDN_INPUT_GATES
+    );
+    if semantic_model_id == no_clipping_retained {
+        return Ok(QwenMxRecipeOptions {
+            retain_gdn_input_gates: true,
+            no_clipping_scale: true,
+        });
+    }
+    Err(QwenGraphError::InvalidModel(
+        "GGUF MX recipe semantic coverage identity differs from the reviewed Qwen identity"
+            .to_owned(),
+    ))
+}
+
 fn is_quantized_linear_consumer(consumer: WeightConsumer) -> bool {
     is_fp8_linear_consumer(consumer) || matches!(consumer, WeightConsumer::OutputProjection)
 }
@@ -3418,11 +3537,22 @@ fn validate_plan(
                         entry.tensor_name
                     ))
                 })?;
-                let (expected_name, expected_dtype, expected_shape) = expected_weight(
+                let (expected_name, mut expected_dtype, expected_shape) = expected_weight(
                     consumer,
                     &lock.model.architecture.text_config.layer_types,
                     dimensions,
                 )?;
+                if lock.model.repo_id == crate::QWEN38_27B_REPO_ID
+                    && matches!(
+                        consumer.role,
+                        WeightConsumer::GdnALog | WeightConsumer::GdnNorm
+                    )
+                {
+                    // Qwen3.8 publishes these two GDN parameter vectors in
+                    // BF16. Qwen3.5's corresponding reviewed tensors remain
+                    // F32 and retain their existing graph contract.
+                    expected_dtype = TensorDType::Bf16;
+                }
                 if entry.tensor_name != expected_name
                     || entry.dtype != expected_dtype
                     || entry.shape != expected_shape
@@ -5865,12 +5995,29 @@ impl GraphBuilder {
             };
             fp8_weight_view(&shape, dtype, encoding)?
         } else {
-            view(to_dtype(binding.dtype)?, &shape)?
+            let dtype = if self.model_fingerprint == crate::QWEN38_27B_FINGERPRINT
+                && is_qwen38_gdn_scalar(&name)
+            {
+                // Qwen3.8 stores these vectors as BF16 but the native GDN
+                // ABI consumes the explicitly promoted F32 resident view.
+                DType::F32
+            } else {
+                to_dtype(binding.dtype)?
+            };
+            view(dtype, &shape)?
         };
         let id = self.add_tensor(&name, view);
         self.weight_tensors.insert(consumer, id);
         Ok(id)
     }
+}
+
+fn is_qwen38_gdn_scalar(name: &str) -> bool {
+    name.strip_prefix("model.language_model.layers.")
+        .and_then(|rest| rest.split_once(".linear_attn."))
+        .is_some_and(|(layer, suffix)| {
+            layer.parse::<u32>().is_ok() && matches!(suffix, "A_log" | "norm.weight")
+        })
 }
 
 fn fp8_weight_view(
@@ -6014,6 +6161,117 @@ mod tests {
 
     fn fixed_dimensions() -> QwenGraphDimensions {
         QwenGraphDimensions::from_spec(reviewed_qwen35_spec(&fixed_lock()).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn qwen_mx_diagnostic_semantic_identity_declares_exact_gdn_retention() {
+        let lock = fixed_lock();
+        let base = format!("qwen35:{}", lock.fingerprint());
+        assert!(
+            !qwen_mx_recipe_options_from_semantic_model_id(&lock, &base)
+                .unwrap()
+                .retain_gdn_input_gates
+        );
+        let retained = format!(
+            "{base}:mx-coverage={}",
+            crate::gguf_convert::QWEN_MX_DIAGNOSTIC_GDN_INPUT_GATES
+        );
+        assert!(
+            qwen_mx_recipe_options_from_semantic_model_id(&lock, &retained)
+                .unwrap()
+                .retain_gdn_input_gates
+        );
+        assert!(qwen_mx_recipe_options_from_semantic_model_id(&lock, "qwen35:unexpected").is_err());
+    }
+
+    #[test]
+    fn qwen_mx_diagnostic_semantic_identity_accepts_only_declared_scale_modes() {
+        let lock = fixed_lock();
+        let base = format!("qwen35:{}", lock.fingerprint());
+        let no_clipping = format!(
+            "{base}:mx-scale={}",
+            crate::gguf_convert::QWEN_MX_DIAGNOSTIC_NO_CLIPPING_SCALE
+        );
+        assert_eq!(
+            qwen_mx_recipe_options_from_semantic_model_id(&lock, &no_clipping).unwrap(),
+            QwenMxRecipeOptions {
+                retain_gdn_input_gates: false,
+                no_clipping_scale: true,
+            }
+        );
+        let combined = format!(
+            "{no_clipping}:mx-coverage={}",
+            crate::gguf_convert::QWEN_MX_DIAGNOSTIC_GDN_INPUT_GATES
+        );
+        assert_eq!(
+            qwen_mx_recipe_options_from_semantic_model_id(&lock, &combined).unwrap(),
+            QwenMxRecipeOptions {
+                retain_gdn_input_gates: true,
+                no_clipping_scale: true,
+            }
+        );
+        assert!(
+            qwen_mx_recipe_options_from_semantic_model_id(
+                &lock,
+                &format!(
+                    "{base}:mx-coverage={}:mx-scale={}",
+                    crate::gguf_convert::QWEN_MX_DIAGNOSTIC_GDN_INPUT_GATES,
+                    crate::gguf_convert::QWEN_MX_DIAGNOSTIC_NO_CLIPPING_SCALE,
+                )
+            )
+            .is_err()
+        );
+        assert!(
+            qwen_mx_recipe_options_from_semantic_model_id(
+                &lock,
+                &format!("{base}:mx-scale=unexpected")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn qwen38_mx_legacy_namespace_remains_default_only() {
+        let lock = read_model_lock(repository_path("docs/models/locks/qwen3.8-27b-bf16.json"))
+            .expect("fixed Qwen3.8 lock parses");
+        let current = format!("qwen38:{}", lock.fingerprint());
+        let legacy = format!("qwen35:{}", lock.fingerprint());
+        assert!(
+            !qwen_mx_recipe_options_from_semantic_model_id(&lock, &current)
+                .unwrap()
+                .retain_gdn_input_gates
+        );
+        assert!(
+            !qwen_mx_recipe_options_from_semantic_model_id(&lock, &legacy)
+                .unwrap()
+                .retain_gdn_input_gates
+        );
+        let retained = format!(
+            "{current}:mx-coverage={}",
+            crate::gguf_convert::QWEN_MX_DIAGNOSTIC_GDN_INPUT_GATES
+        );
+        assert!(
+            qwen_mx_recipe_options_from_semantic_model_id(&lock, &retained)
+                .unwrap()
+                .retain_gdn_input_gates
+        );
+        assert!(
+            qwen_mx_recipe_options_from_semantic_model_id(
+                &lock,
+                &format!("{legacy}:mx-coverage=retain-gdn-in-proj-a-b"),
+            )
+            .is_err()
+        );
+        assert!(
+            qwen_mx_recipe_options_from_semantic_model_id(
+                &lock,
+                &format!(
+                    "{legacy}:mx-scale={}",
+                    crate::gguf_convert::QWEN_MX_DIAGNOSTIC_NO_CLIPPING_SCALE
+                )
+            )
+            .is_err()
+        );
     }
 
     fn tensor_byte_size(dtype: TensorDType, shape: &[u64]) -> u64 {
