@@ -15,6 +15,9 @@ subagentの既定modelは使用中のCodex profileが決める。[プロジェ�
 - `codex -p deepseek-flash`: `~/.codex/deepseek-flash.config.toml` を基本設定に重ね、main modelとsubagentの既定を
   `deepseek-flash`（reasoning `medium`）にする。基本設定のLuna/Terra/SolはOpenAI modelに固定されているため、
   このprofileでは起動しない（`AGENTS.md`の規則）。変更前のprofileは同じ場所に `.bak-20260919` として残した。
+  DeepSeekのmodelは文脈が128k固定で、既定の機能のままでは1回の呼び出しの固定部分だけで約10万tokenを使い、
+  作業開始前に要約を繰り返した（2026-09-19）。このprofileではapps、plugins、ブラウザ操作、コンピュータ操作、
+  画像生成、tool提案と、firecrawl／OpenAI Docs MCPを無効にし、sLLM内での固定部分を約1.8万tokenにした。
 全履歴の複製を一律に要求せず、独立した委譲には対象file・目的・期待結果を簡潔に渡す。
 
 ## Skills
