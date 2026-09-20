@@ -816,16 +816,21 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage1_kernelILj32EEEvPKtS3_S3_PtmPf",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage2_kernelILj16EEEvPKtPtjPKf",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage2_kernelILj32EEEvPKtPtjPKf",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_166__device_stub__causal_attention_decode_gqa6_staged32_stage1_kernelEPKtPKvS4_S4_S4_Pfjm",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_166__device_stub__causal_attention_decode_wave_split_fp16_pair_kernelEPKtPKvS4_S4_S4_PKfS6_Ptmjjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb0ELj6ELj128EEEvPKtPKvS5_S5_S5_PKfS7_Pfjmjjjff",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb0ELj6ELj32EEEvPKtPKvS5_S5_S5_PKfS7_Pfjmjjjff",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb0ELj6ELj8EEEvPKtPKvS5_S5_S5_PKfS7_Pfjmjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb1ELj6ELj128EEEvPKtPKvS5_S5_S5_PKfS7_Pfjmjjjff",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb1ELj6ELj32EEEvPKtPKvS5_S5_S5_PKfS7_Pfjmjjjff",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb1ELj6ELj8EEEvPKtPKvS5_S5_S5_PKfS7_Pfjmjjjff",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage2_kernelILj32EEEvPKfPtjjjj",
             "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage2_kernelILj8EEEvPKfPtjjjj",
-        )
-        self.assertEqual(len(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS), 22)
-        self.assertEqual(len(set(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)), 22)
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_171__device_stub__causal_attention_decode_gqa6_staged32_split_merge_kernelILj128EEEvPKfPtj",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_172__device_stub__causal_attention_decode_gqa6_staged32_split_stage1_kernelILj128EEEvPKtPKvS5_S5_S5_Pfjm",
+)
+        self.assertEqual(len(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS), 27)
+        self.assertEqual(len(set(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)), 27)
         self.assertEqual(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS, expected)
         self.assertEqual(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS, tuple(sorted(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)))
 
