@@ -9,6 +9,7 @@ Git管理外・ignore対象のscratch copyや実験コードも、実際の流�
 
 | 取込み日時（概算・JST） | 元プロジェクト／元パス | sLLM側パス | 流用区分・概要 | 詳細記録 |
 | --- | --- | --- | --- | --- |
+| 2026-09-20 16時頃 JST | GGZ14/vllm-mxfp4 / repository root | `reference/vllm-mxfp4/`、独立評価container | `exact` checkout・上流launcherのcontainer内patch適用、sLLM runtime組込みなし | [詳細](#vllm-mxfp4-investigation-20260920) |
 | 2026-09-17 04:20頃 JST | CarouselAether/rocm_exl3 / repository root | `reference/rocm_exl3/`、`docs/references/patches/rocm-exl3-gfx1201.patch` | `exact` clone・許可済み局所修正：独立動作調査、production組込みなし | [詳細](#rocm-exl3-investigation-20260917) |
 | 不明（2026-09-13に確認・補記） | llama.cpp / `ggml/src/ggml-cuda/fattn-vec.cuh` | `.local-artifacts/phase83-5/qtile8-softmax-ilp/fattn-vec.pinned.cuh` | `exact`：Phase 83.5実験用の固定参照コピー。Git管理外 | [詳細](#llama-cpp-phase83-5-fattn-vec-scratch-001) |
 | 2026-09-14（日付精度） | llama.cpp / repository tree `a402be581cf8` | `.local-artifacts/llama-mtp-20260914/upstream/` | `exact`：最新版の独立HIP比較実行用checkout。sLLM runtimeへのコード組込みなし、Git管理外 | [詳細](#llama-cpp-mtp-quant-benchmark-20260914) |
@@ -467,3 +468,23 @@ import:
   commit_status: not-applicable-ignored-independent-checkout
   imported_at: "2026-09-17 04:20 JST (approximate)"
 ```
+
+## vllm-mxfp4-investigation-20260920
+
+ユーザーが明示した外部engineの追加・実行調査。
+`reference/vllm-mxfp4` は `https://github.com/GGZ14/vllm-mxfp4` の
+`31b9a94a7f74eeb3f59e66d16b1b27dfafcd0663`、tree `64879668b33ba49a799a4755b54f73e292ce48fd`。
+ignored checkoutであり取込みcommitは適用外（sLLM sourceへの取込みなし）。
+主要sourceのGit blob／2026-09-20確認時SHA-256は
+[参照identity](ci/matrix/vllm-mxfp4-investigation-v1.json)に記録する。
+上流launcherが専用containerへ自身のpatch／kernelを配置・buildする。
+sLLM runtimeへのcopy・adapt・port、および外部sourceやimageの再配布は行わない。
+
+repository rootにLICENSEはなく、全体のlicense/copyrightは未確認。
+`escha/EXLLAMAV3-LICENSE.txt`の条件を他componentへ推定適用しない。
+imageの通常依存パッケージ利用とsLLM実装への流用を区別する。
+同じ作業で上流launcherが `https://codeberg.org/StillDeadcode/libr4d.git` の
+`b9e42ab7202f53a3bc13d415f5d41481f9ca311b` を16:13頃JSTに取得し、上流rx9 patchを適用した。
+保存先は `.local-artifacts/vllm-mxfp4/libr4d/b9e42ab-rx9/`（ignored、`adapted`）。
+取込みcommitは適用外。patchとbuild SHA-256は同じ参照identityへ記録した。
+この外部評価用buildもsLLM runtimeへ流用しない。

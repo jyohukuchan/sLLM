@@ -48,3 +48,9 @@ llama.cppのlocal `models/` にある19 vocabulary GGUF（合計 `77556152` byte
 - 今回の採用作業は [採用計画](../plans/archive/2026/08/1-10/reference-source-adoption.md) と [採用履歴](../history/2026/08/1-10/reference-source-adoption.md) を参照する。
 - Qwen3.5 Phase 3の固定llama.cpp/vLLM reader結果は[Qwen3.5 Phase 3 reader記録](qwen3.5-phase3-reader.md)を参照する。
 - Qwen3.5 full-model text path、state/cache、tensor分類、CLI/G3のreader結果は[Qwen3.5 Phase 3 full-model reader記録](qwen3.5-phase3-full-model-reader.md)を参照する。
+
+## 個別依頼による追加参照
+
+- [GGZ14/vllm-mxfp4](https://github.com/GGZ14/vllm-mxfp4): R9700向けvLLMコンテナ、MXFP4 W4A8、MTP／DFlash2の実行調査。2026-09-20に追加。
+  固定revisionは[source-lock](source-lock.md#vllm-mxfp4-独立調査追加2026-09-20)、条件と進捗は[計画](../plans/archive/2026/09/11-20/vllm-mxfp4-investigation.md)。
+  sLLMのMXFP4 W4A6方針への採用を意味しない。

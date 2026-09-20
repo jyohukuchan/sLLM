@@ -803,6 +803,29 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=KV_CACHE_DTYPE_CHOICES,
         help="vLLM KV cache dtype; auto is resolved from the loaded model",
     )
+    parser.add_argument(
+        "--attention-backend",
+        default=None,
+        help="optional vLLM attention backend (for example, the radiance R4D backend)",
+    )
+    parser.add_argument(
+        "--mamba-cache-dtype",
+        default=None,
+        choices=("auto", "float32", "float16", "bfloat16"),
+        help="optional Mamba convolution-state cache dtype",
+    )
+    parser.add_argument(
+        "--mamba-ssm-cache-dtype",
+        default=None,
+        choices=("auto", "float32", "float16", "bfloat16"),
+        help="optional Mamba SSM-state cache dtype",
+    )
+    parser.add_argument(
+        "--mamba-cache-mode",
+        default=None,
+        choices=("none", "all", "align"),
+        help="optional Mamba cache strategy",
+    )
     parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
     parser.add_argument(
@@ -899,6 +922,23 @@ def _make_llm(args: argparse.Namespace) -> Any:
         kwargs["max_model_len"] = args.max_model_len
     if args.max_num_batched_tokens is not None:
         kwargs["max_num_batched_tokens"] = args.max_num_batched_tokens
+    # These EngineArgs fields were added for hybrid Mamba/attention models and
+    # are used by the radiance 0.27.x image.  Keep them absent unless the
+    # caller explicitly requests a serving profile so older vLLM images retain
+    # the adapter's original constructor defaults.
+    optional_engine_args = {
+        "attention_backend": args.attention_backend,
+        "mamba_cache_dtype": args.mamba_cache_dtype,
+        "mamba_ssm_cache_dtype": args.mamba_ssm_cache_dtype,
+        "mamba_cache_mode": args.mamba_cache_mode,
+    }
+    kwargs.update(
+        {
+            name: value
+            for name, value in optional_engine_args.items()
+            if value is not None
+        }
+    )
     try:
         return LLM(**kwargs)
     except TypeError as exc:
@@ -1175,6 +1215,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "model_dtype": _canonical_cache_dtype(getattr(model_config, "dtype", None)),
         "kv_cache_dtype_requested": args.kv_cache_dtype,
         "kv_cache_dtype_engine_arg": _engine_cache_dtype(args),
+        "attention_backend_requested": args.attention_backend,
+        "mamba_cache_dtype_requested": args.mamba_cache_dtype,
+        "mamba_ssm_cache_dtype_requested": args.mamba_ssm_cache_dtype,
+        "mamba_cache_mode_requested": args.mamba_cache_mode,
         "kv": resolved_kv_dtype,
         "kv_cache_encoding": resolved_kv_dtype,
         "kv_cache_dtype_resolved": resolved_kv_dtype,

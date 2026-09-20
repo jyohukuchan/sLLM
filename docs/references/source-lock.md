@@ -153,3 +153,18 @@ test "$(git -C reference/KTransformers grep -Il '^version https://git-lfs.github
 - tree: `e5f6b86fca7b2ac45e70e93be18e04c1c4b3868b`
 - MIT、Copyright (c) 2025 Turboderp。ユーザー指示による実行調査と軽微な局所修正を許可。
 - sLLM productionへのコード組込みなし。局所差分と結果は[調査履歴](../history/2026/09/11-20/rocm-exl3-investigation.md)へ記録する。
+
+## vllm-mxfp4 独立調査追加（2026-09-20）
+
+- origin: https://github.com/GGZ14/vllm-mxfp4
+- local: `reference/vllm-mxfp4/`（ignored、shallow、detached）
+- revision: `31b9a94a7f74eeb3f59e66d16b1b27dfafcd0663`（repo VERSION `0.12.0`）
+- tree: `64879668b33ba49a799a4755b54f73e292ce48fd`
+- upstream commit日時: 2026-09-18T14:16:37-05:00。release tagではなく取得時HEADを固定した。
+- ルートLICENSEは存在せず、同梱 `escha/EXLLAMAV3-LICENSE.txt` はそのcomponent用。repository全体をMIT/Apacheと推定しない。
+- ユーザー指示による外部engine実行調査。sLLM productionへのコード組込みなし。
+- container `stilldeadcode/vllm-radiance:0.9.3`、AMD MXFP4とDFlash2 FP8モデルを別途取得する。
+- [調査計画](../plans/archive/2026/09/11-20/vllm-mxfp4-investigation.md)。
+
+再取得時は `git clone --no-recurse-submodules https://github.com/GGZ14/vllm-mxfp4.git reference/vllm-mxfp4` 後、
+`git -C reference/vllm-mxfp4 checkout --detach 31b9a94a7f74eeb3f59e66d16b1b27dfafcd0663` で固定する。
