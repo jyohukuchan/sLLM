@@ -3298,7 +3298,7 @@ fn request_memory_report(audit: &QwenRequestMemoryAudit) -> Result<RequestMemory
 }
 
 fn audit_report(audit: &QwenExecutionAudit) -> AuditReport {
-    const SELECTED_KERNELS: [(u32, &str); 36] = [
+    const SELECTED_KERNELS: [(u32, &str); 37] = [
         (3, "causal_attention.online_softmax_gqa.packed_kv.v3"),
         (3, "causal_attention.prefill.gqa6_qtile4.v1"),
         (3, "causal_attention.prefill.gqa6_qtile8_w16.mxfp8.v1"),
@@ -3353,6 +3353,7 @@ fn audit_report(audit: &QwenExecutionAudit) -> AuditReport {
         (92, "matmul.fp8.outer.decode.gfx1030.fused.m2_4.v1"),
         (93, "causal_attention.decode.wave32_split.staged.v1"),
         (94, "matmul.nvfp4.w4a4.small_m.vgpr_reuse.v1"),
+        (103, "matmul.fp8.outer.gfx1201.dot4.v1"),
     ];
     AuditReport {
         selected_backend: audit.selected_backend(),

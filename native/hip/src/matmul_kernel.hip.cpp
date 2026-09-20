@@ -17,10 +17,61 @@
 #endif
 
 #include <cstdint>
+#include <cstring>
 
 namespace {
 
 #include <lowp/detail/bf16_helpers.inc>
+
+// Phase 87 WU2 C3: gfx1201 native packed-FP8 dot4 GEMV.  The helper keeps
+// the bounded-byte tail path used by the scratch probe so numerical probes
+// can exercise non-aligned K/N values even though the production launcher
+// below admits only the reviewed M=1 shapes.
+__device__ __forceinline__ uint32_t phase87_wu2_load_fp8_dword_or_bytes(
+    const uint8_t *const source, const uint64_t byte_offset,
+    const uint64_t logical_bytes) noexcept {
+  if (byte_offset >= logical_bytes) {
+    return 0U;
+  }
+  const uint64_t remaining = logical_bytes - byte_offset;
+  const uint8_t *const address = source + byte_offset;
+  if (remaining >= UINT64_C(4) && (reinterpret_cast<uintptr_t>(address) &
+                                   static_cast<uintptr_t>(3U)) == 0U) {
+    return __builtin_nontemporal_load(
+        reinterpret_cast<const uint32_t *>(address));
+  }
+  uint32_t packed = 0U;
+#pragma unroll
+  for (uint32_t byte = 0U; byte < 4U; ++byte) {
+    if (byte_offset + byte < logical_bytes) {
+      packed |= static_cast<uint32_t>(source[byte_offset + byte])
+                << (byte * 8U);
+    }
+  }
+  return packed;
+}
+
+__device__ __forceinline__ float
+phase87_wu2_dot4_fp8(const uint32_t lhs, const uint32_t rhs,
+                     const float accumulator) noexcept {
+#if defined(__gfx1201__) && __has_builtin(__builtin_amdgcn_dot4_f32_fp8_fp8)
+  return __builtin_amdgcn_dot4_f32_fp8_fp8(lhs, rhs, accumulator);
+#else
+  // The production selector never chooses this symbol on gfx1030.  Keep a
+  // software implementation for comparative compile/run probes and ensure
+  // the gfx1201 intrinsic is not emitted into another target's code object.
+  float result = accumulator;
+#pragma unroll
+  for (uint32_t byte = 0U; byte < 4U; ++byte) {
+    const uint8_t lhs_code = static_cast<uint8_t>(lhs >> (byte * 8U));
+    const uint8_t rhs_code = static_cast<uint8_t>(rhs >> (byte * 8U));
+    result = fmaf(sllm_lowp::ScalarCodec<sllm_lowp::E4M3Fn>::decode(lhs_code),
+                  sllm_lowp::ScalarCodec<sllm_lowp::E4M3Fn>::decode(rhs_code),
+                  result);
+  }
+  return result;
+#endif
+}
 
 } // namespace
 
@@ -421,6 +472,75 @@ sllm_matmul_fp32_to_bf16_short_mixed_v1(const float *const input,
   }
 }
 
+// One wave owns one output column.  A block has eight waves and therefore
+// handles eight adjacent columns.  Four packed dwords per lane preserve the
+// C3 scratch arithmetic and load schedule; the final four subtotal values are
+// combined in the same fixed order before the wave reduction.
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_fp8_outer_gfx1201_dot4_v1(
+    const uint8_t *const activation, const float *const activation_scales,
+    const uint8_t *const weight, const float *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  const uint32_t lane = threadIdx.x % 32U;
+  const uint32_t wave = threadIdx.x / 32U;
+  const uint64_t row = static_cast<uint64_t>(blockIdx.y);
+  const uint64_t column = static_cast<uint64_t>(blockIdx.x) * 8U + wave;
+  if (row >= m || column >= n) {
+    return;
+  }
+
+  float sums[4] = {};
+  for (uint64_t base = static_cast<uint64_t>(lane) * 16U; base < k;
+       base += 512U) {
+    uint32_t activation_values[4];
+    uint32_t weight_values[4];
+    const uint8_t *const activation_row = activation + row * k;
+    const uint8_t *const weight_row = weight + column * k;
+    if (base + 16U <= k &&
+        ((reinterpret_cast<uintptr_t>(activation_row + base) |
+          reinterpret_cast<uintptr_t>(weight_row + base)) &
+         static_cast<uintptr_t>(15U)) == 0U) {
+      const uint4 activation_vector =
+          *reinterpret_cast<const uint4 *>(activation_row + base);
+      using Packed4 = uint32_t __attribute__((ext_vector_type(4)));
+      const Packed4 weight_vector = __builtin_nontemporal_load(
+          reinterpret_cast<const Packed4 *>(weight_row + base));
+      activation_values[0] = activation_vector.x;
+      activation_values[1] = activation_vector.y;
+      activation_values[2] = activation_vector.z;
+      activation_values[3] = activation_vector.w;
+      weight_values[0] = weight_vector[0];
+      weight_values[1] = weight_vector[1];
+      weight_values[2] = weight_vector[2];
+      weight_values[3] = weight_vector[3];
+    } else {
+#pragma unroll
+      for (uint32_t index = 0U; index < 4U; ++index) {
+        activation_values[index] = phase87_wu2_load_fp8_dword_or_bytes(
+            activation_row, base + static_cast<uint64_t>(index) * 4U, k);
+        weight_values[index] = phase87_wu2_load_fp8_dword_or_bytes(
+            weight_row, base + static_cast<uint64_t>(index) * 4U, k);
+      }
+    }
+#pragma unroll
+    for (uint32_t index = 0U; index < 4U; ++index) {
+      sums[index] = phase87_wu2_dot4_fp8(activation_values[index],
+                                         weight_values[index], sums[index]);
+    }
+  }
+
+  float accumulator = (sums[0] + sums[1]) + (sums[2] + sums[3]);
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    accumulator += __shfl_down(accumulator, offset, 32U);
+  }
+  if (lane == 0U) {
+    output[row * n + column] = float_to_bf16_rne_bits(
+        accumulator * activation_scales[row] * weight_scales[column]);
+  }
+}
+
 namespace sllm_matmul_kernel {
 
 hipError_t launch(const uint16_t *const activation,
@@ -497,6 +617,29 @@ hipError_t launch_short_mixed_f32_to_bf16(const float *const output_f32,
                      dim3(static_cast<uint32_t>((element_count + 255U) / 256U)),
                      dim3(kWorkgroupSize), 0U, stream, output_f32, output,
                      element_count);
+  return hipGetLastError();
+}
+
+hipError_t launch_fp8_outer_gfx1201_dot4(
+    const uint8_t *const activation, const float *const activation_scales,
+    const uint8_t *const weight, const float *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n, const hipStream_t stream) noexcept {
+  if (activation == nullptr || activation_scales == nullptr ||
+      weight == nullptr || weight_scales == nullptr || output == nullptr ||
+      !fp8_outer_gfx1201_dot4_shape(m, k, n)) {
+    return hipErrorInvalidValue;
+  }
+#if defined(SLLM_HIP_COMPILE_TARGET)
+  if (std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1201") != 0) {
+    return hipErrorInvalidValue;
+  }
+#endif
+  hipLaunchKernelGGL(
+      sllm_matmul_fp8_outer_gfx1201_dot4_v1,
+      dim3(static_cast<uint32_t>((n + 7U) / 8U), static_cast<uint32_t>(m)),
+      dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+      weight_scales, output, m, k, n);
   return hipGetLastError();
 }
 

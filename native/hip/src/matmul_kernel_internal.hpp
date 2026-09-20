@@ -53,6 +53,25 @@ constexpr const char *kPhase49Gfx1030ShortMixedRocblasSolutionEnvironment =
 constexpr const char *kFp8NativeLogicalKernelId =
     "matmul.fp8.outer.hipblaslt.v1";
 constexpr const char *kFp8NativeDeviceSymbol = "hipblasLtMatmul";
+constexpr const char *kFp8OuterGfx1201Dot4LogicalKernelId =
+    "matmul.fp8.outer.gfx1201.dot4.v1";
+constexpr const char *kFp8OuterGfx1201Dot4DeviceSymbol =
+    "sllm_matmul_fp8_outer_gfx1201_dot4_v1";
+
+hipError_t launch_fp8_outer_gfx1201_dot4(
+    const uint8_t *activation, const float *activation_scales,
+    const uint8_t *weight, const float *weight_scales, uint16_t *output,
+    uint64_t m, uint64_t k, uint64_t n, hipStream_t stream) noexcept;
+
+// WU2 measures these operation shapes, independent of model identity. Keep
+// MTP verification rows and unmeasured shapes on their existing providers.
+constexpr bool fp8_outer_gfx1201_dot4_shape(const uint64_t m, const uint64_t k,
+                                            const uint64_t n) noexcept {
+  return m == 1U &&
+         ((k == 5120U && (n == 1024U || n == 6144U || n == 10240U ||
+                          n == 12288U || n == 17408U || n == 248320U)) ||
+          (k == 6144U && n == 5120U) || (k == 17408U && n == 5120U));
+}
 
 // Matmul provider IDs owned by this runtime.  They share the numeric audit ID
 // space with native/lowp, which reserves these values; value 1 is lowp's
@@ -66,6 +85,8 @@ struct HostKernelVariant final {
       static_cast<KernelVariant>(3U);
   static constexpr KernelVariant HipBlas = static_cast<KernelVariant>(4U);
   static constexpr KernelVariant Fp8Native = static_cast<KernelVariant>(5U);
+  static constexpr KernelVariant Fp8OuterGfx1201Dot4 =
+      static_cast<KernelVariant>(103U);
   static constexpr KernelVariant DecodeReductionWave64 =
       static_cast<KernelVariant>(7U);
   static constexpr KernelVariant SerialRowsReduction =
@@ -83,6 +104,8 @@ struct HostKernelVariant final {
 constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
   return variant == HostKernelVariant::Bf16PrefillGfx1030_64x64
              ? kBf16PrefillGfx1030_64x64LogicalKernelId
+         : variant == HostKernelVariant::Fp8OuterGfx1201Dot4
+             ? kFp8OuterGfx1201Dot4LogicalKernelId
          : variant == HostKernelVariant::Fp8Native ? kFp8NativeLogicalKernelId
          : variant == HostKernelVariant::PrefillShortSerial
              ? kShortSerialLogicalKernelId
@@ -107,6 +130,8 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
 constexpr const char *device_symbol(const KernelVariant variant) noexcept {
   return variant == HostKernelVariant::Bf16PrefillGfx1030_64x64
              ? kBf16PrefillGfx1030_64x64DeviceSymbol
+         : variant == HostKernelVariant::Fp8OuterGfx1201Dot4
+             ? kFp8OuterGfx1201Dot4DeviceSymbol
          : variant == HostKernelVariant::Fp8Native ? kFp8NativeDeviceSymbol
          : variant == HostKernelVariant::PrefillShortSerial
              ? kShortSerialDeviceSymbol
@@ -150,7 +175,9 @@ inline const char *device_symbol_for_target(const KernelVariant variant,
 constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
                                const uint64_t n,
                                const uint64_t k = 0U) noexcept {
-  return variant == HostKernelVariant::Fp8Native ? static_cast<uint32_t>(n)
+  return variant == HostKernelVariant::Fp8OuterGfx1201Dot4
+             ? static_cast<uint32_t>((n + 7U) / 8U)
+         : variant == HostKernelVariant::Fp8Native ? static_cast<uint32_t>(n)
          : variant == HostKernelVariant::Bf16PrefillGfx1030_64x64
              ? static_cast<uint32_t>(((m + 63U) / 64U) * ((n + 63U) / 64U))
          : variant == HostKernelVariant::PrefillShortSerial
@@ -174,6 +201,11 @@ static_assert(lowp_logical_kernel_id(HostKernelVariant::DecodeReduction) ==
               nullptr);
 static_assert(lowp_logical_kernel_id(HostKernelVariant::HipBlas) == nullptr);
 static_assert(lowp_logical_kernel_id(HostKernelVariant::Fp8Native) == nullptr);
+static_assert(lowp_logical_kernel_id(HostKernelVariant::Fp8OuterGfx1201Dot4) ==
+              nullptr);
+static_assert(workgroup_size_x(HostKernelVariant::Fp8OuterGfx1201Dot4) == 256U);
+static_assert(grid_size_x(HostKernelVariant::Fp8OuterGfx1201Dot4, 1U, 10240U) ==
+              1280U);
 static_assert(lowp_logical_kernel_id(
                   HostKernelVariant::DecodeReductionWave64) == nullptr);
 static_assert(lowp_logical_kernel_id(HostKernelVariant::SerialRowsReduction) ==
@@ -423,6 +455,10 @@ inline KernelVariant
 select_fp8_outer_variant(const uint64_t m, const uint64_t k, const uint64_t n,
                          const char *const target,
                          const bool fnuz = false) noexcept {
+  if (target_is(target, "gfx1201") && !fnuz &&
+      fp8_outer_gfx1201_dot4_shape(m, k, n)) {
+    return HostKernelVariant::Fp8OuterGfx1201Dot4;
+  }
   if (target_is(target, "gfx1201") || target_is(target, "gfx942")) {
     return HostKernelVariant::Fp8Native;
   }
@@ -434,8 +470,9 @@ select_fp8_outer_decision(const uint64_t m, const uint64_t k, const uint64_t n,
                           const char *const target,
                           const bool fnuz = false) noexcept {
   if (target_is(target, "gfx1201") || target_is(target, "gfx942")) {
-    return make_selector_decision(HostKernelVariant::Fp8Native, true, true,
-                                  true, kSelectorReasonAdopted);
+    return make_selector_decision(
+        select_fp8_outer_variant(m, k, n, target, fnuz), true, true, true,
+        kSelectorReasonAdopted);
   }
   return select_fp8_software_decision(m, k, n, target, fnuz);
 }

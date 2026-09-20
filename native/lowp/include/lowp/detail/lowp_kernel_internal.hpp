@@ -802,7 +802,7 @@ static_assert(phase85_mxfp6_gfx1201_m1_col2_shape(1U, 5120U, 1025U));
 enum class KernelVariant : uint32_t {
   // Value 1 means that no low-precision specialization was selected; the
   // caller keeps its own reference path.  Values 2, 3, 4, 5, 7, 12, 13, 16,
-  // 17 and 91 are owned by the integrating runtime for its non-low-precision
+  // 17, 91 and 103 are owned by the integrating runtime for its host-managed
   // providers and must not be reused here: they appear in audit records.
   Unspecialized = 1U,
   Fp8Emulation = 6U,

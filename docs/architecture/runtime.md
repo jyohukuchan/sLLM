@@ -369,6 +369,12 @@ M/N/K、provider、variant、tile、inner product、activation packとfootprint�
 BF16／FP8 native／hipBLAS経路はlowp libraryの対象外であり、lowpのplan failureを別dtypeやCPU providerへ暗黙にfallbackさせない。
 sLLMはlowpの公開C APIと`native/lowp/include/lowp/detail/`のC++連携ヘッダだけを使い、`native/lowp/src/`へ依存しない。
 BF16／hipBLAS／FP8 nativeのkernel IDと名前はsLLM側の`HostKernelVariant`が持ち、lowpの`KernelVariant`は低精度providerの値だけを持つ。
+Phase87 WU2ではexact gfx1201のFP8 outer E4M3FN W8A8、M1の計測済み8形状へ
+`matmul.fp8.outer.gfx1201.dot4.v1`（ID103）を選択する。現行activation quantizerとFP32 scaleを共有し、
+16-byte読み出し、native FP8 DOT4、FP32 tree accumulation、BF16 RNEを使う。
+M2以上・未計測shape・FNUZは従来providerを保ち、GDN qkv/zの共有量子化は1回のまま、
+graph captureはquantizer＋2 matmulの3 nodeを維持する。採用shape・N1解析・証拠は
+[WU2履歴](../history/2026/09/11-20/phase87-wu2-fp8.md)を参照する。
 両者は同じ監査ID空間を共有し、lowpは統合側の値を予約値として再利用しない。
 MXFP8活性値とMXFP8／MXFP6重み変換のE8M0 scaleは、2026-09-19から飽和しない最小scale（最大値の指数を切り捨てるOCP参照規則ではない）を既定とする。
 NVFP4活性値、MXFP6活性値、MXFP4、MXFP8 KVは従来の規則を使う。2026-09-20のWU-C1で不要なscale切替・不採用の2候補選択・診断統計を削除し、変換CLIも採用済みの規則へ固定した。詳細は

@@ -25,7 +25,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "8d72ca744a01b00b133e4dafb0a05cfd3d6eab48bbd512ab0694dc6bdf8678ba"
+        "sha256": "62186430f951bc2d49c74e43ce4e53bd1af6c79a418e2e6fdbb07c0361e129ba"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -40,7 +40,7 @@
         "sha256": "a705484e1c91bbf21793caa1a661befd00ba7e0ddb2d5cc6a39499521cb8d653"
       }
     ],
-    "source_set_sha256": "34d9ea317fd1ee530e22659bdd9dfa831e219e24e4720d3aa6c5d7ebbac02b4e"
+    "source_set_sha256": "89a386a892d8586a1e9055a447783c836ecfadf25d200893bf9278dd46339688"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -165,11 +165,11 @@
       "native/lowp/src/nvfp4_prefill_wmma_compensated.inc",
       "native/lowp/src/nvfp4_small_m_vgpr_reuse.inc"
     ],
-    "source_set_sha256": "083d9dcccbd96a953658cc74e5417adaaefe97175fc1e21d7ce7969c2086f839",
+    "source_set_sha256": "17bc7064ec8c53458f5a6a29ab48954e170a86e0a8b89048f98018d7e0b4373c",
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "8d72ca744a01b00b133e4dafb0a05cfd3d6eab48bbd512ab0694dc6bdf8678ba"
+        "sha256": "62186430f951bc2d49c74e43ce4e53bd1af6c79a418e2e6fdbb07c0361e129ba"
       },
       {
         "path": "native/hip/src/argmax_api.cpp",
@@ -313,7 +313,7 @@
       },
       {
         "path": "native/hip/src/graph_span_runtime.inc",
-        "sha256": "ed396a48e1cddb4f839216bdbe3f6990d8e3d217bde671ea1c866b1df4a12320"
+        "sha256": "df1acb0accd108b118dd7274838849eeb6f803cc577ccae5047a2b9754bc2c85"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -365,15 +365,15 @@
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
-        "sha256": "ac94674895d15fcacc4ea1002e5514ffa06ff5d36fcf80c293b2d0b082a21be4"
+        "sha256": "ae6f892e0d71deecfe8ec9a726e71c188cc7af7854b37217b290c6bdb662d5dc"
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "42e3a9c393c9a3789ae58638c46bb6f83309bad79e13ae1671ff6537f7485aac"
+        "sha256": "17f93b497e8476d2e39dd041c0c6eab3cd326a6d1f7308689fdd250268592d29"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
-        "sha256": "7d0b95883c3b37a72cb6521045d6ce1c6eb7f234a617668bc56a417f09f533da"
+        "sha256": "a45f46a28726d58e15b7ebefc079e3707deca021d1b550594aac049ecf698472"
       },
       {
         "path": "native/hip/src/minimax_m3_moe_route_api.cpp",
@@ -481,7 +481,7 @@
       },
       {
         "path": "native/hip/src/qwen38_projection_pack_runtime.inc",
-        "sha256": "6ed807d0639cd727ce7141023d808c15d6970304e9749ff5118abcad5f7b4d90"
+        "sha256": "b15018a2326dd24836e8f033b5571621dfd07cd0103737f0ac614f29e32a14ca"
       },
       {
         "path": "native/hip/src/residual_rmsnorm_api.cpp",
@@ -609,7 +609,7 @@
       },
       {
         "path": "native/lowp/include/lowp/detail/lowp_kernel_internal.hpp",
-        "sha256": "3ea11f5651ee1dc932a93225f95f1757ef58dbe02703947c9d61e1dabfe4e941"
+        "sha256": "4a666efe198896908e012a39107d7a415ec0e58033dd531a5f8a16fe42030dbf"
       },
       {
         "path": "native/lowp/include/lowp/detail/lowp_provider_plan.hpp",

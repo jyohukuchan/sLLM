@@ -102,6 +102,13 @@ bool graph_span_direct_matmul(const ElementwisePlan *const plan,
    * unchanged; the graph owns the prepared plan pin for the lifetime of the
    * capture/replay object. */
   if (plan->matmul_kernel_variant ==
+          ::sllm_matmul_kernel::HostKernelVariant::Fp8OuterGfx1201Dot4) {
+    return exact_gfx1201 && plan->matmul_metadata.fp8_outer &&
+           plan->matmul_metadata.fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
+           plan->fp8_lt_plan == nullptr && plan->matmul_workspace != nullptr &&
+           plan->matmul_workspace_bytes != 0U;
+  }
+  if (plan->matmul_kernel_variant ==
           ::sllm_matmul_kernel::HostKernelVariant::Fp8Native ||
       plan->fp8_lt_plan != nullptr) {
     return exact_gfx1201 && plan->matmul_metadata.fp8_outer &&
@@ -241,12 +248,21 @@ bool graph_span_qwen38_pack(const ElementwisePlan *const plan,
   const bool exact_gfx1201 = matches_runtime_gcn_arch(arch_name, "gfx1201");
   const bool exact_gfx1030 = matches_runtime_gcn_arch(arch_name, "gfx1030");
   if (exact_gfx1201) {
-    return plan->qwen38_projection_pack2_kernel_variants[0] ==
-               ::sllm_matmul_kernel::HostKernelVariant::Fp8Native &&
-           plan->qwen38_projection_pack2_kernel_variants[1] ==
-               ::sllm_matmul_kernel::HostKernelVariant::Fp8Native &&
-           plan->qwen38_projection_pack2_fp8_lt_plans[0] != nullptr &&
-           plan->qwen38_projection_pack2_fp8_lt_plans[1] != nullptr;
+    const auto first_variant = plan->qwen38_projection_pack2_kernel_variants[0];
+    const auto second_variant = plan->qwen38_projection_pack2_kernel_variants[1];
+    const bool lt_pair =
+        first_variant == ::sllm_matmul_kernel::HostKernelVariant::Fp8Native &&
+        second_variant == ::sllm_matmul_kernel::HostKernelVariant::Fp8Native &&
+        plan->qwen38_projection_pack2_fp8_lt_plans[0] != nullptr &&
+        plan->qwen38_projection_pack2_fp8_lt_plans[1] != nullptr;
+    const bool dot4_pair =
+        first_variant ==
+            ::sllm_matmul_kernel::HostKernelVariant::Fp8OuterGfx1201Dot4 &&
+        second_variant ==
+            ::sllm_matmul_kernel::HostKernelVariant::Fp8OuterGfx1201Dot4 &&
+        plan->qwen38_projection_pack2_fp8_lt_plans[0] == nullptr &&
+        plan->qwen38_projection_pack2_fp8_lt_plans[1] == nullptr;
+    return lt_pair || dot4_pair;
   }
   if (exact_gfx1030) {
     const auto variant = plan->qwen38_projection_pack2_kernel_variants[0];

@@ -371,7 +371,8 @@ Fp8GdnMatmulRun run_fp8_gdn_matmul_plan(const sllm_matmul_plan_t *const plan,
         gfx1030 ? (expected_baseline
                        ? SLLM_HIP_MATMUL_KERNEL_ID_FP8_BYTE_EMULATION_V1
                        : (m == 1U ? 82U : (m <= 4U ? 92U : 71U)))
-                : SLLM_HIP_MATMUL_KERNEL_ID_HIPBLASLT_FP8_OUTER_V1;
+                : (m == 1U ? SLLM_HIP_MATMUL_KERNEL_ID_FP8_OUTER_GFX1201_DOT4_V1
+                           : SLLM_HIP_MATMUL_KERNEL_ID_HIPBLASLT_FP8_OUTER_V1);
     const uint32_t expected_grid = static_cast<uint32_t>((m * n + 255U) / 256U);
     result.valid = result.valid && dispatch.kernel_id == expected_provider &&
                    (!expected_baseline ||
@@ -380,6 +381,13 @@ Fp8GdnMatmulRun run_fp8_gdn_matmul_plan(const sllm_matmul_plan_t *const plan,
                                  "matmul.fp8.outer.byte_decode.v1") == 0 &&
                      std::strcmp(dispatch.device_symbol,
                                  "sllm_matmul_fp8_outer_emulation_v1") == 0));
+    if (!gfx1030 && m == 1U) {
+      result.valid = result.valid && dispatch.grid_size_x == (n + 7U) / 8U &&
+                     std::strcmp(dispatch.kernel_symbol,
+                                 "matmul.fp8.outer.gfx1201.dot4.v1") == 0 &&
+                     std::strcmp(dispatch.device_symbol,
+                                 "sllm_matmul_fp8_outer_gfx1201_dot4_v1") == 0;
+    }
     if (!result.valid) {
       std::cerr << "FP8 direct metadata failure M=" << m << " N=" << n
                 << " provider=" << dispatch.kernel_id << " rows=" << dispatch.m

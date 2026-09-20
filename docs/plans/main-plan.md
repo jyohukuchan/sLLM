@@ -572,7 +572,7 @@ Phase 79の共通化内容は[Phase 79計画](archive/2026/09/1-10/phase79-commo
 | 完了 | 84.5 | MTP接続・固定p/q・採否後の状態を限定照合。R9700のtarget差はattention演算順へ切り分け。本番既定は維持 |
 | 完了・実装検証済み | 85 | 共通MXFP8／MXFP6 kernelをscope限定採用。両GPUの広範shape、本体・KV・MTP、chunk末尾の効果と数値を確認。BF16 MTP既定を維持 |
 | 完了・既定採用せず | 86 | Qwen MTP catch-upを両GPU26条件で検証。期待p/q受理率では小さい正の効果があるが、分離catch-upは正味マイナスで既定不採用。ベンチマーク主指標を期待受理率へ切替 |
-| WU-C1まで完了 | 87 | Qwen3.8 NVFP4の計測・棚卸しとread帯域計測を完了。WU1でV620 attentionのGQA共有を採用（MTPなし+8.09%／あり+6.88%）。WU1.1で両GPUのlong contextへsplit128を採用（単体TPOT比1.85%／2.22%短縮）。WU-C1で不要な切替を削除し、N0とCI hash連鎖の整合を確認。次はWU2のR9700 FP8。後続はgraph化とサンプリング経路の通信削減、MTP companionのNVFP4化とMXFP6比較、W×A16の廃止等 |
+| WU2完了・後続未着手 | 87 | Qwen3.8 NVFP4の計測・棚卸しとread帯域計測を完了。WU1でV620 attentionのGQA共有を採用（MTPなし+8.09%／あり+6.88%）。WU1.1で両GPUのlong contextへsplit128を採用（単体TPOT比1.85%／2.22%短縮）。WU-C1で不要な切替を削除し、N0とCI hash連鎖の整合を確認。WU2でR9700 FP8のM1 dot4 GEMVを採用（単体TPOT比6.40%、モデルMTPなし+9.40%／あり+1.50%）。後続はgraph化とサンプリング経路の通信削減、MTP companionのNVFP4化とMXFP6比較、W×A16の廃止等 |
 | 計画済み・繰下げ | 88 | NVFP4のGPUリクエストバッチ処理を最適化（旧87、さらに前は旧86） |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
@@ -669,7 +669,10 @@ Phase 76以降は、Qwen3.8 27B NVFP4を単一GPUで実用速度にすること�
   単体では全round改善、TPOT比1.85%／2.22%短縮。モデルの生成列・MTP受理数は変わり、R9700 MTPありは−3.41%だった。
   新基準に従い単体の採否とモデル実測を分離して記録した。
   [WU-C1](../history/2026/09/11-20/phase87-wu-c1-cleanup.md)も完了。不要な8環境変数・CLI旧flags・実験経路を削除し、
-  両GPUの削除前後token一致（N0）、host/GPU検証、CI hash参照連鎖と3種validatorsのPASSを確認した。次はWU2（R9700 FP8 projection）。
+  両GPUの削除前後token一致（N0）、host/GPU検証、CI hash参照連鎖と3種validatorsのPASSを確認した。[WU2](../history/2026/09/11-20/phase87-wu2-fp8.md)も完了し、R9700 FP8 W8A8のM1・8形状へnative dot4 GEMV（ID103）をN1として採用した。
+  dot単体は3.269757 ms/token（通常TPOT比6.4039%）短縮、全AB/BA roundが正。R9700通常モデルはMTPなし+9.40%／あり+1.50%。
+  V620は既存provider・生成列を維持し、速度差−0.03%／+0.15%。R9700 MTPなしのみtoken位置15から分岐する。
+  両GPU単体・公開API／graph・モデル・host・CI検証はPASS。後続の作業単位はまだ着手しない。
   後続はNVFP4 W4A4とFP8 W8A8等のdecode最適化、MTP companionのNVFP4化とMXFP6比較、W×A16の廃止、
   decode 1段全体のHIP graph化とMTPなし・ありのサンプリング経路のCPU-GPU間通信削減（2026-09-19追加）。
   続いてPhase 88（NVFP4リクエストバッチ処理）。

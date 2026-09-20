@@ -61,6 +61,29 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+
+### 2026-09-20 Phase87 WU2 R9700 FP8 W8A8 decode projection
+
+- scope: exact gfx1201、OCP E4M3 FN、M1、K5120×N1024/6144/10240/12288/17408/248320、
+  K6144×N5120、K17408×N5120。M2〜3、他shape、FNUZ、gfx1030/gfx942は従来providerを維持する。
+- **N1**: `BF16RNE((Σ A_fp8 W_fp8) s_a s_w)`、現行activation quantizer、FP32 outer scaleを維持する。
+  native FP8 DOT4の4独立accumulatorとwave32 treeへ加算順を変更する。
+  AMD RDNA4 ISAのFP32 RNE契約に基づき、`B=ceil(K/512)`でscale込みの標準forward boundは
+  `γ_(4B+10)`。現行FP32 GEMM contractの`γ_(K+2)`に対して対象Kでは非増加。
+  有限入力・scale、overflowなしの範囲、共通のBF16丸め／underflow絶対誤差項と解析の限界は
+  [WU2履歴](../history/2026/09/11-20/phase87-wu2-fp8.md#数値分類-n1)に記録する。
+- provider: ID103 `matmul.fp8.outer.gfx1201.dot4.v1`。
+  qkv/z共有quantizerの185回/token、graph capture、dispatch auditを維持する。
+- 両GPU探索59ケース、productionの8形状でoracle／finite／repeat／guard／cleanup PASS。
+  production単体の全8形状・全3roundで改善し、dotのみ3.269757 ms/token（通常TPOT比6.4039%）短縮。
+- 実モデル8192/128、両GPU MTPなし／あり、各1 warmup＋3 measuredがPASS。
+  最初のtoken分岐（0始まり）はR9700 MTPなしのみ15、他3構成は前後一致。同providerの反復は全て再現可能。
+  R9700の速度はMTPなし+9.40%／あり+1.50%、V620は−0.03%／+0.15%。
+  MTP受理数はV620 77/102、R9700 75/106で前後一致。新ID103はgfx1201のみ、graph数は維持した。
+  品質controlは独立oracleと固定sampling比較であり、perplexity／全model高精度評価は未実施。
+- source/binary identityはWU2履歴・結果JSONへ集約する。差し戻しはGitでWU2導入差分を戻す。
+  比較前binaryは`.local-artifacts/phase87/wu2/baseline-bin/`へ保存した。未作成commitをidentityとして割り当てない。
+
 ### 2026-09-20 Phase87 WU-C1 不要な切替・実験経路の削除
 
 - **N0**: 採用済みGQA共有・split128、MXFP8 activationとMXFP8/MXFP6 weight conversionのno-clipping、

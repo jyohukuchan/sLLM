@@ -31,7 +31,7 @@
       "files": [
         {
           "path": "include/sllm/hip.h",
-          "sha256": "8d72ca744a01b00b133e4dafb0a05cfd3d6eab48bbd512ab0694dc6bdf8678ba"
+          "sha256": "62186430f951bc2d49c74e43ce4e53bd1af6c79a418e2e6fdbb07c0361e129ba"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel.hip.cpp",
@@ -42,7 +42,7 @@
           "sha256": "dc9d910305791097ae32463ba134da4c4aa398fdc55d40e59e4eb2b70f0c84d6"
         }
       ],
-      "source_set_sha256": "2ea1cb74c2ca588b27cd5dbac4d91964305821f0258b387aa38f817031abd31a"
+      "source_set_sha256": "250017720c0ba21390023134840a013eb48055bf4d6326b8c694b8783389b1f3"
     },
     "host_abi": {
       "canonical_order": [
@@ -103,10 +103,10 @@
         },
         {
           "path": "native/hip/CMakeLists.txt",
-          "sha256": "13d1c87df2acfeaaec733b92eb3bb101c113571dfba187f93385b84a0f6f7a15"
+          "sha256": "d14000df1d132083ec4d753e7d3e92576353ade009f8751630994be0691f610a"
         }
       ],
-      "source_set_sha256": "85b2d03080665ad4ce4bb91a502df62605b98de53483fd04770a742f58e889bb"
+      "source_set_sha256": "6b8ab2ee887e83cacce3fd38f2a16e05bc0f82fc3b3a2b0d53bde15a2b1dd34e"
     },
     "ci_contract": {
       "canonical_order": [
@@ -152,11 +152,11 @@
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "e38010381c3297c5e4a9b66925709779f3432e3fbb70382c11348e00f439d0b7"
+          "sha256": "33269180d0bb6e8310416684c00e01a594ea0c8a09354a557df29abce17d0347"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "eae8bee20b2e4ee1db4cc78f835d71bb45a3b5d2738bf7f7c3272bcdd4700be1"
+          "sha256": "1464a04d772a2c9e889cffaef67557129b20dc76afb87726c33049eb9eea4139"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -183,7 +183,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "16ebeb77c9319d92b8979e15c4fc0e3c30a7cedf3a8a192e486529829bdfe9ad"
+      "source_set_sha256": "0524c1439ef6220fefab211568b4733197d01e4605bb5bc866b80cf8d1ecc116"
     }
   },
   "source_symbol_map": [

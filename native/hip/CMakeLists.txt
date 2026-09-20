@@ -1148,6 +1148,18 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         COMMAND sllm_public_runtime_host_test
     )
 
+    add_executable(sllm_phase87_wu2_selector_host_test
+        tests/phase87_wu2_selector_host_test.cpp)
+    target_compile_features(sllm_phase87_wu2_selector_host_test PRIVATE cxx_std_17)
+    target_include_directories(sllm_phase87_wu2_selector_host_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/../lowp/include"
+        "${PROJECT_SOURCE_DIR}/tests/fake_hip/include")
+    target_compile_options(sllm_phase87_wu2_selector_host_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    add_test(NAME sllm_phase87_wu2_selector_host_test
+        COMMAND sllm_phase87_wu2_selector_host_test)
+
     add_executable(sllm_ministral3_yarn_public_c_abi_host_test
         src/minimax_m3_moe_route_public_runtime.hip.cpp
         src/embedding_api.cpp

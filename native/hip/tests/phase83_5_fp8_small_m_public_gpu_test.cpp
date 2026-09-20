@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -29,8 +30,24 @@ constexpr std::array<Shape, 5> kShapes = {{
 }};
 constexpr std::array<Shape, 2> kGfx1201Shapes = {
     {{"k5120n6144", 5120U, 6144U}, {"k5120n10240", 5120U, 10240U}}};
+constexpr Shape kGfx1201LmHeadShape = {"k5120n248320", 5120U, 248320U};
 constexpr std::array<uint64_t, 5> kRows = {1U, 2U, 3U, 4U, 5U};
 constexpr std::size_t kRepeats = 3U;
+
+enum class InputPattern : uint8_t {
+  Positive,
+  SignedPartialCancellation,
+  SignedMixedRandom,
+};
+
+bool gfx1201_dot4_shape(const Shape &shape, const uint64_t rows) {
+  return rows == 1U &&
+         ((shape.k == 5120U &&
+           (shape.n == 1024U || shape.n == 6144U || shape.n == 10240U ||
+            shape.n == 12288U || shape.n == 17408U || shape.n == 248320U)) ||
+          (shape.k == 6144U && shape.n == 5120U) ||
+          (shape.k == 17408U && shape.n == 5120U));
+}
 
 struct Error final {
   char message[512]{};
@@ -51,6 +68,12 @@ struct ExpectedSelection final {
 
 ExpectedSelection expected_selection(const Shape &shape, const uint64_t rows) {
   if (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0) {
+    if (gfx1201_dot4_shape(shape, rows)) {
+      return {SLLM_HIP_MATMUL_KERNEL_ID_FP8_OUTER_GFX1201_DOT4_V1,
+              "matmul.fp8.outer.gfx1201.dot4.v1",
+              "sllm_matmul_fp8_outer_gfx1201_dot4_v1",
+              static_cast<uint32_t>((shape.n + 7U) / 8U)};
+    }
     return {5U, "matmul.fp8.outer.hipblaslt.v1", "hipblasLtMatmul",
             static_cast<uint32_t>(shape.n)};
   }
@@ -133,7 +156,85 @@ bool finite_bf16(const uint16_t value) {
   return (value & UINT16_C(0x7f80)) != UINT16_C(0x7f80);
 }
 
-float activation_value(const uint64_t row) {
+float bf16_to_float(const uint16_t value) {
+  uint32_t bits = static_cast<uint32_t>(value) << 16U;
+  float result = 0.0F;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+// OCP E4M3FN host codec used only for the independent mixed-sign oracle.
+// Enumerating the finite code table avoids sharing the device conversion
+// implementation while keeping the fixture values and rounding explicit.
+float fp8_e4m3fn_decode(const uint8_t code) {
+  const float sign = (code & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
+  const uint32_t exponent = (code >> 3U) & UINT32_C(0x0f);
+  const uint32_t mantissa = code & UINT8_C(0x07);
+  float magnitude = 0.0F;
+  if (exponent == 0U) {
+    // E4M3 has bias 7, so subnormals use 2^(1-bias-3) = 2^-9.
+    magnitude = static_cast<float>(mantissa) * 0.001953125F;
+  } else {
+    const float significand = 1.0F + static_cast<float>(mantissa) * 0.125F;
+    magnitude = std::ldexp(significand, static_cast<int>(exponent) - 7);
+  }
+  return sign * magnitude;
+}
+
+uint64_t mixed_hash64(uint64_t state) {
+  // SplitMix-style avalanche keeps the fixture deterministic while avoiding
+  // short low-bit periods that could accidentally cancel every DOT4 block.
+  state ^= state >> 30U;
+  state *= UINT64_C(0xbf58476d1ce4e5b9);
+  state ^= state >> 27U;
+  state *= UINT64_C(0x94d049bb133111eb);
+  state ^= state >> 31U;
+  return state;
+}
+
+uint8_t fp8_e4m3fn_encode(const float value) {
+  const bool negative = value < 0.0F;
+  const float magnitude = std::fabs(value);
+  uint8_t best = 0U;
+  float best_error = magnitude;
+  for (uint32_t code = 0U; code <= UINT32_C(0x7e); ++code) {
+    const float candidate = fp8_e4m3fn_decode(static_cast<uint8_t>(code));
+    const float error = std::fabs(candidate - magnitude);
+    if (error < best_error ||
+        (error == best_error && (code & 1U) == 0U && (best & 1U) != 0U)) {
+      best = static_cast<uint8_t>(code);
+      best_error = error;
+    }
+  }
+  return static_cast<uint8_t>(best | (negative ? UINT8_C(0x80) : UINT8_C(0)));
+}
+
+float mixed_activation_value(const uint64_t row, const uint64_t reduction) {
+  constexpr std::array<float, 8> kMagnitudes = {2.0F,  1.5F, 0.75F, 0.25F,
+                                                1.25F, 0.5F, 1.75F, 1.0F};
+  const uint64_t state = mixed_hash64(
+      reduction + row * UINT64_C(1442695040888963407) + UINT64_C(17));
+  const float magnitude = kMagnitudes[static_cast<std::size_t>(state & 7U)];
+  return ((state >> 63U) & 1U) == 0U ? magnitude : -magnitude;
+}
+
+uint8_t mixed_weight_code(const uint64_t column, const uint64_t reduction) {
+  constexpr std::array<uint8_t, 8> kCodes = {
+      UINT8_C(0x30), UINT8_C(0x38), UINT8_C(0x40), UINT8_C(0x42),
+      UINT8_C(0x48), UINT8_C(0x50), UINT8_C(0x58), UINT8_C(0x60)};
+  const uint64_t state = mixed_hash64(
+      reduction + column * UINT64_C(3202034522624059733) + UINT64_C(101));
+  uint8_t code = kCodes[static_cast<std::size_t>(state & 7U)];
+  if (((state >> 63U) & 1U) != 0U) {
+    code = static_cast<uint8_t>(code | UINT8_C(0x80));
+  }
+  return code;
+}
+
+float activation_value(const uint64_t row, const InputPattern pattern) {
+  if (pattern == InputPattern::SignedPartialCancellation) {
+    return (row & 1U) == 0U ? 1.0F : -1.0F;
+  }
   return 0.5F + 0.5F * static_cast<float>(row % 5U);
 }
 
@@ -199,18 +300,32 @@ bool wait_and_release(sllm_completion_t **const completion,
 
 bool upload(const sllm_queue_t *const queue, const sllm_buffer_t *const buffer,
             const void *const source, const uint64_t bytes) {
-  sllm_transfer_desc_t transfer{};
-  transfer.struct_size = sizeof(transfer);
-  transfer.abi_version = SLLM_HIP_ABI_VERSION;
-  transfer.host_pointer = const_cast<void *>(source);
-  transfer.size_bytes = bytes;
-  sllm_completion_t *completion = nullptr;
-  Error error;
-  const bool copied = expect(sllm_buffer_copy_h2d(queue, buffer, &transfer,
-                                                  &completion, &error.sink),
-                             SLLM_STATUS_OK, "sllm_buffer_copy_h2d", error) &&
-                      completion != nullptr;
-  return copied && wait_and_release(&completion, "sllm_completion_wait(h2d)");
+  constexpr uint64_t kTransferChunkBytes =
+      UINT64_C(64) * UINT64_C(1024) * UINT64_C(1024);
+  const auto *const source_bytes = static_cast<const uint8_t *>(source);
+  for (uint64_t offset = 0U; offset < bytes;) {
+    const uint64_t remaining = bytes - offset;
+    const uint64_t chunk =
+        remaining < kTransferChunkBytes ? remaining : kTransferChunkBytes;
+    sllm_transfer_desc_t transfer{};
+    transfer.struct_size = sizeof(transfer);
+    transfer.abi_version = SLLM_HIP_ABI_VERSION;
+    transfer.host_pointer = const_cast<uint8_t *>(source_bytes + offset);
+    transfer.buffer_offset_bytes = offset;
+    transfer.size_bytes = chunk;
+    sllm_completion_t *completion = nullptr;
+    Error error;
+    const bool copied = expect(sllm_buffer_copy_h2d(queue, buffer, &transfer,
+                                                    &completion, &error.sink),
+                               SLLM_STATUS_OK, "sllm_buffer_copy_h2d", error) &&
+                        completion != nullptr;
+    if (!copied ||
+        !wait_and_release(&completion, "sllm_completion_wait(h2d)")) {
+      return false;
+    }
+    offset += chunk;
+  }
+  return true;
 }
 
 bool download(const sllm_queue_t *const queue,
@@ -250,21 +365,59 @@ bool download(const sllm_queue_t *const queue,
   return valid;
 }
 
-std::vector<uint16_t> make_activation(const uint64_t rows, const uint64_t k) {
+std::vector<uint16_t> make_activation(const uint64_t rows, const uint64_t k,
+                                      const InputPattern pattern) {
   std::vector<uint16_t> activation(static_cast<std::size_t>(rows * k));
   for (uint64_t row = 0U; row != rows; ++row) {
-    const uint16_t value = f32_to_bf16_rne(activation_value(row));
-    std::fill(activation.begin() + static_cast<std::ptrdiff_t>(row * k),
-              activation.begin() + static_cast<std::ptrdiff_t>((row + 1U) * k),
-              value);
+    if (pattern == InputPattern::SignedMixedRandom) {
+      for (uint64_t reduction = 0U; reduction != k; ++reduction) {
+        activation[static_cast<std::size_t>(row * k + reduction)] =
+            f32_to_bf16_rne(mixed_activation_value(row, reduction));
+      }
+    } else {
+      const uint16_t value = f32_to_bf16_rne(activation_value(row, pattern));
+      std::fill(activation.begin() + static_cast<std::ptrdiff_t>(row * k),
+                activation.begin() +
+                    static_cast<std::ptrdiff_t>((row + 1U) * k),
+                value);
+    }
   }
   return activation;
 }
 
-std::vector<uint8_t> make_weight(const Shape &shape) {
+int32_t signed_weight_value(const uint64_t column, const uint64_t reduction) {
+  // Even columns contain exact +/- pairs and sum to zero.  Odd columns flip
+  // the first member of one pair, leaving a signed sum of +2.  All planned K
+  // values are even, so the expected result is independent of reduction
+  // order while still exercising signed FP8 values and DOT4 cancellation.
+  int32_t sign = ((reduction + column) & 1U) == 0U ? 1 : -1;
+  if ((column & 1U) != 0U && reduction == 0U) {
+    sign = -sign;
+  }
+  return sign;
+}
+
+std::vector<uint8_t> make_weight(const Shape &shape,
+                                 const InputPattern pattern) {
   const uint64_t value_bytes = shape.k * shape.n;
   std::vector<uint8_t> weight(
       static_cast<std::size_t>(value_bytes + shape.n * 4U), UINT8_C(0x38));
+  if (pattern == InputPattern::SignedPartialCancellation) {
+    for (uint64_t column = 0U; column != shape.n; ++column) {
+      for (uint64_t reduction = 0U; reduction != shape.k; ++reduction) {
+        weight[static_cast<std::size_t>(column * shape.k + reduction)] =
+            signed_weight_value(column, reduction) > 0 ? UINT8_C(0x38)
+                                                       : UINT8_C(0xb8);
+      }
+    }
+  } else if (pattern == InputPattern::SignedMixedRandom) {
+    for (uint64_t column = 0U; column != shape.n; ++column) {
+      for (uint64_t reduction = 0U; reduction != shape.k; ++reduction) {
+        weight[static_cast<std::size_t>(column * shape.k + reduction)] =
+            mixed_weight_code(column, reduction);
+      }
+    }
+  }
   for (uint64_t column = 0U; column != shape.n; ++column) {
     const float scale = column_scale(column);
     std::memcpy(weight.data() + value_bytes + column * sizeof(float), &scale,
@@ -273,13 +426,47 @@ std::vector<uint8_t> make_weight(const Shape &shape) {
   return weight;
 }
 
-std::vector<uint16_t> expected_output(const Shape &shape, const uint64_t rows) {
+std::vector<uint16_t> expected_output(const Shape &shape, const uint64_t rows,
+                                      const InputPattern pattern) {
   std::vector<uint16_t> expected(static_cast<std::size_t>(rows * shape.n));
+  if (pattern == InputPattern::SignedMixedRandom) {
+    for (uint64_t row = 0U; row != rows; ++row) {
+      float maximum = 0.0F;
+      for (uint64_t reduction = 0U; reduction != shape.k; ++reduction) {
+        const float value = bf16_to_float(
+            f32_to_bf16_rne(mixed_activation_value(row, reduction)));
+        maximum = std::max(maximum, std::fabs(value));
+      }
+      const float activation_scale = maximum == 0.0F ? 1.0F : maximum / 448.0F;
+      for (uint64_t column = 0U; column != shape.n; ++column) {
+        float sum = 0.0F;
+        for (uint64_t reduction = 0U; reduction != shape.k; ++reduction) {
+          const float activation = bf16_to_float(
+              f32_to_bf16_rne(mixed_activation_value(row, reduction)));
+          const uint8_t activation_code =
+              fp8_e4m3fn_encode(activation / activation_scale);
+          // The production contract accumulates decoded FP8 products first,
+          // then applies the per-row activation and per-column weight scales
+          // once in the epilogue.  Keeping that order is essential for
+          // cancellation: scaling each product independently can leave a
+          // tiny nonzero residual where the device sum is exactly zero.
+          sum += fp8_e4m3fn_decode(activation_code) *
+                 fp8_e4m3fn_decode(mixed_weight_code(column, reduction));
+        }
+        expected[static_cast<std::size_t>(row * shape.n + column)] =
+            f32_to_bf16_rne(sum * activation_scale * column_scale(column));
+      }
+    }
+    return expected;
+  }
   for (uint64_t row = 0U; row != rows; ++row) {
-    const float activation = activation_value(row);
+    const float activation = activation_value(row, pattern);
     for (uint64_t column = 0U; column != shape.n; ++column) {
-      const float value =
-          activation * static_cast<float>(shape.k) * column_scale(column);
+      const float reduction =
+          pattern == InputPattern::SignedPartialCancellation
+              ? static_cast<float>((column & 1U) == 0U ? 0 : 2)
+              : static_cast<float>(shape.k);
+      const float value = activation * reduction * column_scale(column);
       expected[static_cast<std::size_t>(row * shape.n + column)] =
           f32_to_bf16_rne(value);
     }
@@ -325,8 +512,10 @@ bool audit_dispatch(const sllm_matmul_dispatch_info_t &dispatch,
 
 bool check_oracle(const std::vector<uint16_t> &actual,
                   const std::vector<uint16_t> &expected, const Shape &shape,
-                  const uint64_t rows, uint32_t *const max_ulp,
-                  uint64_t *const mismatches) {
+                  const uint64_t rows, const InputPattern pattern,
+                  uint32_t *const max_ulp, uint64_t *const mismatches) {
+  const uint32_t allowed_ulp =
+      pattern == InputPattern::SignedMixedRandom ? 2U : 0U;
   bool valid = actual.size() == expected.size();
   *max_ulp = 0U;
   *mismatches = 0U;
@@ -334,7 +523,7 @@ bool check_oracle(const std::vector<uint16_t> &actual,
        index != actual.size() && index < expected.size(); ++index) {
     const uint32_t ulp = bf16_ulp(actual[index], expected[index]);
     *max_ulp = std::max(*max_ulp, ulp);
-    if (!finite_bf16(actual[index]) || actual[index] != expected[index]) {
+    if (!finite_bf16(actual[index]) || ulp > allowed_ulp) {
       ++*mismatches;
       valid = false;
     }
@@ -343,21 +532,46 @@ bool check_oracle(const std::vector<uint16_t> &actual,
   for (uint64_t row = 0U; row != rows; ++row) {
     const std::size_t index =
         static_cast<std::size_t>(row * shape.n) + last_column;
-    valid = valid && index < actual.size() && actual[index] == expected[index];
+    valid = valid && index < actual.size() &&
+            bf16_ulp(actual[index], expected[index]) <= allowed_ulp;
   }
   return valid;
 }
 
 bool run_case(const Shape &shape, const sllm_context_t *const context,
               const sllm_queue_t *const queue,
-              const sllm_buffer_t *const weight, const uint64_t rows) {
+              const sllm_buffer_t *const weight, const uint64_t rows,
+              const InputPattern pattern) {
   const ExpectedSelection expected = expected_selection(shape, rows);
-  const std::vector<uint16_t> activation = make_activation(rows, shape.k);
-  const std::vector<uint16_t> oracle = expected_output(shape, rows);
+  const std::vector<uint16_t> activation =
+      make_activation(rows, shape.k, pattern);
+  const std::vector<uint16_t> oracle = expected_output(shape, rows, pattern);
+  uint64_t oracle_positive = 0U;
+  uint64_t oracle_negative = 0U;
+  uint64_t oracle_zero = 0U;
+  for (const uint16_t value : oracle) {
+    if ((value & UINT16_C(0x7fff)) == 0U) {
+      ++oracle_zero;
+    } else if ((value & UINT16_C(0x8000)) != 0U) {
+      ++oracle_negative;
+    } else {
+      ++oracle_positive;
+    }
+  }
+  const bool nontrivial_mixed_fixture =
+      pattern != InputPattern::SignedMixedRandom ||
+      (oracle_positive != 0U && oracle_negative != 0U &&
+       oracle_positive + oracle_negative != 0U);
+  if (!nontrivial_mixed_fixture) {
+    std::cerr << "mixed oracle did not produce both signs: positive="
+              << oracle_positive << " negative=" << oracle_negative
+              << " zero=" << oracle_zero << '\n';
+  }
   sllm_buffer_t *activation_buffer = nullptr;
   sllm_buffer_t *output_buffer = nullptr;
   sllm_matmul_plan_t *plan = nullptr;
   bool valid =
+      nontrivial_mixed_fixture &&
       create_buffer(context, rows * shape.k * sizeof(uint16_t),
                     &activation_buffer) &&
       create_buffer(context, rows * shape.n * sizeof(uint16_t),
@@ -391,9 +605,9 @@ bool run_case(const Shape &shape, const sllm_context_t *const context,
             audit_dispatch(dispatch, shape, rows, expected);
     std::vector<uint16_t> observed(static_cast<std::size_t>(rows * shape.n));
     if (valid) {
-      valid =
-          download(queue, output_buffer, &observed) &&
-          check_oracle(observed, oracle, shape, rows, &max_ulp, &mismatches);
+      valid = download(queue, output_buffer, &observed) &&
+              check_oracle(observed, oracle, shape, rows, pattern, &max_ulp,
+                           &mismatches);
       if (repeat == 0U) {
         first_output = observed;
       } else {
@@ -411,13 +625,20 @@ bool run_case(const Shape &shape, const sllm_context_t *const context,
   valid = release_buffer(&output_buffer) && valid;
   valid = release_buffer(&activation_buffer) && valid;
   std::cout << "phase83_5_fp8_small_m shape=" << shape.name << " M=" << rows
-            << " K=" << shape.k << " N=" << shape.n
+            << " K=" << shape.k << " N=" << shape.n << " pattern="
+            << (pattern == InputPattern::Positive ? "positive"
+                : pattern == InputPattern::SignedPartialCancellation
+                    ? "signed_cancel"
+                    : "signed_mixed_random")
             << " provider_id=" << expected.kernel_id
             << " kernel=" << expected.kernel_symbol
             << " device=" << expected.device_symbol
             << " grid_x=" << expected.grid_x << " oracle_rows=" << rows
             << " oracle_last_column=" << (shape.n - 1U)
-            << " max_bf16_ulp=" << max_ulp << " mismatches=" << mismatches
+            << " oracle_positive=" << oracle_positive
+            << " oracle_negative=" << oracle_negative
+            << " oracle_zero=" << oracle_zero << " max_bf16_ulp=" << max_ulp
+            << " mismatches=" << mismatches
             << " status=" << (valid ? "PASS" : "FAIL") << '\n';
   return valid;
 }
@@ -457,9 +678,11 @@ int main() {
   std::vector<Shape> shapes(kShapes.begin(), kShapes.end());
   if (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0) {
     shapes.insert(shapes.end(), kGfx1201Shapes.begin(), kGfx1201Shapes.end());
+    shapes.push_back(kGfx1201LmHeadShape);
   }
   for (const Shape &shape : shapes) {
-    const std::vector<uint8_t> weight = make_weight(shape);
+    const std::vector<uint8_t> weight =
+        make_weight(shape, InputPattern::Positive);
     if (valid) {
       valid = create_buffer(context, static_cast<uint64_t>(weight.size()),
                             &weight_buffer) &&
@@ -470,9 +693,47 @@ int main() {
       if (!valid) {
         break;
       }
-      valid = run_case(shape, context, queue, weight_buffer, rows);
+      valid = run_case(shape, context, queue, weight_buffer, rows,
+                       InputPattern::Positive);
     }
     valid = release_buffer(&weight_buffer) && valid;
+
+    // Exercise signed FP8 values and cancellation on the new gfx1201 M=1
+    // route.  The existing M=2..5 checks above deliberately retain their
+    // hipBLASLt provider coverage.
+    if (valid && std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0) {
+      const std::vector<uint8_t> signed_weight =
+          make_weight(shape, InputPattern::SignedPartialCancellation);
+      valid =
+          create_buffer(context, static_cast<uint64_t>(signed_weight.size()),
+                        &weight_buffer) &&
+          upload(queue, weight_buffer, signed_weight.data(),
+                 static_cast<uint64_t>(signed_weight.size()));
+      if (valid) {
+        valid = run_case(shape, context, queue, weight_buffer, 1U,
+                         InputPattern::SignedPartialCancellation);
+      }
+      valid = release_buffer(&weight_buffer) && valid;
+    }
+
+    // A deterministic mixed-magnitude fixture on a representative projection
+    // exercises the dynamic activation quantizer and signed FP8 codes.  The
+    // scalar host oracle above independently re-encodes the BF16 activation
+    // values to OCP E4M3FN before accumulating them.
+    if (valid && std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0 &&
+        shape.k == 5120U && shape.n == 1024U) {
+      const std::vector<uint8_t> mixed_weight =
+          make_weight(shape, InputPattern::SignedMixedRandom);
+      valid = create_buffer(context, static_cast<uint64_t>(mixed_weight.size()),
+                            &weight_buffer) &&
+              upload(queue, weight_buffer, mixed_weight.data(),
+                     static_cast<uint64_t>(mixed_weight.size()));
+      if (valid) {
+        valid = run_case(shape, context, queue, weight_buffer, 1U,
+                         InputPattern::SignedMixedRandom);
+      }
+      valid = release_buffer(&weight_buffer) && valid;
+    }
   }
 
   valid = release_buffer(&weight_buffer) && valid;

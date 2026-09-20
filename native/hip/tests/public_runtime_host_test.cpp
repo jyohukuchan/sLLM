@@ -7374,7 +7374,8 @@ bool matmul_fp8_outer_decode_selector_contract() {
       select(2U, 5120U, 10240U, "gfx1201") == HostKernelVariant::Fp8Native &&
       select(2U, 5120U, 10240U, "gfx1030", true) ==
           KernelVariant::Fp8OuterPrefillTiled16 &&
-      select(1U, 5120U, 17408U, "gfx1201") == HostKernelVariant::Fp8Native &&
+      select(1U, 5120U, 17408U, "gfx1201") ==
+          HostKernelVariant::Fp8OuterGfx1201Dot4 &&
       select(1U, 5120U, 17408U, "gfx1030", true) ==
           KernelVariant::Fp8Emulation &&
       static_cast<uint32_t>(
@@ -7754,8 +7755,8 @@ bool fp8_native_selector_n0_regression_contract() {
   const bool valid =
       static_cast<uint32_t>(HostKernelVariant::Fp8Native) == 5U &&
       static_cast<uint32_t>(KernelVariant::Fp8Emulation) == 6U &&
-      gfx1201.variant == HostKernelVariant::Fp8Native && gfx1201.supported &&
-      gfx1201.enabled && gfx1201.adopted &&
+      gfx1201.variant == HostKernelVariant::Fp8OuterGfx1201Dot4 &&
+      gfx1201.supported && gfx1201.enabled && gfx1201.adopted &&
       gfx942.variant == HostKernelVariant::Fp8Native && gfx942.supported &&
       gfx942.enabled && gfx942.adopted &&
       gfx1030.variant == KernelVariant::Fp8Emulation && gfx1030.supported &&

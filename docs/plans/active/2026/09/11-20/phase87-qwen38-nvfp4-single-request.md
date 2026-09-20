@@ -2,7 +2,7 @@
 
 ## 状態
 
-- 段階0・WU0・WU1・WU1.1・WU-C1完了（WU0再計測・WU1/WU1.1完了は2026-09-20）。WU2以降は未着手。[Phase 76〜88計画](../1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)のPhase 87を置き換える。
+- 段階0・WU0・WU1・WU1.1・WU-C1・WU2完了（2026-09-20）。後続の作業単位は未着手。[Phase 76〜88計画](../1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)のPhase 87を置き換える。
 - 両GPU・MTPなし／ありの通常速度、kernel時間、read-request counter、形状別copy、R9700の2 KV形式のKLD、
   W×A16利用箇所と過去の棄却候補の棚卸しを完了した。
   [段階0履歴](../../../../../history/2026/09/11-20/phase87-stage0.md)と
@@ -13,7 +13,7 @@
   V620 attentionの余地12.41、R9700 attention 2.79、R9700 FP8の正の形状別余地4.08 ms/tokenを得た。
   WU1でV620のGQA共有を採用し、MTPなし+8.09%／あり+6.88%を確認した。R9700は現行維持。
   WU1.1では新採用基準に基づき、両GPUのlong contextへsplit128を採用した。WU-C1で不要な切替を削除し、既定出力のN0を確認した。
-  次にWU2のR9700 FP8、融合等を扱う。
+  WU2でR9700 FP8 W8A8のM1へnative dot4 GEMVを採用した。後続は下記の作業単位を結果に基づいて具体化する。
   下記の段階番号の並びを優先順位とはしない。着手順は「作業単位」の節（WU0→WU1→WU1.1→WU-C1→WU2）に従う。
 - GPU空白時間（通常計測でMTPなしV620約5.8、R9700約2.7 ms/token）は、kernelごとの数µsの隙間と
   tokenごとのhost往復から成る。2026-09-19のユーザー決定で、decode 1段全体のHIP graph化と、
@@ -225,6 +225,13 @@ WU1は候補を単独で比べたため、仕組みの異なる候補の組合�
 
 ### WU2: R9700 FP8 W8A8 decode projection（WU-C1の後に渡す）
 
+- **完了（2026-09-20）**。C1/C2は不採用、C3のnative FP8 dot4 GEMVをexact gfx1201、E4M3FN、下記8形状のM1へN1として採用。
+  共通quantizerの揺れを除くdot単体の短縮は3.269757 ms/token（通常TPOT比6.4039%）で、全形状の全3roundが正。
+  M2〜3・他target／shapeは従来providerを維持する。両GPU各59探索ケース、公開API・graph・host・CI検証がPASS。
+  通常8192/128、1 warmup＋3 measuredのR9700はMTPなし+9.40%／あり+1.50%、V620は−0.03%／+0.15%。
+  R9700 MTPなしのみtoken位置15で分岐し、他3構成は前後一致。詳細は
+  [WU2履歴](../../../../../history/2026/09/11-20/phase87-wu2-fp8.md)と[結果JSON](../../../../../history/2026/09/11-20/phase87-wu2-fp8-results.json)を参照。
+
 - 対象: gfx1201のhipBLASLt M=1（MT16x16x3系）。MTPなしの形状別（ms/token、論理byte数による帯域）は次のとおり。
 
   | 形状 | 回数/token | ms/token | GB/s（640比） |
@@ -246,6 +253,8 @@ WU1は候補を単独で比べたため、仕組みの異なる候補の組合�
     Phase 83.5で棄却されたgfx1030 ID92 bodyの移植（small-M、約2.2倍遅い）とは別構造にする。
   - C2: C1に活性値量子化を融合する。各blockがK要素（最大17,408個）のamaxをL2から冗長に計算し、現行quantizerと
     同じscale式で量子化する。別kernelの185回/tokenの起動をなくす。
+  - C3: C2のnative FP8 dot4 coreを量子化から分離し、16-byte読み出しと4独立accumulatorのGEMVとする。
+    2026-09-20のC1/C2代表形状の回帰を受けた3番目の候補。
   - hipBLASLtのrank／algorithmの再選択は、Phase 82で再現しなかったため候補にしない。
 - 上限と打ち切り: WU0再計測の形状別read実測と論理weight bytesで90%仮定を置き換えた。
   正の形状別余地の合計は**4.0813 ms/token**、打ち切り線はその半分**2.0406 ms/token（約2.04）**。

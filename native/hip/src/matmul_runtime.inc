@@ -1704,7 +1704,14 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
             plan->matmul_metadata.fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ,
             queue->stream);
         if (launch_status == hipSuccess) {
-          if (variant == ::sllm_matmul_kernel::HostKernelVariant::Fp8Native) {
+          if (variant ==
+              ::sllm_matmul_kernel::HostKernelVariant::Fp8OuterGfx1201Dot4) {
+            launch_status = ::sllm_matmul_kernel::launch_fp8_outer_gfx1201_dot4(
+                quantized, activation_scales, fp8_weight, weight_scales,
+                output, plan->matmul_metadata.m, plan->matmul_metadata.k,
+                plan->matmul_metadata.n, queue->stream);
+          } else if (variant ==
+                     ::sllm_matmul_kernel::HostKernelVariant::Fp8Native) {
             std::lock_guard<std::mutex> lt_lock(plan->context->matmul_lt_mutex);
             launch_status =
                 launch_fp8_lt_plan(plan->fp8_lt_plan, quantized, fp8_weight,

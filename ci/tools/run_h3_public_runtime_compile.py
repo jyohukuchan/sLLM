@@ -316,6 +316,7 @@ KERNEL_SYMBOLS = (
     "sllm_matmul_bf16_fp32_prefill_short_serial_v1",
     "sllm_matmul_bf16_fp32_tiled16_v2",
     "sllm_matmul_bf16_fp32_v1",
+    "sllm_matmul_fp8_outer_gfx1201_dot4_v1",
     "sllm_matmul_bf16_to_fp8_outer_v1",
     "sllm_matmul_bf16_to_fp8_outer_v2",
     "sllm_matmul_bf16_to_mxfp4_block32_even_v1",
