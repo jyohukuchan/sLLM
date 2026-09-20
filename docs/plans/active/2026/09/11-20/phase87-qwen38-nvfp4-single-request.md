@@ -2,7 +2,7 @@
 
 ## 状態
 
-- 段階0・WU0・WU1・WU1.1・WU-C1・WU2完了（2026-09-20）。後続の作業単位は未着手。[Phase 76〜88計画](../1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)のPhase 87を置き換える。
+- 段階0・WU0・WU1・WU1.1・WU-C1・WU2・WU-D1・WU-D2・WU-D3完了（2026-09-20）。後続の作業単位は未着手。[Phase 76〜88計画](../1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)のPhase 87を置き換える。
 - 両GPU・MTPなし／ありの通常速度、kernel時間、read-request counter、形状別copy、R9700の2 KV形式のKLD、
   W×A16利用箇所と過去の棄却候補の棚卸しを完了した。
   [段階0履歴](../../../../../history/2026/09/11-20/phase87-stage0.md)と
@@ -14,8 +14,10 @@
   WU1でV620のGQA共有を採用し、MTPなし+8.09%／あり+6.88%を確認した。R9700は現行維持。
   WU1.1では新採用基準に基づき、両GPUのlong contextへsplit128を採用した。WU-C1で不要な切替を削除し、既定出力のN0を確認した。
   WU2でR9700 FP8 W8A8のM1へnative dot4 GEMVを採用した。後続は下記の作業単位を結果に基づいて具体化する。
-  下記の段階番号の並びを優先順位とはしない。着手順は「作業単位」の節（WU0→WU1→WU1.1→WU-C1→WU2）に従う。
-- GPU空白時間（通常計測でMTPなしV620約5.8、R9700約2.7 ms/token）は、kernelごとの数µsの隙間と
+  下記の段階番号の並びを優先順位とはしない。着手順は「作業単位」の節（WU0→WU1→WU1.1→WU-C1→WU2→WU-D1〜D3で完了）に従う。
+  D系統は2026-09-20に打ち切り、次は段階5（decode 1段のgraph化とサンプリング経路の通信削減）。
+- GPU空白時間（2026-09-20のWU2後に再計測: 通常計測でMTPなしV620約4.9、R9700約3.0 ms/token、
+  割合は7.8%／6.5%。[再計測](../../../../../history/2026/09/11-20/phase87-idle-recheck.md)）は、kernelごとの数µsの隙間と
   tokenごとのhost往復から成る。2026-09-19のユーザー決定で、decode 1段全体のHIP graph化と、
   MTPなし・ありのサンプリング経路のCPU-GPU間通信削減を段階5としてPhase 87に追加した。
 
@@ -263,6 +265,112 @@ WU1は候補を単独で比べたため、仕組みの異なる候補の組合�
   活性値量子化の融合による追加利益は、このweight読み出しの参照値に含めない。
 - 数値: C1は累積順が変わるためN1相当。C2は現行quantizerと同じscale・丸めならN0を目指す。
   M=1〜3（MTP verify）、非整列K／Nで独立FP32 oracleを確認する。
+
+### WU-D1: NVFP4 M=1 decodeの近傍依存の原因調査（段階1のNVFP4最適化より前）
+
+- **完了（2026-09-20）**。両shapeでisolated／staged型は約123〜124 µs、GQA型のKV reader後は約135〜136 µsとなり、
+  全AB/BAで約9〜10%の差を再現した。traceでも同方向。GL2C/EA転送量はほぼ同じでEA busy cycleが増えるが、
+  MALL／DRAM stall内訳は取得不能で物理機構の単一帰属は未特定。受入条件に従い特定範囲と限界を記録して終了。
+  production sourceは不変。詳細は[WU-D1履歴](../../../../../history/2026/09/11-20/phase87-wu-d1.md)と
+  [結果JSON](../../../../../history/2026/09/11-20/phase87-wu-d1-results.json)。
+
+2026-09-20のWU2後の再計測で、V620のM=1 NVFP4 decode `sllm_matmul_nvfp4_w4a4_decode_scale_lut_v1`
+（grid 139264）が1 callあたり118.2→129.7 µs（約+10%）になった。
+切り分けの結果、**原因はbinaryの内容ではなく、同じtoken内で直前に実行されるdecode attention kernelの種類**である。
+旧staged32のときだけ速く、GQA共有（採用済み）でもbaseline（`SLLM_CAUSAL_ATTENTION_FORCE_BASELINE=1`）でも遅い。
+条件表と排除済みの原因は[再計測履歴](../../../../../history/2026/09/11-20/phase87-idle-recheck.md#調査-m1のnvfp4-decodeが約10遅くなる条件)にある。
+
+- 仮説: 同一命令列・同一起動設定・同一読み出し量・同一wave数でcycleだけが約9%増え、GL2C hit率も変わらない。
+  増えているのはL2 miss後の待ち時間であり、直前のattention kernelが残すDRAM側の状態
+  （page/bank、書き戻しの排出、Infinity Cacheの内容）が次のkernelに影響していると考える。
+- 手順:
+  1. **単体ベンチ**: attentionを含まない単体で、同じ形状（`K5120,N17408`と`K17408,N5120`、M=1、
+     本番と同じNVFP4 weight／activation／scale配置）のNVFP4 decodeを測り、本来の1 call時間を出す。
+     旧staged32が速くしているのか、他のattentionが遅くしているのかを決める。
+  2. **近傍の再現**: 同じ単体ベンチで、NVFP4 kernelの直前にKV読み出しだけを行うkernelを挟み、
+     旧staged32（query head単位で6回読む）とGQA共有（kv head単位で1回読む）のアクセス順・分割数を模したとき、
+     NVFP4の1 call時間が両条件で分かれるかを確認する。分かれれば直前kernelのアクセス順が原因と確定する。
+  3. **stall内訳**: 1と2で差が再現した条件について、`rocprof-compute`等でNVFP4 kernelのmemory stall内訳
+     （EA／MALL／DRAM待ち）を両条件で取得する。取得できない指標は「未取得」と記録する。
+- 受入条件: 原因を特定して根拠を示すか、特定できない場合はどこまで絞れたかを証拠付きで記録する。
+  性能の修正自体はこの作業単位に含めず、原因が分かった時点で別の作業単位として計画する。
+- 制約:
+  - 採用済みのWU1／WU1.1／WU2を戻さない。production sourceは変更せず、probe・test・計測ツールと履歴だけを扱う。
+  - [再計測履歴](../../../../../history/2026/09/11-20/phase87-idle-recheck.md)で既に排除した原因
+    （機材変化、クロック・電力、kernel code、起動設定、workspaceの大きさ、割り当て配置、code量・資源、
+    ROCTX、メモリ量とcache hit率、kernelの重なり）を再検証しない。
+  - 計測条件はV620・MTPなし・8192/128・1 warmup＋1 measuredのprofileを基準にし、
+    単体ベンチは300 ms継続warmupと同一process AB／BAを用いる。
+  - 新しい環境変数は追加しない（比較の対照に必要な切替のみ可、Gitで差し戻せる）。
+- 変更してよいファイル: `native/hip/tests/`または`native/lowp/tests/`の新規probe、`ci/tools/`の計測・集計script、
+  `docs/history/2026/09/11-20/`の新規履歴、この計画。CI hash manifestは触る必要があれば更新する。
+
+### WU-D2: 遅延の持続範囲とgfx1201での再現（WU-D1の続き）
+
+- **完了（2026-09-20）**。V620の遅延は32 dispatch後も残り、量子化／RMSNorm／1 MiB copyで回復しなかった。
+  R9700は同じprobeで非再現。MALL／DRAM内訳は未取得で、gfx1201のfetch等も0を返し使用不能だった。
+  n=2の重み再利用を修正してdecayを再計測し、全条件・数値検査を確認。
+  [WU-D2履歴](../../../../../history/2026/09/11-20/phase87-wu-d2.md)と[結果JSON](../../../../../history/2026/09/11-20/phase87-wu-d2-results.json)。
+
+WU-D1は「GQA型のKV読み出しの直後の1 NVFP4 dispatch」で差を再現した。一方、実モデルのtraceでは
+1 token内の168 NVFP4 dispatchすべてが遅く、full attentionのない層にも及ぶ。両者を結ぶ持続範囲を測る。
+
+- 手順:
+  1. **減衰の測定**: WU-D1のprobeを拡張し、GQA型のKV読み出し1回の後にNVFP4 M=1を連続n回（n=1,2,4,8,16,32）流し、
+     何回目で単独時の水準へ戻るかを両shapeで測る。staged型とisolatedを同じ条件の対照にする。
+  2. **介在kernelの影響**: 同じprobeで、GQA型の後にNVFP4以外の代表kernel（活性値量子化、RMSNorm相当の軽いkernel、
+     一定サイズのcopy）を挟んでからNVFP4を測り、介在処理で回復するかを見る。回復するなら実用的な緩和策の候補になる。
+  3. **gfx1201での再現**: 同じprobeをR9700で実行する。再計測ではR9700のNVFP4も約6%遅く、
+     gfx1201ではMALL／DRAM系counterや`rocprof-compute`が使える可能性があるため、物理機構の特定を試みる。
+     使えない場合は「未取得」と記録し、gfx1030の結論を一般化しない。
+- 受入条件: 持続範囲（何dispatch分か）と、gfx1201での再現有無を数値で記録する。物理機構を特定できない場合は、
+  WU-D1と同じく到達点と限界を記録して終える。性能修正はここに含めない。
+- 制約: WU-D1と同じ（production source不変、採用済みWUを戻さない、排除済み原因の再検証なし、
+  300 ms継続warmup＋同一process AB／BA、新しい環境変数を追加しない）。
+- 変更してよいファイル: WU-D1と同じ範囲（probe、`ci/tools/`、`docs/history/2026/09/11-20/`、この計画）。
+
+### WU-D3: decode attentionのKV読み出し方式による罰則の緩和（WU-D2の後）
+
+- **完了・3候補とも不採用（2026-09-20）**。C1 tile32とC3先読みはattentionが大幅に退行し、C2 block配置は単体でほぼ中立。
+  C2の実モデルはV620 MTPなし+0.344%／あり−0.093%、token一致。正味1%の採用基準・0.95 ms/tokenの打ち切り線に未達。
+  実attention harnessはD1/D2の合成readerの罰則を再現しないという限界を明記した。
+  両GPUの通常モデルと境界検査を記録し、本番sourceとbuild cacheを復元。現象の修正は採用していない。
+  [WU-D3履歴](../../../../../history/2026/09/11-20/phase87-wu-d3.md)と[結果JSON](../../../../../history/2026/09/11-20/phase87-wu-d3-results.json)。
+
+WU-D1で、GQA型のKV読み出しが後続のNVFP4 M=1を約9〜10%遅くすることが分かった。実モデルでの影響は
+V620で約1.9 ms/token（TPOT比約3%）、R9700で約1.0 ms/tokenに相当する。attention自体の短縮
+（V620で8.5 ms/token）を保ったまま、この罰則を減らせるかを試す。
+
+- 仮説: KV読み出しの順序・粒度（block当たりのtoken tile幅、KV headとsplitの割り当て、1 waveが触るアドレス間隔）が
+  後続kernelの待ち時間を左右する。読み出し総量と数値結果を変えずに、並びだけを変えれば緩和できる。
+- 候補（最大3、WU-D2の結果で絞る）:
+  - C1: stage1のKV読み出しをtoken方向の連続幅を広げた順序に変える（8-token tile→32/64-token tile等）。
+  - C2: split割り当てを変え、同時に動くblockが触るアドレス範囲を近づける／離す。
+  - C3: 読み出しと復号の間にprefetch距離を設け、outstanding requestの分布を変える。
+- 上限と打ち切り: 上限はNVFP4側の罰則の解消（V620で約1.9 ms/token）。attention自体が遅くなる分は差し引く。
+  半分（約0.95 ms/token）に届かなければ打ち切り、理由を記録する。
+- 採用基準: 「進め方の原則」の採用基準に従う。attentionとNVFP4を合わせた正味のTPOT短縮が1%以上で、
+  他のcontext長・M・GPUで退行しないこと。数値はN0（読み出し順だけの変更で累積順を保つ）を目指し、
+  変わる場合はN1の根拠を示す。
+- 計測: 単体ベンチ（attention単体とNVFP4を分けて記録し、合計も出す）と、両GPUのMTPなし・ありの通常8192/128。
+- 変更してよいファイル: `native/hip/src/causal_attention_kernel.hip.cpp`、`causal_attention_kernel_internal.hpp`、
+  `causal_attention_runtime.inc`、`crates/sllm-hip/src/kv_state.rs`のmetadata検査、対応するtest、
+  `docs/history/2026/09/11-20/`の新規履歴、CI hash manifest、この計画。
+  採用時は数値・出力影響変更台帳へ記録する。
+
+### D系統（WU-D1〜D3）の打ち切り（2026-09-20ユーザー決定）
+
+GQA型のKV読み出しが後続のNVFP4 M=1を約9〜10%遅くする現象について、これ以上の調査・緩和を行わない。
+
+- 到達点: 合成readerで再現（V620、32 dispatch以上持続、軽い介在処理で回復しない）。R9700の合成probeでは非再現。
+  EA busy cycleの増加までは観測したが、MALL／DRAMの内訳は両GPUのcounterに存在せず物理機構は未特定。
+  緩和3候補はattention側の退行が大きく、最も中立なC2も実モデルで+0.344%／−0.093%と採用基準に届かなかった。
+- 打ち切りの理由: 影響はV620で約1.9 ms/token（TPOT比約3%）、R9700で約1.0 ms/tokenで、残る候補より小さい。
+  特定に必要なcounterがROCm 7.14のgfx1030／gfx1201 catalogにない。緩和候補の費用が利益を上回る。
+- 再開の条件: 新しい計測手段（MALL／DRAM内訳を取得できるtoolやGPU）が使えるようになった場合、
+  または実attentionのdata flowで罰則を再現するharnessが用意できた場合に限り、前提を変えて再検討する。
+- 引き継ぎ: 後続のNVFP4最適化では、isolated値ではなく実モデルのGQA先行条件を対照に使う
+  （[WU-D1](../../../../../history/2026/09/11-20/phase87-wu-d1.md)の指摘）。
 
 ### 後続の作業単位（WU2の後に具体化する）
 

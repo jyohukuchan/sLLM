@@ -1,0 +1,2230 @@
+{
+  "schema": "phase87-wu-d1-v1",
+  "state": "COMPLETE_INVESTIGATION",
+  "target": "gfx1030",
+  "gpu_uuid": "GPU-76a08c022586fed6",
+  "production_changed": false,
+  "scope": "No performance fix. Attribute the observed regression to synthetic predecessor family; physical MALL/DRAM mechanism remains unproven.",
+  "build": {
+    "sources": {
+      "native/hip/tests/phase87_wud1_nvfp4_neighbor_probe.hip.cpp": "36aa4e511e74f13743401446a18e2a64272855b4908ad05c1f0004055a2e219b",
+      "native/lowp/src/lowp_kernel.hip.cpp": "34cf81e77d8fb04e3cc7d2799fa6d0f7c74fbc493f5ddbfba7899e53c9a21043",
+      "native/lowp/src/nvfp4_decode_scale_lut.inc": "e4606024ea3312a89cf057789df9d6a9934ffd84bf8be5be7552cf8718990c95",
+      "native/lowp/include/lowp/detail/lowp_kernel_internal.hpp": "4a666efe198896908e012a39107d7a415ec0e58033dd531a5f8a16fe42030dbf",
+      ".local-artifacts/phase87/wu-d1/build.sh": "986ac561e2e0198f186ca59bda4150585e205e016255f0676ad26c2f17641e91"
+    },
+    "library": {
+      "path": ".local-artifacts/lowp-boundary/build/sLLM/gfx1030/release/build/sllm-hip-sys-0f6f9ebc80964eda/out/native-hip-build-gfx1030/lowp/libsllm_lowp.a",
+      "sha256": "f0c84cb02c5c3eb390327ea38599af4deacdf8d8c81aed5314ea94318cc81f5f"
+    },
+    "binary": {
+      "path": ".local-artifacts/phase87/wu-d1/probe-gfx1030",
+      "sha256": "5e602d185ccc48122e6e96514e7deebb228b61e2dcdab5d2a911ecc9957bc1a1"
+    },
+    "compiler": "AMD clang version 23.0.0git (https://github.com/ROCm/llvm-project.git 46fcb339fb61119b337f973c7ca9e710a319fdd0+PATCHED:440716f8b87be9d8e20ed910e10e5b6d14d57cf6)\nTarget: x86_64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /opt/rocm/core-7.14/lib/llvm/bin\n",
+    "target": "gfx1030",
+    "gpu_uuid": "GPU-76a08c022586fed6"
+  },
+  "event_timings": {
+    "state": "PASS",
+    "input": ".local-artifacts/phase87/wu-d1/probe-all.log",
+    "input_sha256": "f286818ce19d4efc78f04e90f7f5c00cc314f358343651d6eae1618b465badf3",
+    "metadata": {
+      "probe": "phase87_wud1_nvfp4_neighbor",
+      "target": "gfx1030",
+      "context": "8256",
+      "kv_heads": "4",
+      "qheads_per_kv": "6",
+      "kv_values_bytes": "8454144",
+      "kv_scales_bytes": "264192",
+      "kv_total_bytes": "17436672",
+      "synthetic_predecessor": "true",
+      "warmup_ms": "300",
+      "rounds": "3",
+      "samples": "9",
+      "weight_pool": "4"
+    },
+    "sample_count": 540,
+    "correctness_checks": {
+      "numerical_oracle": [
+        {
+          "shape": "wide-k5120-n17408",
+          "columns": "37",
+          "max_ulp": "0",
+          "status": "PASS"
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "columns": "37",
+          "max_ulp": "0",
+          "status": "PASS"
+        }
+      ],
+      "output_compare": [
+        {
+          "shape": "wide-k5120-n17408",
+          "label": "isolated",
+          "mismatches": "0",
+          "max_ulp": "0",
+          "max_abs": "0",
+          "status": "PASS"
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "label": "staged32-qhead6-split32",
+          "mismatches": "0",
+          "max_ulp": "0",
+          "max_abs": "0",
+          "status": "PASS"
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "label": "gqa-kvhead1-split32",
+          "mismatches": "0",
+          "max_ulp": "0",
+          "max_abs": "0",
+          "status": "PASS"
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "label": "staged128-qhead6-split128",
+          "mismatches": "0",
+          "max_ulp": "0",
+          "max_abs": "0",
+          "status": "PASS"
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "label": "gqa-kvhead1-split128",
+          "mismatches": "0",
+          "max_ulp": "0",
+          "max_abs": "0",
+          "status": "PASS"
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "label": "isolated",
+          "mismatches": "0",
+          "max_ulp": "0",
+          "max_abs": "0",
+          "status": "PASS"
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "label": "staged32-qhead6-split32",
+          "mismatches": "0",
+          "max_ulp": "0",
+          "max_abs": "0",
+          "status": "PASS"
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "label": "gqa-kvhead1-split32",
+          "mismatches": "0",
+          "max_ulp": "0",
+          "max_abs": "0",
+          "status": "PASS"
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "label": "staged128-qhead6-split128",
+          "mismatches": "0",
+          "max_ulp": "0",
+          "max_abs": "0",
+          "status": "PASS"
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "label": "gqa-kvhead1-split128",
+          "mismatches": "0",
+          "max_ulp": "0",
+          "max_abs": "0",
+          "status": "PASS"
+        }
+      ],
+      "predecessor_oracle": [
+        {
+          "mode": "staged32-qhead6-split32",
+          "blocks": "768",
+          "status": "PASS"
+        },
+        {
+          "mode": "gqa-kvhead1-split32",
+          "blocks": "128",
+          "status": "PASS"
+        },
+        {
+          "mode": "staged128-qhead6-split128",
+          "blocks": "3072",
+          "status": "PASS"
+        },
+        {
+          "mode": "gqa-kvhead1-split128",
+          "blocks": "512",
+          "status": "PASS"
+        },
+        {
+          "mode": "staged32-qhead6-split32",
+          "blocks": "768",
+          "status": "PASS"
+        },
+        {
+          "mode": "gqa-kvhead1-split32",
+          "blocks": "128",
+          "status": "PASS"
+        },
+        {
+          "mode": "staged128-qhead6-split128",
+          "blocks": "3072",
+          "status": "PASS"
+        },
+        {
+          "mode": "gqa-kvhead1-split128",
+          "blocks": "512",
+          "status": "PASS"
+        }
+      ]
+    },
+    "summary": [
+      {
+        "shape": "down-k17408-n5120",
+        "mode": "gqa-kvhead1-split128",
+        "median_of_cell_medians_us": 134.9615,
+        "min_cell_us": 134.641,
+        "max_cell_us": 137.321,
+        "cells": 6
+      },
+      {
+        "shape": "down-k17408-n5120",
+        "mode": "gqa-kvhead1-split32",
+        "median_of_cell_medians_us": 134.6015,
+        "min_cell_us": 133.682,
+        "max_cell_us": 139.401,
+        "cells": 6
+      },
+      {
+        "shape": "down-k17408-n5120",
+        "mode": "isolated",
+        "median_of_cell_medians_us": 123.481,
+        "min_cell_us": 122.681,
+        "max_cell_us": 124.081,
+        "cells": 6
+      },
+      {
+        "shape": "down-k17408-n5120",
+        "mode": "staged128-qhead6-split128",
+        "median_of_cell_medians_us": 123.92099999999999,
+        "min_cell_us": 123.281,
+        "max_cell_us": 125.562,
+        "cells": 6
+      },
+      {
+        "shape": "down-k17408-n5120",
+        "mode": "staged32-qhead6-split32",
+        "median_of_cell_medians_us": 123.4615,
+        "min_cell_us": 122.881,
+        "max_cell_us": 123.961,
+        "cells": 6
+      },
+      {
+        "shape": "wide-k5120-n17408",
+        "mode": "gqa-kvhead1-split128",
+        "median_of_cell_medians_us": 136.262,
+        "min_cell_us": 135.761,
+        "max_cell_us": 136.481,
+        "cells": 6
+      },
+      {
+        "shape": "wide-k5120-n17408",
+        "mode": "gqa-kvhead1-split32",
+        "median_of_cell_medians_us": 136.12150000000003,
+        "min_cell_us": 135.361,
+        "max_cell_us": 136.641,
+        "cells": 6
+      },
+      {
+        "shape": "wide-k5120-n17408",
+        "mode": "isolated",
+        "median_of_cell_medians_us": 123.501,
+        "min_cell_us": 123.361,
+        "max_cell_us": 123.961,
+        "cells": 6
+      },
+      {
+        "shape": "wide-k5120-n17408",
+        "mode": "staged128-qhead6-split128",
+        "median_of_cell_medians_us": 123.92099999999999,
+        "min_cell_us": 122.761,
+        "max_cell_us": 124.961,
+        "cells": 6
+      },
+      {
+        "shape": "wide-k5120-n17408",
+        "mode": "staged32-qhead6-split32",
+        "median_of_cell_medians_us": 124.501,
+        "min_cell_us": 123.721,
+        "max_cell_us": 124.881,
+        "cells": 6
+      }
+    ],
+    "paired_comparisons": [
+      {
+        "shape": "down-k17408-n5120",
+        "control": "isolated",
+        "candidate": "staged32-qhead6-split32",
+        "pairs": [
+          {
+            "round": 0,
+            "order": "AB",
+            "delta_us": -0.03900000000000148,
+            "ratio": 0.9996838547028639
+          },
+          {
+            "round": 0,
+            "order": "BA",
+            "delta_us": 0.9200000000000017,
+            "ratio": 1.007499123743693
+          },
+          {
+            "round": 1,
+            "order": "AB",
+            "delta_us": -0.03999999999999204,
+            "ratio": 0.9996751163489576
+          },
+          {
+            "round": 1,
+            "order": "BA",
+            "delta_us": -1.2000000000000028,
+            "ratio": 0.9903288980585263
+          },
+          {
+            "round": 2,
+            "order": "AB",
+            "delta_us": 0.03999999999999204,
+            "ratio": 1.0003227862912663
+          },
+          {
+            "round": 2,
+            "order": "BA",
+            "delta_us": 0.3200000000000074,
+            "ratio": 1.0025889758173478
+          }
+        ],
+        "median_delta_us": 0.000499999999995282,
+        "median_ratio": 1.000003320497065
+      },
+      {
+        "shape": "down-k17408-n5120",
+        "control": "isolated",
+        "candidate": "gqa-kvhead1-split32",
+        "pairs": [
+          {
+            "round": 0,
+            "order": "AB",
+            "delta_us": 16.040000000000006,
+            "ratio": 1.1300248863092874
+          },
+          {
+            "round": 0,
+            "order": "BA",
+            "delta_us": 11.200000000000003,
+            "ratio": 1.0912936803580016
+          },
+          {
+            "round": 1,
+            "order": "AB",
+            "delta_us": 10.76100000000001,
+            "ratio": 1.0874018242217007
+          },
+          {
+            "round": 1,
+            "order": "BA",
+            "delta_us": 11.36,
+            "ratio": 1.0915530983792845
+          },
+          {
+            "round": 2,
+            "order": "AB",
+            "delta_us": 9.760999999999981,
+            "ratio": 1.0787679247262367
+          },
+          {
+            "round": 2,
+            "order": "BA",
+            "delta_us": 11.719999999999999,
+            "ratio": 1.0948212393103616
+          }
+        ],
+        "median_delta_us": 11.280000000000001,
+        "median_ratio": 1.091423389368643
+      },
+      {
+        "shape": "down-k17408-n5120",
+        "control": "isolated",
+        "candidate": "gqa-kvhead1-split128",
+        "pairs": [
+          {
+            "round": 0,
+            "order": "AB",
+            "delta_us": 11.521,
+            "ratio": 1.0933925632898567
+          },
+          {
+            "round": 0,
+            "order": "BA",
+            "delta_us": 14.64,
+            "ratio": 1.119333882182245
+          },
+          {
+            "round": 1,
+            "order": "AB",
+            "delta_us": 12.161000000000016,
+            "ratio": 1.0987727520081871
+          },
+          {
+            "round": 1,
+            "order": "BA",
+            "delta_us": 10.559999999999988,
+            "ratio": 1.0851056970849686
+          },
+          {
+            "round": 2,
+            "order": "AB",
+            "delta_us": 11.11999999999999,
+            "ratio": 1.0897345889720063
+          },
+          {
+            "round": 2,
+            "order": "BA",
+            "delta_us": 11.200999999999993,
+            "ratio": 1.0906222441566007
+          }
+        ],
+        "median_delta_us": 11.360999999999997,
+        "median_ratio": 1.0920074037232288
+      },
+      {
+        "shape": "down-k17408-n5120",
+        "control": "staged32-qhead6-split32",
+        "candidate": "gqa-kvhead1-split32",
+        "pairs": [
+          {
+            "round": 0,
+            "order": "AB",
+            "delta_us": 16.079000000000008,
+            "ratio": 1.1303822513420152
+          },
+          {
+            "round": 0,
+            "order": "BA",
+            "delta_us": 10.280000000000001,
+            "ratio": 1.0831708481322966
+          },
+          {
+            "round": 1,
+            "order": "AB",
+            "delta_us": 10.801000000000002,
+            "ratio": 1.0877552181084003
+          },
+          {
+            "round": 1,
+            "order": "BA",
+            "delta_us": 12.560000000000002,
+            "ratio": 1.1022127098575045
+          },
+          {
+            "round": 2,
+            "order": "AB",
+            "delta_us": 9.72099999999999,
+            "ratio": 1.0784198255903066
+          },
+          {
+            "round": 2,
+            "order": "BA",
+            "delta_us": 11.399999999999991,
+            "ratio": 1.0919940930108698
+          }
+        ],
+        "median_delta_us": 11.100499999999997,
+        "median_ratio": 1.089874655559635
+      },
+      {
+        "shape": "down-k17408-n5120",
+        "control": "staged32-qhead6-split32",
+        "candidate": "gqa-kvhead1-split128",
+        "pairs": [
+          {
+            "round": 0,
+            "order": "AB",
+            "delta_us": 11.560000000000002,
+            "ratio": 1.093738343523459
+          },
+          {
+            "round": 0,
+            "order": "BA",
+            "delta_us": 13.719999999999999,
+            "ratio": 1.111002338168785
+          },
+          {
+            "round": 1,
+            "order": "AB",
+            "delta_us": 12.201000000000008,
+            "ratio": 1.0991298413240063
+          },
+          {
+            "round": 1,
+            "order": "BA",
+            "delta_us": 11.759999999999991,
+            "ratio": 1.095702346172313
+          },
+          {
+            "round": 2,
+            "order": "AB",
+            "delta_us": 11.079999999999998,
+            "ratio": 1.0893829510894555
+          },
+          {
+            "round": 2,
+            "order": "BA",
+            "delta_us": 10.880999999999986,
+            "ratio": 1.0878059408816907
+          }
+        ],
+        "median_delta_us": 11.659999999999997,
+        "median_ratio": 1.094720344847886
+      },
+      {
+        "shape": "wide-k5120-n17408",
+        "control": "isolated",
+        "candidate": "staged32-qhead6-split32",
+        "pairs": [
+          {
+            "round": 0,
+            "order": "AB",
+            "delta_us": 0.3999999999999915,
+            "ratio": 1.003242515868062
+          },
+          {
+            "round": 0,
+            "order": "BA",
+            "delta_us": 1.4000000000000057,
+            "ratio": 1.0113451268628293
+          },
+          {
+            "round": 1,
+            "order": "AB",
+            "delta_us": -0.23999999999999488,
+            "ratio": 0.9980639071966183
+          },
+          {
+            "round": 1,
+            "order": "BA",
+            "delta_us": 1.3199999999999932,
+            "ratio": 1.0106829824944763
+          },
+          {
+            "round": 2,
+            "order": "AB",
+            "delta_us": 1.2000000000000028,
+            "ratio": 1.0097212433470242
+          },
+          {
+            "round": 2,
+            "order": "BA",
+            "delta_us": 0.7600000000000051,
+            "ratio": 1.006148817566201
+          }
+        ],
+        "median_delta_us": 0.980000000000004,
+        "median_ratio": 1.0079350304566126
+      },
+      {
+        "shape": "wide-k5120-n17408",
+        "control": "isolated",
+        "candidate": "gqa-kvhead1-split32",
+        "pairs": [
+          {
+            "round": 0,
+            "order": "AB",
+            "delta_us": 11.999999999999986,
+            "ratio": 1.0972754760418608
+          },
+          {
+            "round": 0,
+            "order": "BA",
+            "delta_us": 13.239999999999995,
+            "ratio": 1.1072924854741857
+          },
+          {
+            "round": 1,
+            "order": "AB",
+            "delta_us": 12.399999999999991,
+            "ratio": 1.1000314615080549
+          },
+          {
+            "round": 1,
+            "order": "BA",
+            "delta_us": 12.439999999999998,
+            "ratio": 1.1006790168418839
+          },
+          {
+            "round": 2,
+            "order": "AB",
+            "delta_us": 12.680000000000007,
+            "ratio": 1.1027211380335546
+          },
+          {
+            "round": 2,
+            "order": "BA",
+            "delta_us": 12.521000000000015,
+            "ratio": 1.1013017694031604
+          }
+        ],
+        "median_delta_us": 12.480500000000006,
+        "median_ratio": 1.100990393122522
+      },
+      {
+        "shape": "wide-k5120-n17408",
+        "control": "isolated",
+        "candidate": "gqa-kvhead1-split128",
+        "pairs": [
+          {
+            "round": 0,
+            "order": "AB",
+            "delta_us": 12.399999999999991,
+            "ratio": 1.1005179919099228
+          },
+          {
+            "round": 0,
+            "order": "BA",
+            "delta_us": 12.36,
+            "ratio": 1.100161262874693
+          },
+          {
+            "round": 1,
+            "order": "AB",
+            "delta_us": 12.161000000000016,
+            "ratio": 1.0981034357580208
+          },
+          {
+            "round": 1,
+            "order": "BA",
+            "delta_us": 12.919999999999987,
+            "ratio": 1.104563737748966
+          },
+          {
+            "round": 2,
+            "order": "AB",
+            "delta_us": 13.0,
+            "ratio": 1.1053134695927609
+          },
+          {
+            "round": 2,
+            "order": "BA",
+            "delta_us": 12.800999999999988,
+            "ratio": 1.1035671232433393
+          }
+        ],
+        "median_delta_us": 12.60049999999999,
+        "median_ratio": 1.102042557576631
+      },
+      {
+        "shape": "wide-k5120-n17408",
+        "control": "staged32-qhead6-split32",
+        "candidate": "gqa-kvhead1-split32",
+        "pairs": [
+          {
+            "round": 0,
+            "order": "AB",
+            "delta_us": 11.599999999999994,
+            "ratio": 1.09372904226695
+          },
+          {
+            "round": 0,
+            "order": "BA",
+            "delta_us": 11.83999999999999,
+            "ratio": 1.094871034687222
+          },
+          {
+            "round": 1,
+            "order": "AB",
+            "delta_us": 12.639999999999986,
+            "ratio": 1.1021653559217917
+          },
+          {
+            "round": 1,
+            "order": "BA",
+            "delta_us": 11.120000000000005,
+            "ratio": 1.0890447706216317
+          },
+          {
+            "round": 2,
+            "order": "AB",
+            "delta_us": 11.480000000000004,
+            "ratio": 1.0921045241934837
+          },
+          {
+            "round": 2,
+            "order": "BA",
+            "delta_us": 11.76100000000001,
+            "ratio": 1.0945714492485588
+          }
+        ],
+        "median_delta_us": 11.680500000000002,
+        "median_ratio": 1.0941502457577543
+      },
+      {
+        "shape": "wide-k5120-n17408",
+        "control": "staged32-qhead6-split32",
+        "candidate": "gqa-kvhead1-split128",
+        "pairs": [
+          {
+            "round": 0,
+            "order": "AB",
+            "delta_us": 12.0,
+            "ratio": 1.0969610782071897
+          },
+          {
+            "round": 0,
+            "order": "BA",
+            "delta_us": 10.959999999999994,
+            "ratio": 1.0878198091361446
+          },
+          {
+            "round": 1,
+            "order": "AB",
+            "delta_us": 12.40100000000001,
+            "ratio": 1.1002335900938403
+          },
+          {
+            "round": 1,
+            "order": "BA",
+            "delta_us": 11.599999999999994,
+            "ratio": 1.0928884297851553
+          },
+          {
+            "round": 2,
+            "order": "AB",
+            "delta_us": 11.799999999999997,
+            "ratio": 1.0946718976901662
+          },
+          {
+            "round": 2,
+            "order": "BA",
+            "delta_us": 12.040999999999983,
+            "ratio": 1.0968229589662353
+          }
+        ],
+        "median_delta_us": 11.899999999999999,
+        "median_ratio": 1.0957474283282007
+      }
+    ],
+    "caveat": "Synthetic KV reader, not full attention. Event timings and profiled kernel timings have different observation overhead."
+  },
+  "profiles": {
+    "trace": {
+      "state": "PASS",
+      "selected_dispatches": 160,
+      "summary": [
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "gqa-kvhead1-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 124.80381249999999
+          },
+          "median": {
+            "kernel_us": 123.941
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "gqa-kvhead1-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 126.96625
+          },
+          "median": {
+            "kernel_us": 127.221
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "isolated",
+          "count": 16,
+          "mean": {
+            "kernel_us": 112.506125
+          },
+          "median": {
+            "kernel_us": 112.1015
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "staged128-qhead6-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.0585625
+          },
+          "median": {
+            "kernel_us": 112.8415
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "staged32-qhead6-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 112.601125
+          },
+          "median": {
+            "kernel_us": 112.441
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "gqa-kvhead1-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 124.7710625
+          },
+          "median": {
+            "kernel_us": 124.64099999999999
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "gqa-kvhead1-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.1038125
+          },
+          "median": {
+            "kernel_us": 125.281
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "isolated",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.111
+          },
+          "median": {
+            "kernel_us": 113.101
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "staged128-qhead6-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 112.7086875
+          },
+          "median": {
+            "kernel_us": 112.301
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "staged32-qhead6-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.2160625
+          },
+          "median": {
+            "kernel_us": 113.061
+          }
+        }
+      ],
+      "hashes": {
+        ".local-artifacts/phase87/wu-d1/profiles/trace/stdout.log": "1ca3c16aa6590bff0c829c1e3ee989bc30fc7c8a888422e2cf04fb3e2dfafacb",
+        ".local-artifacts/phase87/wu-d1/profiles/trace/traces/homelab1-WRX80-Creator/3089947_kernel_trace.csv": "6b42ffb1e16152410b41f4df56540e7361ec3ad48a56285ac93344bfeefa417d"
+      },
+      "interpretation": "Profiled diagnostic counters; EA busy and wave wait do not identify MALL/DRAM latency."
+    },
+    "fetch": {
+      "state": "PASS",
+      "selected_dispatches": 160,
+      "summary": [
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "gqa-kvhead1-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 128.046625,
+            "FETCH_SIZE": 57879.28125,
+            "GRBM_COUNT": 337559.1875
+          },
+          "median": {
+            "kernel_us": 127.12200000000001,
+            "FETCH_SIZE": 57828.25,
+            "GRBM_COUNT": 335515.0
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "gqa-kvhead1-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 126.50631249999999,
+            "FETCH_SIZE": 57603.9296875,
+            "GRBM_COUNT": 333993.125
+          },
+          "median": {
+            "kernel_us": 126.381,
+            "FETCH_SIZE": 57574.75,
+            "GRBM_COUNT": 333253.0
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "isolated",
+          "count": 16,
+          "mean": {
+            "kernel_us": 115.51625,
+            "FETCH_SIZE": 57514.6640625,
+            "GRBM_COUNT": 306726.125
+          },
+          "median": {
+            "kernel_us": 115.30099999999999,
+            "FETCH_SIZE": 57492.5625,
+            "GRBM_COUNT": 306080.0
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "staged128-qhead6-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 114.1861875,
+            "FETCH_SIZE": 57410.71875,
+            "GRBM_COUNT": 303474.0625
+          },
+          "median": {
+            "kernel_us": 114.5415,
+            "FETCH_SIZE": 57417.625,
+            "GRBM_COUNT": 304276.0
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "staged32-qhead6-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.43112500000001,
+            "FETCH_SIZE": 57401.9140625,
+            "GRBM_COUNT": 301387.1875
+          },
+          "median": {
+            "kernel_us": 113.5615,
+            "FETCH_SIZE": 57380.875,
+            "GRBM_COUNT": 301409.5
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "gqa-kvhead1-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.4289375,
+            "FETCH_SIZE": 58968.4921875,
+            "GRBM_COUNT": 330889.875
+          },
+          "median": {
+            "kernel_us": 125.4615,
+            "FETCH_SIZE": 58966.875,
+            "GRBM_COUNT": 330976.0
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "gqa-kvhead1-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.92637500000001,
+            "FETCH_SIZE": 58904.6015625,
+            "GRBM_COUNT": 333037.875
+          },
+          "median": {
+            "kernel_us": 126.1215,
+            "FETCH_SIZE": 58892.6875,
+            "GRBM_COUNT": 332626.0
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "isolated",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.363625,
+            "FETCH_SIZE": 58900.9375,
+            "GRBM_COUNT": 301539.25
+          },
+          "median": {
+            "kernel_us": 113.22149999999999,
+            "FETCH_SIZE": 58879.25,
+            "GRBM_COUNT": 301511.0
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "staged128-qhead6-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.4986875,
+            "FETCH_SIZE": 59056.4921875,
+            "GRBM_COUNT": 301484.1875
+          },
+          "median": {
+            "kernel_us": 113.6815,
+            "FETCH_SIZE": 59064.375,
+            "GRBM_COUNT": 301660.0
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "staged32-qhead6-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.6361875,
+            "FETCH_SIZE": 58808.796875,
+            "GRBM_COUNT": 301812.4375
+          },
+          "median": {
+            "kernel_us": 113.5215,
+            "FETCH_SIZE": 58805.9375,
+            "GRBM_COUNT": 301491.0
+          }
+        }
+      ],
+      "hashes": {
+        ".local-artifacts/phase87/wu-d1/profiles/fetch/stdout.log": "e0b2a248332fa6cf8c4d5604ca8241341ad3c336078d0b8f7c3b029d97708da7",
+        ".local-artifacts/phase87/wu-d1/profiles/fetch/traces/homelab1-WRX80-Creator/3090334_kernel_trace.csv": "46eb955ed02d7d8e4059f10f69637e411246a2a4d830e11739fa706fae817288",
+        ".local-artifacts/phase87/wu-d1/profiles/fetch/traces/homelab1-WRX80-Creator/3090334_counter_collection.csv": "05cbace1512ca1ca3fc87765dd742519a3d9f9c95365c4527822ce84d76cd1ff"
+      },
+      "interpretation": "Profiled diagnostic counters; EA busy and wave wait do not identify MALL/DRAM latency."
+    },
+    "cache": {
+      "state": "PASS",
+      "selected_dispatches": 160,
+      "summary": [
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "gqa-kvhead1-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 127.029125,
+            "GRBM_COUNT": 334952.9375,
+            "GRBM_GUI_ACTIVE": 334952.9375,
+            "L2CacheHit": 14.9241655,
+            "MemUnitBusy": 87.6830196875
+          },
+          "median": {
+            "kernel_us": 126.382,
+            "GRBM_COUNT": 333235.5,
+            "GRBM_GUI_ACTIVE": 333235.5,
+            "L2CacheHit": 14.94612,
+            "MemUnitBusy": 89.1574765
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "gqa-kvhead1-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.901375,
+            "GRBM_COUNT": 332268.8125,
+            "GRBM_GUI_ACTIVE": 332268.8125,
+            "L2CacheHit": 15.033897,
+            "MemUnitBusy": 88.0722049375
+          },
+          "median": {
+            "kernel_us": 125.52099999999999,
+            "GRBM_COUNT": 331168.0,
+            "GRBM_GUI_ACTIVE": 331168.0,
+            "L2CacheHit": 15.030142000000001,
+            "MemUnitBusy": 87.94455450000001
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "isolated",
+          "count": 16,
+          "mean": {
+            "kernel_us": 116.4788125,
+            "GRBM_COUNT": 309111.4375,
+            "GRBM_GUI_ACTIVE": 309111.4375,
+            "L2CacheHit": 15.3339371875,
+            "MemUnitBusy": 85.74586425
+          },
+          "median": {
+            "kernel_us": 116.64099999999999,
+            "GRBM_COUNT": 308834.5,
+            "GRBM_GUI_ACTIVE": 308834.5,
+            "L2CacheHit": 15.45083,
+            "MemUnitBusy": 87.04678
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "staged128-qhead6-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.6938125,
+            "GRBM_COUNT": 301972.0,
+            "GRBM_GUI_ACTIVE": 301972.0,
+            "L2CacheHit": 15.4704323125,
+            "MemUnitBusy": 86.14102762499999
+          },
+          "median": {
+            "kernel_us": 113.221,
+            "GRBM_COUNT": 301342.0,
+            "GRBM_GUI_ACTIVE": 301342.0,
+            "L2CacheHit": 15.522558499999999,
+            "MemUnitBusy": 87.0071415
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "staged32-qhead6-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.658875,
+            "GRBM_COUNT": 302005.5625,
+            "GRBM_GUI_ACTIVE": 302005.5625,
+            "L2CacheHit": 15.539709125,
+            "MemUnitBusy": 86.771975875
+          },
+          "median": {
+            "kernel_us": 113.46199999999999,
+            "GRBM_COUNT": 301399.0,
+            "GRBM_GUI_ACTIVE": 301399.0,
+            "L2CacheHit": 15.500519,
+            "MemUnitBusy": 87.4763545
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "gqa-kvhead1-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.0665,
+            "GRBM_COUNT": 329793.1875,
+            "GRBM_GUI_ACTIVE": 329793.1875,
+            "L2CacheHit": 15.12481125,
+            "MemUnitBusy": 88.361692375
+          },
+          "median": {
+            "kernel_us": 124.92150000000001,
+            "GRBM_COUNT": 329527.0,
+            "GRBM_GUI_ACTIVE": 329527.0,
+            "L2CacheHit": 15.118534499999999,
+            "MemUnitBusy": 88.2765425
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "gqa-kvhead1-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.4015,
+            "GRBM_COUNT": 330830.8125,
+            "GRBM_GUI_ACTIVE": 330830.8125,
+            "L2CacheHit": 15.204575,
+            "MemUnitBusy": 89.4040584375
+          },
+          "median": {
+            "kernel_us": 125.422,
+            "GRBM_COUNT": 330839.5,
+            "GRBM_GUI_ACTIVE": 330839.5,
+            "L2CacheHit": 15.178056000000002,
+            "MemUnitBusy": 89.4907275
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "isolated",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.6236875,
+            "GRBM_COUNT": 302176.9375,
+            "GRBM_GUI_ACTIVE": 302176.9375,
+            "L2CacheHit": 15.181344625,
+            "MemUnitBusy": 88.207706
+          },
+          "median": {
+            "kernel_us": 113.661,
+            "GRBM_COUNT": 302205.5,
+            "GRBM_GUI_ACTIVE": 302205.5,
+            "L2CacheHit": 15.1377785,
+            "MemUnitBusy": 88.87234699999999
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "staged128-qhead6-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.0861875,
+            "GRBM_COUNT": 300132.0,
+            "GRBM_GUI_ACTIVE": 300132.0,
+            "L2CacheHit": 15.023586375,
+            "MemUnitBusy": 88.20977425
+          },
+          "median": {
+            "kernel_us": 112.521,
+            "GRBM_COUNT": 298615.0,
+            "GRBM_GUI_ACTIVE": 298615.0,
+            "L2CacheHit": 15.0184675,
+            "MemUnitBusy": 88.616243
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "staged32-qhead6-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.4863125,
+            "GRBM_COUNT": 301628.75,
+            "GRBM_GUI_ACTIVE": 301628.75,
+            "L2CacheHit": 15.3288503125,
+            "MemUnitBusy": 88.2864379375
+          },
+          "median": {
+            "kernel_us": 113.501,
+            "GRBM_COUNT": 301612.5,
+            "GRBM_GUI_ACTIVE": 301612.5,
+            "L2CacheHit": 15.325475,
+            "MemUnitBusy": 88.668008
+          }
+        }
+      ],
+      "hashes": {
+        ".local-artifacts/phase87/wu-d1/profiles/cache/stdout.log": "34c8b1e3530752f6832f7c664a5136fc754a6f74ffebf91f5546109e7695eea8",
+        ".local-artifacts/phase87/wu-d1/profiles/cache/traces/homelab1-WRX80-Creator/3090856_kernel_trace.csv": "bb5841ccf2a88f20a08d5777de2e1c96cd99b7560a052caeaaf36001e21d7489",
+        ".local-artifacts/phase87/wu-d1/profiles/cache/traces/homelab1-WRX80-Creator/3090856_counter_collection.csv": "b9d91b292c1ba7f40f7f074543fccb5d3c383d31ceeeb815e35d20e71ce91041"
+      },
+      "interpretation": "Profiled diagnostic counters; EA busy and wave wait do not identify MALL/DRAM latency."
+    },
+    "instruction": {
+      "state": "PASS",
+      "selected_dispatches": 160,
+      "summary": [
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "gqa-kvhead1-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 127.3989375,
+            "GRBM_COUNT": 334446.8125,
+            "SQ_INSTS_SMEM": 728975.875,
+            "SQ_INSTS_VALU": 21604260.625,
+            "SQ_INST_CYCLES_VMEM": 2830151.625,
+            "SQ_WAVES": 1280.0
+          },
+          "median": {
+            "kernel_us": 126.5815,
+            "GRBM_COUNT": 333309.0,
+            "SQ_INSTS_SMEM": 20081.0,
+            "SQ_INSTS_VALU": 21775185.5,
+            "SQ_INST_CYCLES_VMEM": 1652233.5,
+            "SQ_WAVES": 1280.0
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "gqa-kvhead1-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 124.20400000000001,
+            "GRBM_COUNT": 326957.375,
+            "SQ_INSTS_SMEM": 1043664.75,
+            "SQ_INSTS_VALU": 21443385.75,
+            "SQ_INST_CYCLES_VMEM": 2806482.5625,
+            "SQ_WAVES": 1280.0
+          },
+          "median": {
+            "kernel_us": 124.0615,
+            "GRBM_COUNT": 326803.5,
+            "SQ_INSTS_SMEM": 14609.0,
+            "SQ_INSTS_VALU": 21567213.5,
+            "SQ_INST_CYCLES_VMEM": 1619353.5,
+            "SQ_WAVES": 1280.0
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "isolated",
+          "count": 16,
+          "mean": {
+            "kernel_us": 114.224,
+            "GRBM_COUNT": 302220.625,
+            "SQ_INSTS_SMEM": 761107.625,
+            "SQ_INSTS_VALU": 10553710.375,
+            "SQ_INST_CYCLES_VMEM": 2076522.1875,
+            "SQ_WAVES": 1280.0
+          },
+          "median": {
+            "kernel_us": 114.4615,
+            "GRBM_COUNT": 302622.5,
+            "SQ_INSTS_SMEM": 12800.0,
+            "SQ_INSTS_VALU": 8923200.0,
+            "SQ_INST_CYCLES_VMEM": 780480.0,
+            "SQ_WAVES": 1280.0
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "staged128-qhead6-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 114.3440625,
+            "GRBM_COUNT": 302213.4375,
+            "SQ_INSTS_SMEM": 753390.5,
+            "SQ_INSTS_VALU": 13604998.0625,
+            "SQ_INST_CYCLES_VMEM": 4467944.9375,
+            "SQ_WAVES": 1280.0
+          },
+          "median": {
+            "kernel_us": 113.862,
+            "GRBM_COUNT": 301312.5,
+            "SQ_INSTS_SMEM": 17635.0,
+            "SQ_INSTS_VALU": 12889627.5,
+            "SQ_INST_CYCLES_VMEM": 3616581.0,
+            "SQ_WAVES": 1280.0
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "staged32-qhead6-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.603875,
+            "GRBM_COUNT": 300335.625,
+            "SQ_INSTS_SMEM": 221902.5,
+            "SQ_INSTS_VALU": 13846826.75,
+            "SQ_INST_CYCLES_VMEM": 4648003.8125,
+            "SQ_WAVES": 1280.0
+          },
+          "median": {
+            "kernel_us": 113.402,
+            "GRBM_COUNT": 299730.0,
+            "SQ_INSTS_SMEM": 14034.0,
+            "SQ_INSTS_VALU": 12920126.0,
+            "SQ_INST_CYCLES_VMEM": 3653232.0,
+            "SQ_WAVES": 1280.0
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "gqa-kvhead1-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.209125,
+            "GRBM_COUNT": 329376.25,
+            "SQ_INSTS_SMEM": 896913.5,
+            "SQ_INSTS_VALU": 21748669.0,
+            "SQ_INST_CYCLES_VMEM": 2993976.625,
+            "SQ_WAVES": 4352.0
+          },
+          "median": {
+            "kernel_us": 124.962,
+            "GRBM_COUNT": 329014.5,
+            "SQ_INSTS_SMEM": 50918.0,
+            "SQ_INSTS_VALU": 22331839.0,
+            "SQ_INST_CYCLES_VMEM": 1828537.0,
+            "SQ_WAVES": 4352.0
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "gqa-kvhead1-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.536625,
+            "GRBM_COUNT": 330774.875,
+            "SQ_INSTS_SMEM": 389542.6875,
+            "SQ_INSTS_VALU": 21711227.0625,
+            "SQ_INST_CYCLES_VMEM": 2925011.6875,
+            "SQ_WAVES": 4352.0
+          },
+          "median": {
+            "kernel_us": 125.8215,
+            "GRBM_COUNT": 330897.0,
+            "SQ_INSTS_SMEM": 45338.0,
+            "SQ_INSTS_VALU": 21819648.0,
+            "SQ_INST_CYCLES_VMEM": 1786343.0,
+            "SQ_WAVES": 4352.0
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "isolated",
+          "count": 16,
+          "mean": {
+            "kernel_us": 112.849,
+            "GRBM_COUNT": 299400.0,
+            "SQ_INSTS_SMEM": 296163.0,
+            "SQ_INSTS_VALU": 10166537.875,
+            "SQ_INST_CYCLES_VMEM": 1607490.0,
+            "SQ_WAVES": 4352.0
+          },
+          "median": {
+            "kernel_us": 112.92150000000001,
+            "GRBM_COUNT": 299568.0,
+            "SQ_INSTS_SMEM": 43520.0,
+            "SQ_INSTS_VALU": 9423168.0,
+            "SQ_INST_CYCLES_VMEM": 943296.0,
+            "SQ_WAVES": 4352.0
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "staged128-qhead6-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 112.6689375,
+            "GRBM_COUNT": 298958.5,
+            "SQ_INSTS_SMEM": 604775.0,
+            "SQ_INSTS_VALU": 14435307.3125,
+            "SQ_INST_CYCLES_VMEM": 4945824.6875,
+            "SQ_WAVES": 4352.0
+          },
+          "median": {
+            "kernel_us": 112.68199999999999,
+            "GRBM_COUNT": 298857.0,
+            "SQ_INSTS_SMEM": 48421.0,
+            "SQ_INSTS_VALU": 13443457.0,
+            "SQ_INST_CYCLES_VMEM": 3817908.0,
+            "SQ_WAVES": 4352.0
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "staged32-qhead6-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.3689375,
+            "GRBM_COUNT": 300817.0,
+            "SQ_INSTS_SMEM": 769064.75,
+            "SQ_INSTS_VALU": 14256806.5,
+            "SQ_INST_CYCLES_VMEM": 4904157.875,
+            "SQ_WAVES": 4352.0
+          },
+          "median": {
+            "kernel_us": 113.281,
+            "GRBM_COUNT": 300391.0,
+            "SQ_INSTS_SMEM": 44715.0,
+            "SQ_INSTS_VALU": 13293773.0,
+            "SQ_INST_CYCLES_VMEM": 3725256.0,
+            "SQ_WAVES": 4352.0
+          }
+        }
+      ],
+      "hashes": {
+        ".local-artifacts/phase87/wu-d1/profiles/instruction/stdout.log": "6fcd584b17a2427701e42c40a62b999271cc3acf25eb1f1b73503b5b3c268c56",
+        ".local-artifacts/phase87/wu-d1/profiles/instruction/traces/homelab1-WRX80-Creator/3091767_kernel_trace.csv": "3caf66726b61ae3bff400d27196fadc09d247682e54d4e87fc39009577d65d8a",
+        ".local-artifacts/phase87/wu-d1/profiles/instruction/traces/homelab1-WRX80-Creator/3091767_counter_collection.csv": "a1b7f01c2cce7d8e2842da87347a0494183ed48e54aff6ffe92ff0813841425d"
+      },
+      "interpretation": "Profiled diagnostic counters; EA busy and wave wait do not identify MALL/DRAM latency."
+    },
+    "wait": {
+      "state": "PASS",
+      "selected_dispatches": 160,
+      "summary": [
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "gqa-kvhead1-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 126.5991875,
+            "GRBM_COUNT": 332475.75,
+            "GRBM_GUI_ACTIVE": 332475.75,
+            "OccupancyPercent": 44.040292625,
+            "WAVE_DEP_WAIT": 88.0980411875
+          },
+          "median": {
+            "kernel_us": 125.222,
+            "GRBM_COUNT": 329271.5,
+            "GRBM_GUI_ACTIVE": 329271.5,
+            "OccupancyPercent": 43.887676,
+            "WAVE_DEP_WAIT": 88.010942
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "gqa-kvhead1-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 126.5491875,
+            "GRBM_COUNT": 332239.0,
+            "GRBM_GUI_ACTIVE": 332239.0,
+            "OccupancyPercent": 43.921572437500004,
+            "WAVE_DEP_WAIT": 88.221268
+          },
+          "median": {
+            "kernel_us": 125.902,
+            "GRBM_COUNT": 331100.5,
+            "GRBM_GUI_ACTIVE": 331100.5,
+            "OccupancyPercent": 44.0158005,
+            "WAVE_DEP_WAIT": 88.0648485
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "isolated",
+          "count": 16,
+          "mean": {
+            "kernel_us": 116.7514375,
+            "GRBM_COUNT": 308553.4375,
+            "GRBM_GUI_ACTIVE": 308553.4375,
+            "OccupancyPercent": 42.228188875,
+            "WAVE_DEP_WAIT": 89.2955071875
+          },
+          "median": {
+            "kernel_us": 115.3215,
+            "GRBM_COUNT": 305544.0,
+            "GRBM_GUI_ACTIVE": 305544.0,
+            "OccupancyPercent": 42.336903,
+            "WAVE_DEP_WAIT": 89.1962815
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "staged128-qhead6-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.3189375,
+            "GRBM_COUNT": 299525.5,
+            "GRBM_GUI_ACTIVE": 299525.5,
+            "OccupancyPercent": 43.2768035625,
+            "WAVE_DEP_WAIT": 89.4294428125
+          },
+          "median": {
+            "kernel_us": 113.441,
+            "GRBM_COUNT": 299646.5,
+            "GRBM_GUI_ACTIVE": 299646.5,
+            "OccupancyPercent": 43.174096500000005,
+            "WAVE_DEP_WAIT": 89.417283
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "staged32-qhead6-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.1414375,
+            "GRBM_COUNT": 299243.75,
+            "GRBM_GUI_ACTIVE": 299243.75,
+            "OccupancyPercent": 43.0302574375,
+            "WAVE_DEP_WAIT": 88.929355875
+          },
+          "median": {
+            "kernel_us": 112.9615,
+            "GRBM_COUNT": 298762.5,
+            "GRBM_GUI_ACTIVE": 298762.5,
+            "OccupancyPercent": 42.984307,
+            "WAVE_DEP_WAIT": 88.77613
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "gqa-kvhead1-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.0665625,
+            "GRBM_COUNT": 328097.5625,
+            "GRBM_GUI_ACTIVE": 328097.5625,
+            "OccupancyPercent": 74.691411625,
+            "WAVE_DEP_WAIT": 68.4943084375
+          },
+          "median": {
+            "kernel_us": 125.14099999999999,
+            "GRBM_COUNT": 327949.5,
+            "GRBM_GUI_ACTIVE": 327949.5,
+            "OccupancyPercent": 74.6430205,
+            "WAVE_DEP_WAIT": 68.3847735
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "gqa-kvhead1-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.2815625,
+            "GRBM_COUNT": 329135.75,
+            "GRBM_GUI_ACTIVE": 329135.75,
+            "OccupancyPercent": 74.48293975,
+            "WAVE_DEP_WAIT": 68.50679975
+          },
+          "median": {
+            "kernel_us": 125.3415,
+            "GRBM_COUNT": 329229.5,
+            "GRBM_GUI_ACTIVE": 329229.5,
+            "OccupancyPercent": 74.54248000000001,
+            "WAVE_DEP_WAIT": 68.403473
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "isolated",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.5815625,
+            "GRBM_COUNT": 300642.0625,
+            "GRBM_GUI_ACTIVE": 300642.0625,
+            "OccupancyPercent": 72.591919875,
+            "WAVE_DEP_WAIT": 69.6675538125
+          },
+          "median": {
+            "kernel_us": 113.66149999999999,
+            "GRBM_COUNT": 300778.0,
+            "GRBM_GUI_ACTIVE": 300778.0,
+            "OccupancyPercent": 72.5091545,
+            "WAVE_DEP_WAIT": 69.6612735
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "staged128-qhead6-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 112.6015625,
+            "GRBM_COUNT": 297653.1875,
+            "GRBM_GUI_ACTIVE": 297653.1875,
+            "OccupancyPercent": 74.341253625,
+            "WAVE_DEP_WAIT": 70.0769289375
+          },
+          "median": {
+            "kernel_us": 112.54150000000001,
+            "GRBM_COUNT": 297667.0,
+            "GRBM_GUI_ACTIVE": 297667.0,
+            "OccupancyPercent": 74.34617,
+            "WAVE_DEP_WAIT": 70.027862
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "staged32-qhead6-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.5889375,
+            "GRBM_COUNT": 300023.5625,
+            "GRBM_GUI_ACTIVE": 300023.5625,
+            "OccupancyPercent": 72.7630671875,
+            "WAVE_DEP_WAIT": 70.0976875
+          },
+          "median": {
+            "kernel_us": 113.922,
+            "GRBM_COUNT": 300780.5,
+            "GRBM_GUI_ACTIVE": 300780.5,
+            "OccupancyPercent": 72.7222635,
+            "WAVE_DEP_WAIT": 69.95568750000001
+          }
+        }
+      ],
+      "hashes": {
+        ".local-artifacts/phase87/wu-d1/profiles/wait/stdout.log": "f0e62725b8b491521602c8c8331fbc78161e31bd3c717a47cc1d56d4c9c59c1a",
+        ".local-artifacts/phase87/wu-d1/profiles/wait/traces/homelab1-WRX80-Creator/3092318_kernel_trace.csv": "2073490769da2003048ea31fef32836e18e77576a34cc68801a3cd0dbf397e21",
+        ".local-artifacts/phase87/wu-d1/profiles/wait/traces/homelab1-WRX80-Creator/3092318_counter_collection.csv": "e6512296b6c2e3140fbc1bf8b73c97e0bad97537e9b4de9d35a6e5b5598bed8e"
+      },
+      "interpretation": "Profiled diagnostic counters; EA busy and wave wait do not identify MALL/DRAM latency."
+    },
+    "ea": {
+      "state": "PASS",
+      "selected_dispatches": 160,
+      "summary": [
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "gqa-kvhead1-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.03375,
+            "GRBM_COUNT": 330068.1875,
+            "GRBM_EA_BUSY": 297691.4375
+          },
+          "median": {
+            "kernel_us": 124.381,
+            "GRBM_COUNT": 328507.5,
+            "GRBM_EA_BUSY": 296354.0
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "gqa-kvhead1-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 126.169,
+            "GRBM_COUNT": 332966.5,
+            "GRBM_EA_BUSY": 300228.1875
+          },
+          "median": {
+            "kernel_us": 126.061,
+            "GRBM_COUNT": 332800.5,
+            "GRBM_EA_BUSY": 300419.5
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "isolated",
+          "count": 16,
+          "mean": {
+            "kernel_us": 115.3736875,
+            "GRBM_COUNT": 306295.0625,
+            "GRBM_EA_BUSY": 273921.875
+          },
+          "median": {
+            "kernel_us": 114.601,
+            "GRBM_COUNT": 304246.0,
+            "GRBM_EA_BUSY": 271963.5
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "staged128-qhead6-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.3685625,
+            "GRBM_COUNT": 301287.875,
+            "GRBM_EA_BUSY": 268243.5
+          },
+          "median": {
+            "kernel_us": 112.62100000000001,
+            "GRBM_COUNT": 299570.5,
+            "GRBM_EA_BUSY": 267008.0
+          }
+        },
+        {
+          "shape": "down-k17408-n5120",
+          "mode": "staged32-qhead6-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 112.9811875,
+            "GRBM_COUNT": 300213.0,
+            "GRBM_EA_BUSY": 267823.625
+          },
+          "median": {
+            "kernel_us": 112.021,
+            "GRBM_COUNT": 297873.5,
+            "GRBM_EA_BUSY": 266009.5
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "gqa-kvhead1-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.433875,
+            "GRBM_COUNT": 330447.625,
+            "GRBM_EA_BUSY": 297519.0
+          },
+          "median": {
+            "kernel_us": 125.5615,
+            "GRBM_COUNT": 330802.5,
+            "GRBM_EA_BUSY": 297976.0
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "gqa-kvhead1-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 125.3664375,
+            "GRBM_COUNT": 330702.5625,
+            "GRBM_EA_BUSY": 297595.3125
+          },
+          "median": {
+            "kernel_us": 125.5215,
+            "GRBM_COUNT": 331087.0,
+            "GRBM_EA_BUSY": 298544.0
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "isolated",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.05625,
+            "GRBM_COUNT": 300455.5,
+            "GRBM_EA_BUSY": 267534.75
+          },
+          "median": {
+            "kernel_us": 113.0415,
+            "GRBM_COUNT": 300295.0,
+            "GRBM_EA_BUSY": 267335.5
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "staged128-qhead6-split128",
+          "count": 16,
+          "mean": {
+            "kernel_us": 112.813875,
+            "GRBM_COUNT": 299463.25,
+            "GRBM_EA_BUSY": 266205.4375
+          },
+          "median": {
+            "kernel_us": 112.822,
+            "GRBM_COUNT": 299741.5,
+            "GRBM_EA_BUSY": 266175.0
+          }
+        },
+        {
+          "shape": "wide-k5120-n17408",
+          "mode": "staged32-qhead6-split32",
+          "count": 16,
+          "mean": {
+            "kernel_us": 113.2540625,
+            "GRBM_COUNT": 300641.6875,
+            "GRBM_EA_BUSY": 267711.0
+          },
+          "median": {
+            "kernel_us": 113.44149999999999,
+            "GRBM_COUNT": 300990.0,
+            "GRBM_EA_BUSY": 267944.0
+          }
+        }
+      ],
+      "hashes": {
+        ".local-artifacts/phase87/wu-d1/profiles-ea/ea/stdout.log": "e11ad6d767c6dd01b16bec7e400c1aa8f37c2c70721edcdf2656727982978dce",
+        ".local-artifacts/phase87/wu-d1/profiles-ea/ea/traces/homelab1-WRX80-Creator/3097748_kernel_trace.csv": "e91604d5378ffafe057927880ee837bd70503bbc94a0e97a37e3b2134663b94c",
+        ".local-artifacts/phase87/wu-d1/profiles-ea/ea/traces/homelab1-WRX80-Creator/3097748_counter_collection.csv": "079795713dd91ae46014021f288f3a9b0e3f454b6eea27c352e88db0e13a76e1"
+      },
+      "interpretation": "Profiled diagnostic counters; EA busy and wave wait do not identify MALL/DRAM latency."
+    }
+  },
+  "profiler_capabilities": {
+    "schema": "phase87-wu-d1-profiler-capabilities-v1",
+    "state": "catalogued_no_workload",
+    "collected_at": "2026-09-20T19:24:54+09:00",
+    "target": {
+      "gpu_arch": "gfx1030",
+      "v620_uuid": "GPU-76a08c022586fed6",
+      "visibility_rule": "ROCR_VISIBLE_DEVICES=GPU-76a08c022586fed6; HIP_VISIBLE_DEVICES unset",
+      "rocprofv3_list_avail_observed_agents": [
+        {
+          "gpu": "GPU:0",
+          "arch": "gfx1030"
+        },
+        {
+          "gpu": "GPU:1",
+          "arch": "gfx1030"
+        },
+        {
+          "gpu": "GPU:2",
+          "arch": "gfx1201"
+        }
+      ]
+    },
+    "toolchain": {
+      "rocm_root": "/opt/rocm/core-7.14",
+      "rocprofv3": {
+        "path": "/usr/bin/rocprofv3",
+        "version": "1.3.2",
+        "git_revision": "2b22ab0195cc1461cd9abf3b969e9dd7c10af350",
+        "rocm_version": "7.14.0"
+      },
+      "rocprof_compute": {
+        "path": "/opt/rocm/bin/rocprof-compute",
+        "version": "3.7.0 (release)",
+        "git_revision": "418cd5f",
+        "gfx1030_supported_by_cli": false,
+        "gfx1030_rejection": "invalid choice: 'gfx1030' (choices: gfx908, gfx90a, gfx940, gfx941, gfx942, gfx950, gfx1150, gfx1151, gfx1152)"
+      },
+      "counter_config": {
+        "path": "/opt/rocm/core-7.14/share/rocprofiler-sdk/config.yaml",
+        "sha256": "9ae8c8e260b3fee8eb16ab5a30ee1261bebb8e5dc3168949801d3722fd46bd48"
+      }
+    },
+    "raw_outputs": {
+      "rocprofv3-version.txt": {
+        "lines": 9,
+        "sha256": "9c89770d4c43912fb8db0b68179e401dfaf321599cb6b8a5727489a9febdaabd",
+        "command": "rocprofv3 --version"
+      },
+      "rocprofv3-help.txt": {
+        "lines": 192,
+        "sha256": "03c9da5662b944fc7e70b7fb52ab288d07f56af030f7a608c685681421e25de9",
+        "command": "rocprofv3 --help"
+      },
+      "rocprofv3-list-avail.txt": {
+        "lines": 2590,
+        "sha256": "e4c52e8e4f2f284f07dc03b3a8ea9286f6c74283383cad4a2c7c680bd4390197",
+        "command": "rocprofv3 --list-avail true"
+      },
+      "rocprof-compute-version.txt": {
+        "lines": 4,
+        "sha256": "c1c4f750b2903012baf44e05c08555a183d9a7c837b5e87237ed36a17dd23cea",
+        "command": "/opt/rocm/bin/rocprof-compute --version"
+      },
+      "rocprof-compute-help.txt": {
+        "lines": 44,
+        "sha256": "69c56a5eeb662eae2362231aba406e38b9491d7cfa82ebcc352f9d9b9525daba",
+        "command": "/opt/rocm/bin/rocprof-compute --help"
+      },
+      "rocprof-compute-list-metrics-gfx1030.txt": {
+        "lines": 2,
+        "sha256": "d536cfd329bf59c236ab2e66108607256e7850ce204490f2754b49d1dbeb5f34",
+        "command": "/opt/rocm/bin/rocprof-compute --list-metrics gfx1030"
+      },
+      "rocprof-compute-list-blocks-gfx1030.txt": {
+        "lines": 2,
+        "sha256": "9faf4ea62ad0c888ee8d940a72814362f49cfc1047c9562bd05abfe499d8ad40",
+        "command": "/opt/rocm/bin/rocprof-compute --list-blocks gfx1030"
+      }
+    },
+    "metric_definitions_gfx1030": {
+      "SQ_WAIT_ANY": {
+        "kind": "raw",
+        "description": "Number of wave-cycles spent waiting for anything (per-simd, nondeterministic). Units in quad-cycles(4 cycles).",
+        "block": "SQ"
+      },
+      "SQ_WAIT_INST_ANY": {
+        "kind": "raw",
+        "description": "Number of wave-cycles spent waiting for any instruction issue. Units in quad-cycles(4 cycles).",
+        "block": "SQ"
+      },
+      "SQ_INST_CYCLES_VMEM": {
+        "kind": "raw",
+        "description": "The number of cycles needed to send addr and data for VMEM (lds, buffer, image, flat, scratch, global) instructions, windowed by perf_en. This value is returned on a per-SE (aggregate of values in SIMDs in the SE) basis with units in quad-cycles(4 cycles).",
+        "block": "SQ"
+      },
+      "GRBM_EA_BUSY": {
+        "kind": "raw",
+        "description": "The Efficiency Arbiter (EA) block is busy.",
+        "block": "GRBM"
+      },
+      "GL2C_EA_RDREQ_32B": {
+        "kind": "raw",
+        "description": "Number of 32-byte GL2C/EA read requests",
+        "block": "GL2C"
+      },
+      "GL2C_EA_RDREQ_32B_sum": {
+        "kind": "derived",
+        "description": "Number of 32-byte GL2C/EA read requests. Sum over GL2C instances.",
+        "expression": "reduce(GL2C_EA_RDREQ_32B,sum)"
+      },
+      "GL2C_EA_RDREQ_64B": {
+        "kind": "raw",
+        "description": "Number of 64-byte GL2C/EA read requests",
+        "block": "GL2C"
+      },
+      "GL2C_EA_RDREQ_64B_sum": {
+        "kind": "derived",
+        "description": "Number of 64-byte GL2C/EA read requests. Sum over GL2C instances.",
+        "expression": "reduce(GL2C_EA_RDREQ_64B,sum)"
+      },
+      "GL2C_EA_RDREQ_96B": {
+        "kind": "raw",
+        "description": "Number of 96-byte GL2C/EA read requests",
+        "block": "GL2C"
+      },
+      "GL2C_EA_RDREQ_96B_sum": {
+        "kind": "derived",
+        "description": "Number of 96-byte GL2C/EA read requests. Sum over GL2C instances.",
+        "expression": "reduce(GL2C_EA_RDREQ_96B,sum)"
+      },
+      "GL2C_EA_RDREQ_128B": {
+        "kind": "raw",
+        "description": "Number of 128-byte GL2C/EA read requests",
+        "block": "GL2C"
+      },
+      "GL2C_EA_RDREQ_128B_sum": {
+        "kind": "derived",
+        "description": "Number of 128-byte GL2C/EA read requests. Sum over GL2C instances.",
+        "expression": "reduce(GL2C_EA_RDREQ_128B,sum)"
+      },
+      "GL2C_MC_RDREQ": {
+        "kind": "raw",
+        "description": "Number of GL2C/EA read requests (either 32-byte or 64-byte or 128-byte).",
+        "block": "GL2C"
+      },
+      "GL2C_MC_RDREQ_sum": {
+        "kind": "derived",
+        "description": "Number of GL2C/EA read requests (either 32-byte or 64-byte or 128-byte). Sum over GL2C instances.",
+        "expression": "reduce(GL2C_MC_RDREQ,sum)"
+      },
+      "GL2C_MC_WRREQ": {
+        "kind": "raw",
+        "description": "Number of transactions (either 32-byte or 64-byte) going over the GL2C_EA_wrreq interface. Atomics may travel over the same interface and are generally classified as write requests. This does not include probe commands",
+        "block": "GL2C"
+      },
+      "GL2C_MC_WRREQ_sum": {
+        "kind": "derived",
+        "description": "Number of transactions (either 32-byte or 64-byte) going over the GL2C_MC_wrreq interface. Sum over GL2C instances.",
+        "expression": "reduce(GL2C_MC_WRREQ,sum)"
+      },
+      "GL2C_MC_WRREQ_STALL": {
+        "kind": "raw",
+        "description": "Number of cycles a write request was stalled.",
+        "block": "GL2C"
+      },
+      "GL2C_EA_WRREQ_64B": {
+        "kind": "raw",
+        "description": "Number of 64-byte transactions going (64-byte write or CMPSWAP) over the TC_EA_wrreq interface.",
+        "block": "GL2C"
+      },
+      "GL2C_EA_WRREQ_64B_sum": {
+        "kind": "derived",
+        "description": "Number of 64-byte transactions going (64-byte write or CMPSWAP) over the GL2C_EA_wrreq interface. Sum over GL2C instances.",
+        "expression": "reduce(GL2C_EA_WRREQ_64B,sum)"
+      },
+      "GL2C_HIT": {
+        "kind": "raw",
+        "description": "Number of cache hits",
+        "block": "GL2C"
+      },
+      "GL2C_HIT_sum": {
+        "kind": "derived",
+        "description": "Number of cache hits. Sum over GL2C instances.",
+        "expression": "reduce(GL2C_HIT,sum)"
+      },
+      "GL2C_MISS": {
+        "kind": "raw",
+        "description": "Number of cache misses. UC reads count as misses.",
+        "block": "GL2C"
+      },
+      "GL2C_MISS_sum": {
+        "kind": "derived",
+        "description": "Number of cache misses. Sum over GL2C instances.",
+        "expression": "reduce(GL2C_MISS,sum)"
+      },
+      "GL2C_WRREQ_STALL_max": {
+        "kind": "derived",
+        "description": "Number of cycles a write request was stalled. Max over GL2C instances.",
+        "expression": "reduce(GL2C_MC_WRREQ_STALL,max)"
+      },
+      "FETCH_SIZE": {
+        "kind": "derived",
+        "description": "The total kilobytes fetched from the video memory. This is measured with all extra fetches and any cache or memory effects taken into account.",
+        "expression": "(GL2C_EA_RDREQ_32B_sum*32+GL2C_EA_RDREQ_64B_sum*64+GL2C_EA_RDREQ_96B_sum*96+GL2C_EA_RDREQ_128B_sum*128)/1024",
+        "interpretation": "GL2C/EA fetch proxy; not a physical DRAM bus-byte measurement."
+      },
+      "WAVE_DEP_WAIT": {
+        "kind": "derived",
+        "description": "Percentage of the SQ_WAVE_CYCLE time spent waiting for anything.",
+        "expression": "100*reduce(SQ_WAIT_ANY,sum)/reduce(SQ_WAVE_CYCLES,sum)",
+        "interpretation": "Broad nondeterministic wave wait; not a unique DRAM or VMEM stall cause."
+      }
+    },
+    "unavailable_or_unsupported": {
+      "rocprof_compute_gfx1030_analysis": "rocprof-compute CLI has no gfx1030 metric/block choice.",
+      "mall": "No MALL counter or metric is present in the gfx1030 rocprofiler-sdk catalog.",
+      "dram_destination": "No gfx1030 DRAM-destination or DRAM-credit-stall counter is present. TCC_EA_RDREQ_DRAM and related counters are gfx90a-only.",
+      "memory_stall_derived": "MemUnitStalled is not defined for gfx1030 in the installed catalog; TCP_PENDING_STALL_CYCLES and TCP_TCP_TA_DATA_STALL_CYCLES are not defined for gfx1030.",
+      "physical_dram_bytes": "GL2C/EA counters and FETCH_SIZE include cache/interface effects and cannot be called physical DRAM bus bytes."
+    },
+    "safe_pass_groups_from_successful_v620_runs": [
+      {
+        "name": "fetch_derived",
+        "pmc": [
+          "FETCH_SIZE",
+          "GRBM_COUNT"
+        ],
+        "evidence": ".local-artifacts/phase85-m1-bottleneck/counter-gate-gfx1030/execution.json",
+        "status": "completed; all jobs exit 0"
+      },
+      {
+        "name": "cache_derived",
+        "pmc": [
+          "L2CacheHit",
+          "MemUnitBusy",
+          "GRBM_GUI_ACTIVE",
+          "GRBM_COUNT"
+        ],
+        "evidence": ".local-artifacts/phase85-m1-bottleneck/counter-gate-gfx1030/execution.json",
+        "status": "completed; all jobs exit 0"
+      },
+      {
+        "name": "instruction_vmem",
+        "pmc": [
+          "SQ_INSTS_VALU",
+          "SQ_WAVES",
+          "SQ_INSTS_SMEM",
+          "SQ_INST_CYCLES_VMEM",
+          "GRBM_COUNT"
+        ],
+        "evidence": ".local-artifacts/phase85-m1-bottleneck/counter-gate-gfx1030/execution.json",
+        "status": "completed; all jobs exit 0"
+      },
+      {
+        "name": "wait_derived",
+        "pmc": [
+          "WAVE_DEP_WAIT",
+          "OccupancyPercent",
+          "GRBM_GUI_ACTIVE",
+          "GRBM_COUNT"
+        ],
+        "evidence": ".local-artifacts/phase85-m1-bottleneck/counter-gate-gfx1030/execution.json",
+        "status": "completed; all jobs exit 0"
+      },
+      {
+        "name": "gl2c_read_size_raw",
+        "pmc": [
+          "GL2C_EA_RDREQ_32B_sum",
+          "GL2C_EA_RDREQ_64B_sum",
+          "GL2C_EA_RDREQ_96B_sum",
+          "GL2C_EA_RDREQ_128B_sum",
+          "GRBM_COUNT"
+        ],
+        "evidence": ".local-artifacts/phase85-m1-bottleneck/extra-and-clocks-gfx1030/execution.json",
+        "status": "completed; all jobs exit 0"
+      }
+    ],
+    "additional_catalog_groups_not_claimed_safe": [
+      {
+        "name": "ea_activity_minimal",
+        "pmc": [
+          "GRBM_EA_BUSY",
+          "GRBM_GUI_ACTIVE",
+          "GRBM_COUNT"
+        ],
+        "reason": "Catalog-supported, but this exact group was not run in the prior successful V620 evidence. Keep as a separate pass until scheduled."
+      },
+      {
+        "name": "raw_wave_wait",
+        "pmc": [
+          "SQ_WAIT_ANY",
+          "SQ_WAIT_INST_ANY",
+          "SQ_WAVE_CYCLES",
+          "GRBM_COUNT"
+        ],
+        "reason": "Catalog-supported, but prior V620 evidence used the derived WAVE_DEP_WAIT group. Do not assume slot capacity without a preflight/profile result."
+      }
+    ],
+    "workload_policy": {
+      "workload_started": false,
+      "gpu_kernel_started": false,
+      "rocprofv3_list_avail_is_device_catalog_query_only": true,
+      "production_source_edited": false,
+      "interpretation": "WU-D1 can compare timing, GL2C/EA interface traffic, cache hits/misses, EA busy, VMEM issue cycles, and broad wait. It cannot directly attribute the delta to MALL or DRAM service on this installed gfx1030 counter catalog."
+    }
+  },
+  "existing_trace_localization": [
+    {
+      "layer_mod4": 0,
+      "role": "down",
+      "old_mean_us": 116.3061822272216,
+      "current_mean_us": 127.54915466816648,
+      "delta_us": 11.242972440944884
+    },
+    {
+      "layer_mod4": 0,
+      "role": "gate",
+      "old_mean_us": 121.10625421822272,
+      "current_mean_us": 130.62331946006748,
+      "delta_us": 9.51706524184477
+    },
+    {
+      "layer_mod4": 0,
+      "role": "up",
+      "old_mean_us": 117.392816647919,
+      "current_mean_us": 128.1747255343082,
+      "delta_us": 10.781908886389202
+    },
+    {
+      "layer_mod4": 1,
+      "role": "down",
+      "old_mean_us": 116.40735376827897,
+      "current_mean_us": 129.06888863892013,
+      "delta_us": 12.661534870641173
+    },
+    {
+      "layer_mod4": 1,
+      "role": "gate",
+      "old_mean_us": 119.83710292463442,
+      "current_mean_us": 130.64461136107985,
+      "delta_us": 10.807508436445444
+    },
+    {
+      "layer_mod4": 1,
+      "role": "up",
+      "old_mean_us": 118.08431102362205,
+      "current_mean_us": 129.15010123734532,
+      "delta_us": 11.06579021372328
+    },
+    {
+      "layer_mod4": 2,
+      "role": "down",
+      "old_mean_us": 116.5940607424072,
+      "current_mean_us": 127.72053487064117,
+      "delta_us": 11.126474128233971
+    },
+    {
+      "layer_mod4": 2,
+      "role": "gate",
+      "old_mean_us": 119.57418560179977,
+      "current_mean_us": 139.16018953880766,
+      "delta_us": 19.586003937007874
+    },
+    {
+      "layer_mod4": 2,
+      "role": "up",
+      "old_mean_us": 118.08150506186726,
+      "current_mean_us": 129.31704274465693,
+      "delta_us": 11.235537682789651
+    },
+    {
+      "layer_mod4": 3,
+      "role": "down",
+      "old_mean_us": 112.66032227221598,
+      "current_mean_us": 124.47195838020248,
+      "delta_us": 11.811636107986505
+    },
+    {
+      "layer_mod4": 3,
+      "role": "gate",
+      "old_mean_us": 118.2119690663667,
+      "current_mean_us": 125.01538020247469,
+      "delta_us": 6.8034111361079885
+    },
+    {
+      "layer_mod4": 3,
+      "role": "up",
+      "old_mean_us": 113.27120078740157,
+      "current_mean_us": 125.89728121484815,
+      "delta_us": 12.626080427446569
+    }
+  ],
+  "limitations": [
+    "Synthetic stored values, four weight-pool copies, context8256, two production shapes; not a complete model replay.",
+    "Reader families differ in load multiplicity, geometry, ordering and duration; those factors are not separated.",
+    "EA busy is not EA latency; WAVE_DEP_WAIT is not a DRAM-specific stall metric.",
+    "MALL/DRAM destination and credit-stall breakdown unavailable on installed gfx1030 catalog.",
+    "SQ instruction/VMEM counts vary despite fixed instruction work; retained as raw observations, excluded from causal inference."
+  ],
+  "failed_attempts": [
+    {
+      "path": ".local-artifacts/phase87/wu-d1/profiles/ea",
+      "exit_code": -6,
+      "reason": "Three GRBM counters exceeded hardware counter capacity (rocprofiler error38).",
+      "resolution": "Retried with GRBM_EA_BUSY + GRBM_COUNT only; all160 measured NV dispatches captured."
+    }
+  ],
+  "source_hashes": {
+    "ci/tools/phase87_wud1_existing_trace.py": "03bb4d8302c199bdf5ad80e91b73c1f4eec5d5331e2b39334068ef4f2730d14f",
+    "ci/tools/phase87_wud1_summarize.py": "48765c6500cf4e067140791c9e0aa064a52fc5c49fb76b3d5a72782e0aa7d6b7",
+    "ci/tools/phase87_wud1_profile.py": "1b308404f718fef6da996f240be600dd740ff708dec690f7517a01e0b1c644ea"
+  },
+  "completion_audit": {
+    "state": "PASS",
+    "goal": "WU-D1\u3092\u5b8c\u4e86\u3059\u308b",
+    "steps": {
+      "1_isolated_production_shapes": "two shapes; independent37-column oracle each; full finite/bitwise across5 modes",
+      "2_neighbor_reproduction": "540 samples,3roundAB/BA,all6pairedsigns positive for bothGQA variants/bothshapes",
+      "3_stall_evidence": "6successful passesx160NVdispatches; MALL/DRAM unavailable documented; failedEA3counterattempt excluded"
+    },
+    "production_source_files_unchanged": 124,
+    "binary_source_hashes_match": true,
+    "raw_profile_hashes_match": true,
+    "physical_mechanism": "not identified; documented bounded result satisfies explicit acceptance; no performancefix"
+  },
+  "validation": {
+    "python_static": "PASS,279 files",
+    "markdown_links": "PASS",
+    "diff_whitespace": "PASS",
+    "integration_review": "one bounded review; no remaining correctness findings; family/counter limitations recorded",
+    "cleanup": "all GPUs idle; VRAM restored to starting levels"
+  }
+}

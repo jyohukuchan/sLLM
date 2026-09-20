@@ -572,7 +572,7 @@ Phase 79の共通化内容は[Phase 79計画](archive/2026/09/1-10/phase79-commo
 | 完了 | 84.5 | MTP接続・固定p/q・採否後の状態を限定照合。R9700のtarget差はattention演算順へ切り分け。本番既定は維持 |
 | 完了・実装検証済み | 85 | 共通MXFP8／MXFP6 kernelをscope限定採用。両GPUの広範shape、本体・KV・MTP、chunk末尾の効果と数値を確認。BF16 MTP既定を維持 |
 | 完了・既定採用せず | 86 | Qwen MTP catch-upを両GPU26条件で検証。期待p/q受理率では小さい正の効果があるが、分離catch-upは正味マイナスで既定不採用。ベンチマーク主指標を期待受理率へ切替 |
-| WU2完了・後続未着手 | 87 | Qwen3.8 NVFP4の計測・棚卸しとread帯域計測を完了。WU1でV620 attentionのGQA共有を採用（MTPなし+8.09%／あり+6.88%）。WU1.1で両GPUのlong contextへsplit128を採用（単体TPOT比1.85%／2.22%短縮）。WU-C1で不要な切替を削除し、N0とCI hash連鎖の整合を確認。WU2でR9700 FP8のM1 dot4 GEMVを採用（単体TPOT比6.40%、モデルMTPなし+9.40%／あり+1.50%）。後続はgraph化とサンプリング経路の通信削減、MTP companionのNVFP4化とMXFP6比較、W×A16の廃止等 |
+| WU-D3まで完了・段階5未着手 | 87 | Qwen3.8 NVFP4の計測・棚卸しとread帯域計測を完了。WU1でV620 attentionのGQA共有を採用（MTPなし+8.09%／あり+6.88%）。WU1.1で両GPUのlong contextへsplit128を採用（単体TPOT比1.85%／2.22%短縮）。WU-C1で不要な切替を削除し、N0とCI hash連鎖の整合を確認。WU2でR9700 FP8のM1 dot4 GEMVを採用（単体TPOT比6.40%、モデルMTPなし+9.40%／あり+1.50%）。後続はgraph化とサンプリング経路の通信削減、MTP companionのNVFP4化とMXFP6比較、W×A16の廃止等 |
 | 計画済み・繰下げ | 88 | NVFP4のGPUリクエストバッチ処理を最適化（旧87、さらに前は旧86） |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
@@ -673,7 +673,21 @@ Phase 76以降は、Qwen3.8 27B NVFP4を単一GPUで実用速度にすること�
   両GPUの削除前後token一致（N0）、host/GPU検証、CI hash参照連鎖と3種validatorsのPASSを確認した。[WU2](../history/2026/09/11-20/phase87-wu2-fp8.md)も完了し、R9700 FP8 W8A8のM1・8形状へnative dot4 GEMV（ID103）をN1として採用した。
   dot単体は3.269757 ms/token（通常TPOT比6.4039%）短縮、全AB/BA roundが正。R9700通常モデルはMTPなし+9.40%／あり+1.50%。
   V620は既存provider・生成列を維持し、速度差−0.03%／+0.15%。R9700 MTPなしのみtoken位置15から分岐する。
-  両GPU単体・公開API／graph・モデル・host・CI検証はPASS。後続の作業単位はまだ着手しない。
+  両GPU単体・公開API／graph・モデル・host・CI検証はPASS。
+  2026-09-20のWU2後の[GPU空白時間の再計測](../history/2026/09/11-20/phase87-idle-recheck.md)で、空白は2.6〜4.9 ms/token
+  （割合は6.5〜9.1%）と段階0からほぼ変わらず、段階5の見込みも変わらないことを確認した。
+  同時に、V620のM=1 NVFP4 decodeが直前のdecode attention kernelの種類で約10%遅くなることが分かった。
+  [WU-D1の原因調査](../history/2026/09/11-20/phase87-wu-d1.md)も完了。KV読み出しだけのGQA型先行kernelで
+  両NVFP4形状の約9〜10%の遅延を再現した。単独とstaged型先行は同程度。EA busy cycleの増加を確認したが、
+  MALL／DRAMの内訳は未取得で物理機構は未特定。特定範囲と限界を記録し、production sourceと採用済みWU1／WU1.1／WU2を維持した。
+  [WU-D2](../history/2026/09/11-20/phase87-wu-d2.md)も完了。V620は32 dispatch後も遅延が残り、軽い介在処理で回復しない。
+  R9700は同じprobeで非再現、物理的な内訳は未取得。
+  [WU-D3](../history/2026/09/11-20/phase87-wu-d3.md)は3候補とも不採用で完了。tile32／先読みはattentionが退行し、
+  block配置変更は単体でほぼ中立、実モデルはMTPなし+0.344%／あり−0.093%で採用基準に未達だった。
+  tokenは一致し、本番sourceは復元済み。2026-09-20のユーザー決定でD系統を打ち切り、物理機構は未特定のまま
+  再開条件（MALL／DRAM内訳を取得できる計測手段、または実attentionのdata flowで罰則を再現するharness）だけを計画へ残した。
+  影響はV620で約1.9 ms/token（TPOT比約3%）、R9700で約1.0 ms/tokenで、残る候補より小さい。
+  次は段階5（decode 1段全体のHIP graph化とサンプリング経路のCPU-GPU間通信削減、空白2.6〜4.9 ms/token）。
   後続はNVFP4 W4A4とFP8 W8A8等のdecode最適化、MTP companionのNVFP4化とMXFP6比較、W×A16の廃止、
   decode 1段全体のHIP graph化とMTPなし・ありのサンプリング経路のCPU-GPU間通信削減（2026-09-19追加）。
   続いてPhase 88（NVFP4リクエストバッチ処理）。
