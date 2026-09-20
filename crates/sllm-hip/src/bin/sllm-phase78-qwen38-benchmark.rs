@@ -11,12 +11,20 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::{CString, c_char, c_void};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[link(name = "dl")]
+unsafe extern "C" {
+    fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn dlclose(handle: *mut c_void) -> i32;
+}
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -72,6 +80,7 @@ const PHASE85_A16_SECONDARY_ENV: &str = "SLLM_PHASE85_A16_STAGE0_SECONDARY";
 const PHASE85_A16_SECONDARY_CASES_ENV: &str = "SLLM_PHASE85_A16_SECONDARY_CASES";
 const PHASE85_A16_SECONDARY_SEED_ENV: &str = "SLLM_PHASE85_A16_SECONDARY_SEED";
 const PHASE85_A16_SECONDARY_OUTPUT_TOKENS_ENV: &str = "SLLM_PHASE85_A16_SECONDARY_OUTPUT_TOKENS";
+const PHASE87_PROFILE_ENV: &str = "SLLM_PHASE87_PROFILE";
 
 const DEFAULT_WARMUPS: usize = 3;
 const DEFAULT_MEASURED: usize = 10;
@@ -99,6 +108,102 @@ const QWEN38_TOKENIZER_VOCAB_SPAN: u32 = 248_077;
 const FIXED_PREFIX: [i32; 17] = [
     2, 106, 1_645, 108, 9_259, 236_776, 563, 107, 17, 23, 42, 255, 256, 257, 4_097, 65_537, 248_319,
 ];
+
+type RoctxRangePush = unsafe extern "C" fn(*const c_char) -> i32;
+type RoctxRangePop = unsafe extern "C" fn() -> i32;
+
+/// Optional profiling-only ROCTX range.  The default benchmark never loads a
+/// profiling library.  When `SLLM_PHASE87_PROFILE=1` is set, the library is
+/// resolved dynamically so the benchmark binary does not gain a ROCm tracing
+/// link-time dependency or change its production path.
+struct Phase87DecodeRange {
+    handle: *mut c_void,
+    pop: Option<RoctxRangePop>,
+    label: Option<CString>,
+    active: bool,
+}
+
+impl Phase87DecodeRange {
+    fn begin(label: &str) -> Self {
+        let inactive = || Self {
+            handle: std::ptr::null_mut(),
+            pop: None,
+            label: None,
+            active: false,
+        };
+        if env::var(PHASE87_PROFILE_ENV).as_deref() != Ok("1") {
+            return inactive();
+        }
+        let library_names = ["librocprofiler-sdk-roctx.so", "libroctx64.so"];
+        let symbol_push = b"roctxRangePushA\0";
+        let symbol_pop = b"roctxRangePop\0";
+        for library_name in library_names {
+            let Ok(library) = CString::new(library_name) else {
+                continue;
+            };
+            // RTLD_NOW; RTLD_LOCAL is zero.  These constants are stable on
+            // Linux, which is the only supported runtime platform.
+            let handle = unsafe { dlopen(library.as_ptr(), 0x2) };
+            if handle.is_null() {
+                continue;
+            }
+            let push = unsafe { dlsym(handle, symbol_push.as_ptr().cast::<c_char>()) };
+            let pop = unsafe { dlsym(handle, symbol_pop.as_ptr().cast::<c_char>()) };
+            if push.is_null() || pop.is_null() {
+                unsafe {
+                    dlclose(handle);
+                }
+                continue;
+            }
+            let Ok(label) = CString::new(label) else {
+                unsafe {
+                    dlclose(handle);
+                }
+                return inactive();
+            };
+            let push: RoctxRangePush = unsafe { std::mem::transmute(push) };
+            let pop: RoctxRangePop = unsafe { std::mem::transmute(pop) };
+            unsafe {
+                push(label.as_ptr());
+            }
+            return Self {
+                handle,
+                pop: Some(pop),
+                label: Some(label),
+                active: true,
+            };
+        }
+        eprintln!(
+            "[phase87] {PHASE87_PROFILE_ENV}=1 but no ROCm ROCTX library was found; decode marker is unavailable"
+        );
+        inactive()
+    }
+
+    fn finish(&mut self) {
+        if self.active {
+            if let Some(pop) = self.pop {
+                unsafe {
+                    pop();
+                }
+            }
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for Phase87DecodeRange {
+    fn drop(&mut self) {
+        self.finish();
+        if !self.handle.is_null() {
+            unsafe {
+                dlclose(self.handle);
+            }
+            self.handle = std::ptr::null_mut();
+        }
+        // Keep the C string alive until after roctxRangePop.
+        let _ = self.label.take();
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RowSpec {
@@ -2615,6 +2720,7 @@ fn run_one_target(
         stop_reason = "stop_token";
     }
     let decode_cpu_started = process_cpu_ticks(observe_cpu);
+    let mut profile_decode_range = Phase87DecodeRange::begin("sllm_phase87_decode_target");
     let decode_started = Instant::now();
     for step in 1..output_tokens {
         if stop_reason == "stop_token" {
@@ -2646,6 +2752,7 @@ fn run_one_target(
             break;
         }
     }
+    profile_decode_range.finish();
     let decode_elapsed = decode_started.elapsed();
     let e2e_elapsed = e2e_started.elapsed();
     let decode_cpu = cpu_delta(decode_cpu_started, process_cpu_ticks(observe_cpu));
@@ -2823,6 +2930,7 @@ fn run_one_mtp(
         stop_reason = "stop_token";
     }
     let decode_cpu_started = process_cpu_ticks(observe_cpu);
+    let mut profile_decode_range = Phase87DecodeRange::begin("sllm_phase87_decode_mtp");
     let decode_started = Instant::now();
     let generation = (|| -> Result<(), String> {
         for step in 1..output_tokens {
@@ -2854,6 +2962,7 @@ fn run_one_mtp(
             .map_err(|error| format!("MTP finalization failed: {error}"))?;
         Ok(())
     })();
+    profile_decode_range.finish();
     if let Err(error) = generation {
         executor.cancel();
         return Err(error);

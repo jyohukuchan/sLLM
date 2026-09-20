@@ -1,0 +1,4932 @@
+{
+  "schema": "phase87-stage0-summary-v1",
+  "state": "PASS",
+  "scope": "Qwen3.8 single-request decode Stage 0; four profile/counter pairs",
+  "identity_scope": "local dirty-tree measurement, not a release candidate",
+  "evidence_index": [
+    {
+      "path": ".local-artifacts/phase87/stage0/initial-state.json",
+      "sha256": "51aefdca6ff7d9421e8ed25849a14c9fdfafdd287dacf0769d5ce804ada79877"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/binaries.json",
+      "sha256": "5f7e50e7a2046578167786b7dd3b8e6c0d77431c4683ba5d1676a74511491fa8"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/profile-binaries.json",
+      "sha256": "2757ee568aaf22ccc1f0b92d723cb4e881e60be21b8f30cb04d109ad68dee00b"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/baseline-summary.json",
+      "sha256": "97b5b6ae6ed006aef37da22ae74400e05e60d63450b9a9c0fcee4f0ef2b4eb60"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/baseline-route-source.json",
+      "sha256": "0a9eb9b43a08907392d3bb3b4c09f2d5a718d3f629d06b994e759994e4f3b9ee"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/kld-corpus.json",
+      "sha256": "26c3e117a66336fcd75f05561701fc50eb54b19d113b5a5c2b4259e7816406c9"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/counter-coverage.json",
+      "sha256": "55bd12baf96e325c73ea2e95de92941f433462fb8c6b4ec9bd6ace520b3e7f5e"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/profile-output-equivalence.json",
+      "sha256": "c19dc04c06ae76ab56318324ac31d840e63b46a92e319eb18e2c545fc9342f43"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/copy-source-identity.json",
+      "sha256": "c86b3fc30b8d937c410ea31e15ee2c5ebd584505d2b58aa3ff5cf32779eab082"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/kld-gfx1201/execution.json",
+      "sha256": "f190d10d45da9d037ef65cc6392f8d1636b1ad4c5a58918a6175ecc08d347dd9"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/kld-gfx1201/fp16-vs-bf16.json",
+      "sha256": "c88adf0fa8c70642a2d3a298764656655ed5ee05526afb1cafcc14262775bc88"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/kld-gfx1201/kv-mxfp8-e4-vs-bf16.json",
+      "sha256": "669fb400ee18e12d10c48808b1adc9293af53bfd7515562cabf9eae202165f3d"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/baseline-gfx1030/execution.json",
+      "sha256": "7da2678371ca9c055de21ba5749f6082be52e0194f513fcbe822dd7ad6f8e266"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/profile-gfx1030/execution.json",
+      "sha256": "c47f1db426b874c8472f869c15e6649197e4ea510f32f7e74adbf89629dba3e3"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/counter-gfx1030/execution.json",
+      "sha256": "998c59a6cab5a0f2b6c0f5243cf567a73ed012c59e7d6c2c3c726e934c8df5f9"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/copy-streaming-gfx1030-execution.json",
+      "sha256": "165d79ca6f58e3640d345cb31e3cd3770873a6641cfbec40e7690f19b5dc8dc6"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/baseline-gfx1201/execution.json",
+      "sha256": "46f448db5819a03c1988c3ec607a2325ec77570818ed1d0aa4fe205fa8748b27"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/profile-gfx1201/execution.json",
+      "sha256": "0795b5ef588357824d1d15e018d5c6bfd5c87de244229850e8e1cc3afe8a8229"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/counter-gfx1201/execution.json",
+      "sha256": "be8e72640dded17ca03ac8200df43355db090b9f1f815f5555ee56247619afba"
+    },
+    {
+      "path": ".local-artifacts/phase87/stage0/copy-streaming-gfx1201-execution.json",
+      "sha256": "869ed6b83e8d19e0db50a85c949388a43640527071e91006662be3350e40da65"
+    }
+  ],
+  "counter_domain": "GL2C/EA interface read-request bytes; not physical DRAM",
+  "copy_domain": "mixed read+write device-copy proxy; not a strict bandwidth ceiling",
+  "baseline_unprofiled": [
+    {
+      "target": "gfx1030",
+      "mtp": "off",
+      "decode_tokens_per_second": {
+        "median": 14.24247448563309,
+        "mad": 0.05122031235676516
+      },
+      "report": ".local-artifacts/phase87/stage0/baseline-gfx1030/baseline-mtp-off/report.json"
+    },
+    {
+      "target": "gfx1030",
+      "mtp": "on",
+      "decode_tokens_per_second": {
+        "median": 25.406658729559798,
+        "mad": 0.054488517241107814
+      },
+      "report": ".local-artifacts/phase87/stage0/baseline-gfx1030/baseline-mtp-on/report.json"
+    },
+    {
+      "target": "gfx1201",
+      "mtp": "off",
+      "decode_tokens_per_second": {
+        "median": 19.16648327574315,
+        "mad": 0.012752093061369152
+      },
+      "report": ".local-artifacts/phase87/stage0/baseline-gfx1201/baseline-mtp-off/report.json"
+    },
+    {
+      "target": "gfx1201",
+      "mtp": "on",
+      "decode_tokens_per_second": {
+        "median": 35.113402440826164,
+        "mad": 0.11501241113634109
+      },
+      "report": ".local-artifacts/phase87/stage0/baseline-gfx1201/baseline-mtp-on/report.json"
+    }
+  ],
+  "pairs": [
+    {
+      "target": "gfx1030",
+      "mtp": false,
+      "inputs": {
+        ".local-artifacts/phase87/stage0/profile-gfx1030/profile-mtp-off/analysis.json": "c7a49cd64b1e8876464d0b09e08b4b82ac88be54c7032752a689c0a5a8c25730",
+        ".local-artifacts/phase87/stage0/counter-gfx1030/counter-mtp-off/analysis.json": "436f2a88a3ebbd515ec129fa0ff9765de31e3f08df4b3269dd290a71a57482ce",
+        ".local-artifacts/phase87/stage0/profile-gfx1030/profile-mtp-off/breakdown.json": "e7ea80b63ed2a7cd5d685b0fa683e35f21e7cd05a7019d30335b6c07a2409441",
+        ".local-artifacts/phase87/stage0/profile-gfx1030/profile-mtp-off/report.json": "716128c8f914290956f1de9a5e32228fd1111212ba85ba21a783cabe10664570",
+        ".local-artifacts/phase87/stage0/counter-gfx1030/counter-mtp-off/report.json": "1b1400ac012a764195abf7a7d56634fffb04586652d1f4b32ba4765d6335bdf5"
+      },
+      "committed_decode_transitions": 127,
+      "kernel_duration_source": "ordinary rocprof kernel trace; no counter timing",
+      "read_source": "separate rocprof GL2C/EA interface request counter run; not physical DRAM",
+      "copy_source": ".local-artifacts/phase87/stage0/copy-streaming-gfx1030.jsonl",
+      "total_kernel_duration_ms": 8177.365462,
+      "time_share_domain": "sum of decode GPU kernel durations; host idle is reported separately",
+      "target_forward_count": 127,
+      "rows": [
+        {
+          "kernel_name": "__amd_rocclr_copyBuffer",
+          "grid_x": 512,
+          "family": "runtime_copy",
+          "priority": "nonpriority",
+          "invocation_count": 381,
+          "duration_ms": 1.142334,
+          "duration_ms_per_transition": 0.008994755905511811,
+          "time_share": 0.0001396946247918594,
+          "read_request_bytes": 462464.0,
+          "read_request_bytes_per_transition": 3641.448818897638,
+          "effective_gb_s": 0.4048413161124505,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "__amd_rocclr_fillBufferAligned",
+          "grid_x": 256,
+          "family": "other",
+          "priority": "nonpriority",
+          "invocation_count": 127,
+          "duration_ms": 0.426088,
+          "duration_ms_per_transition": 0.0033550236220472444,
+          "time_share": 5.210577929774811e-05,
+          "read_request_bytes": 239680.0,
+          "read_request_bytes_per_transition": 1887.244094488189,
+          "effective_gb_s": 0.5625129081316536,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_attention_preprocess_headwise_norm_rope_wave32_v1",
+          "grid_x": 896,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 2032,
+          "duration_ms": 17.050545,
+          "duration_ms_per_transition": 0.13425625984251968,
+          "time_share": 0.0020850902505499392,
+          "read_request_bytes": 91047104.0,
+          "read_request_bytes_per_transition": 716906.3307086615,
+          "effective_gb_s": 5.339835412885629,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_sigmoid_mul_bf16_fp32_v1",
+          "grid_x": 6144,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 2032,
+          "duration_ms": 3.952587,
+          "duration_ms_per_transition": 0.031122732283464564,
+          "time_share": 0.00048335701985774843,
+          "read_request_bytes": 51890944.0,
+          "read_request_bytes_per_transition": 408590.11023622047,
+          "effective_gb_s": 13.12834961001491,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_silu_mul_bf16_fp32_v1",
+          "grid_x": 17408,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 8128,
+          "duration_ms": 13.148231,
+          "duration_ms_per_transition": 0.1035293779527559,
+          "time_share": 0.0016078810542465639,
+          "read_request_bytes": 573260608.0,
+          "read_request_bytes_per_transition": 4513863.05511811,
+          "effective_gb_s": 43.59982783995809,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_embedding_gather_bf16_i32_v1",
+          "grid_x": 5120,
+          "family": "other",
+          "priority": "nonpriority",
+          "invocation_count": 127,
+          "duration_ms": 0.418006,
+          "duration_ms_per_transition": 0.0032913858267716533,
+          "time_share": 5.111744142321421e-05,
+          "read_request_bytes": 1486784.0,
+          "read_request_bytes_per_transition": 11706.96062992126,
+          "effective_gb_s": 3.5568484662899573,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1",
+          "grid_x": 1024,
+          "family": "kv_cache",
+          "priority": "nonpriority",
+          "invocation_count": 2032,
+          "duration_ms": 9.621462,
+          "duration_ms_per_transition": 0.0757595433070866,
+          "time_share": 0.001176596795717481,
+          "read_request_bytes": 15802944.0,
+          "read_request_bytes_per_transition": 124432.62992125984,
+          "effective_gb_s": 1.6424680573492885,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_linear_attention_causal_conv_silu_v1",
+          "grid_x": 40960,
+          "family": "gdn",
+          "priority": "nonpriority",
+          "invocation_count": 6096,
+          "duration_ms": 27.146944,
+          "duration_ms_per_transition": 0.21375546456692915,
+          "time_share": 0.0033197665099048254,
+          "read_request_bytes": 1015476224.0,
+          "read_request_bytes_per_transition": 7995875.779527559,
+          "effective_gb_s": 37.40664967666342,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_linear_attention_recurrent_gated_norm_row32_lds_v1",
+          "grid_x": 6144,
+          "family": "gdn",
+          "priority": "nonpriority",
+          "invocation_count": 6096,
+          "duration_ms": 141.476055,
+          "duration_ms_per_transition": 1.1139846850393702,
+          "time_share": 0.017300933369975388,
+          "read_request_bytes": 26142941120.0,
+          "read_request_bytes_per_transition": 205849930.07874015,
+          "effective_gb_s": 184.7870377782304,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_fp32_decode_v4",
+          "grid_x": 12288,
+          "family": "bf16_matmul",
+          "priority": "matmul",
+          "invocation_count": 12192,
+          "duration_ms": 56.760943,
+          "duration_ms_per_transition": 0.4469365590551181,
+          "time_share": 0.006941226152086096,
+          "read_request_bytes": 6127163136.0,
+          "read_request_bytes_per_transition": 48245379.02362205,
+          "effective_gb_s": 107.94681716263945,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 106.75744871861453,
+            "copy_gb_s_max": 106.75744871861453,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 48,
+                "encoding": "bf16",
+                "payload_bytes": 501760,
+                "median_ms": 0.0094,
+                "effective_gb_s": 106.75744871861453
+              }
+            ]
+          },
+          "copy_score_signed": -0.008255675348131734,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 48,
+              "encoding": "bf16"
+            }
+          ],
+          "shape_candidate_kind": "bf16_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_fp8_outer_v2",
+          "grid_x": 256,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 23495,
+          "duration_ms": 248.858002,
+          "duration_ms_per_transition": 1.9595118267716536,
+          "time_share": 0.03043254005907361,
+          "read_request_bytes": 370941696.0,
+          "read_request_bytes_per_transition": 2920800.755905512,
+          "effective_gb_s": 1.4905757219733686,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 3,
+            "copy_gb_s_min": 2.327273126494208,
+            "copy_gb_s_max": 7.601746369052672,
+            "candidate_payload_bytes": [
+              10240,
+              12288,
+              34816
+            ]
+          },
+          "copy_score_signed": 0.1859784455250757,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 1,
+              "k": 6144,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_nvfp4_block16_wave8_v1",
+          "grid_x": 10240,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 7112,
+          "duration_ms": 33.721234,
+          "duration_ms_per_transition": 0.2655215275590551,
+          "time_share": 0.004123728376419236,
+          "read_request_bytes": 101507520.0,
+          "read_request_bytes_per_transition": 799271.811023622,
+          "effective_gb_s": 3.0101958902215733,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 2.327273126494208,
+            "copy_gb_s_max": 2.327273126494208,
+            "candidate_payload_bytes": [
+              10240
+            ]
+          },
+          "copy_score_signed": -0.0028161879796851862,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_nvfp4_block16_wave8_v1",
+          "grid_x": 34816,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 7112,
+          "duration_ms": 17.647167,
+          "duration_ms_per_transition": 0.13895407086614173,
+          "time_share": 0.0021580504236976953,
+          "read_request_bytes": 249897728.0,
+          "read_request_bytes_per_transition": 1967698.6456692913,
+          "effective_gb_s": 14.160784447724671,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 7.601746369052672,
+            "copy_gb_s_max": 7.601746369052672,
+            "candidate_payload_bytes": [
+              34816
+            ]
+          },
+          "copy_score_signed": -0.014154734904727425,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_dword8_wave4col32_v1",
+          "grid_x": 1986560,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 127,
+          "duration_ms": 331.870791,
+          "duration_ms_per_transition": 2.6131558346456694,
+          "time_share": 0.04058407228369513,
+          "read_request_bytes": 161619402688.0,
+          "read_request_bytes_per_transition": 1272593721.952756,
+          "effective_gb_s": 486.9949603006792,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 366.72887387167134,
+            "copy_gb_s_max": 366.72887387167134,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 248320,
+                "encoding": "fp8",
+                "payload_bytes": 1272396804,
+                "median_ms": 6.939169,
+                "effective_gb_s": 366.72887387167134
+              }
+            ]
+          },
+          "copy_score_signed": -4.880887544911982,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 248320,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k5120n10240_v1",
+          "grid_x": 81920,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 6096,
+          "duration_ms": 730.127789,
+          "duration_ms_per_transition": 5.749037708661417,
+          "time_share": 0.08928643245711403,
+          "read_request_bytes": 319998765120.0,
+          "read_request_bytes_per_transition": 2519675315.905512,
+          "effective_gb_s": 438.27775074590403,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 390.02750271566646,
+            "copy_gb_s_max": 390.02750271566646,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 10240,
+                "encoding": "fp8",
+                "payload_bytes": 52474884,
+                "median_ms": 0.269083,
+                "effective_gb_s": 390.02750271566646
+              }
+            ]
+          },
+          "copy_score_signed": -4.308092511790806,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 10240,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_k5120n6144_v1",
+          "grid_x": 49152,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 6096,
+          "duration_ms": 475.84021,
+          "duration_ms_per_transition": 3.7467733070866145,
+          "time_share": 0.058189916081312104,
+          "read_request_bytes": 192036704640.0,
+          "read_request_bytes_per_transition": 1512100036.535433,
+          "effective_gb_s": 403.5739321819819,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 377.4466888071905,
+            "copy_gb_s_max": 377.4466888071905,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 6144,
+                "encoding": "fp8",
+                "payload_bytes": 31486980,
+                "median_ms": 0.166842,
+                "effective_gb_s": 377.4466888071905
+              }
+            ]
+          },
+          "copy_score_signed": -1.520342099415127,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 6144,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k17408n5120_v1",
+          "grid_x": 40960,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 1016,
+          "duration_ms": 195.186216,
+          "duration_ms_per_transition": 1.5368993385826772,
+          "time_share": 0.023869083130382905,
+          "read_request_bytes": 90725683584.0,
+          "read_request_bytes_per_transition": 714375461.2913386,
+          "effective_gb_s": 464.8160379521882,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 396.64440342006986,
+            "copy_gb_s_max": 396.64440342006986,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 17408,
+                "n": 5120,
+                "encoding": "fp8",
+                "payload_bytes": 89166852,
+                "median_ms": 0.449606,
+                "effective_gb_s": 396.64440342006986
+              }
+            ]
+          },
+          "copy_score_signed": -1.6271944117812145,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 5120,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n1024_v1",
+          "grid_x": 8192,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 4064,
+          "duration_ms": 68.711132,
+          "duration_ms_per_transition": 0.541032535433071,
+          "time_share": 0.008402600118497675,
+          "read_request_bytes": 21368540608.0,
+          "read_request_bytes_per_transition": 168256225.25984251,
+          "effective_gb_s": 310.9909557013265,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 214.36705008726835,
+            "copy_gb_s_max": 214.36705008726835,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 1024,
+                "encoding": "fp8",
+                "payload_bytes": 5252100,
+                "median_ms": 0.049001,
+                "effective_gb_s": 214.36705008726835
+              }
+            ]
+          },
+          "copy_score_signed": -0.8118920407623934,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 1024,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n12288_v1",
+          "grid_x": 98304,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 2032,
+          "duration_ms": 284.856278,
+          "duration_ms_per_transition": 2.2429628188976376,
+          "time_share": 0.034834725110883154,
+          "read_request_bytes": 127995794496.0,
+          "read_request_bytes_per_transition": 1007840901.5433071,
+          "effective_gb_s": 449.33464480638895,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 399.6955342285046,
+            "copy_gb_s_max": 399.6955342285046,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 12288,
+                "encoding": "fp8",
+                "payload_bytes": 62968836,
+                "median_ms": 0.315084,
+                "effective_gb_s": 399.6955342285046
+              }
+            ]
+          },
+          "copy_score_signed": -1.7291647717293341,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 12288,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n17408_v1",
+          "grid_x": 139264,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 2032,
+          "duration_ms": 389.186564,
+          "duration_ms_per_transition": 3.0644611338582677,
+          "time_share": 0.04759314791647012,
+          "read_request_bytes": 181304992576.0,
+          "read_request_bytes_per_transition": 1427598366.7401574,
+          "effective_gb_s": 465.8562482542434,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 399.9037005559235,
+            "copy_gb_s_max": 399.9037005559235,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 17408,
+                "encoding": "fp8",
+                "payload_bytes": 89203716,
+                "median_ms": 0.446126,
+                "effective_gb_s": 399.9037005559235
+              }
+            ]
+          },
+          "copy_score_signed": -3.13888935807419,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 17408,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k6144n5120_v1",
+          "grid_x": 40960,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 8128,
+          "duration_ms": 705.100497,
+          "duration_ms_per_transition": 5.551972417322835,
+          "time_share": 0.08622587559239993,
+          "read_request_bytes": 256031425472.0,
+          "read_request_bytes_per_transition": 2015995476.1574802,
+          "effective_gb_s": 363.113381087292,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 385.6384251700183,
+            "copy_gb_s_max": 385.6384251700183,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 6144,
+                "n": 5120,
+                "encoding": "fp8",
+                "payload_bytes": 31483908,
+                "median_ms": 0.163282,
+                "effective_gb_s": 385.6384251700183
+              }
+            ]
+          },
+          "copy_score_signed": 1.942241648790483,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 6144,
+              "n": 5120,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_nvfp4_w4a4_decode_scale_lut_v1",
+          "grid_x": 40960,
+          "family": "nvfp4_matmul",
+          "priority": "matmul",
+          "invocation_count": 7112,
+          "duration_ms": 822.274679,
+          "duration_ms_per_transition": 6.474603771653543,
+          "time_share": 0.10055496269808273,
+          "read_request_bytes": 417592966976.0,
+          "read_request_bytes_per_transition": 3288133598.2362204,
+          "effective_gb_s": 507.8509379418699,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 392.67075551238554,
+            "copy_gb_s_max": 392.67075551238554,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 17408,
+                "n": 5120,
+                "encoding": "nvfp4",
+                "payload_bytes": 50144840,
+                "median_ms": 0.255404,
+                "effective_gb_s": 392.67075551238554
+              }
+            ]
+          },
+          "copy_score_signed": -11.581938947755164,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 5120,
+              "encoding": "nvfp4"
+            }
+          ],
+          "shape_candidate_kind": "nvfp4_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_nvfp4_w4a4_decode_scale_lut_v1",
+          "grid_x": 139264,
+          "family": "nvfp4_matmul",
+          "priority": "matmul",
+          "invocation_count": 14224,
+          "duration_ms": 1682.481914,
+          "duration_ms_per_transition": 13.247889086614173,
+          "time_share": 0.20574865117848148,
+          "read_request_bytes": 860502338688.0,
+          "read_request_bytes_per_transition": 6775608966.047244,
+          "effective_gb_s": 511.4481953878525,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 392.24955129089227,
+            "copy_gb_s_max": 392.24955129089227,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 17408,
+                "encoding": "nvfp4",
+                "payload_bytes": 50137928,
+                "median_ms": 0.255643,
+                "effective_gb_s": 392.24955129089227
+              }
+            ]
+          },
+          "copy_score_signed": -24.52496024525343,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 17408,
+              "encoding": "nvfp4"
+            }
+          ],
+          "shape_candidate_kind": "nvfp4_matmul"
+        },
+        {
+          "kernel_name": "sllm_rmsnorm_baseline_wave32_v1",
+          "grid_x": 256,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 127,
+          "duration_ms": 1.59551,
+          "duration_ms_per_transition": 0.012563070866141732,
+          "time_share": 0.0001951129624099953,
+          "read_request_bytes": 2813696.0,
+          "read_request_bytes_per_transition": 22155.08661417323,
+          "effective_gb_s": 1.763508846701055,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_rmsnorm_residual_fused_wave32_v1",
+          "grid_x": 256,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 16256,
+          "duration_ms": 212.239849,
+          "duration_ms_per_transition": 1.6711799133858267,
+          "time_share": 0.025954551008668128,
+          "read_request_bytes": 525740672.0,
+          "read_request_bytes_per_transition": 4139690.3307086616,
+          "effective_gb_s": 2.4771063232333903,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_fixed_topk_final_support_v1",
+          "grid_x": 256,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 127,
+          "duration_ms": 4.638568,
+          "duration_ms_per_transition": 0.03652415748031496,
+          "time_share": 0.0005672447955952687,
+          "read_request_bytes": 845312.0,
+          "read_request_bytes_per_transition": 6656.0,
+          "effective_gb_s": 0.18223555200656755,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_fixed_topk_initial_v1",
+          "grid_x": 62208,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 127,
+          "duration_ms": 6.572041,
+          "duration_ms_per_transition": 0.05174835433070866,
+          "time_share": 0.000803686839060832,
+          "read_request_bytes": 63367552.0,
+          "read_request_bytes_per_transition": 498957.10236220475,
+          "effective_gb_s": 9.641989756302493,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_fixed_topk_reduce_v1",
+          "grid_x": 1280,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 127,
+          "duration_ms": 3.760107,
+          "duration_ms_per_transition": 0.029607141732283467,
+          "time_share": 0.0004598188765652113,
+          "read_request_bytes": 5120640.0,
+          "read_request_bytes_per_transition": 40320.0,
+          "effective_gb_s": 1.361833586118693,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "void sllm_causal_attention_kernel::(anonymous namespace)::causal_attention_decode_wave_split_staged_stage1_kernel<true, 6u, 32u>(unsigned short const*, void const*, void const*, void const*, void const*, float const*, float const*, float*, unsigned int, unsigned long, unsigned int, unsigned int, unsigned int, float, float)",
+          "grid_x": 24576,
+          "family": "full_attention",
+          "priority": "attention_stage1_stage2",
+          "invocation_count": 2032,
+          "duration_ms": 1673.924668,
+          "duration_ms_per_transition": 13.180509196850394,
+          "time_share": 0.20470219605307888,
+          "read_request_bytes": 35499747968.0,
+          "read_request_bytes_per_transition": 279525574.5511811,
+          "effective_gb_s": 21.207494367363015,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 3,
+            "copy_gb_s_min": 355.61970903233333,
+            "copy_gb_s_max": 357.55700557080166,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 17315904,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17315904,
+                "median_ms": 0.096921,
+                "effective_gb_s": 357.31997276818635
+              },
+              {
+                "m": 1,
+                "k": 17448960,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17448960,
+                "median_ms": 0.097601,
+                "effective_gb_s": 357.55700557080166
+              },
+              {
+                "m": 1,
+                "k": 17582016,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17582016,
+                "median_ms": 0.098881,
+                "effective_gb_s": 355.61970903233333
+              }
+            ]
+          },
+          "copy_score_signed": 68.85148358472354,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "void sllm_causal_attention_kernel::(anonymous namespace)::causal_attention_decode_wave_split_staged_stage2_kernel<32u>(float const*, unsigned short*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "grid_x": 6144,
+          "family": "full_attention",
+          "priority": "attention_stage1_stage2",
+          "invocation_count": 2032,
+          "duration_ms": 17.629051,
+          "duration_ms_per_transition": 0.13881142519685039,
+          "time_share": 0.002155835040261039,
+          "read_request_bytes": 1624561856.0,
+          "read_request_bytes_per_transition": 12791825.637795275,
+          "effective_gb_s": 92.15254162007928,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 159.15180093341695,
+            "copy_gb_s_max": 159.15180093341695,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 792576,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 792576,
+                "median_ms": 0.00996,
+                "effective_gb_s": 159.15180093341695
+              }
+            ]
+          },
+          "copy_score_signed": 0.1444393508992291,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        }
+      ],
+      "generated_tokens_sha256": "sha256:e38500f139e36819d6ed273c95f17e9384aba6e623106b162b679535efb2d9c9",
+      "copy_source_sha256": "16357fd240ba54c6861c1e0c0a5345ed3aa5fc5b2e9bd34d7c4551e7e41f5ae1"
+    },
+    {
+      "target": "gfx1030",
+      "mtp": true,
+      "inputs": {
+        ".local-artifacts/phase87/stage0/profile-gfx1030/profile-mtp-on/analysis.json": "7335a80876caa04c15293555c0afc361b210954c8e8f71c979bf3c0f095cf028",
+        ".local-artifacts/phase87/stage0/counter-gfx1030/counter-mtp-on/analysis.json": "8ccd613bb12a930cd9b70badc059b03796d7d98d90dd56b2b5228e42ba6fad0d",
+        ".local-artifacts/phase87/stage0/profile-gfx1030/profile-mtp-on/breakdown.json": "94492a90ee819119289a251bff36f62cc8a5330bc458cb5edc18b126afb1b59b",
+        ".local-artifacts/phase87/stage0/profile-gfx1030/profile-mtp-on/report.json": "00ee310c73a3dd5818a67d5edef3843dccdaa52dd413429d69dc2cde36dbfe1f",
+        ".local-artifacts/phase87/stage0/counter-gfx1030/counter-mtp-on/report.json": "88464a384ecd1da98197ec9fe9973dd612057562d653e486bd8b5bf8a45d0e3e"
+      },
+      "committed_decode_transitions": 127,
+      "kernel_duration_source": "ordinary rocprof kernel trace; no counter timing",
+      "read_source": "separate rocprof GL2C/EA interface request counter run; not physical DRAM",
+      "copy_source": ".local-artifacts/phase87/stage0/copy-streaming-gfx1030.jsonl",
+      "total_kernel_duration_ms": 4558.109963,
+      "time_share_domain": "sum of decode GPU kernel durations; host idle is reported separately",
+      "target_forward_count": 53,
+      "rows": [
+        {
+          "kernel_name": "__amd_rocclr_copyBuffer",
+          "grid_x": 512,
+          "family": "runtime_copy",
+          "priority": "nonpriority",
+          "invocation_count": 1090,
+          "duration_ms": 2.962783,
+          "duration_ms_per_transition": 0.023329,
+          "time_share": 0.0006500025282518617,
+          "read_request_bytes": 1073152.0,
+          "read_request_bytes_per_transition": 8450.015748031496,
+          "effective_gb_s": 0.36221079977845155,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "__amd_rocclr_copyBuffer",
+          "grid_x": 1024,
+          "family": "runtime_copy",
+          "priority": "nonpriority",
+          "invocation_count": 246,
+          "duration_ms": 0.764577,
+          "duration_ms_per_transition": 0.006020291338582677,
+          "time_share": 0.00016773991988047174,
+          "read_request_bytes": 2753856.0,
+          "read_request_bytes_per_transition": 21683.905511811023,
+          "effective_gb_s": 3.6018033500876956,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "__amd_rocclr_copyBuffer",
+          "grid_x": 4096,
+          "family": "runtime_copy",
+          "priority": "nonpriority",
+          "invocation_count": 912,
+          "duration_ms": 2.196528,
+          "duration_ms_per_transition": 0.017295496062992126,
+          "time_share": 0.0004818944733299757,
+          "read_request_bytes": 56267200.0,
+          "read_request_bytes_per_transition": 443048.8188976378,
+          "effective_gb_s": 25.61642737993779,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "__amd_rocclr_copyBuffer",
+          "grid_x": 18432,
+          "family": "runtime_copy",
+          "priority": "nonpriority",
+          "invocation_count": 912,
+          "duration_ms": 11.771582,
+          "duration_ms_per_transition": 0.0926896220472441,
+          "time_share": 0.0025825577038629246,
+          "read_request_bytes": 2869346496.0,
+          "read_request_bytes_per_transition": 22593279.49606299,
+          "effective_gb_s": 243.7519864364875,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "__amd_rocclr_fillBufferAligned",
+          "grid_x": 256,
+          "family": "other",
+          "priority": "nonpriority",
+          "invocation_count": 265,
+          "duration_ms": 0.957217,
+          "duration_ms_per_transition": 0.007537141732283465,
+          "time_share": 0.00021000305121423416,
+          "read_request_bytes": 478016.0,
+          "read_request_bytes_per_transition": 3763.9055118110236,
+          "effective_gb_s": 0.4993810180972549,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_attention_preprocess_headwise_norm_rope_wave32_v1",
+          "grid_x": 896,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 140,
+          "duration_ms": 1.282229,
+          "duration_ms_per_transition": 0.010096291338582678,
+          "time_share": 0.0002813071668758247,
+          "read_request_bytes": 6296448.0,
+          "read_request_bytes_per_transition": 49578.330708661415,
+          "effective_gb_s": 4.910548739733698,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_attention_preprocess_headwise_norm_rope_wave32_v1",
+          "grid_x": 2688,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 848,
+          "duration_ms": 7.247182,
+          "duration_ms_per_transition": 0.05706442519685039,
+          "time_share": 0.0015899533049505766,
+          "read_request_bytes": 83154432.0,
+          "read_request_bytes_per_transition": 654759.3070866142,
+          "effective_gb_s": 11.474036666941718,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_add_bf16_fp32_v1",
+          "grid_x": 5120,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 212,
+          "duration_ms": 0.405737,
+          "duration_ms_per_transition": 0.003194779527559055,
+          "time_share": 8.901430709077433e-05,
+          "read_request_bytes": 4449856.0,
+          "read_request_bytes_per_transition": 35038.23622047244,
+          "effective_gb_s": 10.967340912955931,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_copy_bf16_v1",
+          "grid_x": 5120,
+          "family": "runtime_copy",
+          "priority": "nonpriority",
+          "invocation_count": 280,
+          "duration_ms": 0.545169,
+          "duration_ms_per_transition": 0.004292669291338582,
+          "time_share": 0.00011960417901835511,
+          "read_request_bytes": 2986688.0,
+          "read_request_bytes_per_transition": 23517.228346456694,
+          "effective_gb_s": 5.4784626418596805,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_sigmoid_mul_bf16_fp32_v1",
+          "grid_x": 6144,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 106,
+          "duration_ms": 0.267808,
+          "duration_ms_per_transition": 0.002108724409448819,
+          "time_share": 5.875417709838169e-05,
+          "read_request_bytes": 2700032.0,
+          "read_request_bytes_per_transition": 21260.094488188977,
+          "effective_gb_s": 10.081969171944078,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_sigmoid_mul_bf16_fp32_v1",
+          "grid_x": 18432,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 848,
+          "duration_ms": 2.049766,
+          "duration_ms_per_transition": 0.016139889763779527,
+          "time_share": 0.00044969647872446466,
+          "read_request_bytes": 63282688.0,
+          "read_request_bytes_per_transition": 498288.88188976375,
+          "effective_gb_s": 30.87312795704485,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_silu_mul_bf16_fp32_v1",
+          "grid_x": 17408,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 106,
+          "duration_ms": 0.296923,
+          "duration_ms_per_transition": 0.0023379763779527558,
+          "time_share": 6.514169302852337e-05,
+          "read_request_bytes": 7479360.0,
+          "read_request_bytes_per_transition": 58892.59842519685,
+          "effective_gb_s": 25.189560929938065,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_silu_mul_bf16_fp32_v1",
+          "grid_x": 52224,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 3392,
+          "duration_ms": 8.518548,
+          "duration_ms_per_transition": 0.0670751811023622,
+          "time_share": 0.0018688772471810594,
+          "read_request_bytes": 711627520.0,
+          "read_request_bytes_per_transition": 5603366.299212598,
+          "effective_gb_s": 83.53859366643235,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_embedding_gather_bf16_i32_v1",
+          "grid_x": 5120,
+          "family": "other",
+          "priority": "nonpriority",
+          "invocation_count": 140,
+          "duration_ms": 0.455413,
+          "duration_ms_per_transition": 0.0035859291338582676,
+          "time_share": 9.991268391872274e-05,
+          "read_request_bytes": 1625216.0,
+          "read_request_bytes_per_transition": 12796.976377952757,
+          "effective_gb_s": 3.5686640477983724,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_embedding_gather_bf16_i32_v1",
+          "grid_x": 15360,
+          "family": "other",
+          "priority": "nonpriority",
+          "invocation_count": 53,
+          "duration_ms": 0.154441,
+          "duration_ms_per_transition": 0.0012160708661417322,
+          "time_share": 3.388268410671513e-05,
+          "read_request_bytes": 1699200.0,
+          "read_request_bytes_per_transition": 13379.527559055117,
+          "effective_gb_s": 11.0022597626278,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1",
+          "grid_x": 1024,
+          "family": "kv_cache",
+          "priority": "nonpriority",
+          "invocation_count": 140,
+          "duration_ms": 0.694379,
+          "duration_ms_per_transition": 0.005467551181102362,
+          "time_share": 0.00015233923833267557,
+          "read_request_bytes": 1066368.0,
+          "read_request_bytes_per_transition": 8396.598425196851,
+          "effective_gb_s": 1.5357146457482154,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1",
+          "grid_x": 3072,
+          "family": "kv_cache",
+          "priority": "nonpriority",
+          "invocation_count": 848,
+          "duration_ms": 4.123382,
+          "duration_ms_per_transition": 0.03246757480314961,
+          "time_share": 0.0009046253893546096,
+          "read_request_bytes": 13535744.0,
+          "read_request_bytes_per_transition": 106580.66141732283,
+          "effective_gb_s": 3.282680091245487,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_linear_attention_causal_conv_silu_v1",
+          "grid_x": 122880,
+          "family": "gdn",
+          "priority": "nonpriority",
+          "invocation_count": 2544,
+          "duration_ms": 13.467677,
+          "duration_ms_per_transition": 0.10604470078740158,
+          "time_share": 0.0029546625924610236,
+          "read_request_bytes": 530431616.0,
+          "read_request_bytes_per_transition": 4176626.897637795,
+          "effective_gb_s": 39.38553144688575,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_linear_attention_recurrent_gated_norm_register_state_v1",
+          "grid_x": 6144,
+          "family": "gdn",
+          "priority": "nonpriority",
+          "invocation_count": 2544,
+          "duration_ms": 114.740956,
+          "duration_ms_per_transition": 0.903472094488189,
+          "time_share": 0.025172924069712707,
+          "read_request_bytes": 8745649088.0,
+          "read_request_bytes_per_transition": 68863378.6456693,
+          "effective_gb_s": 76.22081419645833,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_fp32_decode_serial_rows_v1",
+          "grid_x": 12288,
+          "family": "bf16_matmul",
+          "priority": "matmul",
+          "invocation_count": 5088,
+          "duration_ms": 51.867931,
+          "duration_ms_per_transition": 0.408408905511811,
+          "time_share": 0.011379262769225122,
+          "read_request_bytes": 2663809088.0,
+          "read_request_bytes_per_transition": 20974874.70866142,
+          "effective_gb_s": 51.3575351212679,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 108.3485494181888,
+            "copy_gb_s_max": 108.3485494181888,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 48,
+                "encoding": "bf16",
+                "payload_bytes": 522240,
+                "median_ms": 0.00964,
+                "effective_gb_s": 108.3485494181888
+              }
+            ]
+          },
+          "copy_score_signed": 0.6485157271693286,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 48,
+              "encoding": "bf16"
+            }
+          ],
+          "shape_candidate_kind": "bf16_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_fp32_decode_v4",
+          "grid_x": 262144,
+          "family": "bf16_matmul",
+          "priority": "matmul",
+          "invocation_count": 280,
+          "duration_ms": 6.996814,
+          "duration_ms_per_transition": 0.05509302362204724,
+          "time_share": 0.0015350252751241051,
+          "read_request_bytes": 2938998912.0,
+          "read_request_bytes_per_transition": 23141723.716535434,
+          "effective_gb_s": 420.0481693525082,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 309.433951087231,
+            "copy_gb_s_max": 309.433951087231,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 1024,
+                "encoding": "bf16",
+                "payload_bytes": 10496000,
+                "median_ms": 0.06784,
+                "effective_gb_s": 309.433951087231
+              }
+            ]
+          },
+          "copy_score_signed": -0.16979562082529495,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 1024,
+              "encoding": "bf16"
+            }
+          ],
+          "shape_candidate_kind": "bf16_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_fp32_decode_v4",
+          "grid_x": 1310720,
+          "family": "bf16_matmul",
+          "priority": "matmul",
+          "invocation_count": 352,
+          "duration_ms": 85.907247,
+          "duration_ms_per_transition": 0.6764350157480314,
+          "time_share": 0.018847120340962253,
+          "read_request_bytes": 40253296896.0,
+          "read_request_bytes_per_transition": 316955093.6692913,
+          "effective_gb_s": 468.5669521687733,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 3,
+            "copy_gb_s_min": 394.5207471768863,
+            "copy_gb_s_max": 400.88709559536846,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 6144,
+                "n": 5120,
+                "encoding": "bf16",
+                "payload_bytes": 62926848,
+                "median_ms": 0.319004,
+                "effective_gb_s": 394.5207471768863
+              },
+              {
+                "m": 1,
+                "k": 10240,
+                "n": 5120,
+                "encoding": "bf16",
+                "payload_bytes": 104878080,
+                "median_ms": 0.528446,
+                "effective_gb_s": 396.93015511046553
+              },
+              {
+                "m": 1,
+                "k": 17408,
+                "n": 5120,
+                "encoding": "bf16",
+                "payload_bytes": 178292736,
+                "median_ms": 0.889491,
+                "effective_gb_s": 400.88709559536846
+              }
+            ]
+          },
+          "copy_score_signed": -1.275570401498026,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 6144,
+              "n": 5120,
+              "encoding": "bf16"
+            },
+            {
+              "m": 1,
+              "k": 10240,
+              "n": 5120,
+              "encoding": "bf16"
+            },
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 5120,
+              "encoding": "bf16"
+            }
+          ],
+          "shape_candidate_kind": "bf16_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_fp32_decode_v4",
+          "grid_x": 3145728,
+          "family": "bf16_matmul",
+          "priority": "matmul",
+          "invocation_count": 140,
+          "duration_ms": 36.733064,
+          "duration_ms_per_transition": 0.2892367244094488,
+          "time_share": 0.00805883673236867,
+          "read_request_bytes": 17617917120.0,
+          "read_request_bytes_per_transition": 138723756.8503937,
+          "effective_gb_s": 479.6201351458185,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 398.9530342410158,
+            "copy_gb_s_max": 398.9530342410158,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 12288,
+                "encoding": "bf16",
+                "payload_bytes": 125839360,
+                "median_ms": 0.630848,
+                "effective_gb_s": 398.9530342410158
+              }
+            ]
+          },
+          "copy_score_signed": -0.6500829958653138,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 12288,
+              "encoding": "bf16"
+            }
+          ],
+          "shape_candidate_kind": "bf16_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_fp32_decode_v4",
+          "grid_x": 4456448,
+          "family": "bf16_matmul",
+          "priority": "matmul",
+          "invocation_count": 212,
+          "duration_ms": 76.727481,
+          "duration_ms_per_transition": 0.6041533937007874,
+          "time_share": 0.016833179019994607,
+          "read_request_bytes": 37793978368.0,
+          "read_request_bytes_per_transition": 297590380.8503937,
+          "effective_gb_s": 492.5742103797204,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 412.2326661720965,
+            "copy_gb_s_max": 412.2326661720965,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 17408,
+                "encoding": "bf16",
+                "payload_bytes": 178268160,
+                "median_ms": 0.864891,
+                "effective_gb_s": 412.2326661720965
+              }
+            ]
+          },
+          "copy_score_signed": -1.3524035963897436,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 17408,
+              "encoding": "bf16"
+            }
+          ],
+          "shape_candidate_kind": "bf16_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_fp8_outer_v2",
+          "grid_x": 256,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 106,
+          "duration_ms": 1.386433,
+          "duration_ms_per_transition": 0.010916795275590552,
+          "time_share": 0.00030416839682548925,
+          "read_request_bytes": 1505920.0,
+          "read_request_bytes_per_transition": 11857.63779527559,
+          "effective_gb_s": 1.0861830322850075,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 6,
+            "copy_gb_s_min": 2.327273126494208,
+            "copy_gb_s_max": 22.706086565904386,
+            "candidate_payload_bytes": [
+              10240,
+              12288,
+              30720,
+              34816,
+              36864,
+              104448
+            ]
+          },
+          "copy_score_signed": 0.006576091397342736,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 1,
+              "k": 6144,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 3,
+              "k": 6144,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 3,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_fp8_outer_v2",
+          "grid_x": 768,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 9805,
+          "duration_ms": 110.845747,
+          "duration_ms_per_transition": 0.872801157480315,
+          "time_share": 0.0243183573673692,
+          "read_request_bytes": 391722560.0,
+          "read_request_bytes_per_transition": 3084429.6062992127,
+          "effective_gb_s": 3.533943074965249,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 6,
+            "copy_gb_s_min": 2.327273126494208,
+            "copy_gb_s_max": 22.706086565904386,
+            "candidate_payload_bytes": [
+              10240,
+              12288,
+              30720,
+              34816,
+              36864,
+              104448
+            ]
+          },
+          "copy_score_signed": 0.46623503691113916,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 1,
+              "k": 6144,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 3,
+              "k": 6144,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 3,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_nvfp4_block16_wave8_v1",
+          "grid_x": 30720,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 2968,
+          "duration_ms": 17.105664,
+          "duration_ms_per_transition": 0.13469026771653544,
+          "time_share": 0.0037527975715490654,
+          "read_request_bytes": 103149120.0,
+          "read_request_bytes_per_transition": 812197.7952755905,
+          "effective_gb_s": 6.030114937368115,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 6.707423582617601,
+            "copy_gb_s_max": 6.707423582617601,
+            "candidate_payload_bytes": [
+              30720
+            ]
+          },
+          "copy_score_signed": 0.002541802239081458,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_nvfp4_block16_wave8_v1",
+          "grid_x": 104448,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 2968,
+          "duration_ms": 15.060785,
+          "duration_ms_per_transition": 0.11858885826771653,
+          "time_share": 0.0033041732477396136,
+          "read_request_bytes": 310953408.0,
+          "read_request_bytes_per_transition": 2448452.031496063,
+          "effective_gb_s": 20.64656045485013,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 22.706086565904386,
+            "copy_gb_s_max": 22.706086565904386,
+            "candidate_payload_bytes": [
+              104448
+            ]
+          },
+          "copy_score_signed": 0.0068050310791666815,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_dword8_wave4col32_v1",
+          "grid_x": 1986560,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 106,
+          "duration_ms": 276.794771,
+          "duration_ms_per_transition": 2.1794863858267717,
+          "time_share": 0.060725777404857226,
+          "read_request_bytes": 134887242880.0,
+          "read_request_bytes_per_transition": 1062104274.6456693,
+          "effective_gb_s": 487.3186093533537,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 2,
+            "copy_gb_s_min": 363.21646894435537,
+            "copy_gb_s_max": 366.72887387167134,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 248320,
+                "encoding": "fp8",
+                "payload_bytes": 1272396804,
+                "median_ms": 6.939169,
+                "effective_gb_s": 366.72887387167134
+              },
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 248320,
+                "encoding": "fp8",
+                "payload_bytes": 1272407052,
+                "median_ms": 7.006329,
+                "effective_gb_s": 363.21646894435537
+              }
+            ]
+          },
+          "copy_score_signed": -7.322905434171255,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 248320,
+              "encoding": "fp8"
+            },
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 248320,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_fused_k17408n5120_v1",
+          "grid_x": 40960,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 424,
+          "duration_ms": 85.221908,
+          "duration_ms_per_transition": 0.6710386456692913,
+          "time_share": 0.01869676438080263,
+          "read_request_bytes": 38012268288.0,
+          "read_request_bytes_per_transition": 299309199.11811024,
+          "effective_gb_s": 446.03869099011484,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 397.9322085615862,
+            "copy_gb_s_max": 397.9322085615862,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 17408,
+                "n": 5120,
+                "encoding": "fp8",
+                "payload_bytes": 89201676,
+                "median_ms": 0.448326,
+                "effective_gb_s": 397.9322085615862
+              }
+            ]
+          },
+          "copy_score_signed": -0.8994355671554218,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 17408,
+              "n": 5120,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n10240_v1",
+          "grid_x": 81920,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 2544,
+          "duration_ms": 327.332812,
+          "duration_ms_per_transition": 2.577423716535433,
+          "time_share": 0.07181327669957312,
+          "read_request_bytes": 133657240448.0,
+          "read_request_bytes_per_transition": 1052419216.1259843,
+          "effective_gb_s": 408.32215881859105,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 389.6981742870856,
+            "copy_gb_s_max": 389.6981742870856,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 10240,
+                "encoding": "fp8",
+                "payload_bytes": 52485132,
+                "median_ms": 0.269363,
+                "effective_gb_s": 389.6981742870856
+              }
+            ]
+          },
+          "copy_score_signed": -1.337449354409572,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 10240,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n1024_v1",
+          "grid_x": 8192,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 1696,
+          "duration_ms": 33.550851,
+          "duration_ms_per_transition": 0.2641799291338583,
+          "time_share": 0.007360693636692766,
+          "read_request_bytes": 8942642048.0,
+          "read_request_bytes_per_transition": 70414504.31496063,
+          "effective_gb_s": 266.53994701952564,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 217.62775919362048,
+            "copy_gb_s_max": 217.62775919362048,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 1024,
+                "encoding": "fp8",
+                "payload_bytes": 5262348,
+                "median_ms": 0.048361,
+                "effective_gb_s": 217.62775919362048
+              }
+            ]
+          },
+          "copy_score_signed": -0.36002762968686153,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 1024,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n12288_v1",
+          "grid_x": 98304,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 848,
+          "duration_ms": 126.878598,
+          "duration_ms_per_transition": 0.9990440787401574,
+          "time_share": 0.027835791376233633,
+          "read_request_bytes": 53455001856.0,
+          "read_request_bytes_per_transition": 420905526.4251968,
+          "effective_gb_s": 421.3082639516556,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 399.4056604432466,
+            "copy_gb_s_max": 399.4056604432466,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 12288,
+                "encoding": "fp8",
+                "payload_bytes": 62979084,
+                "median_ms": 0.315364,
+                "effective_gb_s": 399.4056604432466
+              }
+            ]
+          },
+          "copy_score_signed": -0.6096763018564362,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 12288,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n17408_v1",
+          "grid_x": 139264,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 848,
+          "duration_ms": 171.348081,
+          "duration_ms_per_transition": 1.3491974881889763,
+          "time_share": 0.03759191471704299,
+          "read_request_bytes": 75701966976.0,
+          "read_request_bytes_per_transition": 596078480.1259843,
+          "effective_gb_s": 441.8022456639009,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 396.89017325990704,
+            "copy_gb_s_max": 396.89017325990704,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 17408,
+                "encoding": "fp8",
+                "payload_bytes": 89213964,
+                "median_ms": 0.449565,
+                "effective_gb_s": 396.89017325990704
+              }
+            ]
+          },
+          "copy_score_signed": -1.6883307955765978,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 17408,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n248320_v1",
+          "grid_x": 1986560,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 53,
+          "duration_ms": 138.934261,
+          "duration_ms_per_transition": 1.093970559055118,
+          "time_share": 0.030480673377295615,
+          "read_request_bytes": 67460609600.0,
+          "read_request_bytes_per_transition": 531185902.36220473,
+          "effective_gb_s": 485.55776749696025,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 2,
+            "copy_gb_s_min": 363.21646894435537,
+            "copy_gb_s_max": 366.72887387167134,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 248320,
+                "encoding": "fp8",
+                "payload_bytes": 1272396804,
+                "median_ms": 6.939169,
+                "effective_gb_s": 366.72887387167134
+              },
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 248320,
+                "encoding": "fp8",
+                "payload_bytes": 1272407052,
+                "median_ms": 7.006329,
+                "effective_gb_s": 363.21646894435537
+              }
+            ]
+          },
+          "copy_score_signed": -3.6219846943778364,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 248320,
+              "encoding": "fp8"
+            },
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 248320,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_fused_k5120n6144_v1",
+          "grid_x": 49152,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 2544,
+          "duration_ms": 215.331935,
+          "duration_ms_per_transition": 1.6955270472440944,
+          "time_share": 0.047241496310518036,
+          "read_request_bytes": 80233380480.0,
+          "read_request_bytes_per_transition": 631758901.4173229,
+          "effective_gb_s": 372.60325775644935,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 372.92039457262797,
+            "copy_gb_s_max": 372.92039457262797,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 6144,
+                "encoding": "fp8",
+                "payload_bytes": 31497228,
+                "median_ms": 0.168922,
+                "effective_gb_s": 372.92039457262797
+              }
+            ]
+          },
+          "copy_score_signed": 0.014982017731431603,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 6144,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_fp8_outer_decode_gfx1030_fused_k6144n5120_v1",
+          "grid_x": 40960,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 3392,
+          "duration_ms": 326.714122,
+          "duration_ms_per_transition": 2.572552141732283,
+          "time_share": 0.07167754280876702,
+          "read_request_bytes": 107017504448.0,
+          "read_request_bytes_per_transition": 842657515.3385826,
+          "effective_gb_s": 327.5570207767144,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 381.3053443342336,
+            "copy_gb_s_max": 381.3053443342336,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 6144,
+                "n": 5120,
+                "encoding": "fp8",
+                "payload_bytes": 31496204,
+                "median_ms": 0.165202,
+                "effective_gb_s": 381.3053443342336
+              }
+            ]
+          },
+          "copy_score_signed": 3.8525477626935434,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 6144,
+              "n": 5120,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1",
+          "grid_x": 40960,
+          "family": "nvfp4_matmul",
+          "priority": "matmul",
+          "invocation_count": 2968,
+          "duration_ms": 377.432097,
+          "duration_ms_per_transition": 2.971906275590551,
+          "time_share": 0.08280451767591548,
+          "read_request_bytes": 163244610752.0,
+          "read_request_bytes_per_transition": 1285390635.8425198,
+          "effective_gb_s": 432.51385361642946,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 388.5055939392307,
+            "copy_gb_s_max": 388.5055939392307,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 17408,
+                "n": 5120,
+                "encoding": "nvfp4",
+                "payload_bytes": 50164424,
+                "median_ms": 0.258243,
+                "effective_gb_s": 388.5055939392307
+              }
+            ]
+          },
+          "copy_score_signed": -3.6440827163268814,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 17408,
+              "n": 5120,
+              "encoding": "nvfp4"
+            }
+          ],
+          "shape_candidate_kind": "nvfp4_matmul"
+        },
+        {
+          "kernel_name": "sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1",
+          "grid_x": 139264,
+          "family": "nvfp4_matmul",
+          "priority": "matmul",
+          "invocation_count": 5936,
+          "duration_ms": 744.334993,
+          "duration_ms_per_transition": 5.8609054566929135,
+          "time_share": 0.16329904259486158,
+          "read_request_bytes": 327422754432.0,
+          "read_request_bytes_per_transition": 2578131924.6614175,
+          "effective_gb_s": 439.8862844165651,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 390.5819271590052,
+            "copy_gb_s_max": 390.5819271590052,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 17408,
+                "encoding": "nvfp4",
+                "payload_bytes": 50143688,
+                "median_ms": 0.256764,
+                "effective_gb_s": 390.5819271590052
+              }
+            ]
+          },
+          "copy_score_signed": -8.051354335914548,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 17408,
+              "encoding": "nvfp4"
+            }
+          ],
+          "shape_candidate_kind": "nvfp4_matmul"
+        },
+        {
+          "kernel_name": "sllm_rmsnorm_baseline_wave32_v1",
+          "grid_x": 256,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 632,
+          "duration_ms": 8.59733,
+          "duration_ms_per_transition": 0.06769551181102362,
+          "time_share": 0.0018861611654365435,
+          "read_request_bytes": 13852288.0,
+          "read_request_bytes_per_transition": 109073.13385826771,
+          "effective_gb_s": 1.6112313939327674,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_rmsnorm_baseline_wave32_v1",
+          "grid_x": 768,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 53,
+          "duration_ms": 0.622892,
+          "duration_ms_per_transition": 0.0049046614173228345,
+          "time_share": 0.00013665576413387638,
+          "read_request_bytes": 2256000.0,
+          "read_request_bytes_per_transition": 17763.779527559054,
+          "effective_gb_s": 3.621815659857568,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_rmsnorm_residual_fused_wave32_v1",
+          "grid_x": 768,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 6784,
+          "duration_ms": 92.883347,
+          "duration_ms_per_transition": 0.731364937007874,
+          "time_share": 0.02037760118864425,
+          "read_request_bytes": 497599296.0,
+          "read_request_bytes_per_transition": 3918104.692913386,
+          "effective_gb_s": 5.357249841567402,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_fixed_topk_final_support_v1",
+          "grid_x": 256,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 265,
+          "duration_ms": 9.612618,
+          "duration_ms_per_transition": 0.07568990551181103,
+          "time_share": 0.00210890436563169,
+          "read_request_bytes": 1764800.0,
+          "read_request_bytes_per_transition": 13896.062992125984,
+          "effective_gb_s": 0.18359202456604434,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_fixed_topk_initial_v1",
+          "grid_x": 62208,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 265,
+          "duration_ms": 13.910087,
+          "duration_ms_per_transition": 0.10952824409448819,
+          "time_share": 0.003051722558892553,
+          "read_request_bytes": 131987008.0,
+          "read_request_bytes_per_transition": 1039267.7795275591,
+          "effective_gb_s": 9.488582494128181,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_fixed_topk_reduce_v1",
+          "grid_x": 1280,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 265,
+          "duration_ms": 7.845858,
+          "duration_ms_per_transition": 0.0617784094488189,
+          "time_share": 0.0017212963407394655,
+          "read_request_bytes": 10686144.0,
+          "read_request_bytes_per_transition": 84142.86614173229,
+          "effective_gb_s": 1.3620108852339665,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_sparse_pq_k20_v1",
+          "grid_x": 64,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 53,
+          "duration_ms": 1.41411,
+          "duration_ms_per_transition": 0.011134724409448819,
+          "time_share": 0.00031024043111704103,
+          "read_request_bytes": 565696.0,
+          "read_request_bytes_per_transition": 4454.299212598426,
+          "effective_gb_s": 0.40003677224544054,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "void sllm_causal_attention_kernel::(anonymous namespace)::causal_attention_decode_wave_split_staged_stage1_kernel<true, 6u, 32u>(unsigned short const*, void const*, void const*, void const*, void const*, float const*, float const*, float*, unsigned int, unsigned long, unsigned int, unsigned int, unsigned int, float, float)",
+          "grid_x": 24576,
+          "family": "full_attention",
+          "priority": "attention_stage1_stage2",
+          "invocation_count": 106,
+          "duration_ms": 92.305811,
+          "duration_ms_per_transition": 0.7268174094488189,
+          "time_share": 0.020250896040087483,
+          "read_request_bytes": 1852306112.0,
+          "read_request_bytes_per_transition": 14585087.496062992,
+          "effective_gb_s": 20.067058530042058,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 3,
+            "copy_gb_s_min": 355.61970903233333,
+            "copy_gb_s_max": 357.55700557080166,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 17315904,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17315904,
+                "median_ms": 0.096921,
+                "effective_gb_s": 357.31997276818635
+              },
+              {
+                "m": 1,
+                "k": 17448960,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17448960,
+                "median_ms": 0.097601,
+                "effective_gb_s": 357.55700557080166
+              },
+              {
+                "m": 1,
+                "k": 17582016,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17582016,
+                "median_ms": 0.098881,
+                "effective_gb_s": 355.61970903233333
+              }
+            ]
+          },
+          "copy_score_signed": 6.834473832097053,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "void sllm_causal_attention_kernel::(anonymous namespace)::causal_attention_decode_wave_split_staged_stage1_kernel<true, 6u, 32u>(unsigned short const*, void const*, void const*, void const*, void const*, float const*, float const*, float*, unsigned int, unsigned long, unsigned int, unsigned int, unsigned int, float, float)",
+          "grid_x": 73728,
+          "family": "full_attention",
+          "priority": "attention_stage1_stage2",
+          "invocation_count": 848,
+          "duration_ms": 922.990273,
+          "duration_ms_per_transition": 7.26763994488189,
+          "time_share": 0.2024940776971773,
+          "read_request_bytes": 43877998272.0,
+          "read_request_bytes_per_transition": 345496049.38582677,
+          "effective_gb_s": 47.53896065381395,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 3,
+            "copy_gb_s_min": 355.61970903233333,
+            "copy_gb_s_max": 357.55700557080166,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 17315904,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17315904,
+                "median_ms": 0.096921,
+                "effective_gb_s": 357.31997276818635
+              },
+              {
+                "m": 1,
+                "k": 17448960,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17448960,
+                "median_ms": 0.097601,
+                "effective_gb_s": 357.55700557080166
+              },
+              {
+                "m": 1,
+                "k": 17582016,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17582016,
+                "median_ms": 0.098881,
+                "effective_gb_s": 355.61970903233333
+              }
+            ]
+          },
+          "copy_score_signed": 62.77681807494751,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "void sllm_causal_attention_kernel::(anonymous namespace)::causal_attention_decode_wave_split_staged_stage2_kernel<32u>(float const*, unsigned short*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "grid_x": 6144,
+          "family": "full_attention",
+          "priority": "attention_stage1_stage2",
+          "invocation_count": 106,
+          "duration_ms": 0.865943,
+          "duration_ms_per_transition": 0.006818448818897638,
+          "time_share": 0.00018997852334173712,
+          "read_request_bytes": 84745728.0,
+          "read_request_bytes_per_transition": 667289.1968503937,
+          "effective_gb_s": 97.86524979126803,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 159.15180093341695,
+            "copy_gb_s_max": 159.15180093341695,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 792576,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 792576,
+                "median_ms": 0.00996,
+                "effective_gb_s": 159.15180093341695
+              }
+            ]
+          },
+          "copy_score_signed": 0.011643128486693305,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "void sllm_causal_attention_kernel::(anonymous namespace)::causal_attention_decode_wave_split_staged_stage2_kernel<32u>(float const*, unsigned short*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "grid_x": 18432,
+          "family": "full_attention",
+          "priority": "attention_stage1_stage2",
+          "invocation_count": 848,
+          "duration_ms": 7.653802,
+          "duration_ms_per_transition": 0.06026615748031496,
+          "time_share": 0.0016791613326859092,
+          "read_request_bytes": 2022177344.0,
+          "read_request_bytes_per_transition": 15922656.251968505,
+          "effective_gb_s": 264.2055992564218,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 159.15180093341695,
+            "copy_gb_s_max": 159.15180093341695,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 792576,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 792576,
+                "median_ms": 0.00996,
+                "effective_gb_s": 159.15180093341695
+              }
+            ]
+          },
+          "copy_score_signed": -0.17640227599577357,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        }
+      ],
+      "generated_tokens_sha256": "sha256:316dc877624f4f03edafe20ff3002ef53dd4f4d90742441bcf23dd61e9ba27ff",
+      "copy_source_sha256": "16357fd240ba54c6861c1e0c0a5345ed3aa5fc5b2e9bd34d7c4551e7e41f5ae1"
+    },
+    {
+      "target": "gfx1201",
+      "mtp": false,
+      "inputs": {
+        ".local-artifacts/phase87/stage0/profile-gfx1201/profile-mtp-off/analysis.json": "093a736f06f909452bbce369cc78e9730072dd423538d0c352818e01b83d61ef",
+        ".local-artifacts/phase87/stage0/counter-gfx1201/counter-mtp-off/analysis.json": "b4787f24a9d900519d5c21624ee65b7da5e5972c888ca862b3489c54e274c363",
+        ".local-artifacts/phase87/stage0/profile-gfx1201/profile-mtp-off/breakdown.json": "1e010f2adb1cf72da02a43a4ae7f52a30c06280ae1183d7272dd6ffd4cce26cf",
+        ".local-artifacts/phase87/stage0/profile-gfx1201/profile-mtp-off/report.json": "9e1e3e3903c7796253ee3f1ee90c35924fa8e2f8399ee23bd946164e7a9d4b34",
+        ".local-artifacts/phase87/stage0/counter-gfx1201/counter-mtp-off/report.json": "0688d58ed3dc5c60285607df3ce77b8148cbf8f1e24f75e6989cd3659f267491"
+      },
+      "committed_decode_transitions": 127,
+      "kernel_duration_source": "ordinary rocprof kernel trace; no counter timing",
+      "read_source": "separate rocprof GL2C/EA interface request counter run; not physical DRAM",
+      "copy_source": ".local-artifacts/phase87/stage0/copy-streaming-gfx1201.jsonl",
+      "total_kernel_duration_ms": 6285.712475,
+      "time_share_domain": "sum of decode GPU kernel durations; host idle is reported separately",
+      "target_forward_count": 127,
+      "rows": [
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB1_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG16_2_1",
+          "grid_x": 20480,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 6096,
+          "duration_ms": 691.832583,
+          "duration_ms_per_transition": 5.447500653543307,
+          "time_share": 0.11006430627420641,
+          "read_request_bytes": 320406944896.0,
+          "read_request_bytes_per_transition": 2522889329.889764,
+          "effective_gb_s": 463.12786181104167,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 522.7571254793338,
+            "copy_gb_s_max": 522.7571254793338,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 10240,
+                "encoding": "fp8",
+                "payload_bytes": 52474884,
+                "median_ms": 0.200762,
+                "effective_gb_s": 522.7571254793338
+              }
+            ]
+          },
+          "copy_score_signed": 6.563053539292315,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 10240,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB1_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB1_WS32_WG16_2_1",
+          "grid_x": 2048,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 4064,
+          "duration_ms": 87.788315,
+          "duration_ms_per_transition": 0.6912465748031495,
+          "time_share": 0.013966326864163478,
+          "read_request_bytes": 21346078720.0,
+          "read_request_bytes_per_transition": 168079360.0,
+          "effective_gb_s": 243.15398604016946,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 340.16191235437367,
+            "copy_gb_s_max": 340.16191235437367,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 1024,
+                "encoding": "fp8",
+                "payload_bytes": 5252100,
+                "median_ms": 0.03088,
+                "effective_gb_s": 340.16191235437367
+              }
+            ]
+          },
+          "copy_score_signed": 1.3548444073188615,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 1024,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB1_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB1_WS32_WG16_2_1",
+          "grid_x": 10240,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 1016,
+          "duration_ms": 164.207175,
+          "duration_ms_per_transition": 1.292969881889764,
+          "time_share": 0.02612387627545754,
+          "read_request_bytes": 90604312832.0,
+          "read_request_bytes_per_transition": 713419786.0787401,
+          "effective_gb_s": 551.7682941199129,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 531.7632048213525,
+            "copy_gb_s_max": 531.7632048213525,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 17408,
+                "n": 5120,
+                "encoding": "fp8",
+                "payload_bytes": 89166852,
+                "median_ms": 0.335363,
+                "effective_gb_s": 531.7632048213525
+              }
+            ]
+          },
+          "copy_score_signed": -0.5226104777150713,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 5120,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB1_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB1_WS32_WG16_2_1",
+          "grid_x": 24576,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 2032,
+          "duration_ms": 286.879206,
+          "duration_ms_per_transition": 2.2588913858267716,
+          "time_share": 0.0456398868292174,
+          "read_request_bytes": 128628563200.0,
+          "read_request_bytes_per_transition": 1012823332.2834646,
+          "effective_gb_s": 448.3718600364503,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 535.1716908674581,
+            "copy_gb_s_max": 535.1716908674581,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 12288,
+                "encoding": "fp8",
+                "payload_bytes": 62968836,
+                "median_ms": 0.235322,
+                "effective_gb_s": 535.1716908674581
+              }
+            ]
+          },
+          "copy_score_signed": 3.9615344559224113,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 12288,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB1_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB0_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB0_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB2_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG16_2_1",
+          "grid_x": 10240,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 8128,
+          "duration_ms": 590.695004,
+          "duration_ms_per_transition": 4.651141763779528,
+          "time_share": 0.09397423225280441,
+          "read_request_bytes": 255942200576.0,
+          "read_request_bytes_per_transition": 2015292917.9212599,
+          "effective_gb_s": 433.28993616475555,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 507.30992019072613,
+            "copy_gb_s_max": 507.30992019072613,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 6144,
+                "n": 5120,
+                "encoding": "fp8",
+                "payload_bytes": 31483908,
+                "median_ms": 0.124121,
+                "effective_gb_s": 507.30992019072613
+              }
+            ]
+          },
+          "copy_score_signed": 6.955971170205432,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 6144,
+              "n": 5120,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB1_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB0_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB0_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB2_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG16_2_1",
+          "grid_x": 12288,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 6096,
+          "duration_ms": 389.099126,
+          "duration_ms_per_transition": 3.0637726456692915,
+          "time_share": 0.06190215151385842,
+          "read_request_bytes": 192014360192.0,
+          "read_request_bytes_per_transition": 1511924096.0,
+          "effective_gb_s": 493.4844294458785,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 508.5065421028065,
+            "copy_gb_s_max": 508.5065421028065,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 6144,
+                "encoding": "fp8",
+                "payload_bytes": 31486980,
+                "median_ms": 0.123841,
+                "effective_gb_s": 508.5065421028065
+              }
+            ]
+          },
+          "copy_score_signed": 0.9299010937474083,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 6144,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB1_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB0_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB0_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB2_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG16_2_1",
+          "grid_x": 34816,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 2032,
+          "duration_ms": 428.400964,
+          "duration_ms_per_transition": 3.3732359370078737,
+          "time_share": 0.06815471845138764,
+          "read_request_bytes": 235053517824.0,
+          "read_request_bytes_per_transition": 1850815100.976378,
+          "effective_gb_s": 548.6764446776549,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 527.8279388889088,
+            "copy_gb_s_max": 527.8279388889088,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 17408,
+                "encoding": "fp8",
+                "payload_bytes": 89203716,
+                "median_ms": 0.338003,
+                "effective_gb_s": 527.8279388889088
+              }
+            ]
+          },
+          "copy_score_signed": -1.4209240421641185,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 17408,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT64x64x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT4_4_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB1_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB1_WS32_WG16_2_1",
+          "grid_x": 124160,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 127,
+          "duration_ms": 295.117253,
+          "duration_ms_per_transition": 2.3237578976377953,
+          "time_share": 0.046950485593122836,
+          "read_request_bytes": 170842277504.0,
+          "read_request_bytes_per_transition": 1345214783.496063,
+          "effective_gb_s": 578.8962717947229,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 516.8349915696333,
+            "copy_gb_s_max": 516.8349915696333,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 248320,
+                "encoding": "fp8",
+                "payload_bytes": 1272396804,
+                "median_ms": 4.923803,
+                "effective_gb_s": 516.8349915696333
+              }
+            ]
+          },
+          "copy_score_signed": -2.9138072430988284,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 248320,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "__amd_rocclr_copyBuffer",
+          "grid_x": 512,
+          "family": "runtime_copy",
+          "priority": "nonpriority",
+          "invocation_count": 381,
+          "duration_ms": 1.156805,
+          "duration_ms_per_transition": 0.009108700787401575,
+          "time_share": 0.00018403721210617416,
+          "read_request_bytes": 292608.0,
+          "read_request_bytes_per_transition": 2304.0,
+          "effective_gb_s": 0.25294496479527667,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "__amd_rocclr_fillBufferAligned",
+          "grid_x": 256,
+          "family": "other",
+          "priority": "nonpriority",
+          "invocation_count": 127,
+          "duration_ms": 0.380443,
+          "duration_ms_per_transition": 0.0029956141732283463,
+          "time_share": 6.0525040162611003e-05,
+          "read_request_bytes": 65024.0,
+          "read_request_bytes_per_transition": 512.0,
+          "effective_gb_s": 0.17091653677423424,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_attention_preprocess_headwise_norm_rope_wave32_v1",
+          "grid_x": 896,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 2032,
+          "duration_ms": 12.287001,
+          "duration_ms_per_transition": 0.09674803937007874,
+          "time_share": 0.0019547507221923956,
+          "read_request_bytes": 84271104.0,
+          "read_request_bytes_per_transition": 663552.0,
+          "effective_gb_s": 6.858557592694914,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_sigmoid_mul_bf16_fp32_v1",
+          "grid_x": 6144,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 2032,
+          "duration_ms": 3.416109,
+          "duration_ms_per_transition": 0.026898496062992126,
+          "time_share": 0.0005434720429206396,
+          "read_request_bytes": 50978816.0,
+          "read_request_bytes_per_transition": 401408.0,
+          "effective_gb_s": 14.923064808529237,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_silu_mul_bf16_fp32_v1",
+          "grid_x": 17408,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 8128,
+          "duration_ms": 13.118536,
+          "duration_ms_per_transition": 0.10329555905511811,
+          "time_share": 0.002087040419391757,
+          "read_request_bytes": 570130432.0,
+          "read_request_bytes_per_transition": 4489216.0,
+          "effective_gb_s": 43.45991290491561,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_embedding_gather_bf16_i32_v1",
+          "grid_x": 5120,
+          "family": "other",
+          "priority": "nonpriority",
+          "invocation_count": 127,
+          "duration_ms": 0.462524,
+          "duration_ms_per_transition": 0.0036419212598425197,
+          "time_share": 7.358338483339551e-05,
+          "read_request_bytes": 1398016.0,
+          "read_request_bytes_per_transition": 11008.0,
+          "effective_gb_s": 3.0225804498793574,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1",
+          "grid_x": 1024,
+          "family": "kv_cache",
+          "priority": "nonpriority",
+          "invocation_count": 2032,
+          "duration_ms": 6.199852,
+          "duration_ms_per_transition": 0.04881773228346457,
+          "time_share": 0.0009863403750423694,
+          "read_request_bytes": 8843264.0,
+          "read_request_bytes_per_transition": 69632.0,
+          "effective_gb_s": 1.4263669519853055,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_linear_attention_causal_conv_silu_v1",
+          "grid_x": 40960,
+          "family": "gdn",
+          "priority": "nonpriority",
+          "invocation_count": 6096,
+          "duration_ms": 19.05721,
+          "duration_ms_per_transition": 0.1500567716535433,
+          "time_share": 0.0030318297370100435,
+          "read_request_bytes": 1001889792.0,
+          "read_request_bytes_per_transition": 7888896.0,
+          "effective_gb_s": 52.57274238988813,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_linear_attention_recurrent_gated_norm_v1",
+          "grid_x": 6144,
+          "family": "gdn",
+          "priority": "nonpriority",
+          "invocation_count": 6096,
+          "duration_ms": 244.437657,
+          "duration_ms_per_transition": 1.9247059606299213,
+          "time_share": 0.0388878202705255,
+          "read_request_bytes": 19387035648.0,
+          "read_request_bytes_per_transition": 152653824.0,
+          "effective_gb_s": 79.31280264235228,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_fp32_decode_v4",
+          "grid_x": 12288,
+          "family": "bf16_matmul",
+          "priority": "matmul",
+          "invocation_count": 12192,
+          "duration_ms": 57.501437,
+          "duration_ms_per_transition": 0.45276722047244095,
+          "time_share": 0.009147958521599416,
+          "read_request_bytes": 6122139648.0,
+          "read_request_bytes_per_transition": 48205824.0,
+          "effective_gb_s": 106.46933307075437,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 104.09958659063808,
+            "copy_gb_s_max": 104.09958659063808,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 48,
+                "encoding": "bf16",
+                "payload_bytes": 501760,
+                "median_ms": 0.00964,
+                "effective_gb_s": 104.09958659063808
+              }
+            ]
+          },
+          "copy_score_signed": -0.021678342506810045,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 48,
+              "encoding": "bf16"
+            }
+          ],
+          "shape_candidate_kind": "bf16_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_fp8_outer_v2",
+          "grid_x": 256,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 23495,
+          "duration_ms": 207.95479,
+          "duration_ms_per_transition": 1.6374392913385827,
+          "time_share": 0.03308372612127792,
+          "read_request_bytes": 288218880.0,
+          "read_request_bytes_per_transition": 2269440.0,
+          "effective_gb_s": 1.3859689406529179,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 3,
+            "copy_gb_s_min": 2.197424453976064,
+            "copy_gb_s_max": 7.471244861505536,
+            "candidate_payload_bytes": [
+              10240,
+              12288,
+              34816
+            ]
+          },
+          "copy_score_signed": 0.2013236019378953,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 1,
+              "k": 6144,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_nvfp4_block16_wave8_v1",
+          "grid_x": 10240,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 7112,
+          "duration_ms": 25.71599,
+          "duration_ms_per_transition": 0.2024881102362205,
+          "time_share": 0.004091181405811916,
+          "read_request_bytes": 76468224.0,
+          "read_request_bytes_per_transition": 602112.0,
+          "effective_gb_s": 2.9735671852415555,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 2.197424453976064,
+            "copy_gb_s_max": 2.197424453976064,
+            "candidate_payload_bytes": [
+              10240
+            ]
+          },
+          "copy_score_signed": -0.0031753407104094535,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_nvfp4_block16_wave8_v1",
+          "grid_x": 34816,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 7112,
+          "duration_ms": 16.047578,
+          "duration_ms_per_transition": 0.1263588818897638,
+          "time_share": 0.002553024508172401,
+          "read_request_bytes": 251252736.0,
+          "read_request_bytes_per_transition": 1978368.0,
+          "effective_gb_s": 15.656738730293133,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 7.471244861505536,
+            "copy_gb_s_max": 7.471244861505536,
+            "candidate_payload_bytes": [
+              34816
+            ]
+          },
+          "copy_score_signed": -0.02089776645850966,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_nvfp4_w4a4_decode_scale_lut_gfx1201_actshared_v1",
+          "grid_x": 40960,
+          "family": "nvfp4_matmul",
+          "priority": "matmul",
+          "invocation_count": 7112,
+          "duration_ms": 691.303804,
+          "duration_ms_per_transition": 5.443337039370079,
+          "time_share": 0.10998018231815479,
+          "read_request_bytes": 414122091264.0,
+          "read_request_bytes_per_transition": 3260803868.2204723,
+          "effective_gb_s": 599.045005781568,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 523.5364086404875,
+            "copy_gb_s_max": 523.5364086404875,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 17408,
+                "n": 5120,
+                "encoding": "nvfp4",
+                "payload_bytes": 50144840,
+                "median_ms": 0.191562,
+                "effective_gb_s": 523.5364086404875
+              }
+            ]
+          },
+          "copy_score_signed": -8.304449280164134,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 5120,
+              "encoding": "nvfp4"
+            }
+          ],
+          "shape_candidate_kind": "nvfp4_matmul"
+        },
+        {
+          "kernel_name": "sllm_nvfp4_w4a4_decode_scale_lut_gfx1201_actshared_v1",
+          "grid_x": 139264,
+          "family": "nvfp4_matmul",
+          "priority": "matmul",
+          "invocation_count": 14224,
+          "duration_ms": 1368.574016,
+          "duration_ms_per_transition": 10.776173354330709,
+          "time_share": 0.2177277470840726,
+          "read_request_bytes": 829151235840.0,
+          "read_request_bytes_per_transition": 6528749888.503937,
+          "effective_gb_s": 605.8504882793274,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 522.2673628423782,
+            "copy_gb_s_max": 522.2673628423782,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 17408,
+                "encoding": "nvfp4",
+                "payload_bytes": 50137928,
+                "median_ms": 0.192001,
+                "effective_gb_s": 522.2673628423782
+              }
+            ]
+          },
+          "copy_score_signed": -18.19836559563237,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 17408,
+              "encoding": "nvfp4"
+            }
+          ],
+          "shape_candidate_kind": "nvfp4_matmul"
+        },
+        {
+          "kernel_name": "sllm_rmsnorm_baseline_wave32_v1",
+          "grid_x": 256,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 127,
+          "duration_ms": 1.715581,
+          "duration_ms_per_transition": 0.013508511811023622,
+          "time_share": 0.0002729334195325248,
+          "read_request_bytes": 2665984.0,
+          "read_request_bytes_per_transition": 20992.0,
+          "effective_gb_s": 1.5539831695501407,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_rmsnorm_residual_fused_wave32_v1",
+          "grid_x": 256,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 16256,
+          "duration_ms": 230.51567,
+          "duration_ms_per_transition": 1.8150840157480315,
+          "time_share": 0.03667295806431235,
+          "read_request_bytes": 507707392.0,
+          "read_request_bytes_per_transition": 3997696.0,
+          "effective_gb_s": 2.202485375506142,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_fixed_topk_final_support_v1",
+          "grid_x": 256,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 127,
+          "duration_ms": 3.669038,
+          "duration_ms_per_transition": 0.028890062992125983,
+          "time_share": 0.000583710759057588,
+          "read_request_bytes": 227584.0,
+          "read_request_bytes_per_transition": 1792.0,
+          "effective_gb_s": 0.06202824827652371,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_fixed_topk_initial_v1",
+          "grid_x": 62208,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 127,
+          "duration_ms": 6.116867,
+          "duration_ms_per_transition": 0.04816430708661417,
+          "time_share": 0.0009731382121483372,
+          "read_request_bytes": 63138304.0,
+          "read_request_bytes_per_transition": 497152.0,
+          "effective_gb_s": 10.322000462001217,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_fixed_topk_reduce_v1",
+          "grid_x": 1280,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 127,
+          "duration_ms": 3.335757,
+          "duration_ms_per_transition": 0.0262658031496063,
+          "time_share": 0.0005306887665109117,
+          "read_request_bytes": 5006848.0,
+          "read_request_bytes_per_transition": 39424.0,
+          "effective_gb_s": 1.5009630497665147,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "void sllm_causal_attention_kernel::(anonymous namespace)::causal_attention_decode_wave_split_staged_stage1_kernel<true, 6u, 32u>(unsigned short const*, void const*, void const*, void const*, void const*, float const*, float const*, float*, unsigned int, unsigned long, unsigned int, unsigned int, unsigned int, float, float)",
+          "grid_x": 24576,
+          "family": "full_attention",
+          "priority": "attention_stage1_stage2",
+          "invocation_count": 2032,
+          "duration_ms": 428.502702,
+          "duration_ms_per_transition": 3.3740370236220474,
+          "time_share": 0.06817090404695929,
+          "read_request_bytes": 35486914048.0,
+          "read_request_bytes_per_transition": 279424520.06299216,
+          "effective_gb_s": 82.8160799975539,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 3,
+            "copy_gb_s_min": 470.8300055767941,
+            "copy_gb_s_max": 491.09201201188046,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 17315904,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17315904,
+                "median_ms": 0.07052,
+                "effective_gb_s": 491.09201201188046
+              },
+              {
+                "m": 1,
+                "k": 17448960,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17448960,
+                "median_ms": 0.07412,
+                "effective_gb_s": 470.8300055767941
+              },
+              {
+                "m": 1,
+                "k": 17582016,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17582016,
+                "median_ms": 0.07356,
+                "effective_gb_s": 478.0319774636769
+              }
+            ]
+          },
+          "copy_score_signed": 27.832539386031527,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "void sllm_causal_attention_kernel::(anonymous namespace)::causal_attention_decode_wave_split_staged_stage2_kernel<32u>(float const*, unsigned short*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "grid_x": 6144,
+          "family": "full_attention",
+          "priority": "attention_stage1_stage2",
+          "invocation_count": 2032,
+          "duration_ms": 10.223482,
+          "duration_ms_per_transition": 0.08049985826771654,
+          "time_share": 0.0016264635139869327,
+          "read_request_bytes": 1611554816.0,
+          "read_request_bytes_per_transition": 12689408.0,
+          "effective_gb_s": 157.63267505141593,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 158.49935030399794,
+            "copy_gb_s_max": 158.49935030399794,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 792576,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 792576,
+                "median_ms": 0.010001,
+                "effective_gb_s": 158.49935030399794
+              }
+            ]
+          },
+          "copy_score_signed": 0.0014096156768000532,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        }
+      ],
+      "generated_tokens_sha256": "sha256:ded3d447d4d100eaff932a5c70e8be1e55b84af4bfee6649acde91b6dd60c506",
+      "copy_source_sha256": "77d30e018da2a1df09fcbba5477d9779cdf649f93aeebc00e6bc79ceab287796"
+    },
+    {
+      "target": "gfx1201",
+      "mtp": true,
+      "inputs": {
+        ".local-artifacts/phase87/stage0/profile-gfx1201/profile-mtp-on/analysis.json": "83aafe6eaa0ee508ecf7130186aa25b0d56a0d34568990cb62f1624efcd175d1",
+        ".local-artifacts/phase87/stage0/counter-gfx1201/counter-mtp-on/analysis.json": "da5e3eec12da57700cc0ebdf05b2dcaa0fea6b40908d66fe04460b6ce9b32a39",
+        ".local-artifacts/phase87/stage0/profile-gfx1201/profile-mtp-on/breakdown.json": "233d444178632966d9d0a232d2bf07b97499e51092e52d931d1f88f9a6540aa8",
+        ".local-artifacts/phase87/stage0/profile-gfx1201/profile-mtp-on/report.json": "75a19d56a8856e7fe266d2fc398386a37b5d00e5d301b02833b3b86549d230de",
+        ".local-artifacts/phase87/stage0/counter-gfx1201/counter-mtp-on/report.json": "94aafeddf7917a15118166bd48e5054f05f2320b36e748baa1fd8edb8d29d2c3"
+      },
+      "committed_decode_transitions": 127,
+      "kernel_duration_source": "ordinary rocprof kernel trace; no counter timing",
+      "read_source": "separate rocprof GL2C/EA interface request counter run; not physical DRAM",
+      "copy_source": ".local-artifacts/phase87/stage0/copy-streaming-gfx1201.jsonl",
+      "total_kernel_duration_ms": 3302.52454,
+      "time_share_domain": "sum of decode GPU kernel durations; host idle is reported separately",
+      "target_forward_count": 50,
+      "rows": [
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB1_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG16_2_1",
+          "grid_x": 10240,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 400,
+          "duration_ms": 66.235139,
+          "duration_ms_per_transition": 0.5215365275590551,
+          "time_share": 0.020055911227233453,
+          "read_request_bytes": 35685402240.0,
+          "read_request_bytes_per_transition": 280987419.21259844,
+          "effective_gb_s": 538.7684358902003,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 519.2136260625367,
+            "copy_gb_s_max": 519.2136260625367,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 17408,
+                "n": 5120,
+                "encoding": "fp8",
+                "payload_bytes": 89201676,
+                "median_ms": 0.343603,
+                "effective_gb_s": 519.2136260625367
+              }
+            ]
+          },
+          "copy_score_signed": -0.392189529969053,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 17408,
+              "n": 5120,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB1_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG16_2_1",
+          "grid_x": 20480,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 2400,
+          "duration_ms": 303.415476,
+          "duration_ms_per_transition": 2.3890982362204727,
+          "time_share": 0.09187379906645599,
+          "read_request_bytes": 126211157120.0,
+          "read_request_bytes_per_transition": 993788638.7401575,
+          "effective_gb_s": 415.9680935984952,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 528.1203864333189,
+            "copy_gb_s_max": 528.1203864333189,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 10240,
+                "encoding": "fp8",
+                "payload_bytes": 52485132,
+                "median_ms": 0.198762,
+                "effective_gb_s": 528.1203864333189
+              }
+            ]
+          },
+          "copy_score_signed": 10.303857216748924,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 10240,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB1_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG16_2_1",
+          "grid_x": 24576,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 800,
+          "duration_ms": 123.104858,
+          "duration_ms_per_transition": 0.9693295905511811,
+          "time_share": 0.03727598584324221,
+          "read_request_bytes": 50760854144.0,
+          "read_request_bytes_per_transition": 399691764.9133858,
+          "effective_gb_s": 412.3383509690576,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 535.9876509018358,
+            "copy_gb_s_max": 535.9876509018358,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 12288,
+                "encoding": "fp8",
+                "payload_bytes": 62979084,
+                "median_ms": 0.235002,
+                "effective_gb_s": 535.9876509018358
+              }
+            ]
+          },
+          "copy_score_signed": 4.609149553821048,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 12288,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB1_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB0_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB0_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB2_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG16_2_1",
+          "grid_x": 2048,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 1600,
+          "duration_ms": 38.554802,
+          "duration_ms_per_transition": 0.30358111811023625,
+          "time_share": 0.01167434231995139,
+          "read_request_bytes": 8428364800.0,
+          "read_request_bytes_per_transition": 66365077.165354334,
+          "effective_gb_s": 218.60739422290382,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 348.02738582152807,
+            "copy_gb_s_max": 348.02738582152807,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 1024,
+                "encoding": "fp8",
+                "payload_bytes": 5262348,
+                "median_ms": 0.030241,
+                "effective_gb_s": 348.02738582152807
+              }
+            ]
+          },
+          "copy_score_signed": 1.5108932849675725,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 1024,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB1_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB0_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB0_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB2_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG16_2_1",
+          "grid_x": 10240,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 3200,
+          "duration_ms": 243.304517,
+          "duration_ms_per_transition": 1.915783598425197,
+          "time_share": 0.07367228132693905,
+          "read_request_bytes": 100808822656.0,
+          "read_request_bytes_per_transition": 793770257.1338583,
+          "effective_gb_s": 414.3318993785882,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 510.13847505646385,
+            "copy_gb_s_max": 510.13847505646385,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 6144,
+                "n": 5120,
+                "encoding": "fp8",
+                "payload_bytes": 31496204,
+                "median_ms": 0.123481,
+                "effective_gb_s": 510.13847505646385
+              }
+            ]
+          },
+          "copy_score_signed": 7.05828899631113,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 6144,
+              "n": 5120,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT16x16x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB1_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB0_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB0_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT1_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB2_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG16_2_1",
+          "grid_x": 12288,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 2400,
+          "duration_ms": 158.441129,
+          "duration_ms_per_transition": 1.2475679448818897,
+          "time_share": 0.047975761294418724,
+          "read_request_bytes": 75623615488.0,
+          "read_request_bytes_per_transition": 595461539.2755905,
+          "effective_gb_s": 477.2978832282872,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 507.1976561880596,
+            "copy_gb_s_max": 507.1976561880596,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 6144,
+                "encoding": "fp8",
+                "payload_bytes": 31497228,
+                "median_ms": 0.124201,
+                "effective_gb_s": 507.1976561880596
+              }
+            ]
+          },
+          "copy_score_signed": 1.4344643702753566,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 6144,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT64x64x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT4_4_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB1_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB1_WS32_WG16_2_1",
+          "grid_x": 124160,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 150,
+          "duration_ms": 350.787541,
+          "duration_ms_per_transition": 2.762106622047244,
+          "time_share": 0.106217996793447,
+          "read_request_bytes": 202083600896.0,
+          "read_request_bytes_per_transition": 1591209455.8740158,
+          "effective_gb_s": 576.0854570829812,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 2,
+            "copy_gb_s_min": 512.661883233239,
+            "copy_gb_s_max": 516.8349915696333,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 248320,
+                "encoding": "fp8",
+                "payload_bytes": 1272396804,
+                "median_ms": 4.923803,
+                "effective_gb_s": 516.8349915696333
+              },
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 248320,
+                "encoding": "fp8",
+                "payload_bytes": 1272407052,
+                "median_ms": 4.963923,
+                "effective_gb_s": 512.661883233239
+              }
+            ]
+          },
+          "copy_score_signed": -6.293465755907027,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 248320,
+              "encoding": "fp8"
+            },
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 248320,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SABV_SAV_UserArgs_MT64x64x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB1_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS1_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSUAMB_GLS0_HPLR0_ISA1201_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB0_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA8_LPB0_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV1_MIWT2_2_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS2_NLCA1_NLCB2_ONLL0_PAP0_PGL0_PGR1_PLR1_PKA0_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK0_SKFTR0_SKFDPO0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UIOFGRO0_UPLRP0_USFGROn1_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS32_WG32_4_1",
+          "grid_x": 34816,
+          "family": "fp8_matmul",
+          "priority": "matmul",
+          "invocation_count": 800,
+          "duration_ms": 164.974029,
+          "duration_ms_per_transition": 1.2990081023622047,
+          "time_share": 0.04995391464979092,
+          "read_request_bytes": 84375591168.0,
+          "read_request_bytes_per_transition": 664374733.6062992,
+          "effective_gb_s": 511.44772107129666,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 529.6435955111035,
+            "copy_gb_s_max": 529.6435955111035,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 17408,
+                "encoding": "fp8",
+                "payload_bytes": 89213964,
+                "median_ms": 0.336883,
+                "effective_gb_s": 529.6435955111035
+              }
+            ]
+          },
+          "copy_score_signed": 0.9089551587444239,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 17408,
+              "encoding": "fp8"
+            }
+          ],
+          "shape_candidate_kind": "fp8_matmul"
+        },
+        {
+          "kernel_name": "__amd_rocclr_copyBuffer",
+          "grid_x": 512,
+          "family": "runtime_copy",
+          "priority": "nonpriority",
+          "invocation_count": 1048,
+          "duration_ms": 2.999571,
+          "duration_ms_per_transition": 0.023618669291338584,
+          "time_share": 0.0009082660745346043,
+          "read_request_bytes": 766464.0,
+          "read_request_bytes_per_transition": 6035.149606299213,
+          "effective_gb_s": 0.2555245400092213,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "__amd_rocclr_copyBuffer",
+          "grid_x": 1024,
+          "family": "runtime_copy",
+          "priority": "nonpriority",
+          "invocation_count": 237,
+          "duration_ms": 0.81734,
+          "duration_ms_per_transition": 0.0064357480314960625,
+          "time_share": 0.0002474894554454999,
+          "read_request_bytes": 2544640.0,
+          "read_request_bytes_per_transition": 20036.535433070865,
+          "effective_gb_s": 3.113318814691561,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "__amd_rocclr_copyBuffer",
+          "grid_x": 4096,
+          "family": "runtime_copy",
+          "priority": "nonpriority",
+          "invocation_count": 672,
+          "duration_ms": 1.416473,
+          "duration_ms_per_transition": 0.011153330708661417,
+          "time_share": 0.00042890612404048936,
+          "read_request_bytes": 41463296.0,
+          "read_request_bytes_per_transition": 326482.6456692913,
+          "effective_gb_s": 29.272210624558323,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "__amd_rocclr_copyBuffer",
+          "grid_x": 16384,
+          "family": "runtime_copy",
+          "priority": "nonpriority",
+          "invocation_count": 672,
+          "duration_ms": 7.698628,
+          "duration_ms_per_transition": 0.06061911811023622,
+          "time_share": 0.0023311342298155944,
+          "read_request_bytes": 2114104832.0,
+          "read_request_bytes_per_transition": 16646494.74015748,
+          "effective_gb_s": 274.6079992435016,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "__amd_rocclr_fillBufferAligned",
+          "grid_x": 256,
+          "family": "other",
+          "priority": "nonpriority",
+          "invocation_count": 250,
+          "duration_ms": 0.840218,
+          "duration_ms_per_transition": 0.006615889763779528,
+          "time_share": 0.0002544168831520628,
+          "read_request_bytes": 128000.0,
+          "read_request_bytes_per_transition": 1007.8740157480315,
+          "effective_gb_s": 0.15234141615628327,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_attention_preprocess_headwise_norm_rope_wave32_v1",
+          "grid_x": 896,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 137,
+          "duration_ms": 0.810016,
+          "duration_ms_per_transition": 0.00637807874015748,
+          "time_share": 0.00024527175807147823,
+          "read_request_bytes": 5716480.0,
+          "read_request_bytes_per_transition": 45011.65354330709,
+          "effective_gb_s": 7.0572433137123225,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_attention_preprocess_headwise_norm_rope_wave32_v1",
+          "grid_x": 2688,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 800,
+          "duration_ms": 4.773251,
+          "duration_ms_per_transition": 0.03758465354330709,
+          "time_share": 0.0014453339989413069,
+          "read_request_bytes": 75776000.0,
+          "read_request_bytes_per_transition": 596661.4173228346,
+          "effective_gb_s": 15.8751341590878,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_add_bf16_fp32_v1",
+          "grid_x": 5120,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 200,
+          "duration_ms": 0.36725,
+          "duration_ms_per_transition": 0.002891732283464567,
+          "time_share": 0.0001112028072923873,
+          "read_request_bytes": 4172800.0,
+          "read_request_bytes_per_transition": 32856.69291338583,
+          "effective_gb_s": 11.362287270251871,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_copy_bf16_v1",
+          "grid_x": 5120,
+          "family": "runtime_copy",
+          "priority": "nonpriority",
+          "invocation_count": 274,
+          "duration_ms": 0.542732,
+          "duration_ms_per_transition": 0.00427348031496063,
+          "time_share": 0.0001643385214633409,
+          "read_request_bytes": 2927616.0,
+          "read_request_bytes_per_transition": 23052.094488188977,
+          "effective_gb_s": 5.394220351849532,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_sigmoid_mul_bf16_fp32_v1",
+          "grid_x": 6144,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 100,
+          "duration_ms": 0.22856,
+          "duration_ms_per_transition": 0.001799685039370079,
+          "time_share": 6.920766136078431e-05,
+          "read_request_bytes": 2508800.0,
+          "read_request_bytes_per_transition": 19754.33070866142,
+          "effective_gb_s": 10.976548827441372,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_sigmoid_mul_bf16_fp32_v1",
+          "grid_x": 18432,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 800,
+          "duration_ms": 1.875681,
+          "duration_ms_per_transition": 0.014769141732283464,
+          "time_share": 0.0005679536903607687,
+          "read_request_bytes": 59392000.0,
+          "read_request_bytes_per_transition": 467653.5433070866,
+          "effective_gb_s": 31.664232883949882,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_silu_mul_bf16_fp32_v1",
+          "grid_x": 17408,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 100,
+          "duration_ms": 0.215605,
+          "duration_ms_per_transition": 0.0016976771653543306,
+          "time_share": 6.528490474138914e-05,
+          "read_request_bytes": 7014400.0,
+          "read_request_bytes_per_transition": 55231.496062992126,
+          "effective_gb_s": 32.533568330975626,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_elementwise_silu_mul_bf16_fp32_v1",
+          "grid_x": 52224,
+          "family": "elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 3200,
+          "duration_ms": 8.329093,
+          "duration_ms_per_transition": 0.0655834094488189,
+          "time_share": 0.002522038185975145,
+          "read_request_bytes": 670105600.0,
+          "read_request_bytes_per_transition": 5276422.047244094,
+          "effective_gb_s": 80.45361001492,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_embedding_gather_bf16_i32_v1",
+          "grid_x": 5120,
+          "family": "other",
+          "priority": "nonpriority",
+          "invocation_count": 137,
+          "duration_ms": 0.442167,
+          "duration_ms_per_transition": 0.0034816299212598423,
+          "time_share": 0.00013388757438271754,
+          "read_request_bytes": 1508096.0,
+          "read_request_bytes_per_transition": 11874.771653543306,
+          "effective_gb_s": 3.410693244859974,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_embedding_gather_bf16_i32_v1",
+          "grid_x": 15360,
+          "family": "other",
+          "priority": "nonpriority",
+          "invocation_count": 50,
+          "duration_ms": 0.217725,
+          "duration_ms_per_transition": 0.0017143700787401574,
+          "time_share": 6.592683789716821e-05,
+          "read_request_bytes": 1574400.0,
+          "read_request_bytes_per_transition": 12396.850393700788,
+          "effective_gb_s": 7.231140199793318,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1",
+          "grid_x": 1024,
+          "family": "kv_cache",
+          "priority": "nonpriority",
+          "invocation_count": 137,
+          "duration_ms": 0.415046,
+          "duration_ms_per_transition": 0.0032680787401574807,
+          "time_share": 0.0001256753719686213,
+          "read_request_bytes": 596224.0,
+          "read_request_bytes_per_transition": 4694.677165354331,
+          "effective_gb_s": 1.4365251080603114,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1",
+          "grid_x": 3072,
+          "family": "kv_cache",
+          "priority": "nonpriority",
+          "invocation_count": 800,
+          "duration_ms": 2.429921,
+          "duration_ms_per_transition": 0.019133236220472444,
+          "time_share": 0.0007357768187848197,
+          "read_request_bytes": 10035200.0,
+          "read_request_bytes_per_transition": 79017.32283464567,
+          "effective_gb_s": 4.129846196645899,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_linear_attention_causal_conv_silu_v1",
+          "grid_x": 122880,
+          "family": "gdn",
+          "priority": "nonpriority",
+          "invocation_count": 2400,
+          "duration_ms": 9.885911,
+          "duration_ms_per_transition": 0.07784181889763779,
+          "time_share": 0.0029934405877268667,
+          "read_request_bytes": 492748800.0,
+          "read_request_bytes_per_transition": 3879911.811023622,
+          "effective_gb_s": 49.84353996308484,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_linear_attention_recurrent_gated_norm_register_state_v1",
+          "grid_x": 6144,
+          "family": "gdn",
+          "priority": "nonpriority",
+          "invocation_count": 2400,
+          "duration_ms": 76.439206,
+          "duration_ms_per_transition": 0.6018835118110236,
+          "time_share": 0.023145689024917888,
+          "read_request_bytes": 7910644480.0,
+          "read_request_bytes_per_transition": 62288539.21259843,
+          "effective_gb_s": 103.48935963568225,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_fp32_decode_serial_rows_v1",
+          "grid_x": 12288,
+          "family": "bf16_matmul",
+          "priority": "matmul",
+          "invocation_count": 4800,
+          "duration_ms": 47.873526,
+          "duration_ms_per_transition": 0.3769568976377953,
+          "time_share": 0.014496039445024079,
+          "read_request_bytes": 2508595200.0,
+          "read_request_bytes_per_transition": 19752718.11023622,
+          "effective_gb_s": 52.400468684926196,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 107.45678535852032,
+            "copy_gb_s_max": 107.45678535852032,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 48,
+                "encoding": "bf16",
+                "payload_bytes": 522240,
+                "median_ms": 0.00972,
+                "effective_gb_s": 107.45678535852032
+              }
+            ]
+          },
+          "copy_score_signed": 0.7980985381981573,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 48,
+              "encoding": "bf16"
+            }
+          ],
+          "shape_candidate_kind": "bf16_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_fp32_decode_v4",
+          "grid_x": 262144,
+          "family": "bf16_matmul",
+          "priority": "matmul",
+          "invocation_count": 274,
+          "duration_ms": 9.752941,
+          "duration_ms_per_transition": 0.07679481102362204,
+          "time_share": 0.0029531774501212337,
+          "read_request_bytes": 2876050944.0,
+          "read_request_bytes_per_transition": 22646070.42519685,
+          "effective_gb_s": 294.8906328870441,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 441.37002066090395,
+            "copy_gb_s_max": 441.37002066090395,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 1024,
+                "encoding": "bf16",
+                "payload_bytes": 10496000,
+                "median_ms": 0.047561,
+                "effective_gb_s": 441.37002066090395
+              }
+            ]
+          },
+          "copy_score_signed": 0.43257962488132684,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 1024,
+              "encoding": "bf16"
+            }
+          ],
+          "shape_candidate_kind": "bf16_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_fp32_decode_v4",
+          "grid_x": 1310720,
+          "family": "bf16_matmul",
+          "priority": "matmul",
+          "invocation_count": 337,
+          "duration_ms": 64.464302,
+          "duration_ms_per_transition": 0.5075929291338583,
+          "time_share": 0.019519704159412544,
+          "read_request_bytes": 38499406336.0,
+          "read_request_bytes_per_transition": 303144931.77952754,
+          "effective_gb_s": 597.2205568284909,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 3,
+            "copy_gb_s_min": 509.05438450876414,
+            "copy_gb_s_max": 526.0518421367357,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 6144,
+                "n": 5120,
+                "encoding": "bf16",
+                "payload_bytes": 62926848,
+                "median_ms": 0.239242,
+                "effective_gb_s": 526.0518421367357
+              },
+              {
+                "m": 1,
+                "k": 10240,
+                "n": 5120,
+                "encoding": "bf16",
+                "payload_bytes": 104878080,
+                "median_ms": 0.399403,
+                "effective_gb_s": 525.1742149619221
+              },
+              {
+                "m": 1,
+                "k": 17408,
+                "n": 5120,
+                "encoding": "bf16",
+                "payload_bytes": 178292736,
+                "median_ms": 0.700486,
+                "effective_gb_s": 509.05438450876414
+              }
+            ]
+          },
+          "copy_score_signed": -1.389192256188699,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 6144,
+              "n": 5120,
+              "encoding": "bf16"
+            },
+            {
+              "m": 1,
+              "k": 10240,
+              "n": 5120,
+              "encoding": "bf16"
+            },
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 5120,
+              "encoding": "bf16"
+            }
+          ],
+          "shape_candidate_kind": "bf16_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_fp32_decode_v4",
+          "grid_x": 3145728,
+          "family": "bf16_matmul",
+          "priority": "matmul",
+          "invocation_count": 137,
+          "duration_ms": 27.89856,
+          "duration_ms_per_transition": 0.21967370078740156,
+          "time_share": 0.008447646538911108,
+          "read_request_bytes": 17242166784.0,
+          "read_request_bytes_per_transition": 135765092.7874016,
+          "effective_gb_s": 618.030707821479,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 541.9858647884759,
+            "copy_gb_s_max": 541.9858647884759,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 12288,
+                "encoding": "bf16",
+                "payload_bytes": 125839360,
+                "median_ms": 0.464364,
+                "effective_gb_s": 541.9858647884759
+              }
+            ]
+          },
+          "copy_score_signed": -0.6423999550497879,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 12288,
+              "encoding": "bf16"
+            }
+          ],
+          "shape_candidate_kind": "bf16_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_fp32_decode_v4",
+          "grid_x": 4456448,
+          "family": "bf16_matmul",
+          "priority": "matmul",
+          "invocation_count": 200,
+          "duration_ms": 57.397078,
+          "duration_ms_per_transition": 0.4519454960629921,
+          "time_share": 0.017379758213696726,
+          "read_request_bytes": 35658585600.0,
+          "read_request_bytes_per_transition": 280776264.56692916,
+          "effective_gb_s": 621.261340167874,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 523.328429144146,
+            "copy_gb_s_max": 523.328429144146,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 5120,
+                "n": 17408,
+                "encoding": "bf16",
+                "payload_bytes": 178268160,
+                "median_ms": 0.681286,
+                "effective_gb_s": 523.328429144146
+              }
+            ]
+          },
+          "copy_score_signed": -1.7020503147558677,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 17408,
+              "encoding": "bf16"
+            }
+          ],
+          "shape_candidate_kind": "bf16_matmul"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_fp8_outer_v2",
+          "grid_x": 256,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 100,
+          "duration_ms": 0.724978,
+          "duration_ms_per_transition": 0.005708488188976378,
+          "time_share": 0.00021952236575961977,
+          "read_request_bytes": 1049600.0,
+          "read_request_bytes_per_transition": 8264.566929133858,
+          "effective_gb_s": 1.4477680702035096,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 6,
+            "copy_gb_s_min": 2.197424453976064,
+            "copy_gb_s_max": 22.80524018089984,
+            "candidate_payload_bytes": [
+              10240,
+              12288,
+              30720,
+              34816,
+              36864,
+              104448
+            ]
+          },
+          "copy_score_signed": 0.0046884428043851584,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 1,
+              "k": 6144,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 3,
+              "k": 6144,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 3,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_fp8_outer_v2",
+          "grid_x": 768,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 9250,
+          "duration_ms": 85.625979,
+          "duration_ms_per_transition": 0.6742203070866142,
+          "time_share": 0.02592743156421784,
+          "read_request_bytes": 335680000.0,
+          "read_request_bytes_per_transition": 2643149.6062992127,
+          "effective_gb_s": 3.9203055418496295,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 6,
+            "copy_gb_s_min": 2.197424453976064,
+            "copy_gb_s_max": 22.80524018089984,
+            "candidate_payload_bytes": [
+              10240,
+              12288,
+              30720,
+              34816,
+              36864,
+              104448
+            ]
+          },
+          "copy_score_signed": 0.4896378504487013,
+          "shape_candidates": [
+            {
+              "m": 1,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 1,
+              "k": 6144,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 1,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 3,
+              "k": 6144,
+              "n": 1,
+              "encoding": "bytes"
+            },
+            {
+              "m": 3,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_nvfp4_block16_wave8_v1",
+          "grid_x": 30720,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 2800,
+          "duration_ms": 8.976099,
+          "duration_ms_per_transition": 0.07067794488188976,
+          "time_share": 0.0027179507347430644,
+          "read_request_bytes": 87449600.0,
+          "read_request_bytes_per_transition": 688579.5275590551,
+          "effective_gb_s": 9.742495041554243,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 6.6493513298083835,
+            "copy_gb_s_max": 6.6493513298083835,
+            "candidate_payload_bytes": [
+              30720
+            ]
+          },
+          "copy_score_signed": -0.008407012224005547,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_matmul_bf16_to_nvfp4_block16_wave8_v1",
+          "grid_x": 104448,
+          "family": "activation_quantize",
+          "priority": "quantization",
+          "invocation_count": 2800,
+          "duration_ms": 13.11777,
+          "duration_ms_per_transition": 0.10328952755905511,
+          "time_share": 0.00397204315702072,
+          "read_request_bytes": 293888000.0,
+          "read_request_bytes_per_transition": 2314078.7401574804,
+          "effective_gb_s": 22.403807964311003,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 22.80524018089984,
+            "copy_gb_s_max": 22.80524018089984,
+            "candidate_payload_bytes": [
+              104448
+            ]
+          },
+          "copy_score_signed": 0.001594506088909351,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 17408,
+              "n": 1,
+              "encoding": "bytes"
+            }
+          ],
+          "shape_candidate_kind": "activation_quantize"
+        },
+        {
+          "kernel_name": "sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1",
+          "grid_x": 40960,
+          "family": "nvfp4_matmul",
+          "priority": "matmul",
+          "invocation_count": 2800,
+          "duration_ms": 303.933897,
+          "duration_ms_per_transition": 2.3931802913385827,
+          "time_share": 0.0920307762497353,
+          "read_request_bytes": 168771405056.0,
+          "read_request_bytes_per_transition": 1328908701.2283463,
+          "effective_gb_s": 555.2898400667696,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 523.6342791340031,
+            "copy_gb_s_max": 523.6342791340031,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 17408,
+                "n": 5120,
+                "encoding": "nvfp4",
+                "payload_bytes": 50164424,
+                "median_ms": 0.191601,
+                "effective_gb_s": 523.6342791340031
+              }
+            ]
+          },
+          "copy_score_signed": -2.9132858452632897,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 17408,
+              "n": 5120,
+              "encoding": "nvfp4"
+            }
+          ],
+          "shape_candidate_kind": "nvfp4_matmul"
+        },
+        {
+          "kernel_name": "sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1",
+          "grid_x": 139264,
+          "family": "nvfp4_matmul",
+          "priority": "matmul",
+          "invocation_count": 5600,
+          "duration_ms": 584.766888,
+          "duration_ms_per_transition": 4.60446368503937,
+          "time_share": 0.17706662915516141,
+          "read_request_bytes": 331042630656.0,
+          "read_request_bytes_per_transition": 2606634887.055118,
+          "effective_gb_s": 566.1104235710419,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 521.2414304468336,
+            "copy_gb_s_max": 521.2414304468336,
+            "reference_rows": [
+              {
+                "m": 3,
+                "k": 5120,
+                "n": 17408,
+                "encoding": "nvfp4",
+                "payload_bytes": 50143688,
+                "median_ms": 0.192401,
+                "effective_gb_s": 521.2414304468336
+              }
+            ]
+          },
+          "copy_score_signed": -7.9448013660896715,
+          "shape_candidates": [
+            {
+              "m": 3,
+              "k": 5120,
+              "n": 17408,
+              "encoding": "nvfp4"
+            }
+          ],
+          "shape_candidate_kind": "nvfp4_matmul"
+        },
+        {
+          "kernel_name": "sllm_rmsnorm_baseline_wave32_v1",
+          "grid_x": 256,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 611,
+          "duration_ms": 7.186878,
+          "duration_ms_per_transition": 0.0565895905511811,
+          "time_share": 0.0021761770163863793,
+          "read_request_bytes": 12819456.0,
+          "read_request_bytes_per_transition": 100940.59842519685,
+          "effective_gb_s": 1.7837308494731647,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_rmsnorm_baseline_wave32_v1",
+          "grid_x": 768,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 50,
+          "duration_ms": 0.972017,
+          "duration_ms_per_transition": 0.007653677165354331,
+          "time_share": 0.0002943254435287255,
+          "read_request_bytes": 2073600.0,
+          "read_request_bytes_per_transition": 16327.55905511811,
+          "effective_gb_s": 2.133296022600428,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_rmsnorm_residual_fused_wave32_v1",
+          "grid_x": 768,
+          "family": "rmsnorm_or_elementwise",
+          "priority": "nonpriority",
+          "invocation_count": 6400,
+          "duration_ms": 92.842095,
+          "duration_ms_per_transition": 0.7310401181102362,
+          "time_share": 0.028112461807778117,
+          "read_request_bytes": 462028800.0,
+          "read_request_bytes_per_transition": 3638022.0472440943,
+          "effective_gb_s": 4.976501230395544,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_fixed_topk_final_support_v1",
+          "grid_x": 256,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 250,
+          "duration_ms": 7.066376,
+          "duration_ms_per_transition": 0.05564075590551181,
+          "time_share": 0.0021396891724535074,
+          "read_request_bytes": 448000.0,
+          "read_request_bytes_per_transition": 3527.5590551181103,
+          "effective_gb_s": 0.06339883414072503,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_fixed_topk_initial_v1",
+          "grid_x": 62208,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 250,
+          "duration_ms": 10.347321,
+          "duration_ms_per_transition": 0.08147496850393701,
+          "time_share": 0.003133154916692913,
+          "read_request_bytes": 124262400.0,
+          "read_request_bytes_per_transition": 978444.094488189,
+          "effective_gb_s": 12.009137437603414,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_fixed_topk_reduce_v1",
+          "grid_x": 1280,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 250,
+          "duration_ms": 5.656914,
+          "duration_ms_per_transition": 0.044542629921259846,
+          "time_share": 0.0017129059698069648,
+          "read_request_bytes": 9856000.0,
+          "read_request_bytes_per_transition": 77606.29921259843,
+          "effective_gb_s": 1.7422927058816875,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "sllm_token_selector_sparse_pq_k20_v1",
+          "grid_x": 64,
+          "family": "sampling",
+          "priority": "nonpriority",
+          "invocation_count": 50,
+          "duration_ms": 0.910457,
+          "duration_ms_per_transition": 0.007168952755905512,
+          "time_share": 0.0002756851581184617,
+          "read_request_bytes": 89600.0,
+          "read_request_bytes_per_transition": 705.511811023622,
+          "effective_gb_s": 0.09841211611311682,
+          "copy_reference": null,
+          "copy_score_signed": null,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "void sllm_causal_attention_kernel::(anonymous namespace)::causal_attention_decode_wave_split_staged_stage1_kernel<true, 6u, 32u>(unsigned short const*, void const*, void const*, void const*, void const*, float const*, float const*, float*, unsigned int, unsigned long, unsigned int, unsigned int, unsigned int, float, float)",
+          "grid_x": 24576,
+          "family": "full_attention",
+          "priority": "attention_stage1_stage2",
+          "invocation_count": 100,
+          "duration_ms": 21.200949,
+          "duration_ms_per_transition": 0.16693660629921261,
+          "time_share": 0.006419618913717444,
+          "read_request_bytes": 1746628608.0,
+          "read_request_bytes_per_transition": 13752981.16535433,
+          "effective_gb_s": 82.38445401665746,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 3,
+            "copy_gb_s_min": 470.8300055767941,
+            "copy_gb_s_max": 491.09201201188046,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 17315904,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17315904,
+                "median_ms": 0.07052,
+                "effective_gb_s": 491.09201201188046
+              },
+              {
+                "m": 1,
+                "k": 17448960,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17448960,
+                "median_ms": 0.07412,
+                "effective_gb_s": 470.8300055767941
+              },
+              {
+                "m": 1,
+                "k": 17582016,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17582016,
+                "median_ms": 0.07356,
+                "effective_gb_s": 478.0319774636769
+              }
+            ]
+          },
+          "copy_score_signed": 2.6237467694854026,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "void sllm_causal_attention_kernel::(anonymous namespace)::causal_attention_decode_wave_split_staged_stage1_kernel<true, 6u, 32u>(unsigned short const*, void const*, void const*, void const*, void const*, float const*, float const*, float*, unsigned int, unsigned long, unsigned int, unsigned int, unsigned int, float, float)",
+          "grid_x": 73728,
+          "family": "full_attention",
+          "priority": "attention_stage1_stage2",
+          "invocation_count": 800,
+          "duration_ms": 376.331237,
+          "duration_ms_per_transition": 2.963238086614173,
+          "time_share": 0.11395259367247579,
+          "read_request_bytes": 26851138560.0,
+          "read_request_bytes_per_transition": 211426287.87401575,
+          "effective_gb_s": 71.3497470314961,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 3,
+            "copy_gb_s_min": 470.8300055767941,
+            "copy_gb_s_max": 491.09201201188046,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 17315904,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17315904,
+                "median_ms": 0.07052,
+                "effective_gb_s": 491.09201201188046
+              },
+              {
+                "m": 1,
+                "k": 17448960,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17448960,
+                "median_ms": 0.07412,
+                "effective_gb_s": 470.8300055767941
+              },
+              {
+                "m": 1,
+                "k": 17582016,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 17582016,
+                "median_ms": 0.07356,
+                "effective_gb_s": 478.0319774636769
+              }
+            ]
+          },
+          "copy_score_signed": 47.8307197684744,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "void sllm_causal_attention_kernel::(anonymous namespace)::causal_attention_decode_wave_split_staged_stage2_kernel<32u>(float const*, unsigned short*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "grid_x": 6144,
+          "family": "full_attention",
+          "priority": "attention_stage1_stage2",
+          "invocation_count": 100,
+          "duration_ms": 0.516887,
+          "duration_ms_per_transition": 0.004069976377952756,
+          "time_share": 0.00015651269013734566,
+          "read_request_bytes": 79308800.0,
+          "read_request_bytes_per_transition": 624478.7401574804,
+          "effective_gb_s": 153.4354704219684,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 158.49935030399794,
+            "copy_gb_s_max": 158.49935030399794,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 792576,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 792576,
+                "median_ms": 0.010001,
+                "effective_gb_s": 158.49935030399794
+              }
+            ]
+          },
+          "copy_score_signed": 0.0007925614628688278,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        },
+        {
+          "kernel_name": "void sllm_causal_attention_kernel::(anonymous namespace)::causal_attention_decode_wave_split_staged_stage2_kernel<32u>(float const*, unsigned short*, unsigned int, unsigned int, unsigned int, unsigned int)",
+          "grid_x": 18432,
+          "family": "full_attention",
+          "priority": "attention_stage1_stage2",
+          "invocation_count": 800,
+          "duration_ms": 5.399506,
+          "duration_ms_per_transition": 0.042515795275590545,
+          "time_share": 0.0016349631727490509,
+          "read_request_bytes": 1902592000.0,
+          "read_request_bytes_per_transition": 14981039.37007874,
+          "effective_gb_s": 352.3640866405186,
+          "copy_reference": {
+            "state": "available",
+            "row_count": 1,
+            "copy_gb_s_min": 158.49935030399794,
+            "copy_gb_s_max": 158.49935030399794,
+            "reference_rows": [
+              {
+                "m": 1,
+                "k": 792576,
+                "n": 1,
+                "encoding": "bytes",
+                "payload_bytes": 792576,
+                "median_ms": 0.010001,
+                "effective_gb_s": 158.49935030399794
+              }
+            ]
+          },
+          "copy_score_signed": -0.31696170440491606,
+          "shape_candidates": [],
+          "shape_candidate_kind": null
+        }
+      ],
+      "generated_tokens_sha256": "sha256:7d939adfc7c9b60bb30677bd1c56d462cc6a3b1b86c7512c29913f5d0bb99155",
+      "copy_source_sha256": "77d30e018da2a1df09fcbba5477d9779cdf649f93aeebc00e6bc79ceab287796"
+    }
+  ],
+  "shape_inventory": {
+    "path": ".local-artifacts/phase87/stage0/linear-tensor-shapes.json",
+    "unique_shape_count": 17,
+    "format_counts": {
+      "bf16": 104,
+      "fp8": 233,
+      "nvfp4": 168
+    }
+  }
+}

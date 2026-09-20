@@ -186,6 +186,10 @@ if(SLLM_ENABLE_LOWP_MATMUL_GPU_TESTS)
         sllm_lowp_matmul_microbench
         tests/lowp_matmul_microbench.hip.cpp
         matmul-microbench)
+    sllm_lowp_add_gpu_target(
+        sllm_phase87_copy_bandwidth
+        tests/phase87_copy_bandwidth.hip.cpp
+        phase87-bandwidth)
 endif()
 
 option(LOWP_BUILD_HOST_API_TEST
