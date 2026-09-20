@@ -141,6 +141,11 @@ constexpr uint64_t kDecodeWaveSplitStaged32WorkspaceBytesPerQuery =
     static_cast<uint64_t>(kDecodeWaveSplitStaged32QHeads) *
     kDecodeWaveSplitStaged32WaveCount * (kDecodeWaveSplitStaged32HeadDim + 2U) *
     sizeof(float);
+constexpr uint32_t kDecodeWaveSplitStaged32Split128 = 128U;
+constexpr uint64_t kDecodeWaveSplitStaged32Split128WorkspaceBytesPerQuery =
+    static_cast<uint64_t>(kDecodeWaveSplitStaged32QHeads) *
+    kDecodeWaveSplitStaged32Split128 * (kDecodeWaveSplitStaged32HeadDim + 2U) *
+    sizeof(float);
 bool causal_scaled_prefill_workspace_bytes(const uint64_t key_length,
                                            uint64_t *const result) noexcept {
   if (result == nullptr || key_length == 0U ||
@@ -356,6 +361,8 @@ struct CausalAttentionProviderSelection final {
   bool use_decode_wave_split;
   bool use_decode_wave_split_staged;
   bool use_decode_wave_split_staged32;
+  bool use_decode_wave_split_gqa_shared;
+  bool use_decode_wave_split128;
   bool use_decode_wave_split_fp16_pair;
   bool use_decode_gqa4_split;
   bool use_decode_gqa4_split_p32;
@@ -536,6 +543,16 @@ CausalAttentionProviderSelection select_causal_attention_provider(
       metadata.query.head_dim == kDecodeWaveSplitStaged32HeadDim &&
       encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
       metadata.sliding_window == 0U && !metadata.explicit_score_scale;
+  const bool use_decode_wave_split_gqa_shared =
+      use_decode_wave_split_staged32 &&
+      std::strcmp(arch_name, "gfx1030") == 0 && metadata.query_count >= 1U &&
+      metadata.query_count <= 3U;
+  const bool use_decode_wave_split128 =
+      use_decode_wave_split_staged32 && metadata.query_count <= 3U &&
+      metadata.expected_kv_length >= 8192U &&
+      (std::strcmp(arch_name, "gfx1201") == 0 ||
+       (std::strcmp(arch_name, "gfx1030") == 0 &&
+        use_decode_wave_split_gqa_shared));
   const bool use_decode_wave_split_short =
       std::strcmp(arch_name, "gfx1030") == 0 &&
       (short_decode_opt_in == nullptr ||
@@ -707,6 +724,8 @@ CausalAttentionProviderSelection select_causal_attention_provider(
       use_decode_wave_split && !use_decode_wave_split_staged,
       use_decode_wave_split_staged,
       use_decode_wave_split_staged32,
+      use_decode_wave_split_gqa_shared,
+      use_decode_wave_split128,
       use_decode_wave_split_fp16_pair && !use_decode_gqa4_split &&
           !use_decode_gqa4_split_p32 && !use_decode_gqa6_split_p128 &&
           !use_decode_gqa6_split_p64 && !use_decode_gqa6_split_p32,
@@ -752,6 +771,9 @@ void fill_causal_attention_dispatch_info(
       selection.use_decode_wave_split_staged;
   const bool use_decode_wave_split_staged32 =
       selection.use_decode_wave_split_staged32;
+  const bool use_decode_wave_split_gqa_shared =
+      selection.use_decode_wave_split_gqa_shared;
+  const bool use_decode_wave_split128 = selection.use_decode_wave_split128;
   const bool use_decode_wave_split_fp16_pair =
       selection.use_decode_wave_split_fp16_pair;
   const bool use_decode_gqa4_split = selection.use_decode_gqa4_split;
@@ -836,8 +858,15 @@ void fill_causal_attention_dispatch_info(
       : use_any_gqa6_rocblas_f32                             ? 256U
                                  : SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
   info->grid_size_x = static_cast<uint32_t>(
-      use_decode_wave_split_staged32
-          ? static_cast<uint64_t>(kDecodeWaveSplitStaged32QHeads) *
+      use_decode_wave_split128
+          ? static_cast<uint64_t>(use_decode_wave_split_gqa_shared
+                                      ? kDecodeWaveSplitStaged32KvHeads
+                                      : kDecodeWaveSplitStaged32QHeads) *
+                kDecodeWaveSplitStaged32Split128 * metadata.query_count
+      : use_decode_wave_split_staged32
+          ? static_cast<uint64_t>(use_decode_wave_split_gqa_shared
+                                      ? kDecodeWaveSplitStaged32KvHeads
+                                      : kDecodeWaveSplitStaged32QHeads) *
                 kDecodeWaveSplitStaged32WaveCount * metadata.query_count
       : use_decode_wave_split_staged
           ? static_cast<uint64_t>(kDecodeWaveSplitStagedQHeads) *
@@ -1107,6 +1136,8 @@ extern "C" uint32_t sllm_test_select_causal_attention_providers_with_position(
   mask |= selection.use_decode_gqa6_split_p128 ? (1U << 22U) : 0U;
   mask |= selection.use_decode_wave_split_staged ? (1U << 23U) : 0U;
   mask |= selection.use_decode_wave_split_staged32 ? (1U << 24U) : 0U;
+  mask |= selection.use_decode_wave_split_gqa_shared ? (1U << 26U) : 0U;
+  mask |= selection.use_decode_wave_split128 ? (1U << 27U) : 0U;
   mask |= selection.use_prefill_gqa6_qtile8_w16 ? (1U << 25U) : 0U;
   return mask;
 }
@@ -1418,7 +1449,10 @@ static sllm_status_t causal_attention_execute_impl(
     if (selection.use_decode_wave_split_staged32) {
       const hipError_t plan_status = prepare_causal_workspace_plan_for_bytes(
           context, queue,
-          kDecodeWaveSplitStaged32WorkspaceBytesPerQuery * metadata.query_count,
+          (selection.use_decode_wave_split128
+               ? kDecodeWaveSplitStaged32Split128WorkspaceBytesPerQuery
+               : kDecodeWaveSplitStaged32WorkspaceBytesPerQuery) *
+              metadata.query_count,
           &scaled_prefill_workspace, &scaled_prefill_workspace_bytes);
       if (plan_status != hipSuccess) {
         execute_guard.disarm();
@@ -1607,7 +1641,9 @@ static sllm_status_t causal_attention_execute_impl(
               state->encoding, state->static_key_scale,
               state->static_value_scale, scaled_prefill_workspace,
               scaled_prefill_workspace_bytes,
-              selection.use_decode_wave_split_q_preload, queue->stream);
+              selection.use_decode_wave_split_q_preload,
+              selection.use_decode_wave_split_gqa_shared,
+              selection.use_decode_wave_split128, queue->stream);
     } else if (selection.use_decode_wave_split_staged) {
       launch_status =
           ::sllm_causal_attention_kernel::launch_decode_wave_split_staged(
@@ -1799,9 +1835,8 @@ static sllm_status_t causal_attention_execute_impl(
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
       launch_status = hipErrorNotSupported;
 #else
-      const bool wave_local_kv =
-          std::strcmp(arch_name, "gfx1201") == 0 &&
-          metadata.query_count == 2048U;
+      const bool wave_local_kv = std::strcmp(arch_name, "gfx1201") == 0 &&
+                                 metadata.query_count == 2048U;
       launch_status = ::sllm_causal_attention_kernel::launch_gqa6_qtile8_w16(
           query_pointer, state->key_buffer->device_pointer,
           state->value_buffer->device_pointer, state->key_scale_plane.address,

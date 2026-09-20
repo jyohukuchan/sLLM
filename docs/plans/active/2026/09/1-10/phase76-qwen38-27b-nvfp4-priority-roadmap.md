@@ -1,6 +1,6 @@
 # Phase 76以降: Qwen3.8-27B NVFP4優先ロードマップ
 
-> 状態: Phase 76〜86（83.5・84.5を含む）完了。2026-09-17のユーザー決定により、新Phase86をMTP catch-upの条件付け検証とし、旧86・87を87・88へ繰り下げた。Phase86は有意な改善を確認できず既定採用せず完了。Phase87〜88は計画済み・未着手。Phase78の旧目標の未達・未実施を記録した完了判断は維持する。
+> 状態: Phase 76〜86（83.5・84.5を含む）完了。2026-09-17のユーザー決定により、新Phase86をMTP catch-upの条件付け検証とし、旧86・87を87・88へ繰り下げた。Phase86は有意な改善を確認できず既定採用せず完了。Phase87（2026-09-19に範囲を再定義）〜88は計画済み・未着手。Phase78の旧目標の未達・未実施を記録した完了判断は維持する。
 > 作成日: 2026-09-03
 
 ## 2026-09-17の最新状態
@@ -1421,17 +1421,32 @@ opt-inの分離catch-up、効果があれば融合catch-upの順で進める。�
 tree／並列drafting、batching、greedy受理規則は含めない。
 詳細は[Phase86専用計画](../../../../archive/2026/09/11-20/phase86-mtp-catch-up-conditioning.md)を正本とする。
 
-## Phase 87: 他精度の単一要求最適化（旧Phase86、さらに前は旧Phase85）
+## Phase 87: Qwen3.8 NVFP4の単一要求decode最適化とW×A16の廃止（2026-09-19に再定義）
 
-Phase86と[低精度カーネルのライブラリ境界化](../../../../archive/2026/09/11-20/lowp-kernel-library-boundary.md)（2026-09-17ユーザー決定によりPhase87より先に実施）と[低精度形式のscale選択の修正](../11-20/low-precision-scale-selection.md)（2026-09-18ユーザー決定によりPhase87より先に実施）の完了後に、次の順で残件を閉じる。変更は境界化後の`native/lowp`へ入れ、scale選択の修正で確定した規則を基準にする。Phase84のsidecar・既存provider接続・比較結果と、Phase85の共通kernel採用範囲を引き継ぐ。未対応shape・一般経路を再棚卸しし、完了したMXFP8／MXFP6改善を重複実装・全面再測定しない。
+2026-09-19のユーザー決定（`README.md`の方針）により範囲を再定義し、詳細は
+[Phase 87計画](../11-20/phase87-qwen38-nvfp4-single-request.md)を正本とする。Qwen3.8ではNVFP4だけを考え、
+本番のQwen3.8-27B NVFP4（Unsloth混合精度）のNVFP4 W4A4とFP8 W8A8のdecode、MTP companionのNVFP4化とMXFP6との比較、
+活性値BF16の低精度経路（NVFP4 W4A16、MXFP8 W8A16、MXFP6 W6A16）の廃止を行う。
 
-1. MXFP8 W8A8 decodeの残差。Phase85で得たMXFP8 activation decodeを後続MXFP4 W4A8へ再利用する。
-2. MXFP6 W6A6 decodeの残差。共通tile/reductionとE3M2 ingressの採否・制約を引き継ぐ。
-3. MXFP4 W4A8 prefill/decode。weightはMXFP4 block32/E8M0、activationはMXFP8 E4M3 block32/E8M0とする。
-4. NVFP4 W4A16 decode残差と、必要なら既存prefill providerの追加改善。
+2026-09-19に段階0の計測・棚卸しを完了した。現行Qwen3.8は既にW4A4であると実機確認し、
+ユーザー指示で不要な移行比較を省いた。decode attentionの候補追加も承認され、両GPU・MTP有無の
+時間／read-request量とcopy帯域からMXFP8 E4 attention stage1を第一候補とした。
+同日のレビュー補正で重みの論理byte数による順位へ訂正し、R9700ではFP8 W8A8 projectionを第一候補とした。
+また、decode 1段全体のHIP graph化と、MTPなし・ありのサンプリング経路のCPU-GPU間通信削減を範囲へ追加した。
+詳細は[段階0履歴](../../../../../history/2026/09/11-20/phase87-stage0.md)を参照する。
 
-一般的なFP8 artifact互換は保留を維持する。Phase 76〜83のexact Qwen3.8 recipe対応を汎用化する作業はPhase 87へ
-自動的に含めない。
+WU0のread帯域計測は2026-09-20に300 ms連続warmupで再計測し、WU1のV620 attentionの参照余地12.4143／半分6.2072 ms/token、
+WU2のR9700 FP8の正の形状別余地4.0813／半分2.0406 ms/tokenへ更新した。
+read probeは物理上限ではなく、負の差を最適化不能の証明とはしない。
+[WU0履歴](../../../../../history/2026/09/11-20/phase87-wu0-read-bandwidth.md)を基準にWU1を2026-09-20に完了した。
+V620のGQA共有を採用し、MTPなし+8.09%／あり+6.88%、両GPU全4構成の生成列一致を確認した。
+R9700は現行維持。詳細は[WU1履歴](../../../../../history/2026/09/11-20/phase87-wu1-attention.md)を参照する。
+WU1.1では採否と探索打ち切り線を分け、両GPUのlong contextへsplit128をN1として採用した（単体TPOT比1.85%／2.22%短縮）。
+生成列とMTP受理数の変化、R9700 MTPありの実測−3.41%を含む結果は
+[WU1.1履歴](../../../../../history/2026/09/11-20/phase87-wu1-1-attention.md)に記録した。次はWU2。
+
+再定義前の項目（MXFP8／MXFP6本体のdecode残差、MXFP4の新形式）はPhase 87から外した。MXFP4の活性値はW4A8から
+MXFP6（W4A6）へ変更した。一般的なFP8 artifact互換は保留を維持する。
 
 ## Phase 88: NVFP4リクエストバッチ処理（旧Phase87、さらに前は旧Phase86）
 

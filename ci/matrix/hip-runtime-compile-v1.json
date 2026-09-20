@@ -165,7 +165,7 @@
       "native/lowp/src/nvfp4_prefill_wmma_compensated.inc",
       "native/lowp/src/nvfp4_small_m_vgpr_reuse.inc"
     ],
-    "source_set_sha256": "da1ce450d92f46a160bac7e6710c4b24f601481834bc59e3936063f392bacd51",
+    "source_set_sha256": "083d9dcccbd96a953658cc74e5417adaaefe97175fc1e21d7ce7969c2086f839",
     "files": [
       {
         "path": "include/sllm/hip.h",
@@ -221,15 +221,15 @@
       },
       {
         "path": "native/hip/src/causal_attention_kernel.hip.cpp",
-        "sha256": "a826a3f71428c466d6626ee56632420eb7d5a7173f3d577191fc0143f15f6746"
+        "sha256": "25ae933ddfc929cb87c504fa74b23d5115d5b9e17967f46ca1b1dfcf4ce03072"
       },
       {
         "path": "native/hip/src/causal_attention_kernel_internal.hpp",
-        "sha256": "fc660447bcf4376e768cf6dae86bdfc7309825ced7c92dff834b101c788740cd"
+        "sha256": "e116a71e5440e3dc43d2d24af7bb2ed49a62112450fb673cc23376bc66f396bb"
       },
       {
         "path": "native/hip/src/causal_attention_runtime.inc",
-        "sha256": "b80abf261e4ed84710c67925bde58cb6b8c1d594a4da01126292ea5e1574358e"
+        "sha256": "b14c3dd8c15f23d34f492dea0cd88693d6d964d2515fffa1e1d789747d4583e1"
       },
       {
         "path": "native/hip/src/deepseek_v4_moe_route_api.cpp",
@@ -597,7 +597,7 @@
       },
       {
         "path": "native/lowp/include/lowp/detail/low_precision_block_codec.hpp",
-        "sha256": "967dcae6d2e331641324ae8fda9d9e0ce06644ac761348d5d45b5a42514298c5"
+        "sha256": "461196f36f855804216f9b73da8345dbd7518b55f7adf11f4dfbed81bed63787"
       },
       {
         "path": "native/lowp/include/lowp/detail/low_precision_matmul_provider.hpp",
@@ -625,7 +625,7 @@
       },
       {
         "path": "native/lowp/src/lowp_kernel.hip.cpp",
-        "sha256": "cd131365275f726fb3a785a9c3cc021480a3b897d0c2ef9d440ffb8dea6da29f"
+        "sha256": "34cf81e77d8fb04e3cc7d2799fa6d0f7c74fbc493f5ddbfba7899e53c9a21043"
       },
       {
         "path": "native/lowp/src/lowp_launch.cpp",

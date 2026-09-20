@@ -2458,6 +2458,13 @@ fn validate_causal_attention_info_with_staged_opt_ins(
         && descriptor.layout().heads() == 4
         && descriptor.layout().head_dim() == 256
         && descriptor.cache_encoding() == KvCacheEncoding::Mxfp8E4;
+    let use_decode_wave_split_gqa_shared = use_decode_wave_split_staged32
+        && expected_target == Some("gfx1030")
+        && (1..=3).contains(&query_count);
+    let use_decode_wave_split128 = use_decode_wave_split_staged32
+        && query_count <= 3
+        && committed_kv_length >= 8192
+        && (expected_target == Some("gfx1201") || use_decode_wave_split_gqa_shared);
     let use_decode_wave_split_long = use_phase33_common_provider
         && query_count == 1
         && committed_kv_length >= 1024
@@ -2952,8 +2959,14 @@ fn validate_causal_attention_info_with_staged_opt_ins(
         || Some(info.grid_size_x)
             != if use_decode_wave_split_staged32 {
                 query_count
-                    .checked_mul(24)
-                    .and_then(|value| value.checked_mul(32))
+                    .checked_mul(if use_decode_wave_split_gqa_shared {
+                        4
+                    } else {
+                        24
+                    })
+                    .and_then(|value| {
+                        value.checked_mul(if use_decode_wave_split128 { 128 } else { 32 })
+                    })
                     .and_then(|value| u32::try_from(value).ok())
             } else if use_decode_wave_split_staged {
                 query_count
@@ -3591,7 +3604,12 @@ mod tests {
                 info.kernel_id =
                     sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_V1;
                 info.workgroup_size_x = sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
-                info.grid_size_x = u32::try_from(query_count * 24 * 32).unwrap();
+                let grid_heads = if target == "gfx1030" && query_count <= 3 {
+                    4
+                } else {
+                    24
+                };
+                info.grid_size_x = u32::try_from(query_count * grid_heads * 32).unwrap();
                 info.query_count = query_count;
                 info.start_position = start_position;
                 info.committed_kv_length = committed_kv_length;
@@ -3624,24 +3642,73 @@ mod tests {
                 .unwrap();
                 assert_eq!(evidence.kernel_id, info.kernel_id);
                 assert_eq!(evidence.dispatch_count, 2);
-                assert_eq!(evidence.grid_size_x, query_count as u32 * 24 * 32);
-                assert_eq!(evidence.query_count, query_count);
-
-                assert!(
-                    validate_causal_attention_info_with_staged_opt_ins(
-                        &info,
-                        &context,
-                        start_position,
-                        committed_kv_length,
-                        descriptor,
-                        24,
-                        None,
-                        None,
-                        None,
-                        Some(std::ffi::OsStr::new("0")),
-                    )
-                    .is_err()
+                assert_eq!(
+                    evidence.grid_size_x,
+                    query_count as u32 * grid_heads as u32 * 32
                 );
+                assert_eq!(evidence.query_count, query_count);
+            }
+        }
+    }
+
+    #[test]
+    fn mxfp8_e4_split128_metadata_uses_long_context_and_query_scope() {
+        let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            10000,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        )
+        .unwrap();
+        for target in ["gfx1030", "gfx1201"] {
+            let context = Context::test_without_native_for_target(target);
+            for length in [8191_u64, 8192, 8193] {
+                for m in 1..=4_u64 {
+                    let shared = target == "gfx1030" && m <= 3;
+                    let heads = if shared { 4 } else { 24 };
+                    let splits = if length >= 8192 && m <= 3 { 128 } else { 32 };
+                    let mut info = empty_causal_attention_info();
+                    info.backend = sys::SLLM_BACKEND_HIP;
+                    info.dispatch_id = 93128;
+                    info.dispatch_count = 2;
+                    info.kernel_id =
+                        sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_V1;
+                    info.workgroup_size_x = 256;
+                    info.grid_size_x = (m * heads * splits) as u32;
+                    info.query_count = m;
+                    info.start_position = length - m;
+                    info.committed_kv_length = length;
+                    info.q_heads = 24;
+                    info.kv_heads = 4;
+                    info.head_dim = 256;
+                    info.scale_denominator = 16;
+                    set_test_c_string(
+                        &mut info.kernel_symbol,
+                        "causal_attention.decode.wave32_split.staged.v1",
+                    );
+                    set_test_c_string(
+                        &mut info.device_symbol,
+                        "sllm_causal_attention_decode_wave32_split_staged_v1",
+                    );
+                    set_test_c_string(&mut info.gcn_arch_name, target);
+                    assert!(
+                        validate_causal_attention_info_with_staged_opt_ins(
+                            &info,
+                            &context,
+                            length - m,
+                            length,
+                            descriptor,
+                            24,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .is_ok()
+                    );
+                }
             }
         }
     }

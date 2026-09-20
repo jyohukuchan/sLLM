@@ -88,6 +88,20 @@
           "test": true,
           "doc": true,
           "doctest": false
+        },
+        {
+          "name": "sllm-convert-qwen38-mx",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
         }
       ]
     },
@@ -1255,6 +1269,34 @@
         },
         {
           "name": "sllm-qwen35-quality-baseline",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-qwen38-kld-dump",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-qwen38-mx-kld-dump",
           "kind": [
             "bin"
           ],

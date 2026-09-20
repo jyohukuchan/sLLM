@@ -588,6 +588,14 @@ bool execute_public_attention(const sllm_context_t *const context,
     return false;
   }
   const bool staged = length >= 1024U;
+  const bool gqa_shared =
+      kStaged32Default &&
+      std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1030") == 0 &&
+      query_count <= 3U;
+  const bool split128 =
+      kStaged32Default && length >= 8192U && query_count <= 3U &&
+      (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0 || gqa_shared);
+  const uint32_t staged_splits = split128 ? 128U : kStagedSplits;
   const bool metadata_ok =
       info.backend == SLLM_BACKEND_HIP && info.dispatch_id != 0U &&
       info.query_count == query_count && info.start_position == start &&
@@ -599,7 +607,8 @@ bool execute_public_attention(const sllm_context_t *const context,
       (staged
            ? (info.dispatch_count == 2U && info.kernel_id == kStagedKernelId &&
               info.workgroup_size_x == 256U &&
-              info.grid_size_x == query_count * kQueryHeads * kStagedSplits &&
+              info.grid_size_x == query_count * staged_splits *
+                                      ((gqa_shared) ? kKvHeads : kQueryHeads) &&
               std::strcmp(info.kernel_symbol, kStagedLogicalSymbol) == 0 &&
               std::strcmp(info.device_symbol, kStagedDeviceSymbol) == 0)
            : (info.dispatch_count == 1U &&
@@ -610,7 +619,7 @@ bool execute_public_attention(const sllm_context_t *const context,
             << " dispatch_count=" << info.dispatch_count
             << " grid=" << info.grid_size_x
             << " workgroup=" << info.workgroup_size_x << " workspace_expected="
-            << (staged ? query_count * kQueryHeads * kStagedSplits *
+            << (staged ? query_count * kQueryHeads * staged_splits *
                              (kHeadDim + 2U) * sizeof(float)
                        : 0U)
             << " symbol=" << info.kernel_symbol << '\n';
@@ -740,7 +749,8 @@ int main() {
   sllm_context_t *context = nullptr;
   sllm_queue_t *queue = nullptr;
   bool success = create_visible_context(&context, &queue);
-  constexpr std::array<uint64_t, 3> lengths = {1023U, 1024U, 1025U};
+  constexpr std::array<uint64_t, 7> lengths = {1023U, 1024U, 1025U, 8191U,
+                                               8192U, 8193U, 8256U};
   if (success) {
     for (const uint64_t length : lengths) {
       for (uint32_t query_count = 1U; query_count <= 4U; ++query_count) {
@@ -769,7 +779,8 @@ int main() {
   if (success) {
     std::cout << "phase83 MXFP8 staged public GPU PASS target="
               << SLLM_TEST_EXPECTED_TARGET
-              << " lengths=1023,1024,1025 M=1..4 repeat=1 oracle=independent"
+              << " lengths=1023,1024,1025,8191,8192,8193,8256 M=1..4"
+                 " split128=boundary repeat=1 oracle=independent"
                  " cleanup=verified\n";
   }
   return success ? 0 : 1;

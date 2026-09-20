@@ -710,6 +710,339 @@ __launch_bounds__(256, 1) void causal_attention_decode_wave_split_staged_stage2_
   }
 }
 
+// Global-workspace merge for WU1.1 split counts.  The per-dimension loop is
+// intentionally sequential and matches the scratch candidate; no LDS array of
+// Splits*head_dim is allocated, so Split=128 remains valid on both targets.
+template <uint32_t kSplits>
+__global__
+__launch_bounds__(256, 1) void causal_attention_decode_gqa6_staged32_split_merge_kernel(
+    const float *const workspace, uint16_t *const output,
+    const uint32_t query_count) {
+  constexpr uint32_t kQHeads = 24U;
+  constexpr uint32_t kHeadDim = 256U;
+  constexpr uint32_t kWorkspaceStride = kHeadDim + 2U;
+  const uint32_t head = blockIdx.x;
+  const uint32_t dimension = threadIdx.x;
+  if (head >= query_count * kQHeads || dimension >= kHeadDim) {
+    return;
+  }
+  const uint64_t base =
+      static_cast<uint64_t>(head) * kSplits * kWorkspaceStride;
+  float maximum = -std::numeric_limits<float>::infinity();
+  for (uint32_t split = 0U; split < kSplits; ++split) {
+    maximum = fmaxf(maximum, workspace[base + split * kWorkspaceStride]);
+  }
+  float denominator = 0.0F;
+  float accumulated = 0.0F;
+  for (uint32_t split = 0U; split < kSplits; ++split) {
+    const uint64_t partial = base + split * kWorkspaceStride;
+    const float scale = expf(workspace[partial] - maximum);
+    denominator += workspace[partial + 1U] * scale;
+    accumulated += workspace[partial + 2U + dimension] * scale;
+  }
+  output[static_cast<uint64_t>(head) * kHeadDim + dimension] =
+      f32_to_bf16_rne(accumulated / denominator);
+}
+
+// Phase 87 WU1 C1: one 192-thread block owns one KV head and all six GQA
+// query heads.  The stage-2 workspace contract remains [M,24,32,258].
+__global__
+__launch_bounds__(192, 1) void causal_attention_decode_gqa6_staged32_stage1_kernel(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    float *const workspace, const uint32_t query_count,
+    const uint64_t start_position) {
+  constexpr uint32_t kWaveSize = 32U;
+  constexpr uint32_t kWaveCount = 6U;
+  constexpr uint32_t kKvHeads = 4U;
+  constexpr uint32_t kQHeads = 24U;
+  constexpr uint32_t kGqaRatio = 6U;
+  constexpr uint32_t kSplits = 32U;
+  constexpr uint32_t kHeadDim = 256U;
+  constexpr uint32_t kKeyTile = 8U;
+  constexpr uint32_t kWorkspaceStride = kHeadDim + 2U;
+  constexpr uint32_t kElementsPerLane = kHeadDim / kWaveSize;
+#if defined(__gfx1030__)
+  constexpr bool kUseFusedE4Decode = true;
+#else
+  constexpr bool kUseFusedE4Decode = false;
+#endif
+
+  const uint32_t block = blockIdx.x;
+  const uint32_t split = block % kSplits;
+  const uint32_t kv_head = (block / kSplits) % kKvHeads;
+  const uint32_t query_index = block / (kKvHeads * kSplits);
+  const uint32_t wave = threadIdx.x / kWaveSize;
+  const uint32_t lane = threadIdx.x & (kWaveSize - 1U);
+  const uint32_t query_head = kv_head * kGqaRatio + wave;
+
+  if (query_index >= query_count || query_head >= kQHeads ||
+      wave >= kWaveCount) {
+    return;
+  }
+
+  const uint64_t committed_kv_length =
+      start_position + static_cast<uint64_t>(query_index) + 1U;
+  const uint64_t split_begin =
+      committed_kv_length * static_cast<uint64_t>(split) / kSplits;
+  const uint64_t split_end =
+      committed_kv_length * static_cast<uint64_t>(split + 1U) / kSplits;
+  const uint16_t *const query_row =
+      query +
+      (static_cast<uint64_t>(query_index) * kQHeads + query_head) * kHeadDim;
+
+  float query_values[kElementsPerLane];
+  float accumulations[kElementsPerLane] = {};
+#pragma unroll
+  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+    query_values[index] = bf16_to_f32(query_row[lane + index * kWaveSize]);
+  }
+
+  const uint64_t workspace_base =
+      ((static_cast<uint64_t>(query_index) * kQHeads + query_head) * kSplits +
+       split) *
+      kWorkspaceStride;
+  float *const partial = workspace + workspace_base;
+  if (split_begin >= split_end) {
+    for (uint32_t index = lane; index < kHeadDim; index += kWaveSize) {
+      partial[2U + index] = 0.0F;
+    }
+    if (lane == 0U) {
+      partial[0] = -std::numeric_limits<float>::infinity();
+      partial[1] = 0.0F;
+    }
+    return;
+  }
+
+  // Decode each encoded K/V element once per KV head, then reuse the 8-row
+  // FP32 tile across the six GQA query-head waves.
+  __shared__ float key_tile[kKeyTile][kHeadDim];
+  __shared__ float value_tile[kKeyTile][kHeadDim];
+  float local_maximum = -std::numeric_limits<float>::infinity();
+  float local_denominator = 0.0F;
+
+  for (uint64_t tile_begin = split_begin; tile_begin < split_end;
+       tile_begin += kKeyTile) {
+    const uint64_t remaining = split_end - tile_begin;
+    const uint32_t tile_count =
+        remaining < kKeyTile ? static_cast<uint32_t>(remaining) : kKeyTile;
+    for (uint32_t element = threadIdx.x; element < kKeyTile * 2U * kHeadDim;
+         element += blockDim.x) {
+      const uint32_t key_index = element / (2U * kHeadDim);
+      const uint32_t plane_dimension = element % (2U * kHeadDim);
+      if (key_index < tile_count) {
+        const uint64_t kv_row =
+            (tile_begin + static_cast<uint64_t>(key_index)) * kKvHeads +
+            kv_head;
+        if (plane_dimension < kHeadDim) {
+          key_tile[key_index][plane_dimension] =
+              load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                             kUseFusedE4Decode>(key, key_scales, nullptr,
+                                                kv_row, plane_dimension,
+                                                kHeadDim, 1.0F);
+        } else {
+          const uint32_t dimension = plane_dimension - kHeadDim;
+          value_tile[key_index][dimension] =
+              load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                             kUseFusedE4Decode>(value, value_scales, nullptr,
+                                                kv_row, dimension, kHeadDim,
+                                                1.0F);
+        }
+      }
+    }
+    __syncthreads();
+
+    for (uint32_t key_index = 0U; key_index < tile_count; ++key_index) {
+      float partial_score = 0.0F;
+#pragma unroll
+      for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+        const uint32_t current = lane + index * kWaveSize;
+        partial_score += query_values[index] * key_tile[key_index][current];
+      }
+      for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
+        partial_score += __shfl_down(partial_score, offset, kWaveSize);
+      }
+
+      float rescale = 0.0F;
+      float contribution = 0.0F;
+      if (lane == 0U) {
+        const float current_score =
+            partial_score * rsqrtf(static_cast<float>(kHeadDim));
+        const float next_maximum = fmaxf(local_maximum, current_score);
+        rescale = expf(local_maximum - next_maximum);
+        contribution = expf(current_score - next_maximum);
+        local_denominator = local_denominator * rescale + contribution;
+        local_maximum = next_maximum;
+      }
+      rescale = __shfl(rescale, 0U, kWaveSize);
+      contribution = __shfl(contribution, 0U, kWaveSize);
+#pragma unroll
+      for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+        const uint32_t current = lane + index * kWaveSize;
+        accumulations[index] = accumulations[index] * rescale +
+                               contribution * value_tile[key_index][current];
+      }
+    }
+    __syncthreads();
+  }
+
+  if (lane == 0U) {
+    partial[0] = local_maximum;
+    partial[1] = local_denominator;
+  }
+#pragma unroll
+  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+    const uint32_t current = lane + index * kWaveSize;
+    partial[2U + current] = accumulations[index];
+  }
+}
+
+// WU1.1 C1×C3 candidate.  This keeps the WU1 GQA-shared arithmetic and only
+// changes the partition count.  The workspace remains [M,24,Splits,258].
+template <uint32_t kSplits>
+__global__
+__launch_bounds__(192, 1) void causal_attention_decode_gqa6_staged32_split_stage1_kernel(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    float *const workspace, const uint32_t query_count,
+    const uint64_t start_position) {
+  constexpr uint32_t kWaveSize = 32U;
+  constexpr uint32_t kWaveCount = 6U;
+  constexpr uint32_t kKvHeads = 4U;
+  constexpr uint32_t kQHeads = 24U;
+  constexpr uint32_t kGqaRatio = 6U;
+  constexpr uint32_t kHeadDim = 256U;
+  constexpr uint32_t kKeyTile = 8U;
+  constexpr uint32_t kWorkspaceStride = kHeadDim + 2U;
+  constexpr uint32_t kElementsPerLane = kHeadDim / kWaveSize;
+  static_assert(kSplits == 64U || kSplits == 128U || kSplits == 256U);
+#if defined(__gfx1030__)
+  constexpr bool kUseFusedE4Decode = true;
+#else
+  constexpr bool kUseFusedE4Decode = false;
+#endif
+
+  const uint32_t block = static_cast<uint32_t>(blockIdx.x);
+  const uint32_t split = block % kSplits;
+  const uint32_t kv_head = (block / kSplits) % kKvHeads;
+  const uint32_t query_index = block / (kKvHeads * kSplits);
+  const uint32_t wave = threadIdx.x / kWaveSize;
+  const uint32_t lane = threadIdx.x & (kWaveSize - 1U);
+  const uint32_t query_head = kv_head * kGqaRatio + wave;
+  if (query_index >= query_count || query_head >= kQHeads ||
+      wave >= kWaveCount) {
+    return;
+  }
+
+  const uint64_t committed_kv_length =
+      start_position + static_cast<uint64_t>(query_index) + 1U;
+  const uint64_t split_begin =
+      committed_kv_length * static_cast<uint64_t>(split) / kSplits;
+  const uint64_t split_end =
+      committed_kv_length * static_cast<uint64_t>(split + 1U) / kSplits;
+  const uint16_t *const query_row =
+      query +
+      (static_cast<uint64_t>(query_index) * kQHeads + query_head) * kHeadDim;
+  const uint64_t workspace_base =
+      ((static_cast<uint64_t>(query_index) * kQHeads + query_head) * kSplits +
+       split) *
+      kWorkspaceStride;
+  float *const partial = workspace + workspace_base;
+
+  float query_values[kElementsPerLane];
+  float accumulations[kElementsPerLane] = {};
+#pragma unroll
+  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+    query_values[index] = bf16_to_f32(query_row[lane + index * kWaveSize]);
+  }
+  if (split_begin >= split_end) {
+    for (uint32_t index = lane; index < kHeadDim; index += kWaveSize) {
+      partial[2U + index] = 0.0F;
+    }
+    if (lane == 0U) {
+      partial[0] = -std::numeric_limits<float>::infinity();
+      partial[1] = 0.0F;
+    }
+    return;
+  }
+
+  __shared__ float key_tile[kKeyTile][kHeadDim];
+  __shared__ float value_tile[kKeyTile][kHeadDim];
+  float local_maximum = -std::numeric_limits<float>::infinity();
+  float local_denominator = 0.0F;
+  for (uint64_t tile_begin = split_begin; tile_begin < split_end;
+       tile_begin += kKeyTile) {
+    const uint64_t remaining = split_end - tile_begin;
+    const uint32_t tile_count =
+        remaining < kKeyTile ? static_cast<uint32_t>(remaining) : kKeyTile;
+    for (uint32_t element = threadIdx.x; element < kKeyTile * 2U * kHeadDim;
+         element += blockDim.x) {
+      const uint32_t key_index = element / (2U * kHeadDim);
+      const uint32_t plane_dimension = element % (2U * kHeadDim);
+      if (key_index < tile_count) {
+        const uint64_t kv_row =
+            (tile_begin + static_cast<uint64_t>(key_index)) * kKvHeads +
+            kv_head;
+        if (plane_dimension < kHeadDim) {
+          key_tile[key_index][plane_dimension] =
+              load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                             kUseFusedE4Decode>(key, key_scales, nullptr,
+                                                kv_row, plane_dimension,
+                                                kHeadDim, 1.0F);
+        } else {
+          const uint32_t dimension = plane_dimension - kHeadDim;
+          value_tile[key_index][dimension] =
+              load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                             kUseFusedE4Decode>(value, value_scales, nullptr,
+                                                kv_row, dimension, kHeadDim,
+                                                1.0F);
+        }
+      }
+    }
+    __syncthreads();
+    for (uint32_t key_index = 0U; key_index < tile_count; ++key_index) {
+      float partial_score = 0.0F;
+#pragma unroll
+      for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+        const uint32_t current = lane + index * kWaveSize;
+        partial_score += query_values[index] * key_tile[key_index][current];
+      }
+      for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
+        partial_score += __shfl_down(partial_score, offset, kWaveSize);
+      }
+      float rescale = 0.0F;
+      float contribution = 0.0F;
+      if (lane == 0U) {
+        const float current_score =
+            partial_score * rsqrtf(static_cast<float>(kHeadDim));
+        const float next_maximum = fmaxf(local_maximum, current_score);
+        rescale = expf(local_maximum - next_maximum);
+        contribution = expf(current_score - next_maximum);
+        local_denominator = local_denominator * rescale + contribution;
+        local_maximum = next_maximum;
+      }
+      rescale = __shfl(rescale, 0U, kWaveSize);
+      contribution = __shfl(contribution, 0U, kWaveSize);
+#pragma unroll
+      for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+        const uint32_t current = lane + index * kWaveSize;
+        accumulations[index] = accumulations[index] * rescale +
+                               contribution * value_tile[key_index][current];
+      }
+    }
+    __syncthreads();
+  }
+  if (lane == 0U) {
+    partial[0] = local_maximum;
+    partial[1] = local_denominator;
+  }
+#pragma unroll
+  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+    const uint32_t current = lane + index * kWaveSize;
+    partial[2U + current] = accumulations[index];
+  }
+}
+
 // FP16-only long-decode experiment.  The block/wave decomposition and merge
 // order match the measured wave-split provider, but each lane handles four
 // adjacent half2 pairs (lane*2 + segment*64).  Aligned uint32/half2 loads are
@@ -3407,14 +3740,19 @@ hipError_t launch_decode_wave_split_staged_impl(
     const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
     const uint32_t encoding, const float static_key_scale,
     const float static_value_scale, void *const workspace,
-    const uint64_t workspace_bytes, const hipStream_t stream) noexcept {
+    const uint64_t workspace_bytes, const bool use_gqa_shared,
+    const bool use_split128, const hipStream_t stream) noexcept {
   (void)key_outer_scales;
   (void)value_outer_scales;
   constexpr uint32_t kWaveSize = 32U;
   constexpr uint32_t kMaxQueryCount = 4U;
   constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-  constexpr uint64_t kBytesPerQuery =
+  constexpr uint64_t kBytesPerQuery32 =
       UINT64_C(24) * kWaveCount * (kHeadDim + 2U) * sizeof(float);
+  constexpr uint64_t kBytesPerQuery128 =
+      UINT64_C(24) * 128U * (kHeadDim + 2U) * sizeof(float);
+  const uint64_t required_workspace_bytes =
+      use_split128 ? kBytesPerQuery128 : kBytesPerQuery32;
   if (query == nullptr || key == nullptr || value == nullptr ||
       key_scales == nullptr || value_scales == nullptr || output == nullptr ||
       workspace == nullptr || query_count == 0U ||
@@ -3423,28 +3761,73 @@ hipError_t launch_decode_wave_split_staged_impl(
       start_position > UINT64_MAX - query_count ||
       start_position + query_count != committed_kv_length ||
       committed_kv_length == 0U ||
-      workspace_bytes < kBytesPerQuery * query_count) {
+      workspace_bytes < required_workspace_bytes * query_count ||
+      (use_gqa_shared &&
+       (kWaveCount != 32U || !UseQueryPreload || query_count > 3U ||
+        q_heads != 24U || kv_heads != 4U || head_dim != kHeadDim ||
+        encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1)) ||
+      (use_split128 &&
+       (kWaveCount != 32U || !UseQueryPreload || query_count > 3U ||
+        committed_kv_length < 8192U || q_heads != 24U || kv_heads != 4U ||
+        head_dim != kHeadDim ||
+        encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1))) {
     return hipErrorInvalidValue;
   }
-  hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(causal_attention_decode_wave_split_staged_stage1_kernel<
-                      UseQueryPreload, Encoding, kWaveCount>),
-      dim3(query_count * q_heads * kWaveCount), dim3(kWaveSize), 0U, stream,
-      query, key, value, key_scales, value_scales, key_outer_scales,
-      value_outer_scales, static_cast<float *>(workspace), query_count,
-      start_position, q_heads, kv_heads, head_dim, static_key_scale,
-      static_value_scale);
+  if (use_split128) {
+    if (use_gqa_shared) {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(
+              causal_attention_decode_gqa6_staged32_split_stage1_kernel<128U>),
+          dim3(query_count * 4U * 128U), dim3(192U), 0U, stream, query, key,
+          value, key_scales, value_scales, static_cast<float *>(workspace),
+          query_count, start_position);
+    } else {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(
+              causal_attention_decode_wave_split_staged_stage1_kernel<
+                  UseQueryPreload, Encoding, 128U>),
+          dim3(query_count * q_heads * 128U), dim3(kWaveSize), 0U, stream,
+          query, key, value, key_scales, value_scales, key_outer_scales,
+          value_outer_scales, static_cast<float *>(workspace), query_count,
+          start_position, q_heads, kv_heads, head_dim, static_key_scale,
+          static_value_scale);
+    }
+  } else if (use_gqa_shared) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(causal_attention_decode_gqa6_staged32_stage1_kernel),
+        dim3(query_count * 4U * 32U), dim3(192U), 0U, stream, query, key, value,
+        key_scales, value_scales, static_cast<float *>(workspace), query_count,
+        start_position);
+  } else {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(causal_attention_decode_wave_split_staged_stage1_kernel<
+                        UseQueryPreload, Encoding, kWaveCount>),
+        dim3(query_count * q_heads * kWaveCount), dim3(kWaveSize), 0U, stream,
+        query, key, value, key_scales, value_scales, key_outer_scales,
+        value_outer_scales, static_cast<float *>(workspace), query_count,
+        start_position, q_heads, kv_heads, head_dim, static_key_scale,
+        static_value_scale);
+  }
   hipError_t status = hipGetLastError();
   if (status != hipSuccess) {
     return status;
   }
-  hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(
-          causal_attention_decode_wave_split_staged_stage2_kernel<kWaveCount>),
-      dim3(query_count * q_heads),
-      dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream,
-      static_cast<const float *>(workspace), output, query_count, q_heads,
-      kv_heads, head_dim);
+  if (use_split128) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(
+            causal_attention_decode_gqa6_staged32_split_merge_kernel<128U>),
+        dim3(query_count * q_heads),
+        dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream,
+        static_cast<const float *>(workspace), output, query_count);
+  } else {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(causal_attention_decode_wave_split_staged_stage2_kernel<
+                        kWaveCount>),
+        dim3(query_count * q_heads),
+        dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream,
+        static_cast<const float *>(workspace), output, query_count, q_heads,
+        kv_heads, head_dim);
+  }
   return hipGetLastError();
 }
 
@@ -3469,14 +3852,14 @@ hipError_t launch_decode_wave_split_staged(
                    key_outer_scales, value_outer_scales, output, query_count,
                    start_position, committed_kv_length, q_heads, kv_heads,
                    head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, stream)
+                   workspace, workspace_bytes, false, false, stream)
              : launch_decode_wave_split_staged_impl<
                    false, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 8U>(
                    query, key, value, key_scales, value_scales,
                    key_outer_scales, value_outer_scales, output, query_count,
                    start_position, committed_kv_length, q_heads, kv_heads,
                    head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, stream);
+                   workspace, workspace_bytes, false, false, stream);
 }
 
 hipError_t launch_decode_wave_split_staged32(
@@ -3489,6 +3872,7 @@ hipError_t launch_decode_wave_split_staged32(
     const uint32_t encoding, const float static_key_scale,
     const float static_value_scale, void *const workspace,
     const uint64_t workspace_bytes, const bool use_query_preload,
+    const bool use_gqa_shared, const bool use_split128,
     const hipStream_t stream) noexcept {
   if (encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
     return hipErrorInvalidValue;
@@ -3500,14 +3884,16 @@ hipError_t launch_decode_wave_split_staged32(
                    key_outer_scales, value_outer_scales, output, query_count,
                    start_position, committed_kv_length, q_heads, kv_heads,
                    head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, stream)
+                   workspace, workspace_bytes, use_gqa_shared, use_split128,
+                   stream)
              : launch_decode_wave_split_staged_impl<
                    false, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U>(
                    query, key, value, key_scales, value_scales,
                    key_outer_scales, value_outer_scales, output, query_count,
                    start_position, committed_kv_length, q_heads, kv_heads,
                    head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, stream);
+                   workspace, workspace_bytes, use_gqa_shared, use_split128,
+                   stream);
 }
 
 template <uint32_t kPartitions>

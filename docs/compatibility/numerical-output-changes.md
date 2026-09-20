@@ -61,6 +61,67 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### 2026-09-20 Phase87 WU-C1 不要な切替・実験経路の削除
+
+- **N0**: 採用済みGQA共有・split128、MXFP8 activationとMXFP8/MXFP6 weight conversionのno-clipping、
+  従来NVFP4/MXFP6/MXFP4 activationとMXFP8 KVの規則を固定した。演算順や丸めを変更しない。
+- 計画で列挙した8環境変数、converterの旧scale flags、専用の不採用kernel・activation CPU参照・診断統計を削除した。
+  weight artifact recipe、古いartifactのreader、必要なfloor関数は維持した。
+- 両GPUでcodec／matmul／evidence／attention公開APIがPASS。WU1.1最終binaryとのMTPなし8192/128、
+  1 warmup＋1 measuredの生成token列とtext hashが完全一致し、最初の分岐はなし。
+- 差し戻しはGit上の対応する導入／削除差分を戻す。未コミットのdraftでは架空のcommit SHAを割り当てず、
+  変更前sourceとbinaryの保存identityで対応を確認する。
+- 詳細と最終source/binary/test identityは[WU-C1履歴](../history/2026/09/11-20/phase87-wu-c1-cleanup.md)を参照。
+  以前のWU1/WU1.1の比較用切替とscale診断の説明は、この削除に合わせてGitで戻す方法へ更新した。
+
+### 2026-09-20 Phase87 WU1.1 長contextのsplit128（ローカル）
+
+- scope: exact gfx1030／gfx1201、MXFP8 E4 KV、Q/KV heads=24/4、D256、最終KV長8192以上、M1〜3。
+  V620はGQA共有tile8、R9700は通常wave。短context・M4は従来split32。
+- **N1**: partition数を32→128へ変更し、FP32 stage1のonline softmaxとstage2のpartition番号順mergeを用いる。
+  各keyのdot/scale、実数式、KV量子化recipe、BF16 RNEは維持する。
+  最小可視長K>=8190では、exp/subtractionの係数path r<=ceil(K/P)+1 と、multiply/add path
+  d<=3ceil(K/P)+2P+C がともに非増加。finite／overflowなし・共通exp誤差モデルでのforward bound、
+  signed Vの絶対値和、underflow等の扱いと限界は[WU1.1履歴](../history/2026/09/11-20/phase87-wu1-1-attention.md)へ記録する。
+  pointwise精度改善、全payload同等性、token一致を主張しない。
+- 独立FP32 oracle: 両GPU各26ケース、計182 oracle行がPASS。最大1 ULP、absolute 0.00195312、relative 0.00689655。
+  repeat／finite／guard／cleanupもPASS。公開APIは8191/8192/8193を含む各28ケースでPASS。
+- 性能の採用判定: context8256/M1のstage1+stage2合計を16層へ換算し、V620 1.196848 ms/token（TPOT比1.849%）、
+  R9700 1.157152 ms/token（同2.221%）。long context/M1〜3の全roundで短縮方向が一致。
+  探索の打ち切り線を採否に使わず、更新された1%基準で長context限定採用とする。
+- 生成列の最初の分岐（0始まり）: V620 MTPなし18／あり2、R9700なし15／あり38。
+  同provider内の全反復は再現可能、全構成HIP／fallbackなし／finite／cleanup zero。
+  モデル速度はV620なし+2.46%／あり+6.26%、R9700なし+2.07%／あり−3.41%。
+  MTP受理数はV620 74/106→77/102、R9700 78/100→75/106。生成trajectoryの違いを含むため、
+  速度差全体をkernel単体の効果と扱わない。新基準どおり単体改善によってlong scopeへ採用した。
+  最終productionの新stage1／mergeはFP32 FLUSH_NONEをbinary SHA付きで直接確認し、入力DAZを伴う別buildへ解析を一般化しない。
+- source/provider identity: ID93の論理identityを保持し、実grid/workspaceは128分割へ同期する。
+  WU1最終controlのsource/binary対応を確認し、`.local-artifacts/phase87/wu1-1/baseline-bin/`へ保存した。
+  差し戻しはGit上のsplit128導入差分を戻す（比較用の環境変数はWU-C1で削除）。変更前sourceは同directoryの`before/`、
+  最終build identityは`production-build-identity.json`に保持する。
+
+### 2026-09-20 Phase87 WU1 MXFP8 E4 decode GQA共有（ローカル）
+
+- 対象: exact gfx1030、MXFP8 E4 KV、Q/KV heads=24/4、D256、M1〜3、既存ID93の長さ1024以上。
+  gfx1201とM4はcontrolを維持する。行列積のW/A量子化、KV保存形式、samplingは変更しない。
+- **N0**: 同じK/VのFP32復号結果を6 query headでLDS共有する。各出力のdot（8-term＋32-lane tree）、
+  key順online softmax、FP32 accumulator、32 split、stage2 merge、最後のBF16 RNEを維持する。
+  計画時のN1予想に対し、実装は演算順を変えなかったためN0とした。
+- 独立FP32 oracleは両GPU各24ケース×5実装でPASS、最大1 ULP／absolute 0.00195312。
+  採用C1は両GPU全24ケースでcontrolとbitwise一致。finite／repeat／guard／cleanupもPASS。
+  C2（4-key grouped）とC3（split64/128）は数値順序が変わりbitwise差があるが、打ち切り線未達で不採用。
+  不採用候補についてN1承認や品質同等性を主張しない。
+- provider: `causal_attention.decode.wave32_split.staged.v1`（ID93）のstage1を
+  `causal_attention_decode_gqa6_staged32_stage1_kernel`へshape限定で置換する。stage2/workspaceは同一。
+  基準／採用sourceとbinaryのhash、単体値、公開API、モデル出力差は
+  [WU1履歴](../history/2026/09/11-20/phase87-wu1-attention.md)へ集約する。
+- モデル全体: 両GPU×MTPなし／あり、8192/128、1 warmup＋3 measuredの全構成で生成token／visible／text hashが前後一致。
+  最初の分岐位置はなし。MTP受理数もV620 74/106、R9700 78/100で一致した。
+  V620の速度はMTPなし+8.09%／あり+6.88%。R9700は従来kernelを維持する。
+- rollback: Git上のGQA共有導入差分を戻す（比較用の環境変数はWU-C1で削除）。
+  比較前の3 native sourceは`.local-artifacts/phase87/wu1/preintegration/native/hip/src/`に保存した。
+  draftのdirty checkoutであり、未作成commitをimmutable identityとして扱わない。
+
 ### 2026-09-13 Phase85 follow-up MXFP M=1 Columns2（ローカル）
 
 - N0: 1出力あたりのFP32加算/reduction順と量子化recipeを維持し、隣接2列でactivation読出し・復号を共有する。
@@ -1600,3 +1661,30 @@ Phase82およびPhase78の履歴にある `FORCE_BASELINE` は、当時の同一
 | Phase78 Qwen3.8/NVFP4測定 | `40ab582b049cff7effadbca75fe951d6cef5bd96`（evidenceの`identity.source_commit`と既知CLI binary anchor）。Qwen3.8統合実装commit `9ba9959ee14bc27193b7bafed0939a1142e17383`の直後のdocs-only commit | 同じくT2診断用。既知のPhase78 binaryへ戻す操作と、baseline kernelを選ぶ操作を混同しない |
 
 2026-09-17に11 flag棚卸しと必要なT2修復・検証を完了した。NVFP4 W4A4の両GPU longとgfx1030 FP8 decode longは、参照kernelの実dispatch、HIP-only、非finite 0、fallbackなし、cleanup 0を確認した。既定出力とkernel／launch geometryは変更前と一致した。無効果フラグや全target／全shapeの数値同等性は保証しない。詳細は[FORCE_BASELINE T2約束範囲](../development/force-baseline-reference-oracle.md)、[完了計画](../plans/archive/2026/09/11-20/force-baseline-reference-oracle.md)、[検証履歴](../history/2026/09/11-20/force-baseline-reference-oracle.md)を参照する。
+
+### OUT-2026-09-19-SCALE-MXFP8-ACT: MXFP8活性値の飽和しないE8M0 scale
+
+- scope: MXFP8 E4M3 W8A8の活性値量子化（`native/lowp`の`sllm_matmul_bf16_to_mxfp8_e4m3_block32_v1`、exact gfx1030／gfx1201）。
+  ブロック最大値が448×scaleを超えるときだけE8M0 scaleを1段上げ、飽和を避ける。NaN／Inf／ゼロの扱いは変えない。
+- numerical change: N2。飽和による誤差は消えるが、要素ごとの誤差の非増加は保証しない。出力digestは変わる。
+- evidence: Qwen3.8-27B MXFP8（R9700、chunk32、2,632位置）の平均KLDが `0.045907 → 0.025446`、top1 `0.9145 → 0.9422`。
+  両GPUの演算子evidenceがCPU参照とPASS。当時の旧規則によるraw logitsは変更前とbyte一致した。
+  診断切替はWU-C1で削除した。旧規則へ戻す場合はGit上の対応するscale変更差分を戻す。
+- status: 2026-09-19のユーザー決定で既定採用。[履歴](../history/2026/09/11-20/low-precision-scale-selection.md)。
+
+### OUT-2026-09-19-SCALE-MX-WEIGHT: MXFP8／MXFP6重み変換の飽和しないE8M0 scale
+
+- scope: Qwen3.5（`sllm-convert-gguf`）、Qwen3.8（`sllm-convert-qwen38-mx`）のMXFP8／MXFP6変換と、Qwen3.8 MTP sidecar
+  （`sllm-convert-qwen38-mtp`）。既存のGGUF・sidecarは変わらず、新しく変換したものだけが対象。
+- numerical change: N2。新規則のGGUFはsemantic ID／derived lockに規則を記録し、旧規則のものと区別する。
+- evidence: Qwen3.8のBF16比の重みの相対RMS誤差はMXFP8 `2.97% → 2.66%`、MXFP6 `5.40% → 5.28%`。平均KLDは
+  MXFP8重みだけで `0.045907 → 0.037460`（重み＋活性値で `0.017764`）、MXFP6重みだけで `0.071446 → 0.058688`。
+  Qwen3.5-4BのMXFP6品質fixtureでdecode top1が10件中3件変わる。旧規則を選ぶCLIフラグはWU-C1で削除した。旧変換規則が必要な場合はGit上の対応する変換変更差分を戻す。
+- status: 2026-09-19のユーザー決定で既定採用。[履歴](../history/2026/09/11-20/low-precision-scale-selection.md)。
+
+### OUT-2026-09-19-SCALE-NVFP4-ACT: NVFP4活性値2候補選択（不採用、WU-C1で実験経路を削除）
+
+- scope: NVFP4 W4A4の活性値量子化。既定は従来の最近接E4M3 codeのまま変わらない。
+- 経緯: 当時の2候補選択用wave8カーネルに、laneごとに異なるscale候補で
+  誤差を比べる不具合があった。修正後の平均KLDはFP16 KVで `0.092218 → 0.105180` と悪化したため既定にしなかった。
+  v1カーネルの誤差の合計順はwave8と同じにそろえた。既定経路の出力は変更前とbyte一致する。

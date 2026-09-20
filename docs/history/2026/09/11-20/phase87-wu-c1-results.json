@@ -1,0 +1,759 @@
+{
+  "schema": "phase87-wu-c1-results-v1",
+  "state": "PASS",
+  "classification": "N0",
+  "scope": "default behavior unchanged; removed listed environment/CLI switches and activation-only experiments",
+  "initial_state_sha256": "fede3db46887de2a7f21861a03bf12acfc966cfd261d1b7e52b485bd84566cc3",
+  "production_identity": {
+    "scope": "WU-C1 final local build; existing dirty changes preserved",
+    "sources": {
+      "native/hip/tests/phase83_mxfp8_staged_public_gpu_test.cpp": "61f0dd3fbcb032b64aa6a527a011ceca4acb5247877cba3b8606b426117ba391",
+      "native/hip/tests/public_runtime_host_test.cpp": "8868246eae4df5b9c501bd0cd5c35c76cf3813ea59f4c0e9fea9fda5ab164d23",
+      "native/hip/src/kv_state_kernel.hip.cpp": "bbe5e57c5712368c04bc5797fda5cbeffeb714301535dad21d072dce5f483f09",
+      "native/hip/src/causal_attention_runtime.inc": "b14c3dd8c15f23d34f492dea0cd88693d6d964d2515fffa1e1d789747d4583e1",
+      "native/lowp/tests/low_precision_block_codec_gpu_test.hip.cpp": "e430ee15afe869073f9ee04957df496d92c38b570f751b7adc6a4ae0ae932b16",
+      "native/lowp/src/lowp_kernel.hip.cpp": "34cf81e77d8fb04e3cc7d2799fa6d0f7c74fbc493f5ddbfba7899e53c9a21043",
+      "native/lowp/include/lowp/detail/low_precision_block_codec.hpp": "461196f36f855804216f9b73da8345dbd7518b55f7adf11f4dfbed81bed63787",
+      "crates/sllm-hip/src/kv_state.rs": "48afc1c94dc0f3d44bec769cc50251601dc7bd180d69aa6ebc6c89107fedb068",
+      "crates/sllm-hip/src/bin/sllm-mxfp-wa-evidence.rs": "8ab6927e767bdb23fc7be84a91d8f7e0b3e1e518df02c139d43518f9adcef648",
+      "crates/sllm-hip/src/bin/sllm-nvfp4-w4a4-evidence.rs": "c5a1a17d92cb3c0c1e753f880f9a4162287eb9e1f0e3a9e60538508ca04faa36",
+      "crates/sllm-cli/src/bin/sllm-convert-qwen38-mx.rs": "2a79aad3b4b03af919cd9a8e819e5a6dc90ede678571bd48f866dcf75bfc8c8a",
+      "crates/sllm-cli/src/bin/sllm-convert-gguf.rs": "83294da0e015432cd7b85080a8f3cad8b623f256e2bd011549822fe8541e478c",
+      "crates/sllm-cli/src/bin/sllm-convert-qwen38-mtp.rs": "7ab8950d4f938b3a86e1cfed68f5c57e9767e74ca65cd7c10e5e6a50351da1bd",
+      "native/lowp/CMakeLists.txt": "5ad64476a10adb6e2f5b951e1b134963df30ae9ccc7f5865f7902b6256a650e4"
+    },
+    "removed_sources": [
+      "native/lowp/tests/lowp_quantize_cost_microbench.hip.cpp"
+    ],
+    "binaries": {
+      ".local-artifacts/lowp-boundary/build/sLLM/gfx1030/release/sllm-phase78-qwen38-benchmark": "44d5a59d28c85b3ae00229c887314949e1f8c4ec4b91fc5acda5cbb49956efd3",
+      ".local-artifacts/lowp-boundary/build/sLLM/gfx1030/release/sllm-mxfp-wa-evidence": "d2effcac33cb14527c4b063789c7fff776efe6d327355ade1e5b9586025a0592",
+      ".local-artifacts/lowp-boundary/build/sLLM/gfx1030/release/sllm-nvfp4-w4a4-evidence": "8403a35817f18e65577abe807ded77eb50cc4b2e32a68459f71bfd0a84e76bbf",
+      ".local-artifacts/lowp-boundary/build/sLLM/gfx1201/release/sllm-phase78-qwen38-benchmark": "93eca4045e88193aa4f49b04515bbf785fce39c5b16d70bbbff87074f12708a3",
+      ".local-artifacts/lowp-boundary/build/sLLM/gfx1201/release/sllm-mxfp-wa-evidence": "215fb5043455124c14af52c876114f9c0a78bac7a4cd9621fe18858230438593",
+      ".local-artifacts/lowp-boundary/build/sLLM/gfx1201/release/sllm-nvfp4-w4a4-evidence": "5ede458faa904048dc74e60273872d09b6b05c783693978875d95f09609ee37d"
+    },
+    "cli_followup": "MTP argument parser rejects removed flags as unknown before value lookup; two host tests added after GPU binaries built. CLI source is not linked into model/evidence binaries."
+  },
+  "gpu_tests": [
+    {
+      "name": "codec",
+      "target": "gfx1030",
+      "uuid": "GPU-76a08c022586fed6",
+      "binary": ".local-artifacts/lowp-boundary/standalone-gfx1030/sllm_low_precision_codec_gpu_test",
+      "binary_sha256": "020aec7c79a15e160c9e0777df33b93b634058664fa0fa07b258a29c386cd65f",
+      "args": [],
+      "started": 1789840376.7395833,
+      "pid": 3497220,
+      "exit_code": 0,
+      "elapsed": 0.16791749000549316,
+      "log_sha256": "6753997f450421ddbf28370c2d3135bbfc32a4ea915a18d338c77c9c5c197abe",
+      "log": ".local-artifacts/phase87/wu-c1/codec-gfx1030.log",
+      "state": "PASS",
+      "coverage": {
+        "schema_version": "sllm-phase62-lowp-codec-gpu-v1",
+        "state": "PASS",
+        "target": "gfx1030",
+        "decode_codes": 1104,
+        "exact_e3m2_to_e4m3_codes": 64,
+        "exact_e3m2_to_fp16_bits_codes": 64,
+        "exact_e3m2_packed_lanes": 4,
+        "exact_packed_e3m2_at_codes_per_slot": 64,
+        "exact_e4m3_to_fp16_bits_codes": 256,
+        "exact_e4m3_fp16_lanes": 4,
+        "exact_e4m3_fp16_operands": 2,
+        "encode_boundary_sets": 5,
+        "mx_boundaries": [
+          31,
+          32,
+          33,
+          256
+        ],
+        "mxfp4_boundaries": [
+          31,
+          32,
+          33,
+          256
+        ],
+        "nv_boundaries": [
+          15,
+          16,
+          17,
+          256
+        ],
+        "provider_contract": true,
+        "fallback_used": false
+      }
+    },
+    {
+      "name": "matmul-oracle",
+      "target": "gfx1030",
+      "uuid": "GPU-76a08c022586fed6",
+      "binary": ".local-artifacts/lowp-boundary/standalone-gfx1030/sllm_lowp_matmul_oracle_gpu_test",
+      "binary_sha256": "b12a32cc31ce2eec81454cd7094f4d521be3a5eee1b6cda282e57e2921d307ac",
+      "args": [],
+      "started": 1789840376.909278,
+      "pid": 3497229,
+      "exit_code": 0,
+      "elapsed": 0.25184082984924316,
+      "log_sha256": "88f4d307a42bd3369d8705f62c9dc570544b993726637eccbc5e25afa177e9cd",
+      "log": ".local-artifacts/phase87/wu-c1/matmul-oracle-gfx1030.log",
+      "case_count": 8,
+      "state": "PASS"
+    },
+    {
+      "name": "mxfp-evidence",
+      "target": "gfx1030",
+      "uuid": "GPU-76a08c022586fed6",
+      "binary": ".local-artifacts/lowp-boundary/build/sLLM/gfx1030/release/sllm-mxfp-wa-evidence",
+      "binary_sha256": "d2effcac33cb14527c4b063789c7fff776efe6d327355ade1e5b9586025a0592",
+      "args": [
+        "0",
+        "gfx1030"
+      ],
+      "started": 1789840377.1683025,
+      "pid": 3497237,
+      "exit_code": 0,
+      "elapsed": 0.2598838806152344,
+      "log_sha256": "ecb01abbdbf58b6f8c91b0a12b0d582f6a814a722c87b0273998b64539925b15",
+      "log": ".local-artifacts/phase87/wu-c1/mxfp-evidence-gfx1030.log",
+      "state": "PASS",
+      "case_count": 6,
+      "formats": [
+        "mxfp6-e3m2-w6a6",
+        "mxfp8-e4m3-w8a8"
+      ],
+      "max_abs_error": 914.375,
+      "max_relative_error": 0.0038314175326377153
+    },
+    {
+      "name": "nvfp4-evidence",
+      "target": "gfx1030",
+      "uuid": "GPU-76a08c022586fed6",
+      "binary": ".local-artifacts/lowp-boundary/build/sLLM/gfx1030/release/sllm-nvfp4-w4a4-evidence",
+      "binary_sha256": "8403a35817f18e65577abe807ded77eb50cc4b2e32a68459f71bfd0a84e76bbf",
+      "args": [
+        "0",
+        "gfx1030"
+      ],
+      "started": 1789840377.4335206,
+      "pid": 3497260,
+      "exit_code": 0,
+      "elapsed": 0.3193960189819336,
+      "log_sha256": "361ee4ca27e915a5e3f618c263f08002e5002a656c09efaed6ab376b7c1fe367",
+      "log": ".local-artifacts/phase87/wu-c1/nvfp4-evidence-gfx1030.log",
+      "state": "PASS",
+      "case_count": 21,
+      "formats": [
+        "nvfp4-w4a4"
+      ],
+      "max_abs_error": 0.99890137,
+      "max_relative_error": 0.003889024
+    },
+    {
+      "name": "public-attention",
+      "target": "gfx1030",
+      "uuid": "GPU-76a08c022586fed6",
+      "binary": ".local-artifacts/lowp-boundary/build/sLLM/gfx1030/release/build/sllm-hip-sys-0f6f9ebc80964eda/out/native-hip-build-gfx1030/sllm_phase83_5_mxfp8_staged32_public_gpu_test",
+      "binary_sha256": "964122cbe7b79264bba4898d25d03316bd80f667303aa764d0c4d1a78f11b9e1",
+      "args": [],
+      "started": 1789840377.7551527,
+      "pid": 3497282,
+      "exit_code": 0,
+      "elapsed": 41.50966954231262,
+      "log_sha256": "80b27af8e6b5f5c4c9047bc403143534c883d0e3eab6943be82efc89e805eef7",
+      "log": ".local-artifacts/phase87/wu-c1/public-attention-gfx1030.log",
+      "case_count": 28,
+      "state": "PASS"
+    },
+    {
+      "name": "codec",
+      "target": "gfx1201",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "binary": ".local-artifacts/lowp-boundary/standalone-gfx1201/sllm_low_precision_codec_gpu_test",
+      "binary_sha256": "ef4bfd0e141bacb2b3a01f66f389ede43d3af5f1beb8f3ba42dec8d1581555ff",
+      "args": [],
+      "started": 1789840419.2655473,
+      "pid": 3499845,
+      "exit_code": 0,
+      "elapsed": 0.15484309196472168,
+      "log_sha256": "559081e6e93db1d34a6d7f08c55d31c6230abf4d35610eb9d5ed4c7ff14173f0",
+      "log": ".local-artifacts/phase87/wu-c1/codec-gfx1201.log",
+      "state": "PASS",
+      "coverage": {
+        "schema_version": "sllm-phase62-lowp-codec-gpu-v1",
+        "state": "PASS",
+        "target": "gfx1201",
+        "decode_codes": 1104,
+        "exact_e3m2_to_e4m3_codes": 64,
+        "exact_e3m2_to_fp16_bits_codes": 64,
+        "exact_e3m2_packed_lanes": 4,
+        "exact_packed_e3m2_at_codes_per_slot": 64,
+        "exact_e4m3_to_fp16_bits_codes": 256,
+        "exact_e4m3_fp16_lanes": 4,
+        "exact_e4m3_fp16_operands": 2,
+        "encode_boundary_sets": 5,
+        "mx_boundaries": [
+          31,
+          32,
+          33,
+          256
+        ],
+        "mxfp4_boundaries": [
+          31,
+          32,
+          33,
+          256
+        ],
+        "nv_boundaries": [
+          15,
+          16,
+          17,
+          256
+        ],
+        "provider_contract": true,
+        "fallback_used": false
+      }
+    },
+    {
+      "name": "matmul-oracle",
+      "target": "gfx1201",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "binary": ".local-artifacts/lowp-boundary/standalone-gfx1201/sllm_lowp_matmul_oracle_gpu_test",
+      "binary_sha256": "c1727839614fe3ad9a32cf2eaae52a18218fa6f4465ac66ece6576f1922e2c43",
+      "args": [],
+      "started": 1789840419.4216313,
+      "pid": 3500125,
+      "exit_code": 0,
+      "elapsed": 0.29558825492858887,
+      "log_sha256": "5bb2fa983be4dc3094eebc9c7d5d14ef66bb877b3ea3d617af7383b352140ac8",
+      "log": ".local-artifacts/phase87/wu-c1/matmul-oracle-gfx1201.log",
+      "case_count": 8,
+      "state": "PASS"
+    },
+    {
+      "name": "mxfp-evidence",
+      "target": "gfx1201",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "binary": ".local-artifacts/lowp-boundary/build/sLLM/gfx1201/release/sllm-mxfp-wa-evidence",
+      "binary_sha256": "215fb5043455124c14af52c876114f9c0a78bac7a4cd9621fe18858230438593",
+      "args": [
+        "0",
+        "gfx1201"
+      ],
+      "started": 1789840419.7260237,
+      "pid": 3500150,
+      "exit_code": 0,
+      "elapsed": 0.3081998825073242,
+      "log_sha256": "0c7e656ad46ee61d143c8c379a4f7b57ffd79a1180d9ebb05b945da019a49c26",
+      "log": ".local-artifacts/phase87/wu-c1/mxfp-evidence-gfx1201.log",
+      "state": "PASS",
+      "case_count": 6,
+      "formats": [
+        "mxfp6-e3m2-w6a6",
+        "mxfp8-e4m3-w8a8"
+      ],
+      "max_abs_error": 914.375,
+      "max_relative_error": 0.0038314175326377153
+    },
+    {
+      "name": "nvfp4-evidence",
+      "target": "gfx1201",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "binary": ".local-artifacts/lowp-boundary/build/sLLM/gfx1201/release/sllm-nvfp4-w4a4-evidence",
+      "binary_sha256": "5ede458faa904048dc74e60273872d09b6b05c783693978875d95f09609ee37d",
+      "args": [
+        "0",
+        "gfx1201"
+      ],
+      "started": 1789840420.038693,
+      "pid": 3500171,
+      "exit_code": 0,
+      "elapsed": 0.35752320289611816,
+      "log_sha256": "4442d832c80ee94885ec360df4e620819c559794fb36bbf1f6a37a858c4f36ff",
+      "log": ".local-artifacts/phase87/wu-c1/nvfp4-evidence-gfx1201.log",
+      "state": "PASS",
+      "case_count": 21,
+      "formats": [
+        "nvfp4-w4a4"
+      ],
+      "max_abs_error": 0.99890137,
+      "max_relative_error": 0.003889024
+    },
+    {
+      "name": "public-attention",
+      "target": "gfx1201",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "binary": ".local-artifacts/lowp-boundary/build/sLLM/gfx1201/release/build/sllm-hip-sys-0f6f9ebc80964eda/out/native-hip-build-gfx1201/sllm_phase83_5_mxfp8_staged32_public_gpu_test",
+      "binary_sha256": "62ee13136c4ffbc8efe03ead86a76fd6ef86adb0aa06d302b51665c4ddc0be6d",
+      "args": [],
+      "started": 1789840420.3992584,
+      "pid": 3500177,
+      "exit_code": 0,
+      "elapsed": 41.46354103088379,
+      "log_sha256": "539f62871d9912f811462e81d6b728497219126c5232a761aacb804ff99538e3",
+      "log": ".local-artifacts/phase87/wu-c1/public-attention-gfx1201.log",
+      "case_count": 28,
+      "state": "PASS"
+    }
+  ],
+  "host_and_contracts": {
+    "host-kv-state.log": {
+      "sha256": "355cc122a144603c4f743d9e980c59d4ba122a65e401a9a4b8b4908c621551cc",
+      "result_lines": [
+        "test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.00s"
+      ]
+    },
+    "host-converters.log": {
+      "sha256": "9561817b071e7e4fbde2938c5a0d692b335398590c6e9fae8e55e88d5ecd2671",
+      "result_lines": [
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ]
+    },
+    "host-mtp-converter.log": {
+      "sha256": "15e5411b7a6540a16b659d48307656b016d32c07508241017b05797d38fd37b7",
+      "result_lines": [
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ]
+    },
+    "host-evidence.log": {
+      "sha256": "1f87ae7627d44fc31f594b994b5e7dbfb4c4e9b5c47586a84027c4117b553a92",
+      "result_lines": [
+        "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ]
+    },
+    "native-host-test.log": {
+      "sha256": "0d21ad4b51516930ce59c80fd8f2d545545a4d804e4542f5a96284d71c45b678",
+      "result_lines": [
+        "100% tests passed, 0 tests failed out of 1"
+      ]
+    },
+    "lowp-host-test.log": {
+      "sha256": "7a98583669d552ec7e087d3590846d8d5fb4d04e59bead7e120a43375ae745f1",
+      "result_lines": [
+        "100% tests passed, 0 tests failed out of 2"
+      ]
+    },
+    "validate-h3.log": {
+      "sha256": "6bfd47fcdf6cf2ab55d18804bf69ce8ceb1cb1deaaa0c4b9db37e4bbce373625",
+      "result_lines": [
+        "H3 contract validation: PASS"
+      ]
+    },
+    "validate-public-runtime.log": {
+      "sha256": "82772905905e4da9d68aee64e41d0ca1b6d0ec1363a44e65769ef75ca7f7306c",
+      "result_lines": [
+        "H3 public-runtime contract validation: PASS"
+      ]
+    },
+    "validate-rmsnorm.log": {
+      "sha256": "b66fb00ba28c7ce2c261e1430a8038ccf441789c9fbec97dd7aa09e4c19a20d1",
+      "result_lines": [
+        "RMSNorm H3 dedicated contracts: PASS"
+      ]
+    },
+    "build-production-gfx1030.log": {
+      "sha256": "58b95111bf91b133b2d7feede396dd133a1508b582ceac0c7d9af2e8b221acca",
+      "result_lines": [
+        "    Finished `release` profile [optimized] target(s) in 57.34s"
+      ]
+    },
+    "build-production-gfx1201.log": {
+      "sha256": "00797361061033a9f8f2edff5c2d757c101da78f2a2946df68a9f9ba8a0636c4",
+      "result_lines": [
+        "    Finished `release` profile [optimized] target(s) in 1m 05s"
+      ]
+    }
+  },
+  "manifest_refresh": {
+    "state": "PASS",
+    "fixed_point_iterations": 2,
+    "changed_records": [
+      {
+        "matrix": "ci/matrix/hip-runtime-compile-v1.json",
+        "path": "native/hip/src/causal_attention_runtime.inc",
+        "old": "d12e64224c041f56547c1a60bbc0823cc11e98e77f33a74f275103ad65bd90ae",
+        "new": "b14c3dd8c15f23d34f492dea0cd88693d6d964d2515fffa1e1d789747d4583e1",
+        "iteration": 1
+      },
+      {
+        "matrix": "ci/matrix/hip-runtime-compile-v1.json",
+        "path": "native/hip/src/kv_state_kernel.hip.cpp",
+        "old": "438fbdf58ff8c94447e095c933b6929241bc6633bec29945350035f2bcfe6f24",
+        "new": "bbe5e57c5712368c04bc5797fda5cbeffeb714301535dad21d072dce5f483f09",
+        "iteration": 1
+      },
+      {
+        "matrix": "ci/matrix/hip-runtime-compile-v1.json",
+        "path": "native/lowp/include/lowp/detail/low_precision_block_codec.hpp",
+        "old": "561566268442343b453a368c5a51bd630213cdab8f13b0557c99124d08a13fec",
+        "new": "461196f36f855804216f9b73da8345dbd7518b55f7adf11f4dfbed81bed63787",
+        "iteration": 1
+      },
+      {
+        "matrix": "ci/matrix/hip-runtime-compile-v1.json",
+        "path": "native/lowp/src/lowp_kernel.hip.cpp",
+        "old": "9a6677cdfe2e8e0d324a20fa42d014cd679a701811793c094e34b358f7f0f3ff",
+        "new": "34cf81e77d8fb04e3cc7d2799fa6d0f7c74fbc493f5ddbfba7899e53c9a21043",
+        "iteration": 1
+      },
+      {
+        "matrix": "ci/matrix/rmsnorm-h3-compile-v1.json",
+        "path": "ci/matrix/hip-runtime-compile-v1.json",
+        "old": "1e474cb7c66cb56d2102fd8039ced29526bb8a8a5968b74c92d5358b94f25de6",
+        "new": "ff30b08407669ad9de8eaeda4740af2d05c04ca6b82c991acf5bccf13d317792",
+        "iteration": 1
+      }
+    ],
+    "final_raw_hashes": {
+      "ci/matrix/hip-runtime-compile-v1.json": "ff30b08407669ad9de8eaeda4740af2d05c04ca6b82c991acf5bccf13d317792",
+      "ci/matrix/rmsnorm-h3-compile-v1.json": "929c761457e361d726b4f0e73689a29e1bcf16de189cde702deba1db43979fe1"
+    }
+  },
+  "existing_history_preserved": {
+    "count": 156,
+    "all_hashes_equal": true,
+    "snapshot_sha256": "2f90ab1b121b3960d1f22530bbfc20fb3da7e01648bea68ba6da47d222712d4f"
+  },
+  "fullmodel": {
+    "gfx1030": {
+      "state": "PASS",
+      "executions": {
+        "baseline": {
+          "execution_sha256": "e1bfea7b03bed3bf3dc07f7e2a7a453d3cb3cbeba4ffec042d398597c3a6c22d",
+          "report_sha256": "29d741d28692ca3feb5e378208a1811d7c8d6a47cff184a5781084db6127f5e8",
+          "binary": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase87/wu-c1/baseline-bin/gfx1030/sllm-phase78-qwen38-benchmark",
+          "binary_sha256": "cba61ec3219db4b29e611ce17f76dae87bc09845acaac977bbbca1857c19a8db",
+          "repetitions": {
+            "warmups_per_row": 1,
+            "measured_per_row": 1,
+            "measured_statistics": "median and median absolute deviation over measured runs only"
+          },
+          "generated_tokens_sha256": "sha256:c9c0b4ee401b11544fe0faaec15d882cb2491c31a460a32a89dce28e437bcc0e",
+          "measured_summary": {
+            "measured_samples": 1,
+            "request_setup_ms": {
+              "median": 23.720425,
+              "mad": 0.0
+            },
+            "prefill_ms": {
+              "median": 35866.049074,
+              "mad": 0.0
+            },
+            "ttft_ms": {
+              "median": 35890.013003,
+              "mad": 0.0
+            },
+            "decode_ms": {
+              "median": 8009.729912,
+              "mad": 0.0
+            },
+            "e2e_ms": {
+              "median": 43899.799026,
+              "mad": 0.0
+            },
+            "prefill_tokens_per_second": {
+              "median": 228.40541993064244,
+              "mad": 0.0
+            },
+            "decode_tokens_per_second": {
+              "median": 15.855715660241106,
+              "mad": 0.0
+            },
+            "tpot_ms": {
+              "median": 63.06873946456692,
+              "mad": 0.0
+            }
+          },
+          "cleanup": {
+            "allocation_after_resident_drop_before_shutdown": {
+              "model_resident": {
+                "current_bytes": 0,
+                "high_water_bytes": 21650549568
+              },
+              "request_state": {
+                "current_bytes": 0,
+                "high_water_bytes": 501293520
+              },
+              "workspace": {
+                "current_bytes": 0,
+                "high_water_bytes": 1897021440
+              },
+              "current_bytes": 0,
+              "high_water_bytes": 24048864528,
+              "poisoned": false,
+              "high_water_scope": "cumulative execution-session allocation accounting"
+            },
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+            "zero": true
+          },
+          "performance_level_restored": true,
+          "service_restored": null
+        },
+        "candidate": {
+          "execution_sha256": "cb7b6123f23ebef228a9ffc5409c5d7865154ddf09412b1a91e6ec54ce302f47",
+          "report_sha256": "7870627675f336bc372fc6b2bbfa2ff49c40b7ceb51ba2b3f1ec8db85f8f2245",
+          "binary": "/home/homelab1/coding-local/sLLM/.local-artifacts/lowp-boundary/build/sLLM/gfx1030/release/sllm-phase78-qwen38-benchmark",
+          "binary_sha256": "44d5a59d28c85b3ae00229c887314949e1f8c4ec4b91fc5acda5cbb49956efd3",
+          "repetitions": {
+            "warmups_per_row": 1,
+            "measured_per_row": 1,
+            "measured_statistics": "median and median absolute deviation over measured runs only"
+          },
+          "generated_tokens_sha256": "sha256:c9c0b4ee401b11544fe0faaec15d882cb2491c31a460a32a89dce28e437bcc0e",
+          "measured_summary": {
+            "measured_samples": 1,
+            "request_setup_ms": {
+              "median": 25.010393,
+              "mad": 0.0
+            },
+            "prefill_ms": {
+              "median": 35889.395089,
+              "mad": 0.0
+            },
+            "ttft_ms": {
+              "median": 35914.633307,
+              "mad": 0.0
+            },
+            "decode_ms": {
+              "median": 8606.196107,
+              "mad": 0.0
+            },
+            "e2e_ms": {
+              "median": 44520.904995,
+              "mad": 0.0
+            },
+            "prefill_tokens_per_second": {
+              "median": 228.25684243730333,
+              "mad": 0.0
+            },
+            "decode_tokens_per_second": {
+              "median": 14.75680991009516,
+              "mad": 0.0
+            },
+            "tpot_ms": {
+              "median": 67.76532367716536,
+              "mad": 0.0
+            }
+          },
+          "cleanup": {
+            "allocation_after_resident_drop_before_shutdown": {
+              "model_resident": {
+                "current_bytes": 0,
+                "high_water_bytes": 21650549568
+              },
+              "request_state": {
+                "current_bytes": 0,
+                "high_water_bytes": 501293520
+              },
+              "workspace": {
+                "current_bytes": 0,
+                "high_water_bytes": 1897021440
+              },
+              "current_bytes": 0,
+              "high_water_bytes": 24048864528,
+              "poisoned": false,
+              "high_water_scope": "cumulative execution-session allocation accounting"
+            },
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+            "zero": true
+          },
+          "performance_level_restored": true,
+          "service_restored": null
+        }
+      },
+      "comparison": [
+        {
+          "sample_kind": "warmup",
+          "index": 0,
+          "token_count": 128,
+          "token_match": true,
+          "token_sha256": "sha256:c9c0b4ee401b11544fe0faaec15d882cb2491c31a460a32a89dce28e437bcc0e"
+        },
+        {
+          "sample_kind": "measured",
+          "index": 0,
+          "token_count": 128,
+          "token_match": true,
+          "token_sha256": "sha256:c9c0b4ee401b11544fe0faaec15d882cb2491c31a460a32a89dce28e437bcc0e"
+        }
+      ]
+    },
+    "gfx1201": {
+      "state": "PASS",
+      "executions": {
+        "baseline": {
+          "execution_sha256": "ee78372e2b29bd2f59c533b11d6b3b189c8ee7c291105e11636d414249385c46",
+          "report_sha256": "67c86c6502484510bb9546bc127f709d0adf175b20fdba1cba3dea2242713515",
+          "binary": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase87/wu-c1/baseline-bin/gfx1201/sllm-phase78-qwen38-benchmark",
+          "binary_sha256": "6af0d6c373fd92e331737287aa10a4d9087e48d393d7178cf9accb156db08fd9",
+          "repetitions": {
+            "warmups_per_row": 1,
+            "measured_per_row": 1,
+            "measured_statistics": "median and median absolute deviation over measured runs only"
+          },
+          "generated_tokens_sha256": "sha256:d1d2ce412ddbd67438a8de6babf9569a86dfdd4dc5e135810bbf19a8538c4f91",
+          "measured_summary": {
+            "measured_samples": 1,
+            "request_setup_ms": {
+              "median": 23.249306,
+              "mad": 0.0
+            },
+            "prefill_ms": {
+              "median": 14794.333169,
+              "mad": 0.0
+            },
+            "ttft_ms": {
+              "median": 14817.848789,
+              "mad": 0.0
+            },
+            "decode_ms": {
+              "median": 6518.021536,
+              "mad": 0.0
+            },
+            "e2e_ms": {
+              "median": 21335.954486,
+              "mad": 0.0
+            },
+            "prefill_tokens_per_second": {
+              "median": 553.7255316897615,
+              "mad": 0.0
+            },
+            "decode_tokens_per_second": {
+              "median": 19.484440071049193,
+              "mad": 0.0
+            },
+            "tpot_ms": {
+              "median": 51.32300422047244,
+              "mad": 0.0
+            }
+          },
+          "cleanup": {
+            "allocation_after_resident_drop_before_shutdown": {
+              "model_resident": {
+                "current_bytes": 0,
+                "high_water_bytes": 21650549568
+              },
+              "request_state": {
+                "current_bytes": 0,
+                "high_water_bytes": 501293520
+              },
+              "workspace": {
+                "current_bytes": 0,
+                "high_water_bytes": 1897021440
+              },
+              "current_bytes": 0,
+              "high_water_bytes": 24048864528,
+              "poisoned": false,
+              "high_water_scope": "cumulative execution-session allocation accounting"
+            },
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+            "zero": true
+          },
+          "performance_level_restored": true,
+          "service_restored": true
+        },
+        "candidate": {
+          "execution_sha256": "e5edfd6ac3bac1dc92f92d2da5e37d6b656b13b05a125edbba6c46f741c0f44e",
+          "report_sha256": "1637deb02f9003245f7ef3bb3f61fcaf54c4c65540e641948a500228bb8f251d",
+          "binary": "/home/homelab1/coding-local/sLLM/.local-artifacts/lowp-boundary/build/sLLM/gfx1201/release/sllm-phase78-qwen38-benchmark",
+          "binary_sha256": "93eca4045e88193aa4f49b04515bbf785fce39c5b16d70bbbff87074f12708a3",
+          "repetitions": {
+            "warmups_per_row": 1,
+            "measured_per_row": 1,
+            "measured_statistics": "median and median absolute deviation over measured runs only"
+          },
+          "generated_tokens_sha256": "sha256:d1d2ce412ddbd67438a8de6babf9569a86dfdd4dc5e135810bbf19a8538c4f91",
+          "measured_summary": {
+            "measured_samples": 1,
+            "request_setup_ms": {
+              "median": 22.78437,
+              "mad": 0.0
+            },
+            "prefill_ms": {
+              "median": 14784.611104,
+              "mad": 0.0
+            },
+            "ttft_ms": {
+              "median": 14807.639448,
+              "mad": 0.0
+            },
+            "decode_ms": {
+              "median": 6466.37087,
+              "mad": 0.0
+            },
+            "e2e_ms": {
+              "median": 21274.083259,
+              "mad": 0.0
+            },
+            "prefill_tokens_per_second": {
+              "median": 554.0896505410035,
+              "mad": 0.0
+            },
+            "decode_tokens_per_second": {
+              "median": 19.6400736291205,
+              "mad": 0.0
+            },
+            "tpot_ms": {
+              "median": 50.91630606299213,
+              "mad": 0.0
+            }
+          },
+          "cleanup": {
+            "allocation_after_resident_drop_before_shutdown": {
+              "model_resident": {
+                "current_bytes": 0,
+                "high_water_bytes": 21650549568
+              },
+              "request_state": {
+                "current_bytes": 0,
+                "high_water_bytes": 501293520
+              },
+              "workspace": {
+                "current_bytes": 0,
+                "high_water_bytes": 1897021440
+              },
+              "current_bytes": 0,
+              "high_water_bytes": 24048864528,
+              "poisoned": false,
+              "high_water_scope": "cumulative execution-session allocation accounting"
+            },
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+            "zero": true
+          },
+          "performance_level_restored": true,
+          "service_restored": true
+        }
+      },
+      "comparison": [
+        {
+          "sample_kind": "warmup",
+          "index": 0,
+          "token_count": 128,
+          "token_match": true,
+          "token_sha256": "sha256:d1d2ce412ddbd67438a8de6babf9569a86dfdd4dc5e135810bbf19a8538c4f91"
+        },
+        {
+          "sample_kind": "measured",
+          "index": 0,
+          "token_count": 128,
+          "token_match": true,
+          "token_sha256": "sha256:d1d2ce412ddbd67438a8de6babf9569a86dfdd4dc5e135810bbf19a8538c4f91"
+        }
+      ]
+    }
+  },
+  "notes": [
+    "NVFP4 evidence Rust harness has zero unit tests (compile only); actual NVFP4 CPU reference/GPU execution validated by 21 GPU cases per target.",
+    "MTP converter has two dedicated parser/default-recipe unit tests after the initial zero-test harness was identified.",
+    "Weight artifact best-of-two recipes/metadata readers are outside the activation switch cleanup and remain supported.",
+    "The obsolete SLLM_MXFP8_ACTIVATION_NO_CLIP_SCALE name removed from a comment was already inert; eight active controls were removed."
+  ]
+}

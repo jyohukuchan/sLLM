@@ -1250,7 +1250,12 @@ hipError_t launch_decode_wave_split_staged32(
     const uint32_t encoding, const float static_key_scale,
     const float static_value_scale, void *const workspace,
     const uint64_t workspace_bytes, const bool use_query_preload,
+    const bool use_gqa_shared, const bool use_split128,
     const hipStream_t stream) noexcept {
+  if ((use_gqa_shared || use_split128) &&
+      (!use_query_preload || query_count == 0U || query_count > 3U)) {
+    return hipErrorInvalidValue;
+  }
   return fake_decode_wave_split_staged_launch(
       query, key, value, key_scales, value_scales, key_outer_scales,
       value_outer_scales, output, query_count, start_position,

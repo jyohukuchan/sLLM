@@ -370,6 +370,9 @@ BF16／FP8 native／hipBLAS経路はlowp libraryの対象外であり、lowpのp
 sLLMはlowpの公開C APIと`native/lowp/include/lowp/detail/`のC++連携ヘッダだけを使い、`native/lowp/src/`へ依存しない。
 BF16／hipBLAS／FP8 nativeのkernel IDと名前はsLLM側の`HostKernelVariant`が持ち、lowpの`KernelVariant`は低精度providerの値だけを持つ。
 両者は同じ監査ID空間を共有し、lowpは統合側の値を予約値として再利用しない。
+MXFP8活性値とMXFP8／MXFP6重み変換のE8M0 scaleは、2026-09-19から飽和しない最小scale（最大値の指数を切り捨てるOCP参照規則ではない）を既定とする。
+NVFP4活性値、MXFP6活性値、MXFP4、MXFP8 KVは従来の規則を使う。2026-09-20のWU-C1で不要なscale切替・不採用の2候補選択・診断統計を削除し、変換CLIも採用済みの規則へ固定した。詳細は
+[scale選択の修正履歴](../history/2026/09/11-20/low-precision-scale-selection.md)を参照する。
 
 MXFP8のID37はID36の独立output列をN128へ広げ、各outputのFP32 treeを変えない。exact gfx1201かつPhase 65 direct-both family、
 N%128=0へ限定採用し、N64、small-K、tail、vocabulary、別targetは既存providerへ戻す。causal attentionはweight形式と分離し、

@@ -1148,6 +1148,7 @@ bool causal_attention_target_scoped_selector_contract() {
 
   // Staged32 is the MXFP8 default for the measured small-M geometry.
   constexpr uint32_t kStaged32 = 1U << 24U;
+  constexpr uint32_t kGqaShared = 1U << 26U;
   constexpr const char *kStaged32Flag =
       "SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32";
   for (const auto target : {"gfx1030", "gfx1201"}) {
@@ -1157,6 +1158,9 @@ bool causal_attention_target_scoped_selector_contract() {
                                  SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, target);
         valid = valid && (((mask & kStaged32) != 0U) ==
                           (length >= 1024U && queries <= 4U));
+        const bool shared_expected = std::strcmp(target, "gfx1030") == 0 &&
+                                     length >= 1024U && queries <= 3U;
+        valid = valid && (((mask & kGqaShared) != 0U) == shared_expected);
       }
     }
     for (const auto value : {"0", "yes", ""}) {
@@ -1171,6 +1175,22 @@ bool causal_attention_target_scoped_selector_contract() {
                              SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, target) &
                       kStaged32) == 0U;
     unsetenv(kForceBaseline);
+  }
+
+  // WU1.1 split128 is long-context-only and keeps M<=3.  It is available on
+  // gfx1201 and on gfx1030 where the GQA-shared route is selected.
+  constexpr uint32_t kSplit128 = 1U << 27U;
+  for (const auto target : {"gfx1030", "gfx1201"}) {
+    for (const auto length : {8191U, 8192U, 8193U}) {
+      for (const auto queries : {1U, 2U, 3U, 4U}) {
+        const auto mask = select(length, queries, 24U, 4U, 256U,
+                                 SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, target);
+        const bool eligible = length >= 8192U && queries <= 3U &&
+                              (std::strcmp(target, "gfx1201") == 0 ||
+                               std::strcmp(target, "gfx1030") == 0);
+        valid = valid && (((mask & kSplit128) != 0U) == eligible);
+      }
+    }
   }
 
   // Every environment spelling must remain inert for gfx942.  Test each

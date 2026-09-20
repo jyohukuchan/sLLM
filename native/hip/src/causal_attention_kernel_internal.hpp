@@ -249,7 +249,8 @@ hipError_t launch_decode_wave_split_staged32(
     uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
     uint32_t head_dim, uint32_t encoding, float static_key_scale,
     float static_value_scale, void *workspace, uint64_t workspace_bytes,
-    bool use_query_preload, hipStream_t stream) noexcept;
+    bool use_query_preload, bool use_gqa_shared, bool use_split128,
+    hipStream_t stream) noexcept;
 
 hipError_t launch_decode_gqa4_split(
     const uint16_t *query, const void *key, const void *value,
