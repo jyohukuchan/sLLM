@@ -126,6 +126,35 @@ pub fn quantize_kv_mxfp8(
     columns: usize,
     descriptor: KvMxfp8Descriptor,
 ) -> Result<QuantizedKvMxfp8, KvMxfp8CodecError> {
+    quantize_kv_mxfp8_with_policy(
+        input,
+        rows,
+        columns,
+        descriptor,
+        KvMxfp8ScalePolicy::Clipped,
+    )
+}
+
+/// E8M0 scale selection for the standard OCP MXFP8 KV codec.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KvMxfp8ScalePolicy {
+    /// OCP MX v1.0 section 6.3: `floor_power_of_two(amax) / P`.  Blocks whose
+    /// maximum sits above 1.75 times that power of two saturate.
+    Clipped,
+    /// Smallest E8M0 scale that keeps the finite block maximum representable.
+    NoClipping,
+}
+
+/// Quantize standard MXFP8 KV blocks with an explicit scale policy.  The
+/// default [`quantize_kv_mxfp8`] keeps the historical [`KvMxfp8ScalePolicy::Clipped`]
+/// rule so existing models are unchanged.
+pub fn quantize_kv_mxfp8_with_policy(
+    input: &[f32],
+    rows: usize,
+    columns: usize,
+    descriptor: KvMxfp8Descriptor,
+    scale_policy: KvMxfp8ScalePolicy,
+) -> Result<QuantizedKvMxfp8, KvMxfp8CodecError> {
     if rows == 0 || columns == 0 {
         return Err(KvMxfp8CodecError::Empty);
     }
@@ -159,7 +188,7 @@ pub fn quantize_kv_mxfp8(
             let scale_bits = if all_zero {
                 127
             } else {
-                standard_mx_scale(valid, descriptor.physical_variant())
+                standard_mx_scale(valid, descriptor.physical_variant(), scale_policy)
             };
             scales.push(scale_bits);
             if all_zero {
@@ -249,7 +278,11 @@ fn validate_parts(
     Ok(())
 }
 
-fn standard_mx_scale(values: &[f32], variant: KvFp8PhysicalVariant) -> u8 {
+fn standard_mx_scale(
+    values: &[f32],
+    variant: KvFp8PhysicalVariant,
+    scale_policy: KvMxfp8ScalePolicy,
+) -> u8 {
     let amax = values.iter().fold(0.0_f32, |current, value| {
         if value.is_finite() {
             current.max(value.abs())
@@ -260,15 +293,19 @@ fn standard_mx_scale(values: &[f32], variant: KvFp8PhysicalVariant) -> u8 {
     if amax == 0.0 {
         return 127;
     }
-    let element_power = match variant {
-        KvFp8PhysicalVariant::OcpE4M3Fn => 8,
-        KvFp8PhysicalVariant::OcpE5M2 => 15,
+    let (element_power, format_max) = match variant {
+        KvFp8PhysicalVariant::OcpE4M3Fn => (8, 448.0_f32),
+        KvFp8PhysicalVariant::OcpE5M2 => (15, 57344.0_f32),
         KvFp8PhysicalVariant::E4M3FnuZ => unreachable!("standard MXFP8 excludes FNUZ"),
     };
-    let exponent = floor_log2(amax)
-        .saturating_sub(element_power)
-        .clamp(-127, 127);
-    (exponent + 127) as u8
+    let mut exponent = floor_log2(amax).saturating_sub(element_power);
+    if scale_policy == KvMxfp8ScalePolicy::NoClipping {
+        let bits = (exponent.clamp(-127, 127) + 127) as u8;
+        if amax / decode_e8m0(bits) > format_max {
+            exponent = exponent.saturating_add(1);
+        }
+    }
+    (exponent.clamp(-127, 127) + 127) as u8
 }
 
 fn floor_log2(value: f32) -> i32 {
@@ -388,5 +425,51 @@ mod tests {
             decode_kv_mxfp8(&tiny.values, &[255], 1, 1, e4()),
             Err(KvMxfp8CodecError::NonFiniteScale { block: 0 })
         );
+    }
+
+    #[test]
+    fn no_clipping_kv_scale_is_the_smallest_non_saturating_e8m0_step() {
+        // E4M3 finite max is 448, E5M2 is 57344.  Sweep maxima around both
+        // boundaries and assert the no-clip block never saturates while the
+        // clipped rule does at the mantissa > 1.75 points.
+        for (descriptor, format_max) in [(e4(), 448.0_f32), (e5(), 57344.0_f32)] {
+            for maximum in [
+                1.0_f32, 1.75, 2.0, 3.0, 448.0, 448.5, 512.0, 57344.0, 60000.0, 0.013,
+            ] {
+                let mut block = vec![maximum];
+                block.resize(32, maximum / 4.0);
+                let clipped = quantize_kv_mxfp8(&block, 1, 32, descriptor).unwrap();
+                let no_clip = quantize_kv_mxfp8_with_policy(
+                    &block,
+                    1,
+                    32,
+                    descriptor,
+                    KvMxfp8ScalePolicy::NoClipping,
+                )
+                .unwrap();
+                let clipped_exponent = i32::from(clipped.scales()[0]) - 127;
+                let no_clip_exponent = i32::from(no_clip.scales()[0]) - 127;
+                // The new rule moves at most one E8M0 step up.
+                assert!(
+                    no_clip_exponent == clipped_exponent
+                        || no_clip_exponent == clipped_exponent + 1,
+                    "no-clip moved more than one step: {no_clip_exponent} from {clipped_exponent}"
+                );
+                // The chosen scale never saturates the block maximum.
+                let unit = decode_e8m0(no_clip.scales()[0]);
+                assert!(
+                    maximum / unit <= format_max,
+                    "no-clip KV scale saturates max {maximum} above {format_max}"
+                );
+                if no_clip_exponent > clipped_exponent {
+                    // Moving up is only allowed when the lower step saturates.
+                    let lower = decode_e8m0(clipped.scales()[0]);
+                    assert!(
+                        maximum / lower > format_max,
+                        "no-clip moved up without saturation for max {maximum}"
+                    );
+                }
+            }
+        }
     }
 }

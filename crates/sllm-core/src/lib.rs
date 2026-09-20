@@ -551,8 +551,8 @@ pub use mtp_quantized_sidecar::{
 };
 pub use mxfp::{
     MX_BLOCK_SIZE, MxElementFormat, MxError, QuantizedMx, decode_e3m2, decode_e8m0, decode_mxfp4,
-    decode_mxfp6, decode_mxfp8, encode_e3m2, quantize_mxfp6_e3m2, quantize_mxfp8_e4m3,
-    quantize_mxfp8_e4m3_no_clipping_scale,
+    decode_mxfp6, decode_mxfp8, encode_e3m2, quantize_mxfp4_e2m1_even_scale, quantize_mxfp6_e3m2,
+    quantize_mxfp8_e4m3, quantize_mxfp8_e4m3_no_clipping_scale,
 };
 pub use nvfp4::{
     E2M1_MAX, NVFP4_BLOCK_SIZE, NVFP4_E4M3_MAX, Nvfp4Error, Nvfp4Provider, QuantizedNvfp4,

@@ -675,6 +675,27 @@ mxfp4_even_scale_code(const float maximum) noexcept {
   return static_cast<uint8_t>(code);
 }
 
+// Smallest E8M0 scale that keeps a finite block maximum inside the element
+// format's largest finite magnitude. Start with the OCP floor scale and
+// advance one E8M0 step only when the encoded element would otherwise clip.
+// Exceptional values retain the reference rule.
+__device__ __forceinline__ uint8_t
+ocp_mx_scale_code_no_clip(const float maximum, const int32_t element_power,
+                          const float element_maximum) noexcept {
+  const uint8_t scale = ocp_mx_scale_code(maximum, element_power);
+  if (isnan(maximum) || maximum == 0.0F || isinf(maximum)) {
+    return scale;
+  }
+  const float decoded_scale = e8m0_to_float(scale);
+  if (!isfinite(decoded_scale) || decoded_scale <= 0.0F ||
+      !(maximum > element_maximum * decoded_scale)) {
+    return scale;
+  }
+  const uint32_t incremented = static_cast<uint32_t>(scale) + 1U;
+  // 0xff is reserved for the NaN scale marker by the existing codec.
+  return static_cast<uint8_t>(incremented >= 255U ? 254U : incremented);
+}
+
 __device__ __forceinline__ uint8_t
 packed_e3m2_at(const uint8_t *const row, const uint64_t index) noexcept {
   const uint32_t slot = static_cast<uint32_t>(index & UINT64_C(3));

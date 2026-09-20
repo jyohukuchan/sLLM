@@ -3,7 +3,7 @@
 //! MXFP4 is E2M1 values in blocks of 32 with one E8M0 scale. It is not
 //! NVIDIA NVFP4, whose block size and hierarchical scale formats differ.
 
-use crate::{decode_e2m1, decode_e4m3fn};
+use crate::{decode_e2m1, decode_e4m3fn, encode_e2m1};
 use std::fmt;
 use std::thread;
 
@@ -220,10 +220,76 @@ pub fn quantize_mxfp6_e3m2(
     )
 }
 
+/// Quantize OCP MXFP6 E3M2 with the smallest E8M0 scale that does not clip
+/// any finite element in the block.  This is the MXFP6 counterpart of
+/// [`quantize_mxfp8_e4m3_no_clipping_scale`].
+pub fn quantize_mxfp6_e3m2_no_clipping_scale(
+    input: &[f32],
+    rows: usize,
+    columns: usize,
+) -> Result<QuantizedMx, MxError> {
+    quantize_mx(
+        input,
+        rows,
+        columns,
+        MxElementFormat::E3M2,
+        MxScalePolicy::NoClipping,
+    )
+}
+
+/// Quantize OCP MXFP4 E2M1 with the historical sLLM codec rule: the lower
+/// power-of-two E8M0 scale, bumped one step when the block maximum sits at or
+/// above 1.75 times that power of two.  This mirrors the HIP
+/// `mxfp4_even_scale_code` policy and exists as the reference for the new
+/// best-of-two rule.
+pub fn quantize_mxfp4_e2m1_even_scale(
+    input: &[f32],
+    rows: usize,
+    columns: usize,
+) -> Result<QuantizedMx, MxError> {
+    quantize_mx(
+        input,
+        rows,
+        columns,
+        MxElementFormat::E2M1,
+        MxScalePolicy::EvenMxfp4,
+    )
+}
+
+/// Quantize OCP MXFP4 E2M1 by trying the lower power-of-two E8M0 scale and
+/// the next step, then keeping the one with the smaller block squared error.
+/// Ties keep the lower scale.
+pub fn quantize_mxfp4_e2m1_best_of_two(
+    input: &[f32],
+    rows: usize,
+    columns: usize,
+) -> Result<QuantizedMx, MxError> {
+    quantize_mx(
+        input,
+        rows,
+        columns,
+        MxElementFormat::E2M1,
+        MxScalePolicy::BestOfTwo,
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MxScalePolicy {
+    /// Historical rule: always the lower power-of-two E8M0 scale.  Blocks
+    /// whose maximum needs more range than the element format can represent
+    /// saturate at the format's largest finite magnitude.
     Clipped,
+    /// Smallest E8M0 scale that keeps every finite element representable.
     NoClipping,
+    /// Try the [`Self::Clipped`] exponent and the next E8M0 step, and keep
+    /// whichever gives the smaller block sum of squared error.  This is only
+    /// used for element formats narrow enough that avoiding saturation can
+    /// hurt the resolution of small values, i.e. E2M1.
+    BestOfTwo,
+    /// Historical sLLM MXFP4 codec rule: the lower power-of-two E8M0 scale,
+    /// bumped one step when the block maximum is at or above 1.75 times that
+    /// power of two.  Retained only as the reference for [`Self::BestOfTwo`].
+    EvenMxfp4,
 }
 
 fn quantize_mx(
@@ -249,13 +315,13 @@ fn quantize_mx(
     let value_bytes = match format {
         MxElementFormat::E4M3Fn => elements,
         MxElementFormat::E3M2 => elements.checked_mul(3).ok_or(MxError::ShapeOverflow)? / 4,
-        MxElementFormat::E2M1 => unreachable!("MXFP4 encoding is artifact-recipe specific"),
+        MxElementFormat::E2M1 => elements.div_ceil(2),
     };
     let blocks_per_row = columns / MX_BLOCK_SIZE;
     let value_bytes_per_row = match format {
         MxElementFormat::E4M3Fn => columns,
         MxElementFormat::E3M2 => columns * 3 / 4,
-        MxElementFormat::E2M1 => unreachable!(),
+        MxElementFormat::E2M1 => columns.div_ceil(2),
     };
     let mut values = vec![0_u8; value_bytes];
     let mut scales = vec![0_u8; rows * blocks_per_row];
@@ -315,30 +381,56 @@ fn quantize_mx_rows(
             let element_power = match format {
                 MxElementFormat::E4M3Fn => 8,
                 MxElementFormat::E3M2 => 4,
-                MxElementFormat::E2M1 => unreachable!(),
+                MxElementFormat::E2M1 => 2,
             };
             let scale_bits = if has_nan {
                 255
             } else if maximum == 0.0 || maximum.is_infinite() {
                 127
             } else {
-                let exponent = match scale_policy {
-                    MxScalePolicy::Clipped => floor_log2(maximum).saturating_sub(element_power),
+                match scale_policy {
+                    MxScalePolicy::Clipped => {
+                        e8m0_bits(floor_log2(maximum).saturating_sub(element_power))
+                    }
                     MxScalePolicy::NoClipping => {
-                        // E4M3FN's largest finite magnitude is 448 =
-                        // 1.75 * 2^8.  Start at floor(log2(max))-8, then
-                        // move up one E8M0 step when the exact ratio still
-                        // exceeds 448.  This is ceil(log2(max / 448)) while
-                        // avoiding a lossy logarithm at the 448 boundary.
-                        let mut exponent = floor_log2(maximum).saturating_sub(8);
-                        let scale_bits = exponent.clamp(-127, 127) + 127;
-                        if maximum / decode_e8m0(scale_bits as u8) > 448.0 {
+                        // Start at floor(log2(max)) - element_power, then move
+                        // up one E8M0 step while the exact ratio still exceeds
+                        // the format's largest finite magnitude.  This is
+                        // ceil(log2(max / max_finite)) without a lossy
+                        // logarithm at the boundary.
+                        let mut exponent = floor_log2(maximum).saturating_sub(element_power);
+                        let bits = e8m0_bits(exponent);
+                        if maximum / decode_e8m0(bits) > format_max_magnitude(format) {
                             exponent = exponent.saturating_add(1);
                         }
-                        exponent
+                        e8m0_bits(exponent)
                     }
-                };
-                (exponent.clamp(-127, 127) + 127) as u8
+                    MxScalePolicy::BestOfTwo => {
+                        let exponent = floor_log2(maximum).saturating_sub(element_power);
+                        let low = e8m0_bits(exponent);
+                        let high = e8m0_bits(exponent.saturating_add(1));
+                        // Ties keep the lower scale so the result is
+                        // deterministic and stays close to the old rule.
+                        if block_squared_error(source, decode_e8m0(high), format)
+                            < block_squared_error(source, decode_e8m0(low), format)
+                        {
+                            high
+                        } else {
+                            low
+                        }
+                    }
+                    MxScalePolicy::EvenMxfp4 => {
+                        // The HIP codec rounds the exponent up once the block
+                        // maximum reaches 1.75 * 2^floor(log2(max)).
+                        let floor_exponent = floor_log2(maximum);
+                        let mut exponent = floor_exponent.saturating_sub(element_power);
+                        let unit = decode_e8m0(e8m0_bits(floor_exponent));
+                        if maximum >= 1.75 * unit {
+                            exponent = exponent.saturating_add(1);
+                        }
+                        e8m0_bits(exponent)
+                    }
+                }
             };
             scales[row * blocks_per_row + block] = scale_bits;
             let scale = decode_e8m0(scale_bits);
@@ -369,10 +461,58 @@ fn quantize_mx_rows(
                             .copy_from_slice(&bytes[..3]);
                     }
                 }
-                MxElementFormat::E2M1 => unreachable!(),
+                MxElementFormat::E2M1 => {
+                    let destination = start / 2;
+                    for pair in 0..MX_BLOCK_SIZE / 2 {
+                        let low = if scale.is_nan() {
+                            0
+                        } else {
+                            encode_e2m1(source[pair * 2] / scale)
+                        };
+                        let high = if scale.is_nan() {
+                            0
+                        } else {
+                            encode_e2m1(source[pair * 2 + 1] / scale)
+                        };
+                        values[destination + pair] = low | (high << 4);
+                    }
+                }
             }
         }
     }
+}
+
+const fn format_max_magnitude(format: MxElementFormat) -> f32 {
+    match format {
+        MxElementFormat::E4M3Fn => 448.0,
+        MxElementFormat::E3M2 => 28.0,
+        MxElementFormat::E2M1 => 6.0,
+    }
+}
+
+fn e8m0_bits(exponent: i32) -> u8 {
+    (exponent.clamp(-127, 127) + 127) as u8
+}
+
+/// Sum of squared error of one block quantized with `scale`, used to pick
+/// between two candidate E8M0 scales.  The encode/decode pair matches the
+/// writer so the chosen scale is the one the payload actually realizes.
+fn block_squared_error(source: &[f32], scale: f32, format: MxElementFormat) -> f64 {
+    if scale.is_nan() {
+        return f64::INFINITY;
+    }
+    source
+        .iter()
+        .map(|value| {
+            let decoded = match format {
+                MxElementFormat::E4M3Fn => decode_e4m3fn(encode_e4m3fn_rne(*value / scale)) * scale,
+                MxElementFormat::E3M2 => decode_e3m2(encode_e3m2(*value / scale)) * scale,
+                MxElementFormat::E2M1 => decode_e2m1(encode_e2m1(*value / scale)) * scale,
+            };
+            let delta = f64::from(decoded) - f64::from(*value);
+            delta * delta
+        })
+        .sum()
 }
 
 fn encode_e4m3fn_rne(value: f32) -> u8 {
@@ -713,5 +853,155 @@ mod tests {
             );
         }
         assert!(quantize_mxfp6_e3m2(&[0.0; 32], 1, 32).is_ok());
+    }
+
+    fn quantize_with_policy(
+        format: MxElementFormat,
+        policy: MxScalePolicy,
+        values: &[f32],
+    ) -> QuantizedMx {
+        quantize_mx(values, 1, 32, format, policy).unwrap()
+    }
+
+    fn block_with_max(format: MxElementFormat, maximum: f32) -> Vec<f32> {
+        // Put the maximum in one lane and deterministic small values in the
+        // rest so the block maximum is exactly `maximum`.
+        let mut values = Vec::with_capacity(32);
+        values.push(maximum);
+        for lane in 1..32 {
+            values.push((lane as f32) * maximum / 64.0);
+        }
+        let _ = format;
+        values
+    }
+
+    #[test]
+    fn no_clipping_scale_is_the_smallest_block_max_representable_scale() {
+        let cases = [
+            (MxElementFormat::E4M3Fn, 8, 448.0_f32),
+            (MxElementFormat::E3M2, 4, 28.0_f32),
+        ];
+        // Boundaries: exactly the format max, just above it, the 1.5/1.75
+        // mantissa points, a non-power-of-two, a subnormal-range maximum and
+        // ordinary values on both sides of a power of two.
+        let maxima = [
+            1.0_f32, 1.25, 1.4999, 1.5, 1.75, 2.0, 3.0, 5.75, 28.0, 28.0001, 29.0, 64.0, 448.0,
+            448.5, 512.0, 1024.0, 0.0001, 0.3,
+        ];
+        for (format, element_power, format_max) in cases {
+            for maximum in maxima {
+                let values = block_with_max(format, maximum);
+                let clipped = quantize_with_policy(format, MxScalePolicy::Clipped, &values);
+                let no_clip = quantize_with_policy(format, MxScalePolicy::NoClipping, &values);
+                let clipped_exponent = i32::from(clipped.scales()[0]) - 127;
+                let no_clip_exponent = i32::from(no_clip.scales()[0]) - 127;
+                assert!(
+                    no_clip_exponent == clipped_exponent
+                        || no_clip_exponent == clipped_exponent + 1,
+                    "no-clip must move at most one E8M0 step: {no_clip_exponent} vs {clipped_exponent}"
+                );
+                let unit = 2.0_f32.powi(no_clip_exponent);
+                assert!(
+                    maximum / unit <= format_max,
+                    "no-clip scale {} saturates max {maximum}",
+                    no_clip_exponent
+                );
+                // Every exponent below the chosen one saturates, and the
+                // chosen one is at most one step above floor(log2(max))-P.
+                let expected_floor = floor_log2(maximum).saturating_sub(element_power);
+                assert!(
+                    (no_clip_exponent - expected_floor.max(-127)).abs() <= 1,
+                    "no-clip moved more than one step: {no_clip_exponent} from {expected_floor}"
+                );
+                for exponent in expected_floor.max(-126)..no_clip_exponent {
+                    let lower = 2.0_f32.powi(exponent);
+                    assert!(
+                        maximum / lower > format_max,
+                        "exponent {exponent} already avoids saturation for max {maximum}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mxfp4_even_scale_bumps_at_the_1_75_mantissa_threshold() {
+        // floor(log2(max)) = 2 for all of these, element_power 2 -> scale 1.
+        for (maximum, expected_exponent) in [(4.0_f32, 0_i32), (6.0, 0), (7.0, 1), (6.999, 0)] {
+            let values = block_with_max(MxElementFormat::E2M1, maximum);
+            let even =
+                quantize_with_policy(MxElementFormat::E2M1, MxScalePolicy::EvenMxfp4, &values);
+            assert_eq!(
+                i32::from(even.scales()[0]) - 127,
+                expected_exponent,
+                "even rule for max {maximum}"
+            );
+        }
+        // 1.75 * 2^2 = 7.0 is the bump point; 6.999 is not.
+    }
+
+    #[test]
+    fn mxfp4_best_of_two_never_exceeds_floor_or_even_block_error() {
+        let mut state = 0x1234_5678_u32;
+        let mut maximum = 0.25_f32;
+        while maximum < 32.0 {
+            let mut values = Vec::with_capacity(32);
+            for _ in 0..32 {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let unit = (state >> 8) as f32 / (1u32 << 24) as f32;
+                values.push((unit * 2.0 - 1.0) * maximum);
+            }
+            let floor =
+                quantize_with_policy(MxElementFormat::E2M1, MxScalePolicy::Clipped, &values);
+            let even =
+                quantize_with_policy(MxElementFormat::E2M1, MxScalePolicy::EvenMxfp4, &values);
+            let best =
+                quantize_with_policy(MxElementFormat::E2M1, MxScalePolicy::BestOfTwo, &values);
+            let source_error = |quantized: &QuantizedMx| -> f64 {
+                let decoded = quantized.dequantize().unwrap();
+                decoded
+                    .iter()
+                    .zip(values.iter())
+                    .map(|(q, w)| {
+                        let delta = f64::from(*q) - f64::from(*w);
+                        delta * delta
+                    })
+                    .sum()
+            };
+            let best_error = source_error(&best);
+            assert!(best_error <= source_error(&floor) + 1e-30);
+            assert!(best_error <= source_error(&even) + 1e-30);
+            // The chosen scale is one of the two candidate steps.
+            let floor_exponent = floor_log2(maximum).saturating_sub(2);
+            let chosen = i32::from(best.scales()[0]) - 127;
+            assert!(chosen == floor_exponent || chosen == floor_exponent + 1);
+            maximum *= 1.37;
+        }
+    }
+
+    #[test]
+    fn special_blocks_keep_the_historical_handling() {
+        let all_zero = quantize_mxfp4_e2m1_best_of_two(&[0.0; 32], 1, 32).unwrap();
+        assert_eq!(all_zero.scales(), &[127]);
+        assert!(
+            all_zero
+                .dequantize()
+                .unwrap()
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+
+        let mut nan_block = [0.0_f32; 32];
+        nan_block[5] = f32::NAN;
+        let nan = quantize_mxfp4_e2m1_best_of_two(&nan_block, 1, 32).unwrap();
+        assert_eq!(nan.scales(), &[255]);
+        assert!(nan.dequantize().unwrap().iter().all(|value| value.is_nan()));
+
+        let inf = quantize_mxfp4_e2m1_best_of_two(&[f32::INFINITY; 32], 1, 32).unwrap();
+        assert_eq!(inf.scales(), &[127]);
+
+        // Subnormal and tiny blocks still resolve to a finite E8M0 code.
+        let tiny = quantize_mxfp4_e2m1_best_of_two(&[f32::MIN_POSITIVE; 32], 1, 32).unwrap();
+        assert_ne!(tiny.scales()[0], 255);
     }
 }

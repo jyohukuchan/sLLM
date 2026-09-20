@@ -108,6 +108,31 @@ pub fn quantize_nvfp4_weights(
     rows: usize,
     columns: usize,
 ) -> Result<QuantizedNvfp4, Nvfp4Error> {
+    quantize_nvfp4_weights_with_scale_policy(input, rows, columns, Nvfp4ScalePolicy::Nearest)
+}
+
+/// Select the per-block NVFP4 scale by rounding `block_amax / (6 * global)`
+/// to the nearest E4M3 code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Nvfp4ScalePolicy {
+    /// Historical rule: round the raw per-block scale to the nearest E4M3
+    /// code.  The rounding can land below the raw scale and clip the block.
+    Nearest,
+    /// Take the two E4M3 codes adjacent to the raw per-block scale and keep
+    /// whichever gives the smaller block squared error.  The global tensor
+    /// scale is unchanged.  Ties keep the lower code.
+    BestOfTwo,
+}
+
+/// Quantize NVFP4 weights with an explicit per-block scale policy.  The
+/// historical [`quantize_nvfp4_weights`] behavior is
+/// [`Nvfp4ScalePolicy::Nearest`].
+pub fn quantize_nvfp4_weights_with_scale_policy(
+    input: &[f32],
+    rows: usize,
+    columns: usize,
+    scale_policy: Nvfp4ScalePolicy,
+) -> Result<QuantizedNvfp4, Nvfp4Error> {
     if rows == 0 || columns == 0 {
         return Err(Nvfp4Error::EmptyMatrix);
     }
@@ -150,7 +175,12 @@ pub fn quantize_nvfp4_weights(
             // a positive scale below E4M3's range may also round to zero and
             // canonically collapses that block to zero.
             let raw_scale = (block_amax / E2M1_MAX) / tensor_scale;
-            let scale_bits = encode_e4m3fn(raw_scale);
+            let scale_bits = match scale_policy {
+                Nvfp4ScalePolicy::Nearest => encode_e4m3fn(raw_scale),
+                Nvfp4ScalePolicy::BestOfTwo => {
+                    best_of_two_e4m3_scale(raw_scale, &input[start..end], tensor_scale)
+                }
+            };
             let decoded_scale = decode_e4m3fn(scale_bits);
             block_scales.push(scale_bits);
             for (offset, source) in input[start..end].iter().enumerate() {
@@ -175,6 +205,47 @@ pub fn quantize_nvfp4_weights(
         rows,
         columns,
     })
+}
+
+/// Pick between the two E4M3 magnitude codes bracketing `raw_scale` by block
+/// squared error.  Positive E4M3FN codes `0x00..=0x7e` are monotonic in
+/// magnitude, so the neighbours are `code - 1` and `code + 1` around the
+/// nearest code.  Ties keep the lower code.
+fn best_of_two_e4m3_scale(raw_scale: f32, block: &[f32], tensor_scale: f32) -> u8 {
+    let nearest = encode_e4m3fn(raw_scale);
+    let (lower, upper) = if decode_e4m3fn(nearest) <= raw_scale {
+        (nearest, nearest.saturating_add(1).min(0x7e))
+    } else {
+        (nearest.saturating_sub(1), nearest)
+    };
+    let lower_error = block_e4m3_squared_error(block, lower, tensor_scale);
+    let upper_error = block_e4m3_squared_error(block, upper, tensor_scale);
+    if upper_error < lower_error {
+        upper
+    } else {
+        lower
+    }
+}
+
+fn block_e4m3_squared_error(block: &[f32], scale_bits: u8, tensor_scale: f32) -> f64 {
+    let scale = decode_e4m3fn(scale_bits) * tensor_scale;
+    if scale == 0.0 {
+        return block
+            .iter()
+            .map(|value| {
+                let value = f64::from(*value);
+                value * value
+            })
+            .sum();
+    }
+    block
+        .iter()
+        .map(|value| {
+            let decoded = f64::from(decode_e2m1(encode_e2m1(*value / scale)) * scale);
+            let delta = decoded - f64::from(*value);
+            delta * delta
+        })
+        .sum()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,6 +329,82 @@ mod tests {
             quantized.dequantize()[16..]
                 .iter()
                 .all(|value| *value == 0.0)
+        );
+    }
+
+    #[test]
+    fn nearest_weight_rule_matches_the_default_entry_point() {
+        let mut state = 0x0bad_f00d_u32;
+        let mut values = Vec::with_capacity(16 * 32);
+        for _ in 0..16 * 32 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let unit = (state >> 8) as f32 / (1u32 << 24) as f32;
+            values.push((unit * 2.0 - 1.0) * 3.0);
+        }
+        let nearest = quantize_nvfp4_weights(&values, 16, 32).unwrap();
+        let explicit =
+            quantize_nvfp4_weights_with_scale_policy(&values, 16, 32, Nvfp4ScalePolicy::Nearest)
+                .unwrap();
+        assert_eq!(nearest.block_scales, explicit.block_scales);
+        assert_eq!(nearest.packed_values, explicit.packed_values);
+        assert_eq!(nearest.tensor_scale, explicit.tensor_scale);
+    }
+
+    #[test]
+    fn best_of_two_weight_rule_never_exceeds_nearest_block_error() {
+        let mut state = 0x00c0_ffee_u32;
+        let mut worst_improvement: f64 = 0.0;
+        for _ in 0..256 {
+            let mut values = Vec::with_capacity(64);
+            let shape_scale = 0.5 + ((state >> 16) & 0x3f) as f32 / 8.0;
+            for _ in 0..64 {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let unit = (state >> 8) as f32 / (1u32 << 24) as f32;
+                values.push((unit * 2.0 - 1.0) * shape_scale);
+            }
+            let nearest = quantize_nvfp4_weights(&values, 1, 64).unwrap();
+            let best = quantize_nvfp4_weights_with_scale_policy(
+                &values,
+                1,
+                64,
+                Nvfp4ScalePolicy::BestOfTwo,
+            )
+            .unwrap();
+            let error = |q: &QuantizedNvfp4| -> f64 {
+                q.dequantize()
+                    .iter()
+                    .zip(values.iter())
+                    .map(|(a, b)| {
+                        let delta = f64::from(*a) - f64::from(*b);
+                        delta * delta
+                    })
+                    .sum()
+            };
+            let nearest_error = error(&nearest);
+            let best_error = error(&best);
+            assert!(
+                best_error <= nearest_error + 1e-30,
+                "best-of-two regressed: {best_error} > {nearest_error}"
+            );
+            worst_improvement = worst_improvement.max(nearest_error - best_error);
+        }
+        assert!(worst_improvement >= 0.0);
+    }
+
+    #[test]
+    fn best_of_two_scale_uses_one_of_the_two_adjacent_e4m3_codes() {
+        // A block whose raw scale sits exactly on an E4M3 code should keep
+        // that code; one just above it may pick the neighbour.
+        let global = 1.0_f32;
+        let block = [3.0_f32, 1.0, 0.5, 0.25, 0.0, -3.0];
+        let raw = (3.0 / E2M1_MAX) / 1.0;
+        let nearest = encode_e4m3fn(raw);
+        let chosen = best_of_two_e4m3_scale(raw, &block, 1.0);
+        let _ = global;
+        assert!(
+            chosen == nearest
+                || chosen == nearest.saturating_add(1)
+                || chosen.saturating_add(1) == nearest
         );
     }
 }

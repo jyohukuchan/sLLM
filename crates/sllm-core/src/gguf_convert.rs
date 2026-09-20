@@ -50,6 +50,23 @@ pub(crate) const QWEN_MX_DIAGNOSTIC_NO_CLIPPING_SCALE: &str = "no-clipping";
 const CONVERSION_READ_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QwenMxScaleRule {
+    Default,
+    NoClipping,
+    BestOfTwo,
+}
+
+impl QwenMxScaleRule {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::NoClipping => QWEN_MX_DIAGNOSTIC_NO_CLIPPING_SCALE,
+            Self::BestOfTwo => "best-of-two",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QwenMxWeightActivationFormat {
     Mxfp8E4m3,
     Mxfp6E3m2,
@@ -96,6 +113,41 @@ impl QwenMxWeightActivationFormat {
         }
     }
 
+    pub const fn diagnostic_scale_rule_name(scale_rule: QwenMxScaleRule) -> &'static str {
+        scale_rule.name()
+    }
+
+    #[doc(hidden)]
+    pub fn quantize_mxfp4_best_of_two_parts(
+        input: &[f32],
+        rows: usize,
+        columns: usize,
+    ) -> Result<(Vec<u8>, Vec<u8>), GgufError> {
+        let quantized = crate::mxfp::quantize_mxfp4_e2m1_best_of_two(input, rows, columns)
+            .map_err(|error| invalid(format!("MXFP4 best-of-two quantization: {error}")))?;
+        Ok((quantized.values().to_vec(), quantized.scales().to_vec()))
+    }
+
+    #[doc(hidden)]
+    pub fn quantize_nvfp4_best_of_two_parts(
+        input: &[f32],
+        rows: usize,
+        columns: usize,
+    ) -> Result<(Vec<u8>, Vec<u8>, f32), GgufError> {
+        let quantized = crate::nvfp4::quantize_nvfp4_weights_with_scale_policy(
+            input,
+            rows,
+            columns,
+            crate::nvfp4::Nvfp4ScalePolicy::BestOfTwo,
+        )
+        .map_err(|error| invalid(format!("NVFP4 best-of-two quantization: {error}")))?;
+        Ok((
+            quantized.packed_values,
+            quantized.block_scales,
+            quantized.tensor_scale,
+        ))
+    }
+
     pub fn semantic_model_id(self, base: String, retain_gdn_input_gates: bool) -> String {
         self.semantic_model_id_with_options(base, retain_gdn_input_gates, false)
     }
@@ -110,10 +162,28 @@ impl QwenMxWeightActivationFormat {
         retain_gdn_input_gates: bool,
         no_clipping_scale: bool,
     ) -> String {
+        let scale_rule = if no_clipping_scale {
+            QwenMxScaleRule::NoClipping
+        } else {
+            QwenMxScaleRule::Default
+        };
+        self.semantic_model_id_with_scale_rule(base, retain_gdn_input_gates, scale_rule)
+    }
+
+    /// Build the exact semantic identity for a Qwen MX conversion, including
+    /// opt-in diagnostic coverage and scale-selection modes.  Tags are
+    /// emitted in a fixed order so the identity cannot be confused with a
+    /// different recipe.
+    pub fn semantic_model_id_with_scale_rule(
+        self,
+        base: String,
+        retain_gdn_input_gates: bool,
+        scale_rule: QwenMxScaleRule,
+    ) -> String {
         let mut semantic_model_id = base;
-        if no_clipping_scale {
+        if scale_rule != QwenMxScaleRule::Default {
             semantic_model_id.push_str(":mx-scale=");
-            semantic_model_id.push_str(QWEN_MX_DIAGNOSTIC_NO_CLIPPING_SCALE);
+            semantic_model_id.push_str(scale_rule.name());
         }
         if retain_gdn_input_gates {
             semantic_model_id.push_str(":mx-coverage=");
@@ -643,9 +713,8 @@ pub fn build_qwen35_mx_weight_activation_gguf_plan_with_retention(
     )
 }
 
-/// Build a Qwen MX GGUF plan with optional diagnostic coverage and E4M3 scale
-/// selection.  `no_clipping_scale` applies only to MXFP8; rejecting it for
-/// MXFP6 keeps the artifact identity unambiguous.
+/// Build a Qwen MX GGUF plan with optional diagnostic coverage and a
+/// no-clipping scale selection for the selected MX format.
 pub fn build_qwen35_mx_weight_activation_gguf_plan_with_options(
     lock: &ModelLock,
     cache: &VerifiedCache,
@@ -653,9 +722,29 @@ pub fn build_qwen35_mx_weight_activation_gguf_plan_with_options(
     retain_gdn_input_gates: bool,
     no_clipping_scale: bool,
 ) -> Result<GgufWritePlan, GgufError> {
-    if no_clipping_scale && format != QwenMxWeightActivationFormat::Mxfp8E4m3 {
-        return Err(invalid("--mxfp8-no-clipping-scale requires --kind mxfp8"));
-    }
+    let scale_rule = if no_clipping_scale {
+        QwenMxScaleRule::NoClipping
+    } else {
+        QwenMxScaleRule::Default
+    };
+    build_qwen35_mx_weight_activation_gguf_plan_with_scale_rule(
+        lock,
+        cache,
+        format,
+        retain_gdn_input_gates,
+        scale_rule,
+    )
+}
+
+/// Build a Qwen MX GGUF plan with an explicit per-format scale rule.
+pub fn build_qwen35_mx_weight_activation_gguf_plan_with_scale_rule(
+    lock: &ModelLock,
+    cache: &VerifiedCache,
+    format: QwenMxWeightActivationFormat,
+    retain_gdn_input_gates: bool,
+    scale_rule: QwenMxScaleRule,
+) -> Result<GgufWritePlan, GgufError> {
+    validate_qwen_mx_scale_rule(format, scale_rule)?;
     let mut plan = build_qwen35_bf16_gguf_plan(lock, cache)?;
     let original_recipe = recipe_from_metadata(&plan.metadata)?;
     let weight_plan = build_verified_qwen_component_weight_load_plan(
@@ -743,10 +832,10 @@ pub fn build_qwen35_mx_weight_activation_gguf_plan_with_options(
     plan.tensors.extend(scale_tensors);
     let recipe = GgufTensorRecipeV1 {
         schema_version: "sllm-gguf-tensor-recipe-v1".to_owned(),
-        semantic_model_id: format.semantic_model_id_with_options(
+        semantic_model_id: format.semantic_model_id_with_scale_rule(
             original_recipe.semantic_model_id,
             retain_gdn_input_gates,
-            no_clipping_scale,
+            scale_rule,
         ),
         source_lock_fingerprints: original_recipe.source_lock_fingerprints,
         bindings,
@@ -795,12 +884,36 @@ pub fn write_qwen35_mx_weight_activation_gguf_with_options(
     no_clipping_scale: bool,
     output_path: impl AsRef<Path>,
 ) -> Result<GgufWriteReport, GgufError> {
-    let plan = build_qwen35_mx_weight_activation_gguf_plan_with_options(
+    let scale_rule = if no_clipping_scale {
+        QwenMxScaleRule::NoClipping
+    } else {
+        QwenMxScaleRule::Default
+    };
+    write_qwen35_mx_weight_activation_gguf_with_scale_rule(
         lock,
         cache,
         format,
         retain_gdn_input_gates,
-        no_clipping_scale,
+        scale_rule,
+        output_path,
+    )
+}
+
+/// Write a Qwen MX GGUF plan with an explicit per-format scale rule.
+pub fn write_qwen35_mx_weight_activation_gguf_with_scale_rule(
+    lock: &ModelLock,
+    cache: &VerifiedCache,
+    format: QwenMxWeightActivationFormat,
+    retain_gdn_input_gates: bool,
+    scale_rule: QwenMxScaleRule,
+    output_path: impl AsRef<Path>,
+) -> Result<GgufWriteReport, GgufError> {
+    let plan = build_qwen35_mx_weight_activation_gguf_plan_with_scale_rule(
+        lock,
+        cache,
+        format,
+        retain_gdn_input_gates,
+        scale_rule,
     )?;
     let mut cached_quantized: Option<(String, QuantizedMx)> = None;
     write_gguf(output_path, &plan, |source, offset, length| {
@@ -823,7 +936,7 @@ pub fn write_qwen35_mx_weight_activation_gguf_with_options(
         {
             cached_quantized = Some((
                 name.to_owned(),
-                quantize_qwen_mx_source_tensor(cache, name, format, no_clipping_scale)?,
+                quantize_qwen_mx_source_tensor(cache, name, format, scale_rule)?,
             ));
         }
         let quantized = &cached_quantized
@@ -843,7 +956,7 @@ fn quantize_qwen_mx_source_tensor(
     cache: &VerifiedCache,
     name: &str,
     format: QwenMxWeightActivationFormat,
-    no_clipping_scale: bool,
+    scale_rule: QwenMxScaleRule,
 ) -> Result<QuantizedMx, GgufError> {
     let descriptor = cache
         .tensor(name)
@@ -892,14 +1005,42 @@ fn quantize_qwen_mx_source_tensor(
             "Qwen MX decoded BF16 element count differs: {name}"
         )));
     }
-    match format {
-        QwenMxWeightActivationFormat::Mxfp8E4m3 if no_clipping_scale => {
+    match (format, scale_rule) {
+        (QwenMxWeightActivationFormat::Mxfp8E4m3, QwenMxScaleRule::Default) => {
+            quantize_mxfp8_e4m3(&input, rows, columns)
+        }
+        (QwenMxWeightActivationFormat::Mxfp8E4m3, QwenMxScaleRule::NoClipping) => {
             crate::quantize_mxfp8_e4m3_no_clipping_scale(&input, rows, columns)
         }
-        QwenMxWeightActivationFormat::Mxfp8E4m3 => quantize_mxfp8_e4m3(&input, rows, columns),
-        QwenMxWeightActivationFormat::Mxfp6E3m2 => quantize_mxfp6_e3m2(&input, rows, columns),
+        (QwenMxWeightActivationFormat::Mxfp6E3m2, QwenMxScaleRule::Default) => {
+            quantize_mxfp6_e3m2(&input, rows, columns)
+        }
+        (QwenMxWeightActivationFormat::Mxfp6E3m2, QwenMxScaleRule::NoClipping) => {
+            crate::mxfp::quantize_mxfp6_e3m2_no_clipping_scale(&input, rows, columns)
+        }
+        (_, QwenMxScaleRule::BestOfTwo) => {
+            return Err(invalid(
+                "best-of-two scale is not supported for Qwen MXFP8/MXFP6 conversion",
+            ));
+        }
     }
     .map_err(|error| invalid(format!("quantize Qwen MX source tensor {name}: {error}")))
+}
+
+fn validate_qwen_mx_scale_rule(
+    format: QwenMxWeightActivationFormat,
+    scale_rule: QwenMxScaleRule,
+) -> Result<(), GgufError> {
+    match (format, scale_rule) {
+        (_, QwenMxScaleRule::Default)
+        | (
+            QwenMxWeightActivationFormat::Mxfp8E4m3 | QwenMxWeightActivationFormat::Mxfp6E3m2,
+            QwenMxScaleRule::NoClipping,
+        ) => Ok(()),
+        (_, QwenMxScaleRule::BestOfTwo) => Err(invalid(
+            "best-of-two scale is not supported for Qwen MXFP8/MXFP6 conversion",
+        )),
+    }
 }
 
 fn bounded_plane_range(
@@ -2483,6 +2624,18 @@ mod tests {
             QWEN_MX_DIAGNOSTIC_NO_CLIPPING_SCALE
         );
         assert_eq!(
+            QwenMxWeightActivationFormat::diagnostic_scale_rule_name(QwenMxScaleRule::Default),
+            "default"
+        );
+        assert_eq!(
+            QwenMxWeightActivationFormat::diagnostic_scale_rule_name(QwenMxScaleRule::NoClipping),
+            QWEN_MX_DIAGNOSTIC_NO_CLIPPING_SCALE
+        );
+        assert_eq!(
+            QwenMxWeightActivationFormat::diagnostic_scale_rule_name(QwenMxScaleRule::BestOfTwo),
+            "best-of-two"
+        );
+        assert_eq!(
             QwenMxWeightActivationFormat::Mxfp8E4m3
                 .semantic_model_id("qwen38:sha256:test".to_owned(), false,),
             "qwen38:sha256:test"
@@ -2507,6 +2660,43 @@ mod tests {
                 true,
             ),
             "qwen38:sha256:test:mx-scale=no-clipping:mx-coverage=retain-gdn-in-proj-a-b"
+        );
+        assert_eq!(
+            QwenMxWeightActivationFormat::Mxfp6E3m2.semantic_model_id_with_scale_rule(
+                "qwen38:sha256:test".to_owned(),
+                false,
+                QwenMxScaleRule::NoClipping,
+            ),
+            "qwen38:sha256:test:mx-scale=no-clipping"
+        );
+        assert_eq!(
+            QwenMxWeightActivationFormat::Mxfp8E4m3.semantic_model_id_with_scale_rule(
+                "qwen38:sha256:test".to_owned(),
+                false,
+                QwenMxScaleRule::BestOfTwo,
+            ),
+            "qwen38:sha256:test:mx-scale=best-of-two"
+        );
+        assert!(
+            validate_qwen_mx_scale_rule(
+                QwenMxWeightActivationFormat::Mxfp8E4m3,
+                QwenMxScaleRule::Default,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_qwen_mx_scale_rule(
+                QwenMxWeightActivationFormat::Mxfp6E3m2,
+                QwenMxScaleRule::NoClipping,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_qwen_mx_scale_rule(
+                QwenMxWeightActivationFormat::Mxfp8E4m3,
+                QwenMxScaleRule::BestOfTwo,
+            )
+            .is_err()
         );
     }
 

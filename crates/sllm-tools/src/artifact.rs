@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sllm_core::{
-    VerifiedGguf, decode_e4m3fn, decode_e8m0, encode_e2m1, quantize_e4m3fn_outer_rows,
-    quantize_nvfp4_weights, repack_mxfp4_standard, repack_nvfp4_standard,
+    QwenMxWeightActivationFormat, VerifiedGguf, decode_e4m3fn, decode_e8m0, encode_e2m1,
+    quantize_e4m3fn_outer_rows, quantize_nvfp4_weights, repack_mxfp4_standard,
+    repack_nvfp4_standard,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -241,7 +242,9 @@ pub fn reviewed_capability(architecture: &str) -> Result<CapabilityV1, ArtifactE
             "bf16".into(),
             "fp8-e4m3fn-channel-f32-scale".into(),
             "nvfp4-e2m1-block16-e4m3fn-f32-outer".into(),
+            "nvfp4-e2m1-block16-e4m3fn-f32-outer:nvfp4-scale=best-of-two".into(),
             "mxfp4-e2m1-block32-e8m0".into(),
+            "mxfp4-e2m1-block32-e8m0:mx-scale=best-of-two".into(),
         ],
     })
 }
@@ -272,8 +275,13 @@ pub fn dispatch_capability(
     let dtype_ok = match recipe {
         "bf16" => dtype.eq_ignore_ascii_case("BF16"),
         "fp8-e4m3fn-channel-f32-scale" => dtype.eq_ignore_ascii_case("FP8-E4M3FN"),
-        "nvfp4-e2m1-block16-e4m3fn-f32-outer" => dtype.eq_ignore_ascii_case("NVFP4-E2M1"),
-        "mxfp4-e2m1-block32-e8m0" => dtype.eq_ignore_ascii_case("MXFP4-E2M1"),
+        "nvfp4-e2m1-block16-e4m3fn-f32-outer"
+        | "nvfp4-e2m1-block16-e4m3fn-f32-outer:nvfp4-scale=best-of-two" => {
+            dtype.eq_ignore_ascii_case("NVFP4-E2M1")
+        }
+        "mxfp4-e2m1-block32-e8m0" | "mxfp4-e2m1-block32-e8m0:mx-scale=best-of-two" => {
+            dtype.eq_ignore_ascii_case("MXFP4-E2M1")
+        }
         _ => false,
     };
     if !dtype_ok {
@@ -1084,6 +1092,43 @@ pub struct QuantizedTensorV1 {
     pub scales_sha256: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuantizeScaleRule {
+    Default,
+    BestOfTwo,
+}
+
+fn parse_quantize_scale_rule(value: &str) -> Result<QuantizeScaleRule, ArtifactError> {
+    match value {
+        "default" => Ok(QuantizeScaleRule::Default),
+        "best-of-two" => Ok(QuantizeScaleRule::BestOfTwo),
+        _ => Err(invalid(format!(
+            "unsupported --scale-rule {value}; expected default|best-of-two"
+        ))),
+    }
+}
+
+fn effective_quantize_recipe(
+    recipe: &str,
+    scale_rule: QuantizeScaleRule,
+) -> Result<String, ArtifactError> {
+    if scale_rule == QuantizeScaleRule::Default {
+        return Ok(recipe.to_owned());
+    }
+    match recipe {
+        "mxfp4-e2m1-block32-e8m0" | "mxfp4-e2m1-block32-e8m0:mx-scale=best-of-two" => {
+            Ok("mxfp4-e2m1-block32-e8m0:mx-scale=best-of-two".to_owned())
+        }
+        "nvfp4-e2m1-block16-e4m3fn-f32-outer"
+        | "nvfp4-e2m1-block16-e4m3fn-f32-outer:nvfp4-scale=best-of-two" => {
+            Ok("nvfp4-e2m1-block16-e4m3fn-f32-outer:nvfp4-scale=best-of-two".to_owned())
+        }
+        _ => Err(invalid(
+            "--scale-rule best-of-two applies only to the MXFP4 and NVFP4 recipes",
+        )),
+    }
+}
+
 pub fn quantize_tensor(
     recipe: &str,
     input: &[f32],
@@ -1124,7 +1169,31 @@ pub fn quantize_tensor(
                 Some(quantized.tensor_scale),
             )
         }
+        "nvfp4-e2m1-block16-e4m3fn-f32-outer:nvfp4-scale=best-of-two" => {
+            let (packed_values, block_scales, tensor_scale) =
+                QwenMxWeightActivationFormat::quantize_nvfp4_best_of_two_parts(
+                    input, rows, columns,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+            let scales = block_scales
+                .iter()
+                .map(|scale| decode_e4m3fn(*scale))
+                .collect();
+            (packed_values, scales, block_scales, Some(tensor_scale))
+        }
         "mxfp4-e2m1-block32-e8m0" => quantize_mxfp4(input, rows, columns)?,
+        "mxfp4-e2m1-block32-e8m0:mx-scale=best-of-two" => {
+            let (values, scale_bytes) =
+                QwenMxWeightActivationFormat::quantize_mxfp4_best_of_two_parts(
+                    input, rows, columns,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+            let scales = scale_bytes
+                .iter()
+                .map(|scale| decode_e8m0(*scale))
+                .collect();
+            (values, scales, scale_bytes, None)
+        }
         _ => {
             return Err(invalid(format!(
                 "unsupported quantization recipe: {recipe}"
@@ -1144,7 +1213,6 @@ pub fn quantize_tensor(
         tensor_scale,
     })
 }
-
 type QuantizedParts = (Vec<u8>, Vec<f32>, Vec<u8>, Option<f32>);
 
 fn quantize_mxfp4(
@@ -1252,7 +1320,7 @@ where
         .next()
         .ok_or_else(|| "command is required".to_owned())?;
     if command == "--help" || command == "-h" || command == "help" {
-        return Ok("sllm-artifact commands:\n  capabilities [--architecture qwen35]\n  split --input MODEL.gguf --output-dir DIR --max-part-bytes N\n  merge --manifest PARTS/manifest.json --output-dir DIR\n  lora --input SOURCE.json --output-dir DIR\n  repack --encoding mxfp4|nvfp4 --values FILE --scales FILE --rows N --columns N --output-dir DIR\n  quantize --recipe RECIPE --input-json FILE --rows N --columns N --output-dir DIR\n  imatrix --input-json FILE --rows N --columns N --seed N --output-dir DIR".to_owned());
+        return Ok("sllm-artifact commands:\n  capabilities [--architecture qwen35]\n  split --input MODEL.gguf --output-dir DIR --max-part-bytes N\n  merge --manifest PARTS/manifest.json --output-dir DIR\n  lora --input SOURCE.json --output-dir DIR\n  repack --encoding mxfp4|nvfp4 --values FILE --scales FILE --rows N --columns N --output-dir DIR\n  quantize --recipe RECIPE [--scale-rule default|best-of-two] --input-json FILE --rows N --columns N --output-dir DIR\n  imatrix --input-json FILE --rows N --columns N --seed N --output-dir DIR".to_owned());
     }
     let mut flags = BTreeMap::<String, String>::new();
     while let Some(flag) = args.next() {
@@ -1374,6 +1442,7 @@ where
                     "--rows",
                     "--columns",
                     "--output-dir",
+                    "--scale-rule",
                 ],
             )?;
             let values = read_float_json(get("--input-json")?)?;
@@ -1383,7 +1452,16 @@ where
             let columns: usize = get("--columns")?
                 .parse()
                 .map_err(|_| "--columns must be usize".to_owned())?;
-            let artifact = quantize_tensor(get("--recipe")?, &values, rows, columns)
+            let scale_rule = parse_quantize_scale_rule(
+                flags
+                    .get("--scale-rule")
+                    .map(String::as_str)
+                    .unwrap_or("default"),
+            )
+            .map_err(|error| error.to_string())?;
+            let recipe = effective_quantize_recipe(get("--recipe")?, scale_rule)
+                .map_err(|error| error.to_string())?;
+            let artifact = quantize_tensor(&recipe, &values, rows, columns)
                 .map_err(|error| error.to_string())?;
             let bytes = canonical_json(&artifact).map_err(|error| error.to_string())?;
             let source =
@@ -1397,8 +1475,8 @@ where
             publish_operation_bundle(
                 Path::new(get("--output-dir")?),
                 "quantize",
-                get("--recipe")?,
-                get("--recipe")?.as_bytes(),
+                &recipe,
+                recipe.as_bytes(),
                 vec![source],
                 vec![("quantized-tensor.json".to_owned(), bytes)],
                 selected,
@@ -1485,4 +1563,122 @@ fn read_float_json(path: &str) -> Result<Vec<f32>, String> {
             Ok(number as f32)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn deterministic_matrix(seed: u32, rows: usize, columns: usize, amplitude: f32) -> Vec<f32> {
+        let mut state = seed;
+        (0..rows * columns)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let unit = (state >> 8) as f32 / (1u32 << 24) as f32;
+                (unit * 2.0 - 1.0) * amplitude
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scale_rule_parsing_and_effective_recipe_are_explicit() {
+        assert_eq!(
+            parse_quantize_scale_rule("default").unwrap(),
+            QuantizeScaleRule::Default
+        );
+        assert_eq!(
+            parse_quantize_scale_rule("best-of-two").unwrap(),
+            QuantizeScaleRule::BestOfTwo
+        );
+        assert!(parse_quantize_scale_rule("no-clipping").is_err());
+        assert_eq!(
+            effective_quantize_recipe("mxfp4-e2m1-block32-e8m0", QuantizeScaleRule::Default)
+                .unwrap(),
+            "mxfp4-e2m1-block32-e8m0"
+        );
+        assert_eq!(
+            effective_quantize_recipe("mxfp4-e2m1-block32-e8m0", QuantizeScaleRule::BestOfTwo)
+                .unwrap(),
+            "mxfp4-e2m1-block32-e8m0:mx-scale=best-of-two"
+        );
+        assert_eq!(
+            effective_quantize_recipe(
+                "nvfp4-e2m1-block16-e4m3fn-f32-outer",
+                QuantizeScaleRule::BestOfTwo,
+            )
+            .unwrap(),
+            "nvfp4-e2m1-block16-e4m3fn-f32-outer:nvfp4-scale=best-of-two"
+        );
+        assert!(effective_quantize_recipe("bf16", QuantizeScaleRule::BestOfTwo).is_err());
+    }
+
+    #[test]
+    fn default_recipes_keep_the_historical_numeric_rule() {
+        let values = deterministic_matrix(0x1234_5678, 2, 32, 3.5);
+        let default = quantize_tensor("mxfp4-e2m1-block32-e8m0", &values, 2, 32).unwrap();
+        let historical = quantize_mxfp4(&values, 2, 32).unwrap();
+        assert_eq!(default.values, historical.0);
+        assert_eq!(default.scales, historical.1);
+        assert_eq!(default.scale_bytes, historical.2);
+        assert_eq!(default.tensor_scale, historical.3);
+
+        let nvfp4_default =
+            quantize_tensor("nvfp4-e2m1-block16-e4m3fn-f32-outer", &values, 2, 32).unwrap();
+        let nvfp4_historical = quantize_nvfp4_weights(&values, 2, 32).unwrap();
+        assert_eq!(nvfp4_default.values, nvfp4_historical.packed_values);
+        assert_eq!(nvfp4_default.scale_bytes, nvfp4_historical.block_scales);
+        assert_eq!(
+            nvfp4_default.scales.len(),
+            nvfp4_historical.block_scales.len()
+        );
+        assert_eq!(
+            nvfp4_default.tensor_scale,
+            Some(nvfp4_historical.tensor_scale)
+        );
+    }
+
+    #[test]
+    fn best_of_two_recipes_reach_their_own_scale_rule() {
+        let mut mxfp4_departed = false;
+        let mut nvfp4_departed = false;
+        for seed in 1..128_u32 {
+            let amplitude = 0.25 + f64::from(seed) / 16.0;
+            let mxfp4 = deterministic_matrix(seed, 4, 32, amplitude as f32);
+            let default = quantize_tensor("mxfp4-e2m1-block32-e8m0", &mxfp4, 4, 32).unwrap();
+            let best = quantize_tensor(
+                "mxfp4-e2m1-block32-e8m0:mx-scale=best-of-two",
+                &mxfp4,
+                4,
+                32,
+            )
+            .unwrap();
+            assert_eq!(best.recipe, "mxfp4-e2m1-block32-e8m0:mx-scale=best-of-two");
+            if best.values != default.values || best.scale_bytes != default.scale_bytes {
+                mxfp4_departed = true;
+            }
+
+            let nvfp4 = deterministic_matrix(seed, 4, 16, amplitude as f32);
+            let nvfp4_default =
+                quantize_tensor("nvfp4-e2m1-block16-e4m3fn-f32-outer", &nvfp4, 4, 16).unwrap();
+            let nvfp4_best = quantize_tensor(
+                "nvfp4-e2m1-block16-e4m3fn-f32-outer:nvfp4-scale=best-of-two",
+                &nvfp4,
+                4,
+                16,
+            )
+            .unwrap();
+            assert_eq!(
+                nvfp4_best.recipe,
+                "nvfp4-e2m1-block16-e4m3fn-f32-outer:nvfp4-scale=best-of-two"
+            );
+            assert_eq!(nvfp4_best.tensor_scale, nvfp4_default.tensor_scale);
+            if nvfp4_best.values != nvfp4_default.values
+                || nvfp4_best.scale_bytes != nvfp4_default.scale_bytes
+            {
+                nvfp4_departed = true;
+            }
+        }
+        assert!(mxfp4_departed, "best-of-two never changed the MXFP4 rule");
+        assert!(nvfp4_departed, "best-of-two never changed the NVFP4 rule");
+    }
 }

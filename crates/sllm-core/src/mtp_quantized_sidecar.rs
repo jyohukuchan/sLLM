@@ -9,7 +9,8 @@
 use crate::{
     ModelLock, QuantizedMx, QuantizedTensorEncoding, UNSLOTH_QWEN38_NVFP4_MTP_SHA256,
     UNSLOTH_QWEN38_NVFP4_REPOSITORY, UNSLOTH_QWEN38_NVFP4_REVISION, VerifiedUnslothQwen38Nvfp4,
-    quantize_mxfp6_e3m2, quantize_mxfp8_e4m3, validate_qwen38_mtp_artifact,
+    quantize_mxfp6_e3m2, quantize_mxfp8_e4m3, quantize_mxfp8_e4m3_no_clipping_scale,
+    validate_qwen38_mtp_artifact,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -64,6 +65,8 @@ pub enum MtpWeightEncoding {
     Bf16,
     Mxfp8W8A8Block32E8M0,
     Mxfp6W6A6Block32E8M0,
+    Mxfp8W8A8Block32E8M0NoClippingScale,
+    Mxfp6W6A6Block32E8M0NoClippingScale,
 }
 
 /// Stage-0 fake-quant recipe.  The resident payload is BF16 in both cases;
@@ -122,6 +125,12 @@ impl MtpWeightEncoding {
             Self::Bf16 => "bf16",
             Self::Mxfp8W8A8Block32E8M0 => "mxfp8-w8a8-e4m3-block32-e8m0",
             Self::Mxfp6W6A6Block32E8M0 => "mxfp6-w6a6-e3m2-block32-e8m0",
+            Self::Mxfp8W8A8Block32E8M0NoClippingScale => {
+                "mxfp8-w8a8-e4m3-block32-e8m0:mx-scale=no-clipping"
+            }
+            Self::Mxfp6W6A6Block32E8M0NoClippingScale => {
+                "mxfp6-w6a6-e3m2-block32-e8m0:mx-scale=no-clipping"
+            }
         }
     }
 
@@ -130,6 +139,12 @@ impl MtpWeightEncoding {
             "bf16" => Ok(Self::Bf16),
             "mxfp8-w8a8-e4m3-block32-e8m0" => Ok(Self::Mxfp8W8A8Block32E8M0),
             "mxfp6-w6a6-e3m2-block32-e8m0" => Ok(Self::Mxfp6W6A6Block32E8M0),
+            "mxfp8-w8a8-e4m3-block32-e8m0:mx-scale=no-clipping" => {
+                Ok(Self::Mxfp8W8A8Block32E8M0NoClippingScale)
+            }
+            "mxfp6-w6a6-e3m2-block32-e8m0:mx-scale=no-clipping" => {
+                Ok(Self::Mxfp6W6A6Block32E8M0NoClippingScale)
+            }
             _ => Err(MtpQuantizedSidecarError::invalid(
                 "unsupported MTP sidecar encoding",
             )),
@@ -139,8 +154,8 @@ impl MtpWeightEncoding {
     const fn value_dtype(self) -> &'static str {
         match self {
             Self::Bf16 => "BF16",
-            Self::Mxfp8W8A8Block32E8M0 => "F8_E4M3",
-            Self::Mxfp6W6A6Block32E8M0 => "U8",
+            Self::Mxfp8W8A8Block32E8M0 | Self::Mxfp8W8A8Block32E8M0NoClippingScale => "F8_E4M3",
+            Self::Mxfp6W6A6Block32E8M0 | Self::Mxfp6W6A6Block32E8M0NoClippingScale => "U8",
         }
     }
 
@@ -823,6 +838,30 @@ fn bf16_roundtrip_values(
     Ok((output, diagnostics))
 }
 
+fn quantize_mtp_matrix(
+    encoding: MtpWeightEncoding,
+    values: &[f32],
+    rows: usize,
+    columns: usize,
+) -> Result<QuantizedMx, MtpQuantizedSidecarError> {
+    let quantized = match encoding {
+        MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => quantize_mxfp8_e4m3(values, rows, columns),
+        MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => {
+            quantize_mxfp8_e4m3_no_clipping_scale(values, rows, columns)
+        }
+        MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => quantize_mxfp6_e3m2(values, rows, columns),
+        MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => {
+            crate::mxfp::quantize_mxfp6_e3m2_no_clipping_scale(values, rows, columns)
+        }
+        MtpWeightEncoding::Bf16 => {
+            return Err(MtpQuantizedSidecarError::invalid(
+                "BF16 MTP sidecars do not use MX quantization",
+            ));
+        }
+    };
+    quantized.map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))
+}
+
 fn convert_into_directory(
     lock: &ModelLock,
     artifact: &VerifiedUnslothQwen38Nvfp4,
@@ -881,20 +920,14 @@ fn convert_into_directory(
                     Some(diagnostics),
                 )
             } else {
-                let quantized = match encoding {
-                    MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => {
-                        quantize_mxfp8_e4m3(&values, rows, columns)
-                            .map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))?
-                    }
-                    MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => {
-                        quantize_mxfp6_e3m2(&values, rows, columns)
-                            .map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))?
-                    }
-                    MtpWeightEncoding::Bf16 => unreachable!(),
-                };
+                let quantized = quantize_mtp_matrix(encoding, &values, rows, columns)?;
                 let value_shape = match encoding {
-                    MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => vec![rows as u64, columns as u64],
-                    MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => {
+                    MtpWeightEncoding::Mxfp8W8A8Block32E8M0
+                    | MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => {
+                        vec![rows as u64, columns as u64]
+                    }
+                    MtpWeightEncoding::Mxfp6W6A6Block32E8M0
+                    | MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => {
                         vec![rows as u64, (columns * 3 / 4) as u64]
                     }
                     MtpWeightEncoding::Bf16 => unreachable!(),
@@ -1061,26 +1094,27 @@ fn validate_record(
     let scales_len = scale.data_offsets[1]
         .checked_sub(scale.data_offsets[0])
         .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP scale range is reversed"))?;
-    let expected_values =
-        match encoding {
-            MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => logical_shape[0]
-                .checked_mul(logical_shape[1])
-                .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP value shape overflows"))?,
-            MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => logical_shape[0]
-                .checked_mul(logical_shape[1])
-                .and_then(|elements| elements.checked_mul(3))
-                .map(|bytes| bytes / 4)
-                .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP value shape overflows"))?,
-            MtpWeightEncoding::Bf16 if roundtrip => logical_shape[0]
-                .checked_mul(logical_shape[1])
-                .and_then(|elements| elements.checked_mul(2))
-                .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP value shape overflows"))?,
-            MtpWeightEncoding::Bf16 => {
-                return Err(MtpQuantizedSidecarError::invalid(
-                    "BF16 sidecar is unsupported",
-                ));
-            }
-        };
+    let expected_values = match encoding {
+        MtpWeightEncoding::Mxfp8W8A8Block32E8M0
+        | MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => logical_shape[0]
+            .checked_mul(logical_shape[1])
+            .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP value shape overflows"))?,
+        MtpWeightEncoding::Mxfp6W6A6Block32E8M0
+        | MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => logical_shape[0]
+            .checked_mul(logical_shape[1])
+            .and_then(|elements| elements.checked_mul(3))
+            .map(|bytes| bytes / 4)
+            .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP value shape overflows"))?,
+        MtpWeightEncoding::Bf16 if roundtrip => logical_shape[0]
+            .checked_mul(logical_shape[1])
+            .and_then(|elements| elements.checked_mul(2))
+            .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP value shape overflows"))?,
+        MtpWeightEncoding::Bf16 => {
+            return Err(MtpQuantizedSidecarError::invalid(
+                "BF16 sidecar is unsupported",
+            ));
+        }
+    };
     let expected_scales = if roundtrip {
         0
     } else {
@@ -1095,8 +1129,12 @@ fn validate_record(
         || scale.dtype != encoding.scale_dtype()
         || value.shape
             != match encoding {
-                MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => vec![logical_shape[0], logical_shape[1]],
-                MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => {
+                MtpWeightEncoding::Mxfp8W8A8Block32E8M0
+                | MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => {
+                    vec![logical_shape[0], logical_shape[1]]
+                }
+                MtpWeightEncoding::Mxfp6W6A6Block32E8M0
+                | MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => {
                     vec![logical_shape[0], expected_values / logical_shape[0]]
                 }
                 MtpWeightEncoding::Bf16 if roundtrip => {
@@ -1342,8 +1380,10 @@ mod tests {
     fn encoded_value_len(encoding: MtpWeightEncoding, rows: usize, columns: usize) -> usize {
         match encoding {
             MtpWeightEncoding::Bf16 => rows * columns * 2,
-            MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => rows * columns,
-            MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => rows * columns * 3 / 4,
+            MtpWeightEncoding::Mxfp8W8A8Block32E8M0
+            | MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => rows * columns,
+            MtpWeightEncoding::Mxfp6W6A6Block32E8M0
+            | MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => rows * columns * 3 / 4,
         }
     }
 
@@ -1416,10 +1456,12 @@ mod tests {
         let value = SafeTensorMetadata {
             dtype: encoding.value_dtype().to_owned(),
             shape: match encoding {
-                MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => {
+                MtpWeightEncoding::Mxfp8W8A8Block32E8M0
+                | MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => {
                     vec![rows as u64, columns as u64]
                 }
-                MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => {
+                MtpWeightEncoding::Mxfp6W6A6Block32E8M0
+                | MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => {
                     vec![rows as u64, (columns * 3 / 4) as u64]
                 }
                 MtpWeightEncoding::Bf16 => vec![rows as u64, columns as u64],
@@ -1456,6 +1498,14 @@ mod tests {
             MtpWeightEncoding::Mxfp6W6A6Block32E8M0.manifest_name(),
             "mxfp6-w6a6-e3m2-block32-e8m0"
         );
+        assert_eq!(
+            MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale.manifest_name(),
+            "mxfp8-w8a8-e4m3-block32-e8m0:mx-scale=no-clipping"
+        );
+        assert_eq!(
+            MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale.manifest_name(),
+            "mxfp6-w6a6-e3m2-block32-e8m0:mx-scale=no-clipping"
+        );
         let base = "sha256:base";
         let manifest = "sha256:manifest";
         assert_ne!(
@@ -1482,6 +1532,77 @@ mod tests {
                 MtpWeightEncoding::Mxfp8W8A8Block32E8M0.manifest_name()
             )
         );
+    }
+
+    #[test]
+    fn no_clipping_encoding_names_round_trip_and_unknown_names_are_rejected() {
+        for (name, encoding) in [
+            (
+                "mxfp8-w8a8-e4m3-block32-e8m0:mx-scale=no-clipping",
+                MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale,
+            ),
+            (
+                "mxfp6-w6a6-e3m2-block32-e8m0:mx-scale=no-clipping",
+                MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale,
+            ),
+        ] {
+            assert_eq!(
+                MtpWeightEncoding::parse(name).expect("parse encoding"),
+                encoding
+            );
+            assert_eq!(
+                parse_manifest_encoding(name).expect("parse manifest encoding"),
+                (encoding, None)
+            );
+            assert_eq!(encoding.manifest_name(), name);
+        }
+
+        for unknown in [
+            "mxfp8-w8a8-e4m3-block32-e8m0:mx-scale=clipping",
+            "mxfp6-w6a6-e3m2-block32-e8m0:mx-scale=no-clipping-extra",
+        ] {
+            assert!(MtpWeightEncoding::parse(unknown).is_err());
+            assert!(parse_manifest_encoding(unknown).is_err());
+        }
+    }
+
+    #[test]
+    fn no_clipping_encoding_selects_the_unclipped_scale_rule() {
+        let mut mxfp8_values = vec![1.0_f32; 32];
+        mxfp8_values[0] = 449.0;
+        let mxfp8_clipped = quantize_mtp_matrix(
+            MtpWeightEncoding::Mxfp8W8A8Block32E8M0,
+            &mxfp8_values,
+            1,
+            32,
+        )
+        .expect("clipped mxfp8");
+        let mxfp8_no_clipping = quantize_mtp_matrix(
+            MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale,
+            &mxfp8_values,
+            1,
+            32,
+        )
+        .expect("no-clipping mxfp8");
+        assert_ne!(mxfp8_clipped.scales(), mxfp8_no_clipping.scales());
+
+        let mut mxfp6_values = vec![1.0_f32; 32];
+        mxfp6_values[0] = 29.0;
+        let mxfp6_clipped = quantize_mtp_matrix(
+            MtpWeightEncoding::Mxfp6W6A6Block32E8M0,
+            &mxfp6_values,
+            1,
+            32,
+        )
+        .expect("clipped mxfp6");
+        let mxfp6_no_clipping = quantize_mtp_matrix(
+            MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale,
+            &mxfp6_values,
+            1,
+            32,
+        )
+        .expect("no-clipping mxfp6");
+        assert_ne!(mxfp6_clipped.scales(), mxfp6_no_clipping.scales());
     }
 
     #[test]

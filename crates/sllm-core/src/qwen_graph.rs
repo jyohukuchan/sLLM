@@ -2282,14 +2282,20 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_companion(
             ));
         }
         let encoding = match companion.encoding() {
-            crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => Some(Encoding::Mxfp8W8A8 {
-                block_size: 32,
-                scale_dtype: DType::U8,
-            }),
-            crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => Some(Encoding::Mxfp6W6A6 {
-                block_size: 32,
-                scale_dtype: DType::U8,
-            }),
+            crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0
+            | crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => {
+                Some(Encoding::Mxfp8W8A8 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                })
+            }
+            crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0
+            | crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => {
+                Some(Encoding::Mxfp6W6A6 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                })
+            }
             // Fake-quantized BF16 sidecars use the original BF16 graph layout.
             // Their replacement bytes are supplied by the resident provisioner.
             crate::MtpWeightEncoding::Bf16 => None,
@@ -2324,6 +2330,7 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_companion(
         matches!(
             sidecar.encoding(),
             crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0
+                | crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale
         )
     }) || (!dimensions.tied_embeddings && !fp8_tensor_names.is_empty())
     {
@@ -2583,20 +2590,16 @@ pub fn build_qwen35_gguf_mx_weight_activation_graph(
                     scale_dtype: DType::U8,
                 },
             ),
-            crate::GgufRecipeEncoding::Mxfp6E3m2Block32E8m0 => {
-                if recipe_options.no_clipping_scale {
-                    return Err(QwenGraphError::InvalidPlan(
-                        "GGUF MXFP6 recipe cannot declare MXFP8 no-clipping scale mode".to_owned(),
-                    ));
-                }
-                (
-                    DType::U8,
-                    Encoding::Mxfp6W6A6 {
-                        block_size: 32,
-                        scale_dtype: DType::U8,
-                    },
-                )
-            }
+            // The `mx-scale=` diagnostic tag is format-agnostic: it only records
+            // that the stored weight scales were selected without clipping, which
+            // is valid for both the MXFP8 and MXFP6 weight encodings.
+            crate::GgufRecipeEncoding::Mxfp6E3m2Block32E8m0 => (
+                DType::U8,
+                Encoding::Mxfp6W6A6 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                },
+            ),
             _ => unreachable!("MX recipe predicate excluded other encodings"),
         };
         if resident_contract.is_some_and(|current| current != contract) {

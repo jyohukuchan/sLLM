@@ -4,12 +4,12 @@ use sllm_core::{
     UNSLOTH_GEMMA4_NVFP4_MODEL_SHA256, build_gemma4_moe_nvfp4_gguf_plan,
     build_gemma4_mtp_bf16_gguf_plan, build_gemma4_nvfp4_gguf_plan, build_qwen35_bf16_gguf_plan,
     build_qwen35_fp8_gguf_plan, build_qwen35_moe_mxfp4_gguf_plan,
-    build_qwen35_mx_weight_activation_gguf_plan, gemma4_mtp_pair_semantic_id,
+    build_qwen35_mx_weight_activation_gguf_plan_with_options, gemma4_mtp_pair_semantic_id,
     parse_gemma4_mtp_model_lock, read_model_lock, read_reviewed_model_lock, verify_fp8_sidecar,
     verify_gemma4_moe_artifact, verify_qwen35_moe_artifact, verify_unsloth_gemma4_nvfp4,
     write_gemma4_moe_nvfp4_gguf, write_gemma4_mtp_bf16_gguf, write_gemma4_nvfp4_gguf,
     write_qwen35_bf16_gguf, write_qwen35_fp8_gguf, write_qwen35_moe_mxfp4_gguf,
-    write_qwen35_mx_weight_activation_gguf,
+    write_qwen35_mx_weight_activation_gguf_with_options,
 };
 use sllm_tools::{
     AtomicBundleV1, TOOL_JSON_CANONICALIZATION_V1, TOOL_RUN_SCHEMA_VERSION_V1,
@@ -126,18 +126,26 @@ fn run_qwen35_mx(
     let cache = lock
         .verify_cache(&arguments.cache)
         .map_err(|error| error.to_string())?;
-    let plan = build_qwen35_mx_weight_activation_gguf_plan(&lock, &cache, format)
-        .map_err(|error| error.to_string())?;
+    let plan = build_qwen35_mx_weight_activation_gguf_plan_with_options(
+        &lock, &cache, format, false, true,
+    )
+    .map_err(|error| error.to_string())?;
     finish_conversion(
         arguments,
         "qwen35",
-        format!("qwen35:{}", lock.fingerprint()),
+        format.semantic_model_id_with_options(
+            format!("qwen35:{}", lock.fingerprint()),
+            false,
+            true,
+        ),
         vec![lock.fingerprint().to_owned()],
         format.tensor_mode(),
         &plan,
         |output| {
-            write_qwen35_mx_weight_activation_gguf(&lock, &cache, format, output)
-                .map_err(|error| error.to_string())
+            write_qwen35_mx_weight_activation_gguf_with_options(
+                &lock, &cache, format, false, true, output,
+            )
+            .map_err(|error| error.to_string())
         },
     )
 }
@@ -546,6 +554,21 @@ fn build_derived_lock(
     converter_commit: String,
     report: &sllm_core::GgufWriteReport,
 ) -> Result<DerivedGgufLock, sllm_core::GgufError> {
+    let mut effective_config = BTreeMap::from([
+        ("architecture".to_owned(), architecture.to_owned()),
+        ("format".to_owned(), "GGUF v3 little-endian".to_owned()),
+        ("alignment".to_owned(), "32".to_owned()),
+        ("tensor_mode".to_owned(), tensor_mode.to_owned()),
+    ]);
+    if matches!(
+        arguments.kind.as_str(),
+        "qwen35-mxfp8-w8a8" | "qwen35-mxfp6-w6a6"
+    ) {
+        effective_config.insert(
+            "scale_mode".to_owned(),
+            QwenMxWeightActivationFormat::diagnostic_scale_name(true).to_owned(),
+        );
+    }
     DerivedGgufLock::new(
         semantic_model_id,
         source_fingerprints,
@@ -555,12 +578,7 @@ fn build_derived_lock(
             arguments: std::iter::once("sllm-convert-gguf".to_owned())
                 .chain(arguments.raw.iter().cloned())
                 .collect(),
-            effective_config: BTreeMap::from([
-                ("architecture".to_owned(), architecture.to_owned()),
-                ("format".to_owned(), "GGUF v3 little-endian".to_owned()),
-                ("alignment".to_owned(), "32".to_owned()),
-                ("tensor_mode".to_owned(), tensor_mode.to_owned()),
-            ]),
+            effective_config,
             environment: BTreeMap::from([
                 ("os".to_owned(), env::consts::OS.to_owned()),
                 ("arch".to_owned(), env::consts::ARCH.to_owned()),
@@ -621,8 +639,9 @@ fn parse_arguments(raw: Vec<String>) -> Result<Arguments, String> {
         *target = Some(value.clone());
         index += 1;
     }
+    let kind = kind.unwrap_or_else(|| "qwen35-bf16".to_owned());
     Ok(Arguments {
-        kind: kind.unwrap_or_else(|| "qwen35-bf16".to_owned()),
+        kind,
         lock: lock.map(PathBuf::from),
         cache: cache
             .map(PathBuf::from)
@@ -643,7 +662,7 @@ fn required_path<'a>(path: &'a Option<PathBuf>, flag: &str) -> Result<&'a PathBu
 }
 
 fn help() -> String {
-    "Usage: sllm-convert-gguf --kind qwen35-bf16 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind qwen35-fp8 --lock PATH --cache PATH --manifest PATH --artifact PATH --dry-run\n       sllm-convert-gguf --kind qwen35-mxfp8-w8a8 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind qwen35-mxfp6-w6a6 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4-nvfp4 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4moe-nvfp4 --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4-mtp-bf16 --lock TARGET_LOCK_PATH --cache ASSISTANT_CACHE_PATH --dry-run\n       sllm-convert-gguf --kind qwen35moe-mxfp4 --cache PATH --dry-run\n       Replace --dry-run with --output-bundle DIR --converter-commit SHA40 for atomic GGUF/lock/manifest publication. Legacy --output/--derived-lock publication is rejected.".to_owned()
+    "Usage: sllm-convert-gguf --kind qwen35-bf16 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind qwen35-fp8 --lock PATH --cache PATH --manifest PATH --artifact PATH --dry-run\n       sllm-convert-gguf --kind qwen35-mxfp8-w8a8 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind qwen35-mxfp6-w6a6 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4-nvfp4 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4moe-nvfp4 --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4-mtp-bf16 --lock TARGET_LOCK_PATH --cache ASSISTANT_CACHE_PATH --dry-run\n       sllm-convert-gguf --kind qwen35moe-mxfp4 --cache PATH --dry-run\n       The Qwen MX kinds use the no-clipping E8M0 scale.\n       Replace --dry-run with --output-bundle DIR --converter-commit SHA40 for atomic GGUF/lock/manifest publication. Legacy --output/--derived-lock publication is rejected.".to_owned()
 }
 
 #[cfg(test)]
@@ -691,6 +710,45 @@ mod tests {
         assert!(parsed.lock.is_none());
         assert!(parsed.dry_run);
         assert!(help().contains("--kind gemma4moe-nvfp4 --cache PATH --dry-run"));
+    }
+
+    #[test]
+    fn qwen_mx_scale_rule_is_fixed_to_no_clipping() {
+        let parsed = parse_arguments(vec![
+            "--kind".to_owned(),
+            "qwen35-mxfp8-w8a8".to_owned(),
+            "--cache".to_owned(),
+            "cache".to_owned(),
+            "--dry-run".to_owned(),
+        ])
+        .expect("default scale arguments");
+        assert!(parsed.dry_run);
+
+        parse_arguments(vec![
+            "--kind".to_owned(),
+            "qwen35-mxfp6-w6a6".to_owned(),
+            "--cache".to_owned(),
+            "cache".to_owned(),
+            "--dry-run".to_owned(),
+        ])
+        .expect("default scale arguments");
+        for invalid in [
+            vec!["--kind", "qwen35-bf16", "--legacy-floor-scale"],
+            vec!["--kind", "qwen35-mxfp8-w8a8", "--mxfp8-no-clipping-scale"],
+            vec!["--kind", "qwen35-mxfp6-w6a6", "--mxfp6-no-clipping-scale"],
+        ] {
+            let mut arguments: Vec<String> =
+                invalid.iter().map(|item| (*item).to_owned()).collect();
+            arguments.extend([
+                "--cache".to_owned(),
+                "cache".to_owned(),
+                "--dry-run".to_owned(),
+            ]);
+            assert!(parse_arguments(arguments).is_err());
+        }
+
+        assert!(!help().contains("--mxfp6-no-clipping-scale"));
+        assert!(!help().contains("--legacy-floor-scale"));
     }
 
     #[test]

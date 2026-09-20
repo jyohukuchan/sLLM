@@ -5278,8 +5278,10 @@ impl QwenProvisionSource for Qwen38Nvfp4ProvisionSource {
                 .map(|tensor| (sidecar, tensor))
         }) {
             let expected_dtype = match sidecar.encoding() {
-                crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0 => DType::F8E4M3Fn,
-                crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => DType::U8,
+                crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0
+                | crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => DType::F8E4M3Fn,
+                crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0
+                | crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => DType::U8,
                 crate::MtpWeightEncoding::Bf16 => DType::Bf16,
             };
             if tensor.logical_shape.as_slice() != binding.shape()

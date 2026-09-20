@@ -153,4 +153,22 @@ raw logits、モデルrevisionとhash、各case結果、失敗logは
 `/home/homelab1/datapool/qwen38-kld-20260918/` に保存。`SESSION.md`は再開用の作業状況であり、
 実行継続の判定には実プロセスを確認する。
 
+## 追記: EXL3 3/4/5bpwの速度（2026-09-19）
+
+KLD測定と同じEXL3 3/4/5bpw（R9700、gfx1201 patch付き`550dcfed…`、コンテナ`qwen38-kld-exl3`）で、
+[既存のrunner](../../../../../ci/tools/benchmark_rocm_exl3_large.py)の`exl3` modeを使って速度を測った。
+3つのbpwで同じ入力（manifest sha256 `adfe6881…`）を使い、各行1 warmup＋3 measuredの中央値、FP16 cache 4096 token、
+`DefaultSampler`・seed 1234、EOSで止めない。prefillは`prompt_tokens`を分子にした`time_prefill`、
+decodeは128 tokenの入力の後の63 token（`max_new_tokens=64`）の`time_generate`で計算する。
+
+| bpw | pp128 | pp512 | pp2048 | decode（128入力、64指定） |
+| --- | ---: | ---: | ---: | ---: |
+| 3.00 | 109.9 | 888.6 | 1494.3 | 28.36 |
+| 4.00 | 106.3 | 886.0 | 1372.7 | 27.97 |
+| 5.00 | 98.4 | 844.1 | 1475.0 | 24.26 |
+
+単位はtok/s。pp2048は3回のばらつきが10〜16%と大きい。pp128はpp512より所要時間そのものが長く
+（約1.2秒対約0.6秒）、Qwen3.5-9Bの前回測定と同じ傾向である。raw結果は
+`/home/homelab1/datapool/qwen38-kld-20260918/speed-exl3/`に保存した。sLLM等との同条件比較ではない。
+
 [計画](../../../../plans/archive/2026/09/11-20/qwen38-cross-engine-kld.md)

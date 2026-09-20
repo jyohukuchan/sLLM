@@ -27,11 +27,10 @@ struct Args {
     derived_lock: PathBuf,
     converter_commit: String,
     retain_gdn_input_gates: bool,
-    no_clipping_scale: bool,
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-convert-qwen38-mx --kind mxfp8|mxfp6 --lock LOCK --cache SOURCE_DIR --output OUTPUT.gguf --derived-lock OUTPUT.derived-lock.json [--mxfp8-no-clipping-scale] [--retain-gdn-in-proj-a-b] [--converter-commit SHA40]"
+    "usage: sllm-convert-qwen38-mx --kind mxfp8|mxfp6 --lock LOCK --cache SOURCE_DIR --output OUTPUT.gguf --derived-lock OUTPUT.derived-lock.json [--retain-gdn-in-proj-a-b] [--converter-commit SHA40]"
 }
 
 fn parse_kind(value: &str) -> Result<QwenMxWeightActivationFormat, String> {
@@ -50,7 +49,6 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
     let mut derived_lock = None;
     let mut converter_commit = DEFAULT_COMMIT.to_owned();
     let mut retain_gdn_input_gates = false;
-    let mut no_clipping_scale = false;
     let mut index = 0;
     while index < raw.len() {
         let flag = raw[index].as_str();
@@ -72,12 +70,6 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
                 }
                 retain_gdn_input_gates = true;
             }
-            "--mxfp8-no-clipping-scale" => {
-                if no_clipping_scale {
-                    return Err("--mxfp8-no-clipping-scale was specified more than once".to_owned());
-                }
-                no_clipping_scale = true;
-            }
             "--converter-commit" => converter_commit = value(&mut index)?,
             "--help" | "-h" => return Err(usage().to_owned()),
             other => return Err(format!("unknown argument {other}; {}", usage())),
@@ -92,9 +84,6 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
         return Err("--converter-commit must be 40 lowercase hexadecimal characters".to_owned());
     }
     let kind = kind.ok_or_else(|| format!("--kind is required; {}", usage()))?;
-    if no_clipping_scale && kind != QwenMxWeightActivationFormat::Mxfp8E4m3 {
-        return Err("--mxfp8-no-clipping-scale requires --kind mxfp8".to_owned());
-    }
     Ok(Args {
         kind,
         lock: lock.ok_or_else(|| format!("--lock is required; {}", usage()))?,
@@ -104,7 +93,6 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             .ok_or_else(|| format!("--derived-lock is required; {}", usage()))?,
         converter_commit,
         retain_gdn_input_gates,
-        no_clipping_scale,
     })
 }
 
@@ -131,7 +119,7 @@ fn run(args: Args, raw: &[String]) -> Result<serde_json::Value, String> {
         &cache,
         args.kind,
         args.retain_gdn_input_gates,
-        args.no_clipping_scale,
+        true,
         &args.output,
     )
     .map_err(|error| format!("Qwen3.8 MXFP conversion failed: {error}"))?;
@@ -140,7 +128,7 @@ fn run(args: Args, raw: &[String]) -> Result<serde_json::Value, String> {
     let semantic_model_id = args.kind.semantic_model_id_with_options(
         format!("qwen38:{QWEN38_27B_FINGERPRINT}"),
         args.retain_gdn_input_gates,
-        args.no_clipping_scale,
+        true,
     );
     let mut effective_config = BTreeMap::from([
         (
@@ -153,12 +141,10 @@ fn run(args: Args, raw: &[String]) -> Result<serde_json::Value, String> {
     if args.retain_gdn_input_gates {
         effective_config.insert("coverage_mode".to_owned(), coverage.to_owned());
     }
-    if args.no_clipping_scale {
-        effective_config.insert(
-            "scale_mode".to_owned(),
-            QwenMxWeightActivationFormat::diagnostic_scale_name(true).to_owned(),
-        );
-    }
+    effective_config.insert(
+        "scale_mode".to_owned(),
+        QwenMxWeightActivationFormat::diagnostic_scale_name(true).to_owned(),
+    );
     let derived = DerivedGgufLock::new(
         semantic_model_id,
         vec![QWEN38_27B_FINGERPRINT.to_owned()],
@@ -197,7 +183,7 @@ fn run(args: Args, raw: &[String]) -> Result<serde_json::Value, String> {
         "model_fingerprint": QWEN38_27B_FINGERPRINT,
         "kind": args.kind.tensor_mode(),
         "coverage_mode": coverage,
-        "scale_mode": QwenMxWeightActivationFormat::diagnostic_scale_name(args.no_clipping_scale),
+        "scale_mode": QwenMxWeightActivationFormat::diagnostic_scale_name(true),
         "output": args.output,
         "derived_lock": args.derived_lock,
         "output_sha256": report.sha256,
@@ -248,25 +234,22 @@ mod tests {
     }
 
     #[test]
-    fn no_clipping_scale_is_explicit_and_composable_with_retention() {
+    fn no_clipping_scale_is_the_default_and_composable_with_retention() {
         let mut args = required_args("mxfp8");
-        args.extend([
-            "--mxfp8-no-clipping-scale".to_owned(),
-            "--retain-gdn-in-proj-a-b".to_owned(),
-        ]);
+        args.push("--retain-gdn-in-proj-a-b".to_owned());
         let parsed = parse_args(&args).expect("diagnostic flags parse");
-        assert!(parsed.no_clipping_scale);
         assert!(parsed.retain_gdn_input_gates);
     }
 
     #[test]
-    fn no_clipping_scale_is_rejected_for_mxfp6() {
+    fn removed_scale_switches_are_unknown_arguments() {
         let mut args = required_args("mxfp6");
-        args.push("--mxfp8-no-clipping-scale".to_owned());
-        let error = match parse_args(&args) {
-            Ok(_) => panic!("MXFP6 cannot use MXFP8 scale mode"),
-            Err(error) => error,
-        };
-        assert!(error.contains("requires --kind mxfp8"));
+        args.push("--mxfp6-no-clipping-scale".to_owned());
+        assert!(parse_args(&args).is_err());
+        for flag in ["--mxfp8-no-clipping-scale", "--legacy-floor-scale"] {
+            let mut args = required_args("mxfp8");
+            args.push(flag.to_owned());
+            assert!(parse_args(&args).is_err(), "removed flag {flag}");
+        }
     }
 }

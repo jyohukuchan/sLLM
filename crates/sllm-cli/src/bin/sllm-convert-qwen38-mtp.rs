@@ -30,6 +30,24 @@ fn main() -> ExitCode {
     }
 }
 
+fn parse_encoding(
+    value: &str,
+) -> Result<(Option<MtpWeightEncoding>, Option<MtpBf16RoundtripEncoding>), String> {
+    Ok(match value {
+        "mxfp8" | "mxfp8-w8a8-e4m3-block32-e8m0" => (
+            Some(MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale),
+            None,
+        ),
+        "mxfp6" | "mxfp6-w6a6-e3m2-block32-e8m0" => (
+            Some(MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale),
+            None,
+        ),
+        "bf16-roundtrip-mxfp8" => (None, Some(MtpBf16RoundtripEncoding::Mxfp8)),
+        "bf16-roundtrip-mxfp6" => (None, Some(MtpBf16RoundtripEncoding::Mxfp6)),
+        value => return Err(format!("unsupported --encoding value {value:?}")),
+    })
+}
+
 fn run(args: Vec<std::ffi::OsString>) -> Result<String, String> {
     let mut artifact_root = None;
     let mut encoding = None;
@@ -39,6 +57,9 @@ fn run(args: Vec<std::ffi::OsString>) -> Result<String, String> {
         let flag = args[index].to_str().ok_or("arguments must be UTF-8")?;
         if flag == "--help" || flag == "-h" {
             return Ok(USAGE.to_owned());
+        }
+        if !matches!(flag, "--artifact-root" | "--encoding" | "--output-dir") {
+            return Err(format!("unknown argument {flag}"));
         }
         let value = args
             .get(index + 1)
@@ -56,17 +77,7 @@ fn run(args: Vec<std::ffi::OsString>) -> Result<String, String> {
     if !artifact_root.is_absolute() || !output_dir.is_absolute() {
         return Err("artifact and output paths must be absolute".to_owned());
     }
-    let encoding = match encoding.ok_or("--encoding is required")? {
-        "mxfp8" | "mxfp8-w8a8-e4m3-block32-e8m0" => {
-            (Some(MtpWeightEncoding::Mxfp8W8A8Block32E8M0), None)
-        }
-        "mxfp6" | "mxfp6-w6a6-e3m2-block32-e8m0" => {
-            (Some(MtpWeightEncoding::Mxfp6W6A6Block32E8M0), None)
-        }
-        "bf16-roundtrip-mxfp8" => (None, Some(MtpBf16RoundtripEncoding::Mxfp8)),
-        "bf16-roundtrip-mxfp6" => (None, Some(MtpBf16RoundtripEncoding::Mxfp6)),
-        value => return Err(format!("unsupported --encoding value {value:?}")),
-    };
+    let encoding = parse_encoding(encoding.ok_or("--encoding is required")?)?;
     if output_dir.exists() {
         return Err("--output-dir already exists; choose a new directory".to_owned());
     }
@@ -96,4 +107,53 @@ fn run(args: Vec<std::ffi::OsString>) -> Result<String, String> {
         "files": ["manifest.json", "payload.safetensors"],
     })
     .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removed_scale_switches_are_unknown_arguments() {
+        for flag in [
+            "--legacy-floor-scale",
+            "--mxfp8-no-clipping-scale",
+            "--mxfp6-no-clipping-scale",
+        ] {
+            assert_eq!(
+                run(vec![flag.into()]).unwrap_err(),
+                format!("unknown argument {flag}")
+            );
+        }
+    }
+
+    #[test]
+    fn default_mx_recipes_stay_non_saturating() {
+        for value in ["mxfp8", "mxfp8-w8a8-e4m3-block32-e8m0"] {
+            assert!(matches!(
+                parse_encoding(value).unwrap(),
+                (
+                    Some(MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale),
+                    None
+                )
+            ));
+        }
+        for value in ["mxfp6", "mxfp6-w6a6-e3m2-block32-e8m0"] {
+            assert!(matches!(
+                parse_encoding(value).unwrap(),
+                (
+                    Some(MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale),
+                    None
+                )
+            ));
+        }
+        assert!(matches!(
+            parse_encoding("bf16-roundtrip-mxfp8").unwrap(),
+            (None, Some(MtpBf16RoundtripEncoding::Mxfp8))
+        ));
+        assert!(matches!(
+            parse_encoding("bf16-roundtrip-mxfp6").unwrap(),
+            (None, Some(MtpBf16RoundtripEncoding::Mxfp6))
+        ));
+    }
 }

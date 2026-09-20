@@ -282,22 +282,31 @@ fn encode_e2m1(value: f32) -> u8 {
     sign | code
 }
 
+/// Host reference for the activation block scale.
 fn quantize_activation_scales(values: &[u16], m: usize, k: usize, global: f32) -> Vec<f32> {
     let blocks_per_row = k.div_ceil(16);
     let mut scales = vec![0.0_f32; m * blocks_per_row];
     for row in 0..m {
         for block in 0..blocks_per_row {
             let start = block * 16;
-            let end = (start + 16).min(k);
-            let maximum = (start..end)
-                .map(|column| from_bf16(values[row * k + column]).abs())
+            let mut block_values = [0.0_f32; 16];
+            for (offset, slot) in block_values.iter_mut().enumerate() {
+                let column = start + offset;
+                if column < k {
+                    *slot = from_bf16(values[row * k + column]);
+                }
+            }
+            let maximum = block_values
+                .iter()
+                .map(|value| value.abs())
                 .fold(0.0_f32, f32::max);
-            let block_scale = e4m3(if maximum == 0.0 {
-                0
+            let raw_scale = if maximum != 0.0 && global > 0.0 {
+                maximum / (6.0 * global)
             } else {
-                encode_e4m3(maximum / (6.0 * global))
-            });
-            scales[row * blocks_per_row + block] = block_scale * global;
+                0.0
+            };
+            let nearest = encode_e4m3(raw_scale);
+            scales[row * blocks_per_row + block] = e4m3(nearest) * global;
         }
     }
     scales
