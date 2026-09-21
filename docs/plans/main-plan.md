@@ -572,7 +572,7 @@ Phase 79の共通化内容は[Phase 79計画](archive/2026/09/1-10/phase79-commo
 | 完了 | 84.5 | MTP接続・固定p/q・採否後の状態を限定照合。R9700のtarget差はattention演算順へ切り分け。本番既定は維持 |
 | 完了・実装検証済み | 85 | 共通MXFP8／MXFP6 kernelをscope限定採用。両GPUの広範shape、本体・KV・MTP、chunk末尾の効果と数値を確認。BF16 MTP既定を維持 |
 | 完了・既定採用せず | 86 | Qwen MTP catch-upを両GPU26条件で検証。期待p/q受理率では小さい正の効果があるが、分離catch-upは正味マイナスで既定不採用。ベンチマーク主指標を期待受理率へ切替 |
-| 段階5完了・段階6計測中 | 87 | Qwen3.8 NVFP4の計測・棚卸しとread帯域計測を完了。WU1でV620 attentionのGQA共有を採用（MTPなし+8.09%／あり+6.88%）。WU1.1で両GPUのlong contextへsplit128を採用（単体TPOT比1.85%／2.22%短縮）。WU-C1で不要な切替を削除し、N0とCI hash連鎖の整合を確認。WU2でR9700 FP8のM1 dot4 GEMVを採用（単体TPOT比6.40%、モデルMTPなし+9.40%／あり+1.50%）。段階5でwhole graphと非同期readbackを接続し、両GPUのN0・停止・境界・profileを確認。後続はMTP companionのNVFP4化とMXFP6比較、W×A16の廃止等 |
+| 段階6完了・段階7未着手 | 87 | Qwen3.8 NVFP4の計測・棚卸しとread帯域計測を完了。WU1でV620 attentionのGQA共有を採用（MTPなし+8.09%／あり+6.88%）。WU1.1で両GPUのlong contextへsplit128を採用（単体TPOT比1.85%／2.22%短縮）。WU-C1で不要な切替を削除し、N0とCI hash連鎖の整合を確認。WU2でR9700 FP8のM1 dot4 GEMVを採用（単体TPOT比6.40%、モデルMTPなし+9.40%／あり+1.50%）。段階5でwhole graphと非同期readbackを接続し、段階6でV620のNVFP4/FP8 M1 packを並列captureへ採用（MTPなし+4.1%）。次は段階7（活性値量子化のproducer融合）、続いてW×A16廃止、MTP companion形式、残るdecode最適化 |
 | 計画済み・繰下げ | 88 | NVFP4のGPUリクエストバッチ処理を最適化（旧87、さらに前は旧86） |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
@@ -696,10 +696,30 @@ Phase 76以降は、Qwen3.8 27B NVFP4を単一GPUで実用速度にすること�
   MTP有無で全体経路を分けず、V620 16.1868／30.1174、R9700 21.4909／35.6390 tok/sとなり、
   MTPなしの低下を解消してMTPありも改善した。[追加修正・検証](../history/2026/09/21-30/phase87-mtp-off-regression.md)。
   [Phase 87変更のCI整合も修復](../history/2026/09/21-30/phase87-ci-repair.md)し、local H0／H1／H2と
-  両targetのCI用直接compile/link・ELF検査がPASS。commit／pushと公開CIの再実行は未実施。
-  段階5でgraph間隔は0.03 ms/tokenまで減ったが、残る空白の大半はgraph内のkernel間dispatch固定費
-  （MTPなしでV620約8.0／R9700約6.6 ms/token、1,218 node/token）であり、host待ちではないと分かった。
-  次は段階6（独立nodeを並列枝として表し、この固定費を重ねる。効かなければkernel融合へ切替）。
+  両targetのCI用直接compile/link・ELF検査がPASS。実装・CI修正は`b261cd7a`へcommit済み。pushと公開CIの再実行は未実施。
+  [段階6](../history/2026/09/21-30/phase87-stage6.md)でV620のNVFP4 gate/up（M=1／3）だけを並列captureへ採用した。
+  同条件の通常decodeはMTPなし16.146946→16.708786、あり30.176041→30.695941 token/s（+3.48%／+1.72%）。
+  [追加のFP8再評価](../history/2026/09/21-30/phase87-fp8-fork-investigation.md)では、再現しない過去N0をユーザー判断で採否から除外し、
+  gfx1030のFP8 GDN M1だけを追加採用した。NVFP4-only比でMTPなし16.686732→16.813859 token/s（+0.76%）、
+  MTPありはM3経路を維持して30.719020→30.717491 token/sで同等。固定128位置のBF16比mean KLDは0.026571、変更前との差0。
+  別途観測したHIP graph signal停止はV620の既存classic scheduler設定で回避し、[software契約](../compatibility/software.md)へ反映した。
+  R9700は従来scheduler・直列依存を維持し、MTPなし21.4663／あり35.6270 token/s、全run token一致。
+  2026-09-22に残りの作業を整理し直した（[Phase 87計画の「今後の順序」](active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#今後の順序2026-09-22整理)）。
+  最大の塊はgraph内のkernel間dispatch固定費（MTPなしでV620約6.1／R9700約5.2 ms/token）であり、
+  graph化でも並列枝でも取り切れないため、次はnode数自体を減らす段階7（活性値量子化を前段producerへ融合）とする。
+  [vllm-mxfp4の分析](../history/2026/09/21-30/vllm-mxfp4-optimization-analysis.md)も同じ設計へ到達しており、
+  そこから採る候補はproducer融合とdual-output bundleに限る（形式・kernelの流用はしない）。
+  以降は段階4（W×A16廃止、受入条件1の未達項目）、段階3（MTP companion形式）、
+  段階2残り・段階1（V620 FP8約1.05、V620 NVFP4約0.83、R9700 NVFP4約1.41 ms/tokenの余地）、
+  段階8（dual-output bundle）、Phase 88の順とする。
+  [調査・再評価計画](archive/2026/09/21-30/phase87-fp8-fork-cause.md)は完了。過去N0の原因と新しい停止との同因性は断定しない。
+  [R9700のFP8単独評価](../history/2026/09/21-30/phase87-r9700-fp8-fork.md)も実施。
+  M1は通常約1.7%改善したが、実wholegraphの同一process AB/BAは−1.70〜+1.69%、中央値+0.73%で不安定。
+  M3はMTPあり−38.23%。全run N0、固定128位置のBF16比KLD 0.023446・差0だが、既定採用を見送りR9700直列を維持した。
+  [M3退行の原因調査](../history/2026/09/21-30/phase87-r9700-m3-cause.md)では、複数queue graph実行の同期・dispatchが主因と確認。
+  trace増分の約69%がGPU空白で、同じfork graphを1 queueに制限すると22.0052→35.6604 token/sへ回復した。
+  MTP受理率・replay数・出力は同じ。1 queueは並列実行もなくすため、本番は直列を維持した。
+  理想上限の半分に届かなかったため並列化の探索を終了した。kernel融合は後続候補とする。
   後続はNVFP4 W4A4とFP8 W8A8等のdecode最適化、MTP companionのNVFP4化とMXFP6比較、W×A16の廃止等。
   続いてPhase 88（NVFP4リクエストバッチ処理）。
   詳細と受入条件は[Phase 76〜88計画](active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)に従う。

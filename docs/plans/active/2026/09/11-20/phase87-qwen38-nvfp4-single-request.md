@@ -15,7 +15,7 @@
   WU1.1では新採用基準に基づき、両GPUのlong contextへsplit128を採用した。WU-C1で不要な切替を削除し、既定出力のN0を確認した。
   WU2でR9700 FP8 W8A8のM1へnative dot4 GEMVを採用した。後続は下記の作業単位を結果に基づいて具体化する。
   下記の段階番号の並びを優先順位とはしない。着手順は「作業単位」の節（WU0→WU1→WU1.1→WU-C1→WU2→WU-D1〜D3で完了）に従う。
-  D系統は2026-09-20に打ち切り、段階5は2026-09-21に完了（MTPなしの退行も解消）。段階6の現状再計測・構造分析・単体probeを実施中。
+  D系統は2026-09-20に打ち切り、段階5は2026-09-21に完了（MTPなしの退行も解消）。段階6は2026-09-21に完了。V620のNVFP4 gate/upだけを並列captureへ採用した。
 - GPU空白時間（2026-09-20のWU2後に再計測: 通常計測でMTPなしV620約4.9、R9700約3.0 ms/token、
   割合は7.8%／6.5%。[再計測](../../../../../history/2026/09/11-20/phase87-idle-recheck.md)）は、kernelごとの数µsの隙間と
   tokenごとのhost往復から成る。2026-09-19のユーザー決定で、decode 1段全体のHIP graph化と、
@@ -465,6 +465,19 @@ MTPありでは受理判定の読み戻しと、一部受理時のrestore＋repl
 
 ### 段階6: graph内の並列表現によるkernel間空白の削減（段階5の続き、2026-09-21追加）
 
+- **完了（2026-09-21）**。両GPU・MTP有無のDAG／critical pathと、96条件の単体probeを確認した。
+  exact gfx1030のNVFP4 gate/up（M=1／3、56組）だけをforkし、他の辺を保持する。
+  通常8192/128の1 warmup＋3 measuredで、V620はMTPなし16.146946→16.708786、
+  あり30.176041→30.695941 token/s（+3.48%／+1.72%）。通常とprofileのtoken列一致、独立oracle、
+  cleanup、async replay契約、CI hash連鎖を確認した。R9700は単体で退行するため直列のまま。
+  初回はFP8 GDNも含む候補をN0不一致で棄却したが、追加調査で再現せず、ユーザー判断でその結果を採否から除外した。
+  [再評価](../../../../../history/2026/09/21-30/phase87-fp8-fork-investigation.md)によりFP8 M1だけを追加採用。
+  単体全18roundで改善し、通常MTPなしはNVFP4-only比16.686732→16.813859 token/s（+0.76%）。
+  FP8 M3は退行roundがあり維持、MTPありは30.719020→30.717491 token/sで同等。
+  固定128位置のBF16比mean KLDは0.026571、変更前との差0。V620のHIP signal停止は既存classic設定で回避し、R9700は従来設定を維持する。
+  理想上限の半分へは届かず探索を終了し、単体の全roundで通常TPOT比1%以上を満たす対象だけを採用する。
+  詳細・失敗した試行・profiling回避設定は[段階6履歴](../../../../../history/2026/09/21-30/phase87-stage6.md)。
+
 段階5でhost往復は実質消えた（graph間隔0.03 ms/token）。しかし**graph内のkernel間の隙間が、以前「空白」と
 呼んでいた時間のほぼ全部を占める**ことが分かった。MTPなしでV620 7.978／R9700 6.623 ms/token（当時1,218 kernel node/token、
 1 nodeあたり5.4〜6.6 µs）で、profileの`idle_outside_hip_api`7.997／6.678とほぼ一致する。
@@ -506,6 +519,66 @@ MTPありでは受理判定の読み戻しと、一部受理時のrestore＋repl
   CI hash manifest、この計画。commit前に`validate_cpp.py --mode format`、`cargo fmt`、clippy、
   CI hash更新（`hip-runtime-compile`→`rmsnorm-h3`の連鎖が収束するまで）を必ず通す。
 
+## 今後の順序（2026-09-22整理）
+
+段階5・段階6と[vllm-mxfp4の分析](../../../../../history/2026/09/21-30/vllm-mxfp4-optimization-analysis.md)を踏まえ、
+残りの作業を効果の大きい順に並べ替える。基準は段階6採用後の通常計測
+（V620 16.8134／30.6959、R9700 21.4513／35.6294 tok/s。MTPなし／あり）とする。
+
+MTPなし1 tokenの残りの時間の内訳（段階6後のprofile、ms/token）は次のとおりで、
+**最大の塊はkernel間のdispatch固定費**である。段階6の並列枝はV620で約1.3 ms減らしたが上限には届かず、
+graph化でも取れないことは段階5で確認済みである。したがって次はnode数そのものを減らす。
+
+| 対象 | V620 | R9700 |
+| --- | ---: | ---: |
+| graph内のkernel間gap | 6.09 | 5.19 |
+| FP8行列積（WU0参照比の余地） | 25.0（1.05） | 18.5（WU2で大半を回収済み） |
+| NVFP4行列積（同） | 21.5（0.83） | 17.2（1.41） |
+| 活性値量子化＋RMSNorm等 | 約4.1 | 約3.1 |
+| full attention | 4.8 | 2.2 |
+
+### 順序と根拠
+
+1. **段階7: 活性値量子化を前段producerへ融合（最優先）**
+   - 1 tokenあたり量子化185回、RMSNorm・residual・SiLU等の軽いkernelも多数あり、
+     これらをproducerへ畳み込めばnodeとgapを同時に減らせる。1,170 nodeのうち削減余地が最も大きい。
+   - vllm-mxfp4も同じ結論に達しており、decodeの128箇所で2〜3 kernelを1個へ集約し、
+     producerが`(codes, scale)`をconsumerへ直接渡す契約にしている。相手の計測では量子化は
+     実処理2.2 µsに対しdispatch 4.7 µsで、dispatch側が支配的だった。
+   - sLLM側の上限は「削減できるnode数×1 nodeあたりのgap（V620約5.2／R9700約4.4 µs）＋量子化kernel自体の時間」。
+     着手時に対象families（FP8 per-row、NVFP4 block16＋tensor scale、MXFP8 KV前処理）ごとに上限を算出し、半分を打切り線とする。
+   - 数値はbit一致を目指しN0。NVFP4のtensor scaleはreduction契約を変えないことを先に確認する。
+   - 段階6のfork（V620のNVFP4 M1/M3、FP8 M1）を対照に含める。両者は別種の削減なので加算しない。
+2. **段階4: W×A16の廃止と契約の整理**
+   - 受入条件1が未達のまま残っている唯一の項目であり、性能作業と独立に完了できる。
+   - 段階0の棚卸しで対象と必要なscaleの有無は確定済み。lowpのMXFP4契約はW4A6へ書き換える。
+3. **段階3: MTP companionの形式（NVFP4 vs MXFP6）**
+   - READMEの方針決定に必要。5ポイント規則で採否を決める。
+   - vllm-mxfp4はdrafterをMXFP4にすると受理が2.5→2.21へ落ち、FP8 per-channelなら2.60〜2.80を維持したと記録している。
+     「低bit化で受理率が落ちると全体が遅くなる」という論点の先行事例として、評価時に参照する。
+4. **段階2の残り（V620のFP8 W8A8）と段階1（NVFP4 W4A4）**
+   - WU0再計測の余地はV620 FP8約1.05、V620 NVFP4約0.83、R9700 NVFP4約1.41 ms/token。
+   - 着手前に、vllm-mxfp4側の技法（weightのWMMA fragment順配置＋non-temporal load、LDS padding、
+     SGPRへのwave-uniform base address、小M用のTM=ceil(M/16)と深いsplit-K）とsLLM現行providerの差分を
+     読み取りだけで確認し、未実装のものだけを候補にする。相手の数値は倍率として転用しない。
+   - V620のNVFP4には[D系統](../../../../../history/2026/09/21-30/phase87-stage6.md)で打ち切った近傍依存（約1.9 ms/token）が残る。
+     再開条件は満たさないが、このstageの対照は実モデルの先行条件で取る。
+5. **段階8: gate/upとGDN qkv/zのdual-output bundle（段階7の後に判断）**
+   - vllm-mxfp4のGDN in_proj mergeは約2.9%。sLLMは最大104 pairが対象だが、量子化は既に共有しており、
+     V620は段階6で並列枝になっているため、同じ削減量は期待しない。
+   - 段階7でproducer融合が入るとpairの前後関係が変わるため、順序はこの後にする。
+     対照はV620が並列枝、R9700が直列枝。
+6. **Phase 88（リクエストバッチ処理）**
+   - prefill向けのA-tiled producer-consumerやKV容量設計（group size選択）は、ここで扱う。
+
+### 当面着手しないもの
+
+- MTP draft headの低bit化＋厳密rerank。段階3の結果とhead寄与のprofileが先。
+- GDNのconv＋recurrent追加融合（相手側の単独効果0.4〜0.8%で1%基準に届かない見込み）。
+- vllm-mxfp4由来のうち[分析](../../../../../history/2026/09/21-30/vllm-mxfp4-optimization-analysis.md)で
+  「適用しない」と整理した項目（MXFP4 W4A8形式、R4D attention、DFlash2、int2 target verify head、
+  lazy GDN snapshot、KV pin、ParoQuant、TP関連、sourceの直接流用）。
+
 ## 受入条件
 
 1. Qwen3.8 NVFP4の単一要求decodeで、NVFP4部分がW4A4、FP8部分がW8A8で動き、W×A16の経路がコードに残っていない。
@@ -540,3 +613,7 @@ WU1履歴: [MXFP8 E4 decode attentionのGQA共有](../../../../../history/2026/0
 WU1.1履歴: [split増の組合せと新基準での採否](../../../../../history/2026/09/11-20/phase87-wu1-1-attention.md)
 
 WU-C1履歴: [不要な切替と実験経路の削除](../../../../../history/2026/09/11-20/phase87-wu-c1-cleanup.md)
+
+段階6履歴: [graph内の並列枝と再計測](../../../../../history/2026/09/21-30/phase87-stage6.md)
+
+R9700 FP8単独追加評価: [不採用の測定根拠](../../../../../history/2026/09/21-30/phase87-r9700-fp8-fork.md)（出力一致、M1速度不安定・M3退行）。

@@ -168,7 +168,7 @@
       "native/lowp/src/nvfp4_prefill_wmma_compensated.inc",
       "native/lowp/src/nvfp4_small_m_vgpr_reuse.inc"
     ],
-    "source_set_sha256": "0f43d463a0362623eb626e9414cf1517e73b78c00b8604dbc6b8e0b8ebcbae3a",
+    "source_set_sha256": "99ba562da8e38593edfec66026dd28651f3db3ffdd36e942c5e8a73093de7d82",
     "files": [
       {
         "path": "include/sllm/hip.h",
@@ -496,7 +496,7 @@
       },
       {
         "path": "native/hip/src/qwen38_projection_pack_runtime.inc",
-        "sha256": "b15018a2326dd24836e8f033b5571621dfd07cd0103737f0ac614f29e32a14ca"
+        "sha256": "7cb87884b44959f815934e6f1fbf4552988af645fb26a4157ba554a1022b6180"
       },
       {
         "path": "native/hip/src/residual_rmsnorm_api.cpp",

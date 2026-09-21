@@ -111,6 +111,14 @@ _sllm_activate_rocm_main() {
         return 1
     fi
 
+    # The local HIP 7.14 build can underflow a forked gfx1030 graph signal.
+    # Apply its classic-scheduler workaround only for a declared gfx1030 target;
+    # gfx1201 retains its existing scheduler. Explicit overrides are preserved.
+    if [[ "${SLLM_HIP_TARGET:-${SLLM_PHASE78_TARGET:-}}" == gfx1030 &&
+          ! -v DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING ]]; then
+        export DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=0
+    fi
+
     printf 'ROCm %s activated from %s (LLVM %s)\n' \
         "$expected_rocm_version" "$canonical_root" "$expected_llvm_major"
 }

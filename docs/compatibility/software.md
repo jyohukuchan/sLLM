@@ -60,6 +60,30 @@ build 時に選んだ ROCm tree だけでなく、process 起動時に dynamic l
 
 初期バージョンでは、build に使った ROCm release と実際にロードした ROCm user-space release が一致しない場合は起動 error とする。driver と user-space の互換範囲を将来許容する場合も、AMD の互換性資料と実機検証に基づく別 tuple として明示し、黙って警告だけで続行しない。診断には build 側と runtime 側の release、path、検出方法を含める。
 
+### ローカル7.14のgfx1030 graph実行設定（2026-09-21）
+
+ローカルTheRock 7.14（rocm-systems
+`2b22ab0195cc1461cd9abf3b969e9dd7c10af350`）のV620で、分岐を持つwhole decode graphの
+完了signalが`-1`となり、`BARRIER_AND`が0を待ち続ける停止を実測した。
+実行中kernelがない状態でsignalだけを0へ戻すとqueueが解放された。
+launch間signal pool再利用との関連は強いが、underflowを生んだraceの細部と、
+先行するFP8 token不一致との同因性は未確定である。
+[該当HIP実装](https://github.com/ROCm/rocm-systems/blob/2b22ab0195cc1461cd9abf3b969e9dd7c10af350/projects/clr/hipamd/src/hip_graph_internal.cpp#L398)。
+
+この環境のgfx1030並列graphは、process起動前に既存HIP control
+`DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=0` を指定し、classic schedulerを使う。
+ROCm root、compiler、headers、ROCr、math librariesは交換しない。これはruntime更新や
+根因修正ではなく、問題のsegmented実行経路を外すworkaroundである。
+`activate-rocm.sh` は宣言済み `SLLM_HIP_TARGET`（未指定時は `SLLM_PHASE78_TARGET`）が
+`gfx1030` の場合だけ、未設定のHIP controlを0にする。
+`run_phase86_mtp_catch_up.py` もtarget別のdefaultを設定し、SLLM設定とruntime controlを実行記録へ残す。
+明示設定・以前のshellから継承された設定は保持するため、対象を切り替える場合は起動環境も確認する。
+
+R9700/gfx1201は従来のscheduler（値1）を維持する。classicへの切替だけで通常decodeが
+約1.5〜1.9%低下した対照結果があり、V620の回避設定を全targetへ一般化しない。
+詳細な停止状態、介入結果、速度・KLDの再評価は
+[Phase87 FP8調査履歴](../history/2026/09/21-30/phase87-fp8-fork-investigation.md)を参照する。
+
 ## Compatibility tuple
 
 互換性は Ubuntu、ROCm、GPU の独立した range ではなく、次の tuple を一単位として管理する。

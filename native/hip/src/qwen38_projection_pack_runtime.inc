@@ -2,6 +2,73 @@ namespace {
 
 using Qwen38ProjectionPackPlan = ElementwisePlan;
 
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+// Capture-only fork: both members consume the completed shared quantizer and
+// write disjoint outputs. Merge both frontiers before the queue can reuse the
+// activation workspace. This owns neither streams nor executable graphs.
+class ProjectionPackCaptureFork final {
+public:
+  ProjectionPackCaptureFork(Queue *queue, bool enabled) noexcept
+      : stream_(queue->stream),
+        enabled_(enabled && queue == graph_capture_queue &&
+                 whole_graph_capture_active()) {}
+
+  hipError_t begin() noexcept {
+    return enabled_ ? frontier(root_) : hipSuccess;
+  }
+
+  hipError_t member_complete(uint32_t index) noexcept {
+    if (!enabled_)
+      return hipSuccess;
+    if (index == 0U) {
+      const hipError_t status = frontier(first_);
+      if (status != hipSuccess)
+        return status;
+      return hipStreamUpdateCaptureDependencies(
+          stream_, root_.data(), root_.size(), hipStreamSetCaptureDependencies);
+    }
+    std::vector<hipGraphNode_t> joined;
+    const hipError_t status = frontier(joined);
+    if (status != hipSuccess)
+      return status;
+    try {
+      joined.insert(joined.end(), first_.begin(), first_.end());
+    } catch (...) {
+      return hipErrorOutOfMemory;
+    }
+    return hipStreamUpdateCaptureDependencies(
+        stream_, joined.data(), joined.size(), hipStreamSetCaptureDependencies);
+  }
+
+private:
+  hipError_t frontier(std::vector<hipGraphNode_t> &nodes) noexcept {
+    hipStreamCaptureStatus capture_status = hipStreamCaptureStatusNone;
+    unsigned long long capture_id = 0U;
+    hipGraph_t graph = nullptr;
+    const hipGraphNode_t *dependencies = nullptr;
+    size_t count = 0U;
+    const hipError_t status = hipStreamGetCaptureInfo_v2(
+        stream_, &capture_status, &capture_id, &graph, &dependencies, &count);
+    if (status != hipSuccess)
+      return status;
+    if (capture_status != hipStreamCaptureStatusActive || graph == nullptr ||
+        dependencies == nullptr || count == 0U)
+      return hipErrorInvalidValue;
+    try {
+      nodes.assign(dependencies, dependencies + count);
+    } catch (...) {
+      return hipErrorOutOfMemory;
+    }
+    return hipSuccess;
+  }
+
+  hipStream_t stream_;
+  bool enabled_;
+  std::vector<hipGraphNode_t> root_;
+  std::vector<hipGraphNode_t> first_;
+};
+#endif
+
 constexpr uint64_t kQwen38ProjectionPackM = UINT64_C(1);
 constexpr uint64_t kQwen38ProjectionPackSmallNvfp4MMin = UINT64_C(2);
 constexpr uint64_t kQwen38ProjectionPackSmallNvfp4MMax = UINT64_C(4);
@@ -109,12 +176,10 @@ uint32_t qwen38_projection_pack_compute_grid(
   // The native FP8 provider ID is owned by this runtime, not the lowp enum.
   if (variant == HostKernelVariant::Fp8Native ||
       variant == HostKernelVariant::Fp8OuterGfx1201Dot4) {
-    return n > static_cast<uint64_t>(UINT32_MAX)
-               ? 0U
-               : variant == HostKernelVariant::Fp8OuterGfx1201Dot4
-                     ? static_cast<uint32_t>((n + UINT64_C(7)) /
-                                             UINT64_C(8))
-                     : static_cast<uint32_t>(n);
+    return n > static_cast<uint64_t>(UINT32_MAX) ? 0U
+           : variant == HostKernelVariant::Fp8OuterGfx1201Dot4
+               ? static_cast<uint32_t>((n + UINT64_C(7)) / UINT64_C(8))
+               : static_cast<uint32_t>(n);
   }
   switch (variant) {
   case KernelVariant::Nvfp4W4A4DecodeWave4Column32:
@@ -909,8 +974,7 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
                   candidate->qwen38_projection_pack2_metadata[0].k);
           for (uint32_t index = 0U; index != 2U; ++index) {
             if (variants[index] ==
-                ::sllm_matmul_kernel::HostKernelVariant::
-                    Fp8OuterGfx1201Dot4) {
+                ::sllm_matmul_kernel::HostKernelVariant::Fp8OuterGfx1201Dot4) {
               continue;
             }
             const auto &member =
@@ -1325,6 +1389,15 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
         return reinterpret_cast<uint16_t *>(
             static_cast<uint8_t *>(buffer->device_pointer) + offset);
       };
+      // M=1 and M=3 use read-only prequantized activation/scales in each
+      // member. Larger variants may write shared reduction scratch and retain
+      // their ordered capture. The prepared pack rejects output/input overlap.
+      // gfx1030 improves for NVFP4 M=1/3 and FP8 M=1. FP8 M=3 has
+      // regressing measurement rounds; gfx1201 also retains serial
+      // dependencies.
+      ProjectionPackCaptureFork capture_fork(
+          queue, std::strcmp(arch_name, "gfx1030") == 0 &&
+                     (projection_m == 1U || (!fp8_gdn && projection_m == 3U)));
       if (fp8_gdn) {
         auto *const quantized_activation = workspace;
         auto *const activation_scales = reinterpret_cast<float *>(
@@ -1346,6 +1419,8 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
               quantized_activation, activation_scales, nullptr, queue->stream);
           launch_status = static_cast<hipError_t>(status);
         }
+        if (launch_status == hipSuccess)
+          launch_status = capture_fork.begin();
         for (uint32_t index = 0U; launch_status == hipSuccess && index != 2U;
              ++index) {
           const auto &member = plan->qwen38_projection_pack2_metadata[index];
@@ -1391,6 +1466,8 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
                 queue->stream);
             launch_status = static_cast<hipError_t>(status);
           }
+          if (launch_status == hipSuccess)
+            launch_status = capture_fork.member_complete(index);
         }
       } else {
         auto *const packed_activation = workspace;
@@ -1415,6 +1492,8 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
           launch_status = quantize_status == LOWP_SUCCESS
                               ? hipSuccess
                               : hipErrorInvalidValue;
+          if (launch_status == hipSuccess)
+            launch_status = capture_fork.begin();
           for (uint32_t index = 0U; launch_status == hipSuccess && index != 2U;
                ++index) {
             const auto &member = plan->qwen38_projection_pack2_metadata[index];
@@ -1445,6 +1524,8 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
                 &plan->qwen38_projection_pack2_lowp_plans[index], &buffers,
                 queue->stream);
             launch_status = static_cast<hipError_t>(status);
+            if (launch_status == hipSuccess)
+              launch_status = capture_fork.member_complete(index);
           }
         }
       }
@@ -1454,7 +1535,7 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
       if (launch_status != hipSuccess) {
         return cleanup_failed_submission(
             candidate, token, launch_status,
-            "Qwen3.8 projection-pack ordered kernel launch", queue, error_sink);
+            "Qwen3.8 projection-pack kernel capture/launch", queue, error_sink);
       }
       if (candidate->event != nullptr) {
         const hipError_t event_status =

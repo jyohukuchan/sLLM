@@ -20,6 +20,14 @@ import run_mtp_teacher_forced_r9700 as lease
 
 REPO = Path(__file__).resolve().parents[2]
 UUIDS = {"gfx1030": "GPU-76a08c022586fed6", "gfx1201": lease.UUID}
+RUNTIME_CONTROL_KEYS = (
+    "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING",
+    "DEBUG_HIP_FORCE_GRAPH_QUEUES",
+    "DEBUG_HIP_GRAPH_BATCH_SIZE",
+    "LD_PRELOAD",
+    "HSA_ENABLE_SDMA",
+    "ROCPROFILER_QUEUE_INTERPOSITION",
+)
 
 
 def digest(path: Path) -> str:
@@ -91,14 +99,21 @@ def main() -> int:
                      "SLLM_PHASE83_SAMPLING": "gpu-fixed", "SLLM_PHASE83_REPLAY": "0",
                      "SLLM_PHASE83_MTP": "on", "SLLM_PHASE83_MTP_WIDTH": "2",
                      "SLLM_PHASE83_STATE_CAPACITY": "10240"})
+        # Avoid the observed HIP 7.14 segmented-graph signal underflow.
+        # An explicit process-level override remains available for diagnostics.
+        base.setdefault("DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING",
+                        "0" if args.target == "gfx1030" else "1")
         for job in jobs:
             directory = output / job["name"]
             directory.mkdir()
             env = dict(base)
             env.update(job.get("env", {}))
             env["SLLM_PHASE85_A16_OUTPUT_DIR"] = str(directory)
-            item = {"name": job["name"], "started": time.time(), "env":
-                    {k: v for k, v in env.items() if k.startswith("SLLM_")}}
+            item = {"name": job["name"], "started": time.time(),
+                    "env": {k: v for k, v in env.items() if k.startswith("SLLM_")},
+                    "runtime_controls": {
+                        k: env[k] for k in RUNTIME_CONTROL_KEYS if k in env
+                    }}
             report["jobs"].append(item)
             with (directory / "report.json").open("w") as stdout, \
                     (directory / "stderr.log").open("w") as stderr:
