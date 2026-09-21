@@ -126,6 +126,26 @@
 - Tests should include non-aligned values and both sides of relevant boundaries,
   not only powers of two or a single convenient case.
 
+## Kernel implementation and fusion
+
+- Keep the arithmetic in shared `__device__` inline helpers, as
+  `native/lowp/include/lowp/detail/` already does. A fused kernel composes those
+  helpers instead of copying the math, so optimizing the arithmetic updates the
+  standalone and the fused path at once.
+- Develop and measure on the decomposed kernels. They remain the per-family
+  timing reference and the bitwise control, and other shapes keep using them.
+  Do not add a runtime switch to choose between fused and decomposed; probes and
+  tests call each directly.
+- Compile one representative fused variant at the start of the work unit and
+  record VGPR, LDS and occupancy. Fusion changes register pressure, so leaving
+  it entirely to the end can invalidate the tuning done on the decomposed path.
+- Fusion that removes an intermediate rounding step changes results. Build the
+  bit-identical variant first, rounding exactly where the decomposed path
+  rounds, and use it as the control. A variant that keeps higher precision by
+  dropping that rounding is a separate N1 candidate for the numerical ledger.
+- Gate fused variants on the exact shapes that are actually hot, the way the
+  existing exact-tuple providers do, so the number of variants stays bounded.
+
 ## GPU evidence and deployment
 
 - Before GPU or software compatibility work, read the relevant compatibility
