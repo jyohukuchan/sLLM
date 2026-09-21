@@ -622,6 +622,7 @@ Phase 76以降は、Qwen3.8 27B NVFP4を単一GPUで実用速度にすること�
 | 2026-09-18 | Qwen3.8-27B全語彙KLD | 初期8構成とKV・chunk・長文の40条件、64組のKLD比較を取得。非対応条件を区別し、NVFP4 E5はV620で取得。形式・GPU・実装の差を含む実測として記録 | [計画](archive/2026/09/11-20/qwen38-cross-engine-kld.md)、[履歴](../history/2026/09/11-20/qwen38-cross-engine-kld.md) |
 | 2026-09-18 | Qwen3.8 MXFP8とvLLM FP8のKLD差 | 主因はMXFP8の重み・活性値のE8M0 scale選択（最大値の指数切り捨て）による飽和。両方を飽和回避scaleにすると平均KLD 0.0459→0.0178（vLLM FP8 0.0145）。活性値側の寄与が大きい。既定は未変更で、診断opt-inだけを追加 | [計画](archive/2026/09/11-20/qwen38-mxfp8-vllm-fp8-attribution.md)、[履歴](../history/2026/09/11-20/qwen38-mxfp8-vllm-fp8-attribution.md) |
 | 2026-09-20 | vllm-mxfp4参照追加・実測 | R9700でAMD MXFP4＋FP8 activationを実行。既存2632位置のBF16比KLDは0.12529（BF16 KV）／0.13202（FP8 KV＋FP16 SSM）。速度・長文・比較条件は別記し、sLLM形式採用とは分離 | [履歴](../history/2026/09/11-20/vllm-mxfp4-investigation.md) |
+| 2026-09-21 | vllm-mxfp4の最適化分析 | 相手はMXFP4 W4A8＋FP8 WMMA前提で、NVFP4もload時にMXFP4へ再量子化して同じkernelへ載せる。sLLMへは形式・kernelを持ち込まず、activation量子化のproducer融合とdual-output bundleを候補として記録 | [履歴](../history/2026/09/21-30/vllm-mxfp4-optimization-analysis.md) |
 
 ### llama.cppとの機能差
 
