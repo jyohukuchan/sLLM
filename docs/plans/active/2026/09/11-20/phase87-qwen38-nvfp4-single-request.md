@@ -15,11 +15,13 @@
   WU1.1では新採用基準に基づき、両GPUのlong contextへsplit128を採用した。WU-C1で不要な切替を削除し、既定出力のN0を確認した。
   WU2でR9700 FP8 W8A8のM1へnative dot4 GEMVを採用した。後続は下記の作業単位を結果に基づいて具体化する。
   下記の段階番号の並びを優先順位とはしない。着手順は「作業単位」の節（WU0→WU1→WU1.1→WU-C1→WU2→WU-D1〜D3で完了）に従う。
-  D系統は2026-09-20に打ち切り、次は段階5（decode 1段のgraph化とサンプリング経路の通信削減）。
+  D系統は2026-09-20に打ち切り、段階5は2026-09-21に完了（MTPなしの退行も解消）。段階6の現状再計測・構造分析・単体probeを実施中。
 - GPU空白時間（2026-09-20のWU2後に再計測: 通常計測でMTPなしV620約4.9、R9700約3.0 ms/token、
   割合は7.8%／6.5%。[再計測](../../../../../history/2026/09/11-20/phase87-idle-recheck.md)）は、kernelごとの数µsの隙間と
   tokenごとのhost往復から成る。2026-09-19のユーザー決定で、decode 1段全体のHIP graph化と、
   MTPなし・ありのサンプリング経路のCPU-GPU間通信削減を段階5としてPhase 87に追加した。
+  段階5の結果、host往復は消えたが空白の大半はgraph内のkernel間dispatch固定費と判明したため、
+  独立nodeの並列表現を段階6として追加した（2026-09-21）。
 
 ## 方針の前提（2026-09-19ユーザー決定）
 
@@ -460,6 +462,49 @@ MTPありでは受理判定の読み戻しと、一部受理時のrestore＋repl
   状態へ公開しない。
 - 各作業単位で、profileのGPU空白時間（kernel間の隙間とtokenごとの往復を分けて）と、通常計測の
   decode tok/s（MTPなし・あり、両GPU）を段階0と同じ条件で記録する。
+
+### 段階6: graph内の並列表現によるkernel間空白の削減（段階5の続き、2026-09-21追加）
+
+段階5でhost往復は実質消えた（graph間隔0.03 ms/token）。しかし**graph内のkernel間の隙間が、以前「空白」と
+呼んでいた時間のほぼ全部を占める**ことが分かった。MTPなしでV620 7.978／R9700 6.623 ms/token（当時1,218 kernel node/token、
+1 nodeあたり5.4〜6.6 µs）で、profileの`idle_outside_hip_api`7.997／6.678とほぼ一致する。
+これはhostの遅延ではなくdispatchごとの固定費であり、graph化では取り除けない。
+残る手はnode数を減らす（融合）か、**独立nodeを並列な枝として表し、dispatchの固定費を重ねる**かである。
+本段階は後者を先に評価する。融合は変更が大きいので、並列化が効かない場合の後続候補とする。
+
+- 仮説: decode 1段のnodeの多くは依存していない（例: 同一層のq/k/v投影、MLPのgate/up、GDNのin_proj束、
+  KV書き込みとstage2、sampling末尾）。これらを直列の鎖ではなく並列枝としてgraphへ入れると、
+  command processorが次のdispatchを前のdrainと重ねられ、隙間の一部が隠れる。
+- 手順:
+  0. **現状の再計測と構造分析**: 段階5とMTPなし修正後の最終binaryで、kernel node数・隙間・
+     `intra_graph_gap`を両GPU・MTP有無で測り直す（MTPなしは状態選択48 nodeを除いた現行値を使う）。
+     capture済みgraphから依存DAGを作り、critical pathの合計kernel時間と、並列に置ける最大幅・
+     各枝の所要時間を出す。**改善の上限は「現在の合計時間 − critical pathの合計kernel時間 − critical path上の隙間」**として算出する。
+  1. **単体probeで並列枝の効果を確認**: 1本の鎖のN kernelと、K本の並列枝に分けた同じN kernelを
+     同一graphで比較し、1 kernelあたりの隙間がKでどう変わるかを両GPUで測る。
+     枝数、kernelの長さ（1／5／20 µs相当）、使用queue数を変えた表を作る。
+     ここで隙間が縮まなければ、この方式は成立しないので段階6を打ち切り、融合へ切り替える。
+  2. **decode graphの再構成**: 手順1で効果が出た構成に合わせ、capture時の依存関係を実際の
+     データ依存だけに絞り、独立nodeを別枝にする。対象候補は手順0のDAGから選び、最大3箇所に限る。
+  3. **計測**: 段階0と同じ条件（両GPU、MTPなし／あり、8192/128、1 warmup＋3 measured）と、
+     profileのkernel間隙間・intra_graph_gapを記録する。
+- 上限と打ち切り: 上限は手順0で算出する。打ち切り線はその半分とし、届かなければ理由を記録して段階6を終える。
+  採用は「進め方の原則」の採用基準（正しさ、N0／N1、通常TPOTの1%以上、他条件で退行しない）に従う。
+- 数値と正しさ:
+  - 並列化は独立kernelの実行順だけを変えるので、各kernelの入力・演算順は不変でN0を目指す。
+    依存を1つでも取り違えると競合で結果が変わるため、**依存関係の根拠を各枝について明記**し、
+    生成token列の一致と既存の独立oracleで確認する。
+  - 同じbufferを読む枝と書く枝の分離、KV／GDN状態の公開順、停止・破棄replayの扱いは段階5の契約を維持する。
+  - 非決定性（実行順による結果差）が出た場合は即座に候補を棄却する。
+- 制約:
+  - 新しい環境変数を追加しない。capture対象の適用条件（固定device sampling、eligibleなfresh request）は変えない。
+  - graphのinstantiate回数を増やさない。再生中の再instantiate・host確保は0を維持する。
+  - queue数を増やす場合は、既存のqueue所有・cleanup契約と公開C APIの制約に収める。
+- 変更してよいファイル: `native/hip/src/decode_graph_capture_internal.hpp`、`graph_span_runtime.inc`、
+  関連するnative runtime、`crates/sllm-core/src/decode_control.rs`／`decode_replay.rs`／capture系、
+  `crates/sllm-hip/src/graph_span.rs`、新規probeとtest、`docs/history/2026/09/21-30/`の新規履歴、
+  CI hash manifest、この計画。commit前に`validate_cpp.py --mode format`、`cargo fmt`、clippy、
+  CI hash更新（`hip-runtime-compile`→`rmsnorm-h3`の連鎖が収束するまで）を必ず通す。
 
 ## 受入条件
 
