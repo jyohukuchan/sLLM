@@ -513,7 +513,7 @@ enum PendingCleanup {
     GraphSpan {
         raw: Option<NonNull<sys::sllm_graph_span_t>>,
         queue: Queue,
-        owners: Vec<crate::GraphSpanPlan>,
+        owners: crate::graph_span::GraphSpanOwners,
         disposition: CleanupDisposition,
     },
     KvState {
@@ -620,12 +620,18 @@ struct CleanupRecord {
     cleanup: PendingCleanup,
 }
 
+// Cleanup records intentionally remain inline here.  They carry the owned
+// dependency graph needed by retry/quarantine, and boxing either variant
+// would complicate the no-drop cleanup handoff.  Keep the ownership shape and
+// opt out of layout-only clippy advice.
+#[allow(clippy::large_enum_variant)]
 enum CleanupAttempt {
     Complete,
     Retry(CleanupRecord),
 }
 
 impl CleanupRecord {
+    #[allow(clippy::result_large_err)]
     fn accepted(cleanup: PendingCleanup) -> Result<Self, PendingCleanup> {
         if checked_increment(&PENDING_CLEANUP_ITEMS, CleanupCasTarget::PendingIncrement).is_err() {
             record_cleanup_accounting_error();
@@ -650,6 +656,7 @@ impl CleanupOwner {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn push(&mut self, record: CleanupRecord) -> Result<(), CleanupRecord> {
         if record.cleanup.is_poisoned() || self.recoverable.try_reserve(1).is_err() {
             return Err(record);
@@ -1777,7 +1784,7 @@ pub(crate) fn release_graph_span_once(
 pub(crate) fn enqueue_graph_span_cleanup(
     raw: NonNull<sys::sllm_graph_span_t>,
     queue: Queue,
-    owners: Vec<crate::GraphSpanPlan>,
+    owners: crate::graph_span::GraphSpanOwners,
     status: RuntimeStatus,
 ) {
     let (_, disposition, _) = classify_release(status, Some(raw));
@@ -4092,6 +4099,27 @@ impl Completion {
                 "completion was already released",
             )
         })
+    }
+
+    pub(crate) fn transfer_to_graph(
+        &mut self,
+        graph: NonNull<sys::sllm_graph_span_t>,
+    ) -> Result<(), RuntimeError> {
+        let mut raw = self.raw_handle()?.as_ptr();
+        let mut buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut buffer);
+        let status = unsafe {
+            sys::sllm_graph_span_capture_marker(graph.as_ptr(), &mut raw, &mut error_sink)
+        };
+        self.raw = NonNull::new(raw);
+        ensure_ok(status, &buffer, error_sink.message_length)?;
+        if self.raw.is_some() {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InternalError,
+                "capture marker success did not consume its handle",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn opaque_token(&self) -> Result<u64, RuntimeError> {

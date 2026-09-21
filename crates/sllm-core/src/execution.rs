@@ -313,6 +313,51 @@ pub enum QueueCompletionMode {
     Deferred,
 }
 
+/// Backend-neutral command metadata for one device-controlled decode stage.
+/// The HIP adapter lowers this compact description to its private capture ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExecutionDecodeCommand {
+    pub opcode: u32,
+    pub phase_kind: u32,
+    pub phase_index: u32,
+    pub rows: u32,
+    pub input_kind: u32,
+    pub row_count: u32,
+    pub hidden_width: u32,
+    pub token_capacity: u32,
+    pub vocabulary_size: u32,
+    pub stop_count: u32,
+}
+
+impl ExecutionDecodeCommand {
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        opcode: u32,
+        phase_kind: u32,
+        phase_index: u32,
+        rows: u32,
+        input_kind: u32,
+        row_count: u32,
+        hidden_width: u32,
+        token_capacity: u32,
+        vocabulary_size: u32,
+        stop_count: u32,
+    ) -> Self {
+        Self {
+            opcode,
+            phase_kind,
+            phase_index,
+            rows,
+            input_kind,
+            row_count,
+            hidden_width,
+            token_capacity,
+            vocabulary_size,
+            stop_count,
+        }
+    }
+}
+
 /// Backend-neutral dispatch metadata returned only after a successful submit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DispatchEvidence {
@@ -564,6 +609,63 @@ impl AdapterResource {
     }
 }
 
+/// A backend-specific completion marker sink used only while a whole-decode
+/// graph is being captured. It is intentionally thread-affine: native graph
+/// capture state is tied to the creating thread.
+pub trait ExecutionCaptureMarker {
+    fn capture_completion(&mut self, completion: &mut dyn Any) -> Result<(), ExecutionError>;
+}
+
+/// Backend implementation of the thread-affine whole-decode capture guard.
+/// Only the finished graph and its retained device owners cross a thread
+/// boundary through an ordinary [`AdapterResource`].
+pub trait ExecutionWholeDecodeCaptureAdapter {
+    fn command(
+        &mut self,
+        access: &ExecutionAdapterAccess<'_>,
+        command: &ExecutionDecodeCommand,
+        bindings: [Option<&OwnedTensorBinding>; 4],
+    ) -> Result<(), ExecutionError>;
+
+    fn capture_completion(&mut self, completion: &mut dyn Any) -> Result<(), ExecutionError>;
+
+    fn bind_linear_state(
+        &mut self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &LinearAttentionState,
+        checkpoint_conv: Option<&OwnedTensorBinding>,
+        checkpoint_recurrent: Option<&OwnedTensorBinding>,
+        token_count: u32,
+        checkpoint_rows: u32,
+    ) -> Result<(), ExecutionError> {
+        let _ = (
+            access,
+            state,
+            checkpoint_conv,
+            checkpoint_recurrent,
+            token_count,
+            checkpoint_rows,
+        );
+        Err(ExecutionError::Unsupported {
+            reason: "whole-decode capture does not support linear-state binding".to_owned(),
+        })
+    }
+
+    fn select_linear_state(
+        &mut self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &LinearAttentionState,
+        token_count: u32,
+    ) -> Result<(), ExecutionError> {
+        let _ = (access, state, token_count);
+        Err(ExecutionError::Unsupported {
+            reason: "whole-decode capture does not support linear-state selection".to_owned(),
+        })
+    }
+
+    fn finish(self: Box<Self>) -> Result<(AdapterResource, u64, u64), ExecutionError>;
+}
+
 /// Backend implementation hook for an owned execution session.  It may only
 /// obtain its opaque resources through the checked downcast accessors on the
 /// session passed to each method.
@@ -741,6 +843,37 @@ pub trait ExecutionSessionAdapter: Send + Sync {
     ) -> Result<Box<dyn ExecutionSubmissionAdapter>, ExecutionError> {
         Err(ExecutionError::Unsupported {
             reason: "backend does not support graph replay".to_owned(),
+        })
+    }
+
+    /// Begins a thread-affine full-decode capture on a deferred queue. The
+    /// returned guard is deliberately not placed in [`AdapterResource`]
+    /// because it owns native thread-local capture state.
+    fn begin_whole_decode_capture(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _queue: &ExecutionQueue,
+        _control: &OwnedTensorBinding,
+    ) -> Result<Box<dyn ExecutionWholeDecodeCaptureAdapter>, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support whole-decode graph capture".to_owned(),
+        })
+    }
+
+    /// Publishes graph-owned state metadata only after the caller has
+    /// observed all replay completions. The adapter must downcast the
+    /// finished graph payload and keep this host-only transition separate from
+    /// capture-time native graph construction.
+    fn publish_graph_state_metadata(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _span: &ExecutionGraphSpan,
+        _expected_initial_position: u64,
+        _final_position: u64,
+        _successful_generations: u64,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support graph state metadata publication".to_owned(),
         })
     }
 
@@ -1160,6 +1293,15 @@ pub trait ExecutionSubmissionAdapter: Send {
     fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
         Ok(None)
     }
+
+    fn capture_marker(
+        &mut self,
+        _marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "submission does not support whole-decode capture markers".to_owned(),
+        })
+    }
     fn start_output_readback(
         &mut self,
         access: &ExecutionAdapterAccess<'_>,
@@ -1168,6 +1310,9 @@ pub trait ExecutionSubmissionAdapter: Send {
 }
 
 pub trait ExecutionQueueFenceAdapter: Send {
+    fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        self.wait(Duration::ZERO)
+    }
     fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
     fn token(&self) -> Result<u64, ExecutionError>;
 }
@@ -1176,6 +1321,15 @@ pub trait ExecutionQueueFenceAdapter: Send {
 pub trait ExecutionTransferAdapter: Send {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
     fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
+
+    fn capture_marker(
+        &mut self,
+        _marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "transfer does not support whole-decode capture markers".to_owned(),
+        })
+    }
 }
 
 /// Adapter-owned mutable D2H readback state.
@@ -1197,6 +1351,15 @@ pub trait ExecutionKvStateSubmissionAdapter: Send {
     ) -> Result<ExecutionState, ExecutionError> {
         Err(ExecutionError::Unsupported {
             reason: "backend does not support deferred KV completion finalization".to_owned(),
+        })
+    }
+
+    fn capture_marker(
+        &mut self,
+        _marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "KV submission does not support whole-decode capture markers".to_owned(),
         })
     }
 
@@ -1239,6 +1402,16 @@ pub trait ExecutionCausalAttentionSubmissionAdapter: Send {
                 .to_owned(),
         })
     }
+
+    fn capture_marker(
+        &mut self,
+        _marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "causal-attention submission does not support whole-decode capture markers"
+                .to_owned(),
+        })
+    }
     fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
         Ok(None)
     }
@@ -1260,6 +1433,16 @@ pub trait ExecutionMinistral3YarnSubmissionAdapter: Send {
                 .to_owned(),
         })
     }
+
+    fn capture_marker(
+        &mut self,
+        _marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "Ministral 3 YaRN submission does not support whole-decode capture markers"
+                .to_owned(),
+        })
+    }
     fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
         Ok(None)
     }
@@ -1276,6 +1459,16 @@ pub trait ExecutionLinearAttentionSubmissionAdapter: Send {
     ) -> Result<ExecutionState, ExecutionError> {
         Err(ExecutionError::Unsupported {
             reason: "backend does not support deferred linear-attention completion finalization"
+                .to_owned(),
+        })
+    }
+
+    fn capture_marker(
+        &mut self,
+        _marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "linear-attention submission does not support whole-decode capture markers"
                 .to_owned(),
         })
     }
@@ -2502,11 +2695,35 @@ impl ExecutionSession {
         bindings: LinearAttentionBindings,
         descriptor: LinearAttentionDescriptor,
     ) -> Result<LinearAttentionSubmission, ExecutionError> {
+        self.linear_attention_impl(state, queue, bindings, descriptor, false)
+    }
+
+    /// Capture-only linear-state admission. Runtime device control selects
+    /// the active prefix; the static maximum-row descriptor remains bounded
+    /// to one decode graph and may extend past the final logical capacity.
+    pub(crate) fn linear_attention_for_capture(
+        &self,
+        state: &LinearAttentionState,
+        queue: &ExecutionQueue,
+        bindings: LinearAttentionBindings,
+        descriptor: LinearAttentionDescriptor,
+    ) -> Result<LinearAttentionSubmission, ExecutionError> {
+        self.linear_attention_impl(state, queue, bindings, descriptor, true)
+    }
+
+    fn linear_attention_impl(
+        &self,
+        state: &LinearAttentionState,
+        queue: &ExecutionQueue,
+        bindings: LinearAttentionBindings,
+        descriptor: LinearAttentionDescriptor,
+        capture_projected: bool,
+    ) -> Result<LinearAttentionSubmission, ExecutionError> {
         self.ensure_open()?;
         self.ensure_linear_attention_state(state)?;
         self.ensure_queue(queue)?;
         validate_linear_attention_bindings(self, &bindings, descriptor, state.descriptor.layout())?;
-        if descriptor.expected_length() > state.capacity() {
+        if !capture_projected && descriptor.expected_length() > state.capacity() {
             return Err(ExecutionError::InvalidRange {
                 reason: "linear-attention transition exceeds state capacity".to_owned(),
             });
@@ -2532,7 +2749,16 @@ impl ExecutionSession {
                 return Err(error);
             }
         };
-        if snapshot.length() != descriptor.start_position() {
+        if capture_projected {
+            if let Err(error) = validate_capture_projected_length(
+                snapshot.length(),
+                descriptor.start_position(),
+                descriptor.token_count(),
+            ) {
+                state.execution_in_flight.store(false, Ordering::Release);
+                return Err(error);
+            }
+        } else if snapshot.length() != descriptor.start_position() {
             state.execution_in_flight.store(false, Ordering::Release);
             return Err(ExecutionError::StaleLinearAttentionLength {
                 expected: descriptor.start_position(),
@@ -2578,6 +2804,51 @@ impl ExecutionSession {
         expected_length: u64,
         start_position: u64,
     ) -> Result<KvStateAppendSubmission, ExecutionError> {
+        self.append_kv_state_impl(
+            state,
+            queue,
+            key,
+            value,
+            expected_length,
+            start_position,
+            false,
+        )
+    }
+
+    /// Capture-only KV append admission. The backend native capture path owns
+    /// the device-side projected publication; core only permits a bounded
+    /// projected start relative to the still-published snapshot.
+    pub(crate) fn append_kv_state_for_capture(
+        &self,
+        state: &KvState,
+        queue: &ExecutionQueue,
+        key: OwnedTensorBinding,
+        value: OwnedTensorBinding,
+        expected_length: u64,
+        start_position: u64,
+    ) -> Result<KvStateAppendSubmission, ExecutionError> {
+        self.append_kv_state_impl(
+            state,
+            queue,
+            key,
+            value,
+            expected_length,
+            start_position,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_kv_state_impl(
+        &self,
+        state: &KvState,
+        queue: &ExecutionQueue,
+        key: OwnedTensorBinding,
+        value: OwnedTensorBinding,
+        expected_length: u64,
+        start_position: u64,
+        capture_projected: bool,
+    ) -> Result<KvStateAppendSubmission, ExecutionError> {
         self.ensure_open()?;
         self.ensure_kv_state(state)?;
         self.ensure_queue(queue)?;
@@ -2594,7 +2865,7 @@ impl ExecutionSession {
                 reason: "KV append end position overflowed u64".to_owned(),
             }
         })?;
-        if end_position > state.descriptor.capacity() {
+        if !capture_projected && end_position > state.descriptor.capacity() {
             return Err(ExecutionError::InvalidRange {
                 reason: "KV append exceeds state capacity".to_owned(),
             });
@@ -2622,7 +2893,15 @@ impl ExecutionSession {
                 return Err(error);
             }
         };
-        if snapshot.length() != expected_length {
+        if capture_projected {
+            if let Err(error) =
+                validate_capture_projected_length(snapshot.length(), start_position, token_count)
+            {
+                state.append_in_flight.store(false, Ordering::Release);
+                return Err(error);
+            }
+        }
+        if !capture_projected && snapshot.length() != expected_length {
             state.append_in_flight.store(false, Ordering::Release);
             return Err(ExecutionError::StaleKvLength {
                 expected: expected_length,
@@ -2676,6 +2955,33 @@ impl ExecutionSession {
         output: OwnedTensorBinding,
         descriptor: CausalAttentionDescriptor,
     ) -> Result<CausalAttentionSubmission, ExecutionError> {
+        self.causal_attention_impl(state, queue, query, output, descriptor, false)
+    }
+
+    /// Capture-only causal attention admission. The native graph controls the
+    /// projected KV publication; core permits only a bounded projected end
+    /// relative to the still-published state snapshot.
+    pub(crate) fn causal_attention_for_capture(
+        &self,
+        state: &KvState,
+        queue: &ExecutionQueue,
+        query: OwnedTensorBinding,
+        output: OwnedTensorBinding,
+        descriptor: CausalAttentionDescriptor,
+    ) -> Result<CausalAttentionSubmission, ExecutionError> {
+        self.causal_attention_impl(state, queue, query, output, descriptor, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn causal_attention_impl(
+        &self,
+        state: &KvState,
+        queue: &ExecutionQueue,
+        query: OwnedTensorBinding,
+        output: OwnedTensorBinding,
+        descriptor: CausalAttentionDescriptor,
+        capture_projected: bool,
+    ) -> Result<CausalAttentionSubmission, ExecutionError> {
         self.ensure_open()?;
         self.ensure_kv_state(state)?;
         self.ensure_queue(queue)?;
@@ -2686,9 +2992,14 @@ impl ExecutionSession {
             descriptor,
             state.descriptor.layout(),
         )?;
-        if descriptor.expected_kv_length() > state.capacity() {
+        if !capture_projected && descriptor.expected_kv_length() > state.capacity() {
             return Err(ExecutionError::InvalidRange {
                 reason: "causal attention snapshot length exceeds KV capacity".to_owned(),
+            });
+        }
+        if capture_projected && descriptor.query_count() > 9 {
+            return Err(ExecutionError::InvalidRange {
+                reason: "capture causal attention permits at most nine query rows".to_owned(),
             });
         }
         {
@@ -2712,7 +3023,17 @@ impl ExecutionSession {
                 return Err(error);
             }
         };
-        if snapshot.length() != descriptor.expected_kv_length() {
+        if capture_projected {
+            if let Err(error) = validate_capture_projected_length(
+                snapshot.length(),
+                descriptor.start_position(),
+                descriptor.query_count(),
+            ) {
+                state.attention_in_flight.store(false, Ordering::Release);
+                return Err(error);
+            }
+        }
+        if !capture_projected && snapshot.length() != descriptor.expected_kv_length() {
             state.attention_in_flight.store(false, Ordering::Release);
             return Err(ExecutionError::StaleKvLength {
                 expected: descriptor.expected_kv_length(),
@@ -2954,6 +3275,8 @@ impl ExecutionSession {
         for operation in operations {
             self.ensure_prepared(operation)?;
         }
+        let (provider_dispatch_count, provider_kernel_dispatch_count) =
+            dispatch_totals(logical_dispatches)?;
         let (resource, native_kernel_nodes) = self.state.adapter.create_graph_span(
             &ExecutionAdapterAccess { session: self },
             queue,
@@ -2972,8 +3295,65 @@ impl ExecutionSession {
                 state: Arc::clone(&self.state),
                 logical_dispatches: logical_dispatches.to_vec(),
                 native_kernel_nodes,
+                native_node_count: native_kernel_nodes,
+                captured_owners: Mutex::new(Vec::new()),
+                provider_dispatch_count,
+                provider_kernel_dispatch_count,
             }),
         })
+    }
+
+    pub fn begin_whole_decode_capture(
+        &self,
+        queue: &ExecutionQueue,
+        control: &OwnedTensorBinding,
+    ) -> Result<ExecutionWholeDecodeCapture, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_queue(queue)?;
+        self.ensure_buffer(control.buffer())?;
+        let adapter = self.state.adapter.begin_whole_decode_capture(
+            &ExecutionAdapterAccess { session: self },
+            queue,
+            control,
+        )?;
+        let owners = vec![Box::new(control.clone()) as Box<dyn ExecutionCaptureOwner>];
+        Ok(ExecutionWholeDecodeCapture {
+            adapter: Some(adapter),
+            state: Arc::clone(&self.state),
+            queue: queue.clone(),
+            owners,
+            captured_semantics: Vec::new(),
+            captured_provider_dispatch_count: 0,
+            captured_provider_kernel_dispatch_count: 0,
+            _thread: std::marker::PhantomData,
+        })
+    }
+
+    /// Publishes state metadata for a finished graph after its replay
+    /// completions have drained. This cannot be called on the capture guard,
+    /// which is intentionally consumed by graph finalization.
+    pub fn publish_graph_state_metadata(
+        &self,
+        span: &ExecutionGraphSpan,
+        expected_initial_position: u64,
+        final_position: u64,
+        successful_generations: u64,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        ensure_identity(
+            self.backend_name(),
+            self.id(),
+            span.inner.state.backend,
+            span.inner.state.id,
+        )?;
+        self.ensure_queue(&span.inner.queue)?;
+        self.state.adapter.publish_graph_state_metadata(
+            &ExecutionAdapterAccess { session: self },
+            span,
+            expected_initial_position,
+            final_position,
+            successful_generations,
+        )
     }
 
     pub fn submit_graph_span(
@@ -2988,15 +3368,29 @@ impl ExecutionSession {
             span.inner.state.id,
         )?;
         self.ensure_queue(&span.inner.queue)?;
+        let prepared = span.inner.operations.first().cloned().ok_or_else(|| {
+            ExecutionError::InvalidRequest {
+                reason: "graph span has no semantic operation for a replay submission".to_owned(),
+            }
+        })?;
+        let dispatch = span
+            .inner
+            .logical_dispatches
+            .first()
+            .map(|(_, evidence)| evidence.clone())
+            .ok_or_else(|| ExecutionError::InvalidRequest {
+                reason: "graph span has no eager dispatch evidence for a replay submission"
+                    .to_owned(),
+            })?;
         let inner = self
             .state
             .adapter
             .submit_graph_span(&ExecutionAdapterAccess { session: self }, span)?;
         Ok(Submission {
             state: Arc::clone(&self.state),
-            prepared: span.inner.operations[0].clone(),
+            prepared,
             queue: span.inner.queue.clone(),
-            dispatch: span.inner.logical_dispatches[0].1.clone(),
+            dispatch,
             graph_span: Some(span.clone()),
             completion_state: ExecutionState::Pending,
             inner,
@@ -3525,6 +3919,12 @@ impl fmt::Debug for ExecutionQueueFence {
 }
 
 impl ExecutionQueueFence {
+    pub fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        let state = self.inner.query()?;
+        self.completion_state = state;
+        Ok(state)
+    }
+
     pub fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
         let state = self.inner.wait(timeout)?;
         self.completion_state = state;
@@ -3774,6 +4174,26 @@ impl LinearAttentionSubmission {
         self.completion_state
     }
 
+    pub(crate) fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        let result = self
+            .inner
+            .as_mut()
+            .expect("linear-attention submission adapter remains owned until drop")
+            .capture_marker(marker);
+        if result.is_ok() {
+            // Marker transfer does not mean GPU success. It only moves native
+            // lifetime ownership into the graph, so admit the next state
+            // transition while retaining this wrapper until graph release.
+            self.state
+                .execution_in_flight
+                .store(false, Ordering::Release);
+        }
+        result
+    }
+
     pub fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         let Some(inner) = self.inner.as_mut() else {
             return Ok(self.completion_state);
@@ -3881,6 +4301,21 @@ impl KvStateAppendSubmission {
 
     pub const fn completion_state(&self) -> ExecutionState {
         self.completion_state
+    }
+
+    pub(crate) fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        let result = self
+            .inner
+            .as_mut()
+            .expect("KV submission adapter remains owned until drop")
+            .capture_marker(marker);
+        if result.is_ok() {
+            self.state.append_in_flight.store(false, Ordering::Release);
+        }
+        result
     }
 
     pub fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
@@ -3992,6 +4427,21 @@ impl CausalAttentionSubmission {
 
     pub const fn completion_state(&self) -> ExecutionState {
         self.completion_state
+    }
+
+    pub(crate) fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        let result = self
+            .inner
+            .as_mut()
+            .expect("attention submission adapter remains owned until drop")
+            .capture_marker(marker);
+        if result.is_ok() {
+            self.attention_in_flight.store(false, Ordering::Release);
+        }
+        result
     }
 
     pub fn dispatch(&self) -> &DispatchEvidence {
@@ -4632,6 +5082,34 @@ fn validate_nonoverlap(
 
 fn intervals_overlap(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> bool {
     left_start < right_end && right_start < left_end
+}
+
+fn validate_capture_projected_length(
+    published_length: u64,
+    projected_start: u64,
+    token_rows: u64,
+) -> Result<(), ExecutionError> {
+    if token_rows == 0 || token_rows > 9 {
+        return Err(ExecutionError::InvalidRange {
+            reason: "capture state transition permits one through nine token rows".to_owned(),
+        });
+    }
+    let projected_end =
+        projected_start
+            .checked_add(token_rows)
+            .ok_or_else(|| ExecutionError::InvalidRange {
+                reason: "capture projected state end position overflowed".to_owned(),
+            })?;
+    if projected_start < published_length
+        || projected_start - published_length > 8
+        || projected_end - published_length > 9
+    {
+        return Err(ExecutionError::StaleKvLength {
+            expected: projected_start,
+            actual: published_length,
+        });
+    }
+    Ok(())
 }
 
 fn buffer_ranges_overlap(left: &BufferRange, right: &BufferRange) -> bool {
@@ -5300,6 +5778,25 @@ pub struct ExecutionGraphSpan {
     inner: Arc<ExecutionGraphSpanInner>,
 }
 
+fn dispatch_totals(
+    logical_dispatches: &[(String, DispatchEvidence)],
+) -> Result<(u64, u64), ExecutionError> {
+    let dispatch_count =
+        u64::try_from(logical_dispatches.len()).map_err(|_| ExecutionError::InvalidRequest {
+            reason: "graph logical dispatch count does not fit u64".to_owned(),
+        })?;
+    let kernel_count = logical_dispatches
+        .iter()
+        .try_fold(0_u64, |total, (_, evidence)| {
+            total
+                .checked_add(u64::from(evidence.dispatch_count))
+                .ok_or_else(|| ExecutionError::InvalidRequest {
+                    reason: "graph logical kernel dispatch count overflowed".to_owned(),
+                })
+        })?;
+    Ok((dispatch_count, kernel_count))
+}
+
 struct ExecutionGraphSpanInner {
     payload: Arc<dyn Any + Send + Sync>,
     operations: Vec<PreparedOperation>,
@@ -5307,6 +5804,14 @@ struct ExecutionGraphSpanInner {
     state: Arc<ExecutionSessionState>,
     logical_dispatches: Vec<(String, DispatchEvidence)>,
     native_kernel_nodes: u64,
+    native_node_count: u64,
+    // The owners are retained for the full native graph lifetime.  The mutex
+    // is intentionally write-only at this layer: dropping the graph span
+    // drops the native resource and these owners together.
+    #[allow(dead_code)]
+    captured_owners: Mutex<Vec<Box<dyn ExecutionCaptureOwner>>>,
+    provider_dispatch_count: u64,
+    provider_kernel_dispatch_count: u64,
 }
 
 impl ExecutionGraphSpan {
@@ -5319,6 +5824,30 @@ impl ExecutionGraphSpan {
     pub fn native_kernel_nodes(&self) -> u64 {
         self.inner.native_kernel_nodes
     }
+
+    pub fn native_node_count(&self) -> u64 {
+        self.inner.native_node_count
+    }
+
+    pub fn logical_dispatch_count(&self) -> u64 {
+        self.inner.logical_dispatches.len() as u64
+    }
+
+    pub fn logical_kernel_dispatch_count(&self) -> u64 {
+        self.inner
+            .logical_dispatches
+            .iter()
+            .map(|(_, evidence)| u64::from(evidence.dispatch_count))
+            .sum()
+    }
+
+    pub fn provider_dispatch_count(&self) -> u64 {
+        self.inner.provider_dispatch_count
+    }
+
+    pub fn provider_kernel_dispatch_count(&self) -> u64 {
+        self.inner.provider_kernel_dispatch_count
+    }
 }
 
 impl fmt::Debug for ExecutionGraphSpan {
@@ -5329,6 +5858,234 @@ impl fmt::Debug for ExecutionGraphSpan {
             .field("native_kernel_nodes", &self.inner.native_kernel_nodes)
             .field("queue", &self.inner.queue)
             .finish_non_exhaustive()
+    }
+}
+
+pub(crate) trait ExecutionCaptureOwner: Send {}
+
+impl<T: Send + 'static> ExecutionCaptureOwner for T {}
+
+pub struct ExecutionWholeDecodeCapture {
+    // Keep the adapter before owners so native abort runs while provider
+    // completions and bound buffers are still alive.
+    adapter: Option<Box<dyn ExecutionWholeDecodeCaptureAdapter>>,
+    state: Arc<ExecutionSessionState>,
+    queue: ExecutionQueue,
+    owners: Vec<Box<dyn ExecutionCaptureOwner>>,
+    captured_semantics: Vec<(String, PreparedOperation, DispatchEvidence)>,
+    captured_provider_dispatch_count: u64,
+    captured_provider_kernel_dispatch_count: u64,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ExecutionCaptureMarker for ExecutionWholeDecodeCapture {
+    fn capture_completion(&mut self, completion: &mut dyn Any) -> Result<(), ExecutionError> {
+        self.adapter
+            .as_mut()
+            .ok_or_else(|| ExecutionError::InvalidRequest {
+                reason: "whole-decode capture is already finished".to_owned(),
+            })?
+            .capture_completion(completion)
+    }
+}
+
+impl ExecutionWholeDecodeCapture {
+    pub fn command(
+        &mut self,
+        command: &ExecutionDecodeCommand,
+        bindings: [Option<&OwnedTensorBinding>; 4],
+    ) -> Result<(), ExecutionError> {
+        for binding in bindings.iter().flatten() {
+            self.owners.push(Box::new((*binding).clone()));
+        }
+        let session = ExecutionSession {
+            state: Arc::clone(&self.state),
+        };
+        self.adapter
+            .as_mut()
+            .ok_or_else(|| ExecutionError::InvalidRequest {
+                reason: "whole-decode capture is already finished".to_owned(),
+            })?
+            .command(
+                &ExecutionAdapterAccess { session: &session },
+                command,
+                bindings,
+            )
+    }
+
+    pub fn bind_linear_state(
+        &mut self,
+        state: &LinearAttentionState,
+        checkpoint_conv: Option<&OwnedTensorBinding>,
+        checkpoint_recurrent: Option<&OwnedTensorBinding>,
+        token_count: u32,
+        checkpoint_rows: u32,
+    ) -> Result<(), ExecutionError> {
+        // The backend graph pins native state/buffer dependencies, while the
+        // core graph also keeps the opaque state and binding wrappers alive
+        // until native graph release.
+        self.owners.push(Box::new(state.clone()));
+        if let Some(binding) = checkpoint_conv {
+            self.owners.push(Box::new(binding.clone()));
+        }
+        if let Some(binding) = checkpoint_recurrent {
+            self.owners.push(Box::new(binding.clone()));
+        }
+        let session = ExecutionSession {
+            state: Arc::clone(&self.state),
+        };
+        self.adapter
+            .as_mut()
+            .ok_or_else(|| ExecutionError::InvalidRequest {
+                reason: "whole-decode capture is already finished".to_owned(),
+            })?
+            .bind_linear_state(
+                &ExecutionAdapterAccess { session: &session },
+                state,
+                checkpoint_conv,
+                checkpoint_recurrent,
+                token_count,
+                checkpoint_rows,
+            )
+    }
+
+    pub fn select_linear_state(
+        &mut self,
+        state: &LinearAttentionState,
+        token_count: u32,
+    ) -> Result<(), ExecutionError> {
+        self.owners.push(Box::new(state.clone()));
+        let session = ExecutionSession {
+            state: Arc::clone(&self.state),
+        };
+        self.adapter
+            .as_mut()
+            .ok_or_else(|| ExecutionError::InvalidRequest {
+                reason: "whole-decode capture is already finished".to_owned(),
+            })?
+            .select_linear_state(
+                &ExecutionAdapterAccess { session: &session },
+                state,
+                token_count,
+            )
+    }
+
+    pub(crate) fn record_submission(
+        &mut self,
+        label: impl Into<String>,
+        prepared: PreparedOperation,
+        dispatch: DispatchEvidence,
+    ) {
+        self.captured_semantics
+            .push((label.into(), prepared, dispatch));
+    }
+
+    pub(crate) fn record_provider_dispatch(
+        &mut self,
+        evidence: &DispatchEvidence,
+    ) -> Result<(), ExecutionError> {
+        self.captured_provider_dispatch_count = self
+            .captured_provider_dispatch_count
+            .checked_add(1)
+            .ok_or_else(|| ExecutionError::InvalidRequest {
+                reason: "captured provider dispatch count overflowed".to_owned(),
+            })?;
+        self.captured_provider_kernel_dispatch_count = self
+            .captured_provider_kernel_dispatch_count
+            .checked_add(u64::from(evidence.dispatch_count))
+            .ok_or_else(|| ExecutionError::InvalidRequest {
+                reason: "captured provider kernel dispatch count overflowed".to_owned(),
+            })?;
+        Ok(())
+    }
+
+    pub fn captured_semantics(&self) -> &[(String, PreparedOperation, DispatchEvidence)] {
+        &self.captured_semantics
+    }
+
+    pub fn retain_submission(&mut self, submission: Submission) -> Result<(), ExecutionError> {
+        self.retain_submission_named("capture.semantic", submission)
+    }
+
+    pub(crate) fn retain_submission_named(
+        &mut self,
+        label: impl Into<String>,
+        mut submission: Submission,
+    ) -> Result<(), ExecutionError> {
+        let (_, dispatch) = submission.capture_metadata();
+        self.record_provider_dispatch(&dispatch)?;
+        self.record_submission(
+            label,
+            submission.prepared.clone(),
+            submission.dispatch.clone(),
+        );
+        submission.capture_marker(self)?;
+        self.owners.push(Box::new(submission));
+        Ok(())
+    }
+
+    pub(crate) fn retain_owner(&mut self, owner: Box<dyn ExecutionCaptureOwner>) {
+        self.owners.push(owner);
+    }
+
+    pub fn finish(
+        mut self,
+        operations: &[PreparedOperation],
+        logical_dispatches: &[(String, DispatchEvidence)],
+    ) -> Result<ExecutionGraphSpan, ExecutionError> {
+        if operations.is_empty() || operations.len() != logical_dispatches.len() {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "whole-decode capture requires one or more semantic operations and matching eager evidence".to_owned(),
+            });
+        }
+        for operation in operations {
+            ensure_identity(
+                self.state.backend,
+                self.state.id,
+                operation.state.backend,
+                operation.state.id,
+            )?;
+        }
+        let adapter = self
+            .adapter
+            .take()
+            .ok_or_else(|| ExecutionError::InvalidRequest {
+                reason: "whole-decode capture is already finished".to_owned(),
+            })?;
+        let (resource, native_node_count, native_kernel_nodes) = adapter.finish()?;
+        if native_kernel_nodes == 0 {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "whole-decode capture contains no native kernel nodes".to_owned(),
+            });
+        }
+        Ok(ExecutionGraphSpan {
+            inner: Arc::new(ExecutionGraphSpanInner {
+                payload: resource.payload,
+                operations: operations.to_vec(),
+                queue: self.queue,
+                state: self.state,
+                logical_dispatches: logical_dispatches.to_vec(),
+                native_kernel_nodes,
+                native_node_count,
+                captured_owners: Mutex::new(self.owners),
+                provider_dispatch_count: self.captured_provider_dispatch_count,
+                provider_kernel_dispatch_count: self.captured_provider_kernel_dispatch_count,
+            }),
+        })
+    }
+
+    pub fn finish_captured(self) -> Result<ExecutionGraphSpan, ExecutionError> {
+        let operations = self
+            .captured_semantics
+            .iter()
+            .map(|(_, operation, _)| operation.clone())
+            .collect::<Vec<_>>();
+        let logical_dispatches = self
+            .captured_semantics
+            .iter()
+            .map(|(label, _, dispatch)| (label.clone(), dispatch.clone()))
+            .collect::<Vec<_>>();
+        self.finish(&operations, &logical_dispatches)
     }
 }
 
@@ -5369,6 +6126,17 @@ impl Submission {
 
     pub const fn state(&self) -> ExecutionState {
         self.completion_state
+    }
+
+    pub(crate) fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        self.inner.capture_marker(marker)
+    }
+
+    pub(crate) fn capture_metadata(&self) -> (PreparedOperation, DispatchEvidence) {
+        (self.prepared.clone(), self.dispatch.clone())
     }
 
     pub fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
@@ -5498,6 +6266,13 @@ impl DeviceCopy {
         self.audit
     }
 
+    pub(crate) fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        self.inner.capture_marker(marker)
+    }
+
     pub fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         let state = self.inner.query()?;
         self.completion_state = state;
@@ -5527,6 +6302,17 @@ impl fmt::Debug for Transfer {
 impl Transfer {
     pub const fn state(&self) -> ExecutionState {
         self.completion_state
+    }
+
+    // Transfers are not currently admitted to whole-decode capture, but keep
+    // this hook alongside DeviceCopy for the adapter contract and future
+    // capture paths.
+    #[allow(dead_code)]
+    pub(crate) fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        self.inner.capture_marker(marker)
     }
 
     pub fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
@@ -5671,6 +6457,7 @@ mod tests {
         d2d_copy_error: AtomicBool,
         row_concat_supported: AtomicBool,
         row_concat_calls: AtomicUsize,
+        capture_markers: Arc<AtomicUsize>,
         support_gate: Mutex<Option<SupportGate>>,
     }
 
@@ -5692,6 +6479,30 @@ mod tests {
         bytes: Vec<u8>,
     }
     struct TestMinistral3YarnSubmission;
+
+    struct TestCaptureAdapter {
+        markers: Arc<AtomicUsize>,
+    }
+
+    impl ExecutionWholeDecodeCaptureAdapter for TestCaptureAdapter {
+        fn command(
+            &mut self,
+            _access: &ExecutionAdapterAccess<'_>,
+            _command: &ExecutionDecodeCommand,
+            _bindings: [Option<&OwnedTensorBinding>; 4],
+        ) -> Result<(), ExecutionError> {
+            Ok(())
+        }
+
+        fn capture_completion(&mut self, _completion: &mut dyn Any) -> Result<(), ExecutionError> {
+            self.markers.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn finish(self: Box<Self>) -> Result<(AdapterResource, u64, u64), ExecutionError> {
+            Ok((AdapterResource::new(()), 1, 1))
+        }
+    }
 
     impl ExecutionSessionAdapter for TestAdapter {
         fn max_transfer_bytes(&self) -> u64 {
@@ -5720,6 +6531,17 @@ mod tests {
             _access: &ExecutionAdapterAccess<'_>,
         ) -> Result<AdapterResource, ExecutionError> {
             Ok(AdapterResource::new(()))
+        }
+
+        fn begin_whole_decode_capture(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            _queue: &ExecutionQueue,
+            _control: &OwnedTensorBinding,
+        ) -> Result<Box<dyn ExecutionWholeDecodeCaptureAdapter>, ExecutionError> {
+            Ok(Box::new(TestCaptureAdapter {
+                markers: Arc::clone(&self.capture_markers),
+            }))
         }
 
         fn allocate(
@@ -5936,6 +6758,14 @@ mod tests {
     }
 
     impl ExecutionSubmissionAdapter for TestSubmission {
+        fn capture_marker(
+            &mut self,
+            marker: &mut dyn ExecutionCaptureMarker,
+        ) -> Result<(), ExecutionError> {
+            let mut token = ();
+            marker.capture_completion(&mut token)
+        }
+
         fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
             Ok(ExecutionState::Success)
         }
@@ -8541,6 +9371,43 @@ mod tests {
     }
 
     #[test]
+    fn capture_projected_state_admission_bounds_are_planning_only() {
+        for (published, projected, rows, valid) in [
+            (100, 100, 1, true),
+            (100, 101, 1, true),
+            (100, 100, 9, true),
+            (100, 108, 1, true),
+            (100, 108, 2, false),
+            (100, 109, 1, false),
+            (100, 99, 1, false),
+            (100, 101, 10, false),
+            (u64::MAX, u64::MAX, 1, false),
+        ] {
+            assert_eq!(
+                validate_capture_projected_length(published, projected, rows).is_ok(),
+                valid,
+                "published={published} projected={projected} rows={rows}"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_append_admits_static_max_rows_past_physical_tail() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let state = session
+            .create_kv_state(crate::KvStateDescriptor::new(3, 1).unwrap())
+            .unwrap();
+        let (key, value) = valid_kv_bindings(&session, 9);
+        let append = session
+            .append_kv_state_for_capture(&state, &queue, key, value, 0, 0)
+            .expect("device control narrows the static nine-row capture");
+        assert_eq!(append.request().token_count(), 9);
+        assert_eq!(adapter.store.append_calls.load(Ordering::Relaxed), 1);
+        drop(append);
+    }
+
+    #[test]
     fn kv_append_covers_non_aligned_capacity_and_exact_end_boundaries() {
         for token_count in [1_usize, 3, 17, 255, 256, 257] {
             let (session, adapter) = kv_session();
@@ -9700,6 +10567,59 @@ mod tests {
             test_session.submit(&prepared, &other_queue),
             Err(ExecutionError::WrongQueue { .. })
         ));
+    }
+
+    #[test]
+    fn whole_capture_retains_marker_owner_and_eager_evidence_without_success_claim() {
+        let adapter = Arc::new(TestAdapter::default());
+        let session = ExecutionSession::new("test", adapter.clone());
+        let queue = session.create_queue().unwrap();
+        let activation_buffer = session.allocate(64).unwrap();
+        let scale_buffer = session.allocate(64).unwrap();
+        let output_buffer = session.allocate(64).unwrap();
+        let (activation, scale, output) = rmsnorm_views([0, 0, 0]);
+        let operation = Arc::new(
+            BoundSemanticOp::new(
+                rmsnorm_descriptor(activation.clone(), scale.clone(), output.clone()),
+                vec![
+                    session
+                        .bind(&activation_buffer, activation, AccessMode::Read)
+                        .unwrap(),
+                    session
+                        .bind(&scale_buffer, scale, AccessMode::Read)
+                        .unwrap(),
+                ],
+                vec![
+                    session
+                        .bind(&output_buffer, output, AccessMode::Write)
+                        .unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let prepared = session.prepare(operation).unwrap();
+        let submission = session.submit(&prepared, &queue).unwrap();
+
+        let control_buffer = session.allocate(4).unwrap();
+        let control_view = TensorView::contiguous(DType::I32, &[1]).unwrap();
+        let control = session
+            .bind(&control_buffer, control_view, AccessMode::ReadWrite)
+            .unwrap();
+        let mut capture = session
+            .begin_whole_decode_capture(&queue, &control)
+            .unwrap();
+        capture
+            .command(
+                &ExecutionDecodeCommand::new(1, 0, 0, 1, 0, 0, 0, 0, 0, 0),
+                [Some(&control), None, None, None],
+            )
+            .unwrap();
+        capture.retain_submission(submission).unwrap();
+        assert_eq!(adapter.capture_markers.load(Ordering::Relaxed), 1);
+        assert_eq!(capture.captured_semantics().len(), 1);
+        let graph = capture.finish_captured().unwrap();
+        assert_eq!(graph.operations().len(), 1);
+        drop(graph);
     }
 }
 

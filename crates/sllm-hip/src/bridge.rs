@@ -16,12 +16,13 @@ use sllm_hip_sys as sys;
 
 use sllm_core::{
     AdapterResource, BoundSemanticOp, BufferRange, CausalAttentionDescriptor, DispatchEvidence,
-    ExecutionAdapterAccess, ExecutionCausalAttentionSubmissionAdapter, ExecutionError,
-    ExecutionKvStateSubmissionAdapter, ExecutionLinearAttentionSubmissionAdapter,
-    ExecutionMinistral3YarnSubmissionAdapter, ExecutionQueueFenceAdapter, ExecutionReadbackAdapter,
-    ExecutionSession, ExecutionSessionAdapter, ExecutionSessionRequest, ExecutionState,
-    ExecutionStateImageV1, ExecutionSubmissionAdapter, ExecutionTransferAdapter, KvCacheEncoding,
-    OpaqueStatePlane, OwnedTensorBinding, PrepareSupport, PreparedMatmulFootprint,
+    ExecutionAdapterAccess, ExecutionCaptureMarker, ExecutionCausalAttentionSubmissionAdapter,
+    ExecutionDecodeCommand, ExecutionError, ExecutionKvStateSubmissionAdapter,
+    ExecutionLinearAttentionSubmissionAdapter, ExecutionMinistral3YarnSubmissionAdapter,
+    ExecutionQueueFenceAdapter, ExecutionReadbackAdapter, ExecutionSession,
+    ExecutionSessionAdapter, ExecutionSessionRequest, ExecutionState, ExecutionStateImageV1,
+    ExecutionSubmissionAdapter, ExecutionTransferAdapter, ExecutionWholeDecodeCaptureAdapter,
+    KvCacheEncoding, OpaqueStatePlane, OwnedTensorBinding, PrepareSupport, PreparedMatmulFootprint,
     PreparedOperation, QueueCompletionMode as CoreQueueCompletionMode, ShutdownReport,
     StateLayerMetadataV1, StateOwnerKindV1, StatePlaneKindV1,
 };
@@ -58,9 +59,9 @@ use crate::{
     Qwen38ProjectionPack2DispatchInfo, Qwen38ProjectionPack2Submission, ResidualRmsNormDescriptor,
     ResidualRmsNormDispatchInfo, ResidualRmsNormSubmission, RmsNormDescriptor, RmsNormDispatchInfo,
     RmsNormSubmission, RotaryDescriptor, RotaryDispatchInfo, RotarySubmission, RuntimeError,
-    RuntimeStatus, TokenSelectorDescriptor, TokenSelectorDispatchInfo, TokenSelectorSubmission,
-    WindowedAttentionDescriptor, WindowedAttentionDispatchInfo, WindowedAttentionSubmission,
-    gemma4_moe_expert_workspace_bytes, moe_expert_workspace_bytes,
+    RuntimeStatus, TensorBinding, TokenSelectorDescriptor, TokenSelectorDispatchInfo,
+    TokenSelectorSubmission, WindowedAttentionDescriptor, WindowedAttentionDispatchInfo,
+    WindowedAttentionSubmission, gemma4_moe_expert_workspace_bytes, moe_expert_workspace_bytes,
 };
 
 const HIP_BACKEND_NAME: &str = "hip";
@@ -2271,6 +2272,39 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         }))
     }
 
+    fn begin_whole_decode_capture(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        queue: &sllm_core::ExecutionQueue,
+        control: &OwnedTensorBinding,
+    ) -> Result<Box<dyn ExecutionWholeDecodeCaptureAdapter>, ExecutionError> {
+        self.state.ensure_open()?;
+        let queue = access.downcast_queue_payload::<Queue>(queue)?.clone();
+        let control = tensor_binding_from_core(access, control)?;
+        let capture = crate::graph_span::WholeDecodeCapture::begin(&self.context, &queue, &control)
+            .map_err(map_backend_error)?;
+        Ok(Box::new(HipWholeDecodeCaptureAdapter { capture }))
+    }
+
+    fn publish_graph_state_metadata(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        span: &sllm_core::ExecutionGraphSpan,
+        expected_initial_position: u64,
+        final_position: u64,
+        successful_generations: u64,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        let graph = access.downcast_graph_span_payload::<GraphSpan>(span)?;
+        graph
+            .publish_state_metadata(
+                expected_initial_position,
+                final_position,
+                successful_generations,
+            )
+            .map_err(map_backend_error)
+    }
+
     fn upload(
         &self,
         access: &ExecutionAdapterAccess<'_>,
@@ -2392,6 +2426,115 @@ fn graph_span_plan(plan: &HipPreparedPlan) -> Result<GraphSpanPlan, ExecutionErr
     }
 }
 
+fn tensor_binding_from_core(
+    access: &ExecutionAdapterAccess<'_>,
+    binding: &OwnedTensorBinding,
+) -> Result<TensorBinding, ExecutionError> {
+    let buffer = access
+        .downcast_buffer_payload::<Buffer>(binding.buffer())?
+        .clone();
+    Ok(TensorBinding::from_buffer(buffer, binding.view().clone()))
+}
+
+struct HipWholeDecodeCaptureAdapter {
+    capture: crate::graph_span::WholeDecodeCapture,
+}
+
+impl ExecutionWholeDecodeCaptureAdapter for HipWholeDecodeCaptureAdapter {
+    fn command(
+        &mut self,
+        access: &ExecutionAdapterAccess<'_>,
+        command: &ExecutionDecodeCommand,
+        bindings: [Option<&OwnedTensorBinding>; 4],
+    ) -> Result<(), ExecutionError> {
+        let mut converted: [Option<TensorBinding>; 4] = [None, None, None, None];
+        for (index, binding) in bindings.into_iter().enumerate() {
+            converted[index] = binding
+                .map(|binding| tensor_binding_from_core(access, binding))
+                .transpose()?;
+        }
+        let raw_bindings = std::array::from_fn(|index| converted[index].as_ref());
+        let raw = sys::sllm_graph_span_decode_command_desc_t {
+            struct_size: 0,
+            abi_version: 0,
+            info_version: 0,
+            opcode: command.opcode,
+            phase_kind: command.phase_kind,
+            phase_index: command.phase_index,
+            rows: command.rows,
+            input_kind: command.input_kind,
+            row_count: command.row_count,
+            hidden_width: command.hidden_width,
+            token_capacity: command.token_capacity,
+            vocabulary_size: command.vocabulary_size,
+            stop_count: command.stop_count,
+            reserved0: 0,
+            input0: unsafe { std::mem::zeroed() },
+            input1: unsafe { std::mem::zeroed() },
+            output: unsafe { std::mem::zeroed() },
+            stop_ids: unsafe { std::mem::zeroed() },
+        };
+        self.capture
+            .command(raw, raw_bindings)
+            .map_err(map_backend_error)
+    }
+
+    fn capture_completion(
+        &mut self,
+        completion: &mut dyn std::any::Any,
+    ) -> Result<(), ExecutionError> {
+        sllm_core::ExecutionCaptureMarker::capture_completion(&mut self.capture, completion)
+    }
+
+    fn bind_linear_state(
+        &mut self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::LinearAttentionState,
+        checkpoint_conv: Option<&OwnedTensorBinding>,
+        checkpoint_recurrent: Option<&OwnedTensorBinding>,
+        token_count: u32,
+        checkpoint_rows: u32,
+    ) -> Result<(), ExecutionError> {
+        let state = access
+            .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?;
+        let conv = checkpoint_conv
+            .map(|binding| tensor_binding_from_core(access, binding))
+            .transpose()?;
+        let recurrent = checkpoint_recurrent
+            .map(|binding| tensor_binding_from_core(access, binding))
+            .transpose()?;
+        self.capture
+            .bind_linear_state(
+                state,
+                conv.as_ref(),
+                recurrent.as_ref(),
+                token_count,
+                checkpoint_rows,
+            )
+            .map_err(map_backend_error)
+    }
+
+    fn select_linear_state(
+        &mut self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::LinearAttentionState,
+        token_count: u32,
+    ) -> Result<(), ExecutionError> {
+        let state = access
+            .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?;
+        self.capture
+            .select_linear_state(state, token_count)
+            .map_err(map_backend_error)
+    }
+
+    fn finish(self: Box<Self>) -> Result<(AdapterResource, u64, u64), ExecutionError> {
+        let graph = self.capture.finish().map_err(map_backend_error)?;
+        let nodes = graph.node_count();
+        let kernel_nodes = graph.kernel_node_count();
+        Ok((AdapterResource::new(graph), nodes, kernel_nodes))
+    }
+}
+
 #[derive(Clone)]
 enum HipPreparedPlan {
     RmsNorm(PreparedRmsNorm),
@@ -2449,6 +2592,36 @@ struct SparseMoeSubmission {
 }
 
 impl HipSemanticSubmission {
+    fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        match self {
+            Self::RmsNorm(submission) => submission.capture_marker(marker),
+            Self::ResidualRmsNorm(submission) => submission.capture_marker(marker),
+            Self::Elementwise(submission) => submission.capture_marker(marker),
+            Self::Embedding(submission) => submission.capture_marker(marker),
+            Self::Matmul(submission) => submission.capture_marker(marker),
+            Self::Qwen38ProjectionPack2(submission) => submission.capture_marker(marker),
+            Self::GdnProjectionBundle(submission) => submission.capture_marker(marker),
+            Self::MlpGateUpSiluBundle(submission) => submission.capture_marker(marker),
+            Self::Argmax(submission) => submission.capture_marker(marker),
+            Self::TokenSelector(submission) => submission.capture_marker(marker),
+            Self::AttentionPreprocess(submission) => submission.capture_marker(marker),
+            Self::Rotary(submission) => submission.capture_marker(marker),
+            Self::WindowedAttention(submission) => submission.capture_marker(marker),
+            Self::MoeRoute(submission) => submission.capture_marker(marker),
+            Self::DeepSeekV4MoeRoute(submission) => submission.capture_marker(marker),
+            Self::MiniMaxM3MoeRoute(submission) => submission.capture_marker(marker),
+            Self::MoeExpert(submission) => submission.capture_marker(marker),
+            Self::SparseMoe(submission) => {
+                submission.router.capture_marker(marker)?;
+                submission.route.capture_marker(marker)?;
+                submission.expert.capture_marker(marker)
+            }
+        }
+    }
+
     fn query(&mut self) -> Result<CompletionState, RuntimeError> {
         match self {
             Self::RmsNorm(submission) => submission.query(),
@@ -2558,6 +2731,13 @@ struct HipSubmission {
 }
 
 impl ExecutionSubmissionAdapter for HipSubmission {
+    fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        self.submission.capture_marker(marker)
+    }
+
     fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         self.submission
             .query()
@@ -2617,6 +2797,13 @@ struct HipGraphSubmission {
 }
 
 impl ExecutionSubmissionAdapter for HipGraphSubmission {
+    fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        marker.capture_completion(&mut self.completion)
+    }
+
     fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         self.completion
             .query()
@@ -2679,6 +2866,13 @@ struct HipQueueFence {
 }
 
 impl ExecutionQueueFenceAdapter for HipQueueFence {
+    fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .query()
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
     fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
         self.completion
             .wait(timeout)
@@ -2714,6 +2908,13 @@ struct HipLinearAttentionSubmission {
 }
 
 impl ExecutionLinearAttentionSubmissionAdapter for HipLinearAttentionSubmission {
+    fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        marker.capture_completion(&mut self.completion)
+    }
+
     fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         self.completion
             .query()
@@ -2737,6 +2938,13 @@ impl ExecutionLinearAttentionSubmissionAdapter for HipLinearAttentionSubmission 
 }
 
 impl ExecutionCausalAttentionSubmissionAdapter for HipCausalAttentionSubmission {
+    fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        marker.capture_completion(&mut self.completion)
+    }
+
     fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         self.completion
             .query()
@@ -2790,6 +2998,13 @@ impl ExecutionMinistral3YarnSubmissionAdapter for HipMinistral3YarnSubmissionAda
 }
 
 impl ExecutionKvStateSubmissionAdapter for HipKvSubmission {
+    fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        marker.capture_completion(&mut self.completion)
+    }
+
     fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         self.completion
             .query()
@@ -2867,6 +3082,13 @@ impl ExecutionKvStateSubmissionAdapter for HipKvSubmission {
 }
 
 impl ExecutionTransferAdapter for HipTransfer {
+    fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        marker.capture_completion(&mut self.completion)
+    }
+
     fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         self.completion
             .query()

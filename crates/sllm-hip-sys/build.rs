@@ -442,6 +442,16 @@ fn main() {
         embedding_kernel_internal.display()
     );
     println!("cargo:rerun-if-changed={}", embedding_kernel.display());
+    for name in [
+        "decode_control_kernel_internal.hpp",
+        "decode_control_kernel.hip.cpp",
+        "decode_graph_capture_internal.hpp",
+    ] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            source_dir.join("src").join(name).display()
+        );
+    }
     println!("cargo:rerun-if-changed={}", embedding_runtime.display());
     println!(
         "cargo:rerun-if-changed={}",

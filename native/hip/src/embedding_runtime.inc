@@ -316,34 +316,47 @@ extern "C" sllm_status_t sllm_embedding_execute(
     const int32_t *const token_ids = static_cast<const int32_t *>(
         byte_pointer(plan->input1,
                      plan->embedding_metadata.token_ids.byte_offset));
-    std::vector<int32_t> host_token_ids(
-        static_cast<std::size_t>(plan->embedding_metadata.token_count));
-    const hipError_t id_copy_status = hipMemcpyAsync(
-        host_token_ids.data(), token_ids,
-        host_token_ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost,
-        queue->stream);
-    if (id_copy_status != hipSuccess) {
+    auto *const device_control = graph_capture_queue == queue
+        ? static_cast<sllm_decode_control::ControlV1 *>(
+              whole_graph_capture_device_control())
+        : nullptr;
+    if (whole_graph_capture_active() && device_control == nullptr) {
       execute_guard.disarm();
       (void)rollback_reserved_elementwise_submission(plan, queue, error_sink);
-      return hip_failure(error_sink, id_copy_status,
-                         "embedding token ID validation copy");
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "whole-decode embedding requires a device control buffer");
     }
-    const hipError_t id_sync_status = hipStreamSynchronize(queue->stream);
-    if (id_sync_status != hipSuccess) {
-      execute_guard.disarm();
-      (void)rollback_reserved_elementwise_submission(plan, queue, error_sink);
-      return hip_failure(error_sink, id_sync_status,
-                         "embedding token ID validation synchronize");
-    }
-    for (const int32_t token_id : host_token_ids) {
-      if (token_id < 0 ||
-          static_cast<uint64_t>(token_id) >=
-              plan->embedding_metadata.vocab_size) {
+    if (device_control == nullptr) {
+      std::vector<int32_t> host_token_ids(
+          static_cast<std::size_t>(plan->embedding_metadata.token_count));
+      const hipError_t id_copy_status = hipMemcpyAsync(
+          host_token_ids.data(), token_ids,
+          host_token_ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost,
+          queue->stream);
+      if (id_copy_status != hipSuccess) {
         execute_guard.disarm();
         (void)rollback_reserved_elementwise_submission(plan, queue, error_sink);
-        return sllm_public_runtime::write_error(
-            error_sink, SLLM_STATUS_TOKEN_ID_OUT_OF_RANGE,
-            "embedding token ID is negative or outside the vocabulary");
+        return hip_failure(error_sink, id_copy_status,
+                           "embedding token ID validation copy");
+      }
+      const hipError_t id_sync_status = hipStreamSynchronize(queue->stream);
+      if (id_sync_status != hipSuccess) {
+        execute_guard.disarm();
+        (void)rollback_reserved_elementwise_submission(plan, queue, error_sink);
+        return hip_failure(error_sink, id_sync_status,
+                           "embedding token ID validation synchronize");
+      }
+      for (const int32_t token_id : host_token_ids) {
+        if (token_id < 0 ||
+            static_cast<uint64_t>(token_id) >=
+                plan->embedding_metadata.vocab_size) {
+          execute_guard.disarm();
+          (void)rollback_reserved_elementwise_submission(plan, queue, error_sink);
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_TOKEN_ID_OUT_OF_RANGE,
+              "embedding token ID is negative or outside the vocabulary");
+        }
       }
     }
 
@@ -421,9 +434,14 @@ extern "C" sllm_status_t sllm_embedding_execute(
                      plan->embedding_metadata.weight.byte_offset));
     uint16_t *const output = static_cast<uint16_t *>(byte_pointer(
         plan->output, plan->embedding_metadata.output.byte_offset));
-    status = ::sllm_embedding_kernel::launch_gather(
-        weight, token_ids, output, plan->embedding_metadata.token_count,
-        plan->embedding_metadata.hidden_size, queue->stream);
+    status = device_control != nullptr
+        ? ::sllm_embedding_kernel::launch_gather_device(
+              weight, token_ids, output, plan->embedding_metadata.token_count,
+              plan->embedding_metadata.hidden_size,
+              plan->embedding_metadata.vocab_size, device_control, queue->stream)
+        : ::sllm_embedding_kernel::launch_gather(
+              weight, token_ids, output, plan->embedding_metadata.token_count,
+              plan->embedding_metadata.hidden_size, queue->stream);
     if (status != hipSuccess) {
       publish_guard.disarm();
       return cleanup_failed_submission(candidate, token, status,

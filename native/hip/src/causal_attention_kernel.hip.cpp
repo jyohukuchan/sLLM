@@ -19,6 +19,45 @@
 namespace sllm_causal_attention_kernel {
 namespace {
 
+__device__ __forceinline__ bool
+decode_control_phase(sllm_decode_control::ControlV1 *const control,
+                     const uint32_t query_index, const uint32_t query_count,
+                     uint64_t *const start_position,
+                     uint32_t *const phase_rows) noexcept {
+  if (control == nullptr) {
+    return true;
+  }
+  if (control->phase_active == 0U || control->halted != 0U ||
+      control->phase_rows == 0U || query_index >= control->phase_rows ||
+      query_count == 0U) {
+    return false;
+  }
+  if (control->phase_position > UINT64_MAX - query_index) {
+    atomicExch(
+        &control->status,
+        static_cast<uint32_t>(sllm_decode_control::Status::InvalidPosition));
+    atomicExch(&control->halted, 1U);
+    atomicExch(&control->phase_active, 0U);
+    return false;
+  }
+  *start_position = control->phase_position;
+  *phase_rows = control->phase_rows;
+  return true;
+}
+
+__device__ __forceinline__ uint32_t
+decode_control_split_count(sllm_decode_control::ControlV1 *const control,
+                           const uint32_t fallback) noexcept {
+  if (control == nullptr) {
+    return fallback;
+  }
+  // The normal selector uses P128 when the committed tail reaches 8192.
+  // Keep this threshold in the device path so graph replay can cross it
+  // without changing a kernel node or reinstantiating the graph.
+  return sllm_causal_attention_kernel::decode_dynamic_split_count(
+      control->phase_position, control->phase_rows);
+}
+
 __device__ float f16_to_f32(const uint16_t raw) noexcept {
 #if defined(__gfx1030__) || defined(__gfx1201__)
   // Every finite FP16 value, including subnormals and signed zero, converts
@@ -523,27 +562,23 @@ __launch_bounds__(256, 1) void causal_attention_decode_wave_split_kernel(
 // accumulation order remains unchanged.  The storage boundary moves from
 // shared memory to request-owned global workspace so all stage-1 blocks can
 // occupy the device concurrently.
-template <bool UseQueryPreload, uint32_t Encoding, uint32_t kWaveCount>
-__global__
-__launch_bounds__(32, 1) void causal_attention_decode_wave_split_staged_stage1_kernel(
+template <bool UseQueryPreload, uint32_t Encoding, uint32_t kGridWaveCount,
+          uint32_t kActiveWaveCount>
+__device__ __forceinline__ void
+causal_attention_decode_wave_split_staged_stage1_body(
     const uint16_t *const query, const void *const key, const void *const value,
     const void *const key_scales, const void *const value_scales,
     const float *const key_outer_scales, const float *const value_outer_scales,
-    float *const workspace, const uint32_t query_count,
-    const uint64_t start_position, const uint32_t q_heads,
+    float *const workspace, const uint32_t query_count, const uint32_t q_heads,
     const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale) {
+    const float static_key_scale, const float static_value_scale,
+    const uint32_t query_index, const uint32_t query_head, const uint32_t wave,
+    const uint64_t control_start_position) {
   constexpr uint32_t kWaveSize = 32U;
   constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
   constexpr uint32_t kDimensionsPerLane = kHeadDim / kWaveSize;
-  const uint64_t flat = static_cast<uint64_t>(blockIdx.x);
-  const uint64_t blocks_per_query = static_cast<uint64_t>(q_heads) * kWaveCount;
-  const uint32_t query_index = static_cast<uint32_t>(flat / blocks_per_query);
-  const uint32_t query_head =
-      static_cast<uint32_t>((flat % blocks_per_query) / kWaveCount);
-  const uint32_t wave = static_cast<uint32_t>(flat % kWaveCount);
   if (query_index >= query_count || query_head >= q_heads ||
-      head_dim != kHeadDim || kv_heads == 0U) {
+      head_dim != kHeadDim || kv_heads == 0U || wave >= kActiveWaveCount) {
     return;
   }
   const uint32_t lane = threadIdx.x & (kWaveSize - 1U);
@@ -551,12 +586,13 @@ __launch_bounds__(32, 1) void causal_attention_decode_wave_split_staged_stage1_k
   const uint16_t *const query_row =
       query +
       (static_cast<uint64_t>(query_index) * q_heads + query_head) * head_dim;
-  const uint64_t committed_kv_length = start_position + query_index + 1U;
+  const uint64_t committed_kv_length =
+      control_start_position + query_index + 1U;
   float accumulations[kDimensionsPerLane];
   float query_values[kDimensionsPerLane];
 #if defined(__gfx1030__)
   constexpr bool kUseFusedE4Decode =
-      kWaveCount == 32U && Encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1;
+      kGridWaveCount == 32U && Encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1;
 #else
   constexpr bool kUseFusedE4Decode = false;
 #endif
@@ -571,9 +607,10 @@ __launch_bounds__(32, 1) void causal_attention_decode_wave_split_staged_stage1_k
   }
   float local_maximum = -std::numeric_limits<float>::infinity();
   float local_denominator = 0.0F;
-  const uint64_t split_begin = committed_kv_length * wave / kWaveCount;
-  const uint64_t split_end =
-      committed_kv_length * (static_cast<uint64_t>(wave) + 1U) / kWaveCount;
+  const uint64_t split_begin = committed_kv_length * wave / kActiveWaveCount;
+  const uint64_t split_end = committed_kv_length *
+                             (static_cast<uint64_t>(wave) + 1U) /
+                             kActiveWaveCount;
   for (uint64_t key_position = split_begin; key_position < split_end;
        ++key_position) {
     const uint64_t kv_row = key_position * kv_heads + kv_head;
@@ -626,7 +663,7 @@ __launch_bounds__(32, 1) void causal_attention_decode_wave_split_staged_stage1_k
   const uint64_t stride = static_cast<uint64_t>(kHeadDim) + 2U;
   const uint64_t base =
       ((static_cast<uint64_t>(query_index) * q_heads + query_head) *
-           kWaveCount +
+           kGridWaveCount +
        wave) *
       stride;
   if (lane == 0U) {
@@ -642,12 +679,69 @@ __launch_bounds__(32, 1) void causal_attention_decode_wave_split_staged_stage1_k
   }
 }
 
-template <uint32_t kWaveCount>
+template <bool UseQueryPreload, uint32_t Encoding, uint32_t kGridWaveCount,
+          bool DeviceControl = false>
+__global__
+__launch_bounds__(32, 1) void causal_attention_decode_wave_split_staged_stage1_kernel(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    float *const workspace, const uint32_t query_count,
+    const uint64_t start_position, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim,
+    const float static_key_scale, const float static_value_scale,
+    sllm_decode_control::ControlV1 *const control) {
+  const uint64_t flat = static_cast<uint64_t>(blockIdx.x);
+  const uint64_t blocks_per_query =
+      static_cast<uint64_t>(q_heads) * kGridWaveCount;
+  const uint32_t query_index = static_cast<uint32_t>(flat / blocks_per_query);
+  const uint32_t query_head =
+      static_cast<uint32_t>((flat % blocks_per_query) / kGridWaveCount);
+  const uint32_t wave = static_cast<uint32_t>(flat % kGridWaveCount);
+  if (query_index >= query_count || query_head >= q_heads ||
+      head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM || kv_heads == 0U) {
+    return;
+  }
+  if constexpr (DeviceControl) {
+    uint64_t control_start_position = start_position;
+    uint32_t control_rows = query_count;
+    if (!decode_control_phase(control, query_index, query_count,
+                              &control_start_position, &control_rows)) {
+      return;
+    }
+    const uint32_t active_splits =
+        decode_control_split_count(control, kGridWaveCount);
+    if (active_splits == 32U) {
+      causal_attention_decode_wave_split_staged_stage1_body<
+          UseQueryPreload, Encoding, kGridWaveCount, 32U>(
+          query, key, value, key_scales, value_scales, key_outer_scales,
+          value_outer_scales, workspace, query_count, q_heads, kv_heads,
+          head_dim, static_key_scale, static_value_scale, query_index,
+          query_head, wave, control_start_position);
+    } else {
+      causal_attention_decode_wave_split_staged_stage1_body<
+          UseQueryPreload, Encoding, kGridWaveCount, 128U>(
+          query, key, value, key_scales, value_scales, key_outer_scales,
+          value_outer_scales, workspace, query_count, q_heads, kv_heads,
+          head_dim, static_key_scale, static_value_scale, query_index,
+          query_head, wave, control_start_position);
+    }
+  } else {
+    causal_attention_decode_wave_split_staged_stage1_body<
+        UseQueryPreload, Encoding, kGridWaveCount, kGridWaveCount>(
+        query, key, value, key_scales, value_scales, key_outer_scales,
+        value_outer_scales, workspace, query_count, q_heads, kv_heads, head_dim,
+        static_key_scale, static_value_scale, query_index, query_head, wave,
+        start_position);
+  }
+}
+
+template <uint32_t kWaveCount, bool DeviceControl = false>
 __global__
 __launch_bounds__(256, 1) void causal_attention_decode_wave_split_staged_stage2_kernel(
     const float *const workspace, uint16_t *const output,
     const uint32_t query_count, const uint32_t q_heads, const uint32_t kv_heads,
-    const uint32_t head_dim) {
+    const uint32_t head_dim, sllm_decode_control::ControlV1 *const control) {
   constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
   const uint64_t flat = static_cast<uint64_t>(blockIdx.x);
   const uint32_t query_index = static_cast<uint32_t>(flat / q_heads);
@@ -655,6 +749,14 @@ __launch_bounds__(256, 1) void causal_attention_decode_wave_split_staged_stage2_
   if (query_index >= query_count || query_head >= q_heads || kv_heads == 0U ||
       head_dim != kHeadDim) {
     return;
+  }
+  if constexpr (DeviceControl) {
+    uint64_t control_start_position = 0U;
+    uint32_t control_rows = query_count;
+    if (!decode_control_phase(control, query_index, query_count,
+                              &control_start_position, &control_rows)) {
+      return;
+    }
   }
   const uint32_t dimension = threadIdx.x;
   constexpr uint64_t kStride = static_cast<uint64_t>(kHeadDim) + 2U;
@@ -713,28 +815,22 @@ __launch_bounds__(256, 1) void causal_attention_decode_wave_split_staged_stage2_
 // Global-workspace merge for WU1.1 split counts.  The per-dimension loop is
 // intentionally sequential and matches the scratch candidate; no LDS array of
 // Splits*head_dim is allocated, so Split=128 remains valid on both targets.
-template <uint32_t kSplits>
-__global__
-__launch_bounds__(256, 1) void causal_attention_decode_gqa6_staged32_split_merge_kernel(
-    const float *const workspace, uint16_t *const output,
-    const uint32_t query_count) {
-  constexpr uint32_t kQHeads = 24U;
+template <uint32_t kGridSplits, uint32_t kActiveSplits>
+__device__ __forceinline__ void
+causal_attention_decode_gqa6_staged32_split_merge_body(
+    const float *const workspace, uint16_t *const output, const uint32_t head,
+    const uint32_t dimension) {
   constexpr uint32_t kHeadDim = 256U;
   constexpr uint32_t kWorkspaceStride = kHeadDim + 2U;
-  const uint32_t head = blockIdx.x;
-  const uint32_t dimension = threadIdx.x;
-  if (head >= query_count * kQHeads || dimension >= kHeadDim) {
-    return;
-  }
   const uint64_t base =
-      static_cast<uint64_t>(head) * kSplits * kWorkspaceStride;
+      static_cast<uint64_t>(head) * kGridSplits * kWorkspaceStride;
   float maximum = -std::numeric_limits<float>::infinity();
-  for (uint32_t split = 0U; split < kSplits; ++split) {
+  for (uint32_t split = 0U; split < kActiveSplits; ++split) {
     maximum = fmaxf(maximum, workspace[base + split * kWorkspaceStride]);
   }
   float denominator = 0.0F;
   float accumulated = 0.0F;
-  for (uint32_t split = 0U; split < kSplits; ++split) {
+  for (uint32_t split = 0U; split < kActiveSplits; ++split) {
     const uint64_t partial = base + split * kWorkspaceStride;
     const float scale = expf(workspace[partial] - maximum);
     denominator += workspace[partial + 1U] * scale;
@@ -742,6 +838,42 @@ __launch_bounds__(256, 1) void causal_attention_decode_gqa6_staged32_split_merge
   }
   output[static_cast<uint64_t>(head) * kHeadDim + dimension] =
       f32_to_bf16_rne(accumulated / denominator);
+}
+
+template <uint32_t kGridSplits, bool DeviceControl = false>
+__global__
+__launch_bounds__(256, 1) void causal_attention_decode_gqa6_staged32_split_merge_kernel(
+    const float *const workspace, uint16_t *const output,
+    const uint32_t query_count, sllm_decode_control::ControlV1 *const control) {
+  constexpr uint32_t kQHeads = 24U;
+  constexpr uint32_t kHeadDim = 256U;
+  const uint32_t head = blockIdx.x;
+  const uint32_t dimension = threadIdx.x;
+  if (head >= query_count * kQHeads || dimension >= kHeadDim) {
+    return;
+  }
+  const uint32_t query_index = head / kQHeads;
+  if constexpr (DeviceControl) {
+    uint64_t control_start_position = 0U;
+    uint32_t control_rows = query_count;
+    if (!decode_control_phase(control, query_index, query_count,
+                              &control_start_position, &control_rows)) {
+      return;
+    }
+    const uint32_t active_splits =
+        decode_control_split_count(control, kGridSplits);
+    if (active_splits == 32U) {
+      causal_attention_decode_gqa6_staged32_split_merge_body<kGridSplits, 32U>(
+          workspace, output, head, dimension);
+    } else {
+      causal_attention_decode_gqa6_staged32_split_merge_body<kGridSplits, 128U>(
+          workspace, output, head, dimension);
+    }
+  } else {
+    causal_attention_decode_gqa6_staged32_split_merge_body<kGridSplits,
+                                                           kGridSplits>(
+        workspace, output, head, dimension);
+  }
 }
 
 // Phase 87 WU1 C1: one 192-thread block owns one KV head and all six GQA
@@ -899,13 +1031,14 @@ __launch_bounds__(192, 1) void causal_attention_decode_gqa6_staged32_stage1_kern
 
 // WU1.1 C1×C3 candidate.  This keeps the WU1 GQA-shared arithmetic and only
 // changes the partition count.  The workspace remains [M,24,Splits,258].
-template <uint32_t kSplits>
+template <uint32_t kSplits, bool DeviceControl = false>
 __global__
 __launch_bounds__(192, 1) void causal_attention_decode_gqa6_staged32_split_stage1_kernel(
     const uint16_t *const query, const void *const key, const void *const value,
     const void *const key_scales, const void *const value_scales,
     float *const workspace, const uint32_t query_count,
-    const uint64_t start_position) {
+    const uint64_t start_position,
+    sllm_decode_control::ControlV1 *const control) {
   constexpr uint32_t kWaveSize = 32U;
   constexpr uint32_t kWaveCount = 6U;
   constexpr uint32_t kKvHeads = 4U;
@@ -933,13 +1066,37 @@ __launch_bounds__(192, 1) void causal_attention_decode_gqa6_staged32_split_stage
       wave >= kWaveCount) {
     return;
   }
+  uint64_t control_start_position = start_position;
+  uint32_t control_rows = query_count;
+  if constexpr (DeviceControl) {
+    if (!decode_control_phase(control, query_index, query_count,
+                              &control_start_position, &control_rows)) {
+      return;
+    }
+  }
 
   const uint64_t committed_kv_length =
-      start_position + static_cast<uint64_t>(query_index) + 1U;
-  const uint64_t split_begin =
-      committed_kv_length * static_cast<uint64_t>(split) / kSplits;
-  const uint64_t split_end =
-      committed_kv_length * static_cast<uint64_t>(split + 1U) / kSplits;
+      control_start_position + static_cast<uint64_t>(query_index) + 1U;
+  uint64_t split_begin = 0U;
+  uint64_t split_end = 0U;
+  if constexpr (DeviceControl) {
+    const uint32_t active_splits = decode_control_split_count(control, kSplits);
+    if (split >= active_splits) {
+      return;
+    }
+    if (active_splits == 32U) {
+      split_begin = committed_kv_length * static_cast<uint64_t>(split) / 32U;
+      split_end = committed_kv_length * static_cast<uint64_t>(split + 1U) / 32U;
+    } else {
+      split_begin = committed_kv_length * static_cast<uint64_t>(split) / 128U;
+      split_end =
+          committed_kv_length * static_cast<uint64_t>(split + 1U) / 128U;
+    }
+  } else {
+    split_begin = committed_kv_length * static_cast<uint64_t>(split) / kSplits;
+    split_end =
+        committed_kv_length * static_cast<uint64_t>(split + 1U) / kSplits;
+  }
   const uint16_t *const query_row =
       query +
       (static_cast<uint64_t>(query_index) * kQHeads + query_head) * kHeadDim;
@@ -3730,7 +3887,8 @@ hipError_t launch_decode_wave_split_fp16_pair(
   return hipGetLastError();
 }
 
-template <bool UseQueryPreload, uint32_t Encoding, uint32_t kWaveCount>
+template <bool UseQueryPreload, uint32_t Encoding, uint32_t kWaveCount,
+          bool DeviceControl = false>
 hipError_t launch_decode_wave_split_staged_impl(
     const uint16_t *const query, const void *const key, const void *const value,
     const void *const key_scales, const void *const value_scales,
@@ -3741,11 +3899,12 @@ hipError_t launch_decode_wave_split_staged_impl(
     const uint32_t encoding, const float static_key_scale,
     const float static_value_scale, void *const workspace,
     const uint64_t workspace_bytes, const bool use_gqa_shared,
-    const bool use_split128, const hipStream_t stream) noexcept {
+    const bool use_split128, sllm_decode_control::ControlV1 *const control,
+    const hipStream_t stream) noexcept {
   (void)key_outer_scales;
   (void)value_outer_scales;
   constexpr uint32_t kWaveSize = 32U;
-  constexpr uint32_t kMaxQueryCount = 4U;
+  constexpr uint32_t kMaxQueryCount = 9U;
   constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
   constexpr uint64_t kBytesPerQuery32 =
       UINT64_C(24) * kWaveCount * (kHeadDim + 2U) * sizeof(float);
@@ -3767,9 +3926,10 @@ hipError_t launch_decode_wave_split_staged_impl(
         q_heads != 24U || kv_heads != 4U || head_dim != kHeadDim ||
         encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1)) ||
       (use_split128 &&
-       (kWaveCount != 32U || !UseQueryPreload || query_count > 3U ||
-        committed_kv_length < 8192U || q_heads != 24U || kv_heads != 4U ||
-        head_dim != kHeadDim ||
+       (kWaveCount != 32U || !UseQueryPreload ||
+        (control == nullptr && query_count > 3U) ||
+        (control == nullptr && committed_kv_length < 8192U) || q_heads != 24U ||
+        kv_heads != 4U || head_dim != kHeadDim ||
         encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1))) {
     return hipErrorInvalidValue;
   }
@@ -3777,20 +3937,21 @@ hipError_t launch_decode_wave_split_staged_impl(
     if (use_gqa_shared) {
       hipLaunchKernelGGL(
           HIP_KERNEL_NAME(
-              causal_attention_decode_gqa6_staged32_split_stage1_kernel<128U>),
+              causal_attention_decode_gqa6_staged32_split_stage1_kernel<
+                  128U, DeviceControl>),
           dim3(query_count * 4U * 128U), dim3(192U), 0U, stream, query, key,
           value, key_scales, value_scales, static_cast<float *>(workspace),
-          query_count, start_position);
+          query_count, start_position, control);
     } else {
       hipLaunchKernelGGL(
           HIP_KERNEL_NAME(
               causal_attention_decode_wave_split_staged_stage1_kernel<
-                  UseQueryPreload, Encoding, 128U>),
+                  UseQueryPreload, Encoding, 128U, DeviceControl>),
           dim3(query_count * q_heads * 128U), dim3(kWaveSize), 0U, stream,
           query, key, value, key_scales, value_scales, key_outer_scales,
           value_outer_scales, static_cast<float *>(workspace), query_count,
           start_position, q_heads, kv_heads, head_dim, static_key_scale,
-          static_value_scale);
+          static_value_scale, control);
     }
   } else if (use_gqa_shared) {
     hipLaunchKernelGGL(
@@ -3801,12 +3962,12 @@ hipError_t launch_decode_wave_split_staged_impl(
   } else {
     hipLaunchKernelGGL(
         HIP_KERNEL_NAME(causal_attention_decode_wave_split_staged_stage1_kernel<
-                        UseQueryPreload, Encoding, kWaveCount>),
+                        UseQueryPreload, Encoding, kWaveCount, DeviceControl>),
         dim3(query_count * q_heads * kWaveCount), dim3(kWaveSize), 0U, stream,
         query, key, value, key_scales, value_scales, key_outer_scales,
         value_outer_scales, static_cast<float *>(workspace), query_count,
         start_position, q_heads, kv_heads, head_dim, static_key_scale,
-        static_value_scale);
+        static_value_scale, control);
   }
   hipError_t status = hipGetLastError();
   if (status != hipSuccess) {
@@ -3815,18 +3976,19 @@ hipError_t launch_decode_wave_split_staged_impl(
   if (use_split128) {
     hipLaunchKernelGGL(
         HIP_KERNEL_NAME(
-            causal_attention_decode_gqa6_staged32_split_merge_kernel<128U>),
+            causal_attention_decode_gqa6_staged32_split_merge_kernel<
+                128U, DeviceControl>),
         dim3(query_count * q_heads),
         dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream,
-        static_cast<const float *>(workspace), output, query_count);
+        static_cast<const float *>(workspace), output, query_count, control);
   } else {
     hipLaunchKernelGGL(
         HIP_KERNEL_NAME(causal_attention_decode_wave_split_staged_stage2_kernel<
-                        kWaveCount>),
+                        kWaveCount, DeviceControl>),
         dim3(query_count * q_heads),
         dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream,
         static_cast<const float *>(workspace), output, query_count, q_heads,
-        kv_heads, head_dim);
+        kv_heads, head_dim, control);
   }
   return hipGetLastError();
 }
@@ -3852,14 +4014,14 @@ hipError_t launch_decode_wave_split_staged(
                    key_outer_scales, value_outer_scales, output, query_count,
                    start_position, committed_kv_length, q_heads, kv_heads,
                    head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, false, false, stream)
+                   workspace, workspace_bytes, false, false, nullptr, stream)
              : launch_decode_wave_split_staged_impl<
                    false, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 8U>(
                    query, key, value, key_scales, value_scales,
                    key_outer_scales, value_outer_scales, output, query_count,
                    start_position, committed_kv_length, q_heads, kv_heads,
                    head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, false, false, stream);
+                   workspace, workspace_bytes, false, false, nullptr, stream);
 }
 
 hipError_t launch_decode_wave_split_staged32(
@@ -3879,20 +4041,56 @@ hipError_t launch_decode_wave_split_staged32(
   }
   return use_query_preload
              ? launch_decode_wave_split_staged_impl<
-                   true, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U>(
+                   true, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U, false>(
                    query, key, value, key_scales, value_scales,
                    key_outer_scales, value_outer_scales, output, query_count,
                    start_position, committed_kv_length, q_heads, kv_heads,
                    head_dim, encoding, static_key_scale, static_value_scale,
                    workspace, workspace_bytes, use_gqa_shared, use_split128,
+                   nullptr, stream)
+             : launch_decode_wave_split_staged_impl<
+                   false, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U, false>(
+                   query, key, value, key_scales, value_scales,
+                   key_outer_scales, value_outer_scales, output, query_count,
+                   start_position, committed_kv_length, q_heads, kv_heads,
+                   head_dim, encoding, static_key_scale, static_value_scale,
+                   workspace, workspace_bytes, use_gqa_shared, use_split128,
+                   nullptr, stream);
+}
+
+hipError_t launch_decode_wave_split_staged32_device(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t start_position, const uint64_t committed_kv_length,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    const uint32_t encoding, const float static_key_scale,
+    const float static_value_scale, void *const workspace,
+    const uint64_t workspace_bytes, const bool use_query_preload,
+    const bool use_gqa_shared, sllm_decode_control::ControlV1 *const control,
+    const hipStream_t stream) noexcept {
+  if (control == nullptr || encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
+    return hipErrorInvalidValue;
+  }
+  // Capture the largest workspace/grid once. The stage-1 and merge kernels
+  // select the active P32 prefix from ControlV1 on every graph replay.
+  return use_query_preload
+             ? launch_decode_wave_split_staged_impl<
+                   true, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U, true>(
+                   query, key, value, key_scales, value_scales,
+                   key_outer_scales, value_outer_scales, output, query_count,
+                   start_position, committed_kv_length, q_heads, kv_heads,
+                   head_dim, encoding, static_key_scale, static_value_scale,
+                   workspace, workspace_bytes, use_gqa_shared, true, control,
                    stream)
              : launch_decode_wave_split_staged_impl<
-                   false, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U>(
+                   false, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U, true>(
                    query, key, value, key_scales, value_scales,
                    key_outer_scales, value_outer_scales, output, query_count,
                    start_position, committed_kv_length, q_heads, kv_heads,
                    head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, use_gqa_shared, use_split128,
+                   workspace, workspace_bytes, use_gqa_shared, true, control,
                    stream);
 }
 

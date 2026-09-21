@@ -496,7 +496,22 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
         byte_pointer(plan->buffers[7], plan->metadata.k_output.byte_offset));
     const bool use_wave32 =
         use_rdna_wave32_attention_preprocess(plan->metadata, arch_name);
-    status = ::sllm_attention_preprocess_kernel::launch(
+    auto *const device_control = graph_capture_queue == queue
+        ? static_cast<sllm_decode_control::ControlV1 *>(
+              whole_graph_capture_device_control())
+        : nullptr;
+    status = device_control != nullptr
+        ? (use_wave32 && plan->metadata.m <= 9U &&
+           plan->metadata.position_components == 1U &&
+           plan->metadata.position_payload_mode ==
+               SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1
+              ? ::sllm_attention_preprocess_kernel::launch_device(
+                    packed_q_gate, k, q_raw_scale, k_raw_scale, q_output,
+                    gate_output, k_output, static_cast<uint32_t>(plan->metadata.m),
+                    plan->metadata.q_heads, plan->metadata.k_heads,
+                    device_control, queue->stream)
+              : hipErrorInvalidValue)
+        : ::sllm_attention_preprocess_kernel::launch(
         packed_q_gate, k, q_raw_scale, k_raw_scale, positions, q_output,
         gate_output, k_output, static_cast<uint32_t>(plan->metadata.m),
         plan->metadata.q_heads, plan->metadata.k_heads, plan->metadata.head_dim,

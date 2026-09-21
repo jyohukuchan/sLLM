@@ -37,6 +37,27 @@ const ERROR_CAPACITY: usize = 256;
 const MAX_FINITE_TIMEOUT_MS: u32 = u32::MAX - 1;
 const KERNEL_SYMBOL: &str = "kv_state.bf16_to_f16_token_major.v2";
 const DEVICE_SYMBOL: &str = "sllm_kv_state_bf16_to_f16_token_major_v2";
+const WHOLE_DECODE_CAPTURE_MAX_ROWS: u64 = 9;
+
+fn operation_range_admitted(
+    start: u64,
+    rows: u64,
+    end: u64,
+    capacity: u64,
+    capture_projected: bool,
+) -> bool {
+    if rows == 0 || start.checked_add(rows) != Some(end) {
+        return false;
+    }
+    if end <= capacity {
+        return true;
+    }
+    capture_projected
+        && rows <= WHOLE_DECODE_CAPTURE_MAX_ROWS
+        && capacity
+            .checked_add(WHOLE_DECODE_CAPTURE_MAX_ROWS - 1)
+            .is_some_and(|limit| start < limit && end <= limit)
+}
 
 pub(crate) fn native_kv_storage(
     descriptor: KvStateDescriptor,
@@ -768,10 +789,17 @@ impl KvStateResource {
         value: &TensorBinding,
         request: KvStateAppendRequest,
     ) -> Result<(KvAppendCompletion, KvAppendEvidence), RuntimeError> {
+        let capture_projected = crate::graph_span::whole_decode_capture_active_on(queue)?;
         if request.state_id() != self.inner.state_id
             || request.descriptor() != self.inner.descriptor
             || request.start_position() != request.expected_length()
-            || request.end_position() > self.inner.descriptor.capacity()
+            || !operation_range_admitted(
+                request.start_position(),
+                request.token_count(),
+                request.end_position(),
+                self.inner.descriptor.capacity(),
+                capture_projected,
+            )
         {
             return Err(RuntimeError::local(
                 RuntimeStatus::InvalidKvAppendDescriptor,
@@ -831,6 +859,7 @@ impl KvStateResource {
             &self.inner.context,
             request,
             self.inner.descriptor,
+            capture_projected,
         ) {
             Ok(evidence) => evidence,
             Err(error) => {
@@ -854,6 +883,13 @@ impl KvStateResource {
         sliding_window: Option<u64>,
         score_scale: Option<f32>,
     ) -> Result<(CausalAttentionCompletion, CausalAttentionEvidence), RuntimeError> {
+        let capture_projected = crate::graph_span::whole_decode_capture_active_on(queue)?;
+        if capture_projected && (sliding_window.is_some() || score_scale.is_some()) {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidCausalAttentionDescriptor,
+                "whole-decode capture supports only unscaled full causal attention",
+            ));
+        }
         if sliding_window != self.inner.descriptor.sliding_window() {
             return Err(RuntimeError::local(
                 RuntimeStatus::InvalidCausalAttentionDescriptor,
@@ -938,6 +974,7 @@ impl KvStateResource {
             })?,
             sliding_window,
             score_scale,
+            capture_projected,
         ) {
             Ok(evidence) => evidence,
             Err(error) => {
@@ -966,6 +1003,12 @@ impl KvStateResource {
         sliding_window: Option<u64>,
         score_scale: Option<f32>,
     ) -> Result<(CausalAttentionCompletion, CausalAttentionEvidence), RuntimeError> {
+        if crate::graph_span::whole_decode_capture_active_on(queue)? {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidCausalAttentionDescriptor,
+                "whole-decode capture does not use the eager append-attention chain",
+            ));
+        }
         if append.state.inner.raw != self.inner.raw
             || append.context.raw_handle()?.as_ptr() != self.inner.context.raw_handle()?.as_ptr()
             || append.queue.raw_handle()?.as_ptr() != queue.raw_handle()?.as_ptr()
@@ -1060,6 +1103,7 @@ impl KvStateResource {
             })?,
             sliding_window,
             score_scale,
+            false,
         ) {
             Ok(evidence) => evidence,
             Err(error) => {
@@ -1266,6 +1310,13 @@ pub(crate) struct CausalAttentionCompletion {
 }
 
 impl CausalAttentionCompletion {
+    pub(crate) fn capture_marker(
+        &mut self,
+        capture: &mut crate::graph_span::WholeDecodeCapture,
+    ) -> Result<(), RuntimeError> {
+        capture.capture_opaque_completion(&mut self.raw)
+    }
+
     pub(crate) fn query(&mut self) -> Result<CompletionState, RuntimeError> {
         self.call_completion(None)
     }
@@ -1393,6 +1444,13 @@ impl Drop for CausalAttentionCompletion {
 }
 
 impl KvAppendCompletion {
+    pub(crate) fn capture_marker(
+        &mut self,
+        capture: &mut crate::graph_span::WholeDecodeCapture,
+    ) -> Result<(), RuntimeError> {
+        capture.capture_opaque_completion(&mut self.raw)
+    }
+
     pub(crate) fn query(&mut self) -> Result<CompletionState, RuntimeError> {
         self.call_completion(None)
     }
@@ -1750,6 +1808,7 @@ fn validate_append_info(
     context: &Context,
     request: KvStateAppendRequest,
     descriptor: KvStateDescriptor,
+    capture_projected: bool,
 ) -> Result<KvAppendEvidence, RuntimeError> {
     let observed_target = c_string(&info.gcn_arch_name);
     let target = logical_gcn_arch_name(&observed_target).to_owned();
@@ -1830,7 +1889,13 @@ fn validate_append_info(
         || c_string(&info.device_symbol) != expected_device
         || info.reserved0 != 0
         || info.reserved != [0; 8]
-        || info.end_position > descriptor.capacity()
+        || !operation_range_admitted(
+            info.start_position,
+            info.token_count,
+            info.end_position,
+            descriptor.capacity(),
+            capture_projected,
+        )
         || expected_target.is_some_and(|expected| !gcn_arch_matches(expected, &observed_target))
     {
         return Err(RuntimeError::local(
@@ -2212,10 +2277,11 @@ fn validate_causal_attention_info(
     query_heads: u32,
     sliding_window: Option<u64>,
     score_scale: Option<f32>,
+    capture_projected: bool,
 ) -> Result<CausalAttentionEvidence, RuntimeError> {
     let staged_decode_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_STAGED");
     let staged32_decode_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32");
-    validate_causal_attention_info_with_staged_opt_ins(
+    validate_causal_attention_info_impl(
         info,
         context,
         start_position,
@@ -2226,6 +2292,7 @@ fn validate_causal_attention_info(
         score_scale,
         staged_decode_opt_in.as_deref(),
         staged32_decode_opt_in.as_deref(),
+        capture_projected,
     )
 }
 
@@ -2242,7 +2309,7 @@ fn validate_causal_attention_info_with_staged_opt_in(
     score_scale: Option<f32>,
     staged_decode_opt_in: Option<&std::ffi::OsStr>,
 ) -> Result<CausalAttentionEvidence, RuntimeError> {
-    validate_causal_attention_info_with_staged_opt_ins(
+    validate_causal_attention_info_impl(
         info,
         context,
         start_position,
@@ -2253,10 +2320,12 @@ fn validate_causal_attention_info_with_staged_opt_in(
         score_scale,
         staged_decode_opt_in,
         None,
+        false,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn validate_causal_attention_info_with_staged_opt_ins(
     info: &sys::sllm_causal_attention_dispatch_info_t,
     context: &Context,
@@ -2268,6 +2337,35 @@ fn validate_causal_attention_info_with_staged_opt_ins(
     score_scale: Option<f32>,
     staged_decode_opt_in: Option<&std::ffi::OsStr>,
     staged32_decode_opt_in: Option<&std::ffi::OsStr>,
+) -> Result<CausalAttentionEvidence, RuntimeError> {
+    validate_causal_attention_info_impl(
+        info,
+        context,
+        start_position,
+        committed_kv_length,
+        descriptor,
+        query_heads,
+        sliding_window,
+        score_scale,
+        staged_decode_opt_in,
+        staged32_decode_opt_in,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_causal_attention_info_impl(
+    info: &sys::sllm_causal_attention_dispatch_info_t,
+    context: &Context,
+    start_position: u64,
+    committed_kv_length: u64,
+    descriptor: KvStateDescriptor,
+    query_heads: u32,
+    sliding_window: Option<u64>,
+    score_scale: Option<f32>,
+    staged_decode_opt_in: Option<&std::ffi::OsStr>,
+    staged32_decode_opt_in: Option<&std::ffi::OsStr>,
+    capture_projected: bool,
 ) -> Result<CausalAttentionEvidence, RuntimeError> {
     let observed_target = c_string(&info.gcn_arch_name);
     let target = logical_gcn_arch_name(&observed_target).to_owned();
@@ -2336,7 +2434,13 @@ fn validate_causal_attention_info_with_staged_opt_ins(
             || c_string(&info.kernel_symbol) != kernel_symbol
             || c_string(&info.device_symbol) != device_symbol
             || info.reserved != expected_reserved
-            || committed_kv_length > descriptor.capacity()
+            || !operation_range_admitted(
+                start_position,
+                query_count,
+                committed_kv_length,
+                descriptor.capacity(),
+                capture_projected,
+            )
             || expected_target.is_some_and(|expected| !gcn_arch_matches(expected, &observed_target))
         {
             return Err(RuntimeError::local(
@@ -2402,7 +2506,13 @@ fn validate_causal_attention_info_with_staged_opt_ins(
             || c_string(&info.kernel_symbol) != "causal_attention.sliding_static_fp8_gqa.v1"
             || c_string(&info.device_symbol) != "sllm_causal_attention_sliding_static_fp8_gqa_v1"
             || info.reserved != expected_reserved
-            || committed_kv_length > descriptor.capacity()
+            || !operation_range_admitted(
+                start_position,
+                query_count,
+                committed_kv_length,
+                descriptor.capacity(),
+                capture_projected,
+            )
             || expected_target.is_some_and(|expected| !gcn_arch_matches(expected, &observed_target))
         {
             return Err(RuntimeError::local(
@@ -2452,8 +2562,8 @@ fn validate_causal_attention_info_with_staged_opt_ins(
         && matches!(expected_target, Some("gfx1030" | "gfx1201"))
         && (staged32_decode_opt_in.is_some_and(|value| value == "1")
             || (staged32_decode_opt_in.is_none() && !use_decode_wave_split_staged))
-        && (1..=4).contains(&query_count)
-        && committed_kv_length >= 1024
+        && (1..=9).contains(&query_count)
+        && committed_kv_length >= 1
         && query_heads == 24
         && descriptor.layout().heads() == 4
         && descriptor.layout().head_dim() == 256
@@ -3024,7 +3134,13 @@ fn validate_causal_attention_info_with_staged_opt_ins(
         || c_string(&info.kernel_symbol) != expected_kernel
         || c_string(&info.device_symbol) != expected_device
         || info.reserved != expected_reserved
-        || committed_kv_length > descriptor.capacity()
+        || !operation_range_admitted(
+            start_position,
+            query_count,
+            committed_kv_length,
+            descriptor.capacity(),
+            capture_projected,
+        )
         || expected_target.is_some_and(|expected| !gcn_arch_matches(expected, &observed_target))
     {
         return Err(RuntimeError::local(
@@ -3172,6 +3288,66 @@ pub fn expected_storage_offset(
 mod tests {
     use super::*;
 
+    #[test]
+    fn projected_operation_range_requires_bounded_capture_admission() {
+        assert!(!operation_range_admitted(20, 3, 23, 22, false));
+        assert!(operation_range_admitted(20, 3, 23, 22, true));
+        assert!(operation_range_admitted(21, 9, 30, 22, true));
+        assert!(!operation_range_admitted(21, 10, 31, 22, true));
+        assert!(!operation_range_admitted(22, 9, 31, 22, true));
+        assert!(!operation_range_admitted(20, 3, 24, 22, true));
+        assert!(operation_range_admitted(19, 3, 22, 22, false));
+    }
+
+    #[test]
+    fn capture_projected_causal_evidence_requires_scope_flag() {
+        let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            22,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        )
+        .unwrap();
+        let context = Context::test_without_native_for_target("gfx1030");
+        let mut info = empty_causal_attention_info();
+        info.backend = sys::SLLM_BACKEND_HIP;
+        info.dispatch_id = 1;
+        info.dispatch_count = 2;
+        info.kernel_id = sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_V1;
+        info.workgroup_size_x = sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+        info.grid_size_x = 9 * 24 * 32;
+        info.query_count = 9;
+        info.start_position = 21;
+        info.committed_kv_length = 30;
+        info.q_heads = 24;
+        info.kv_heads = 4;
+        info.head_dim = 256;
+        info.scale_denominator = 16;
+        set_test_c_string(
+            &mut info.kernel_symbol,
+            "causal_attention.decode.wave32_split.staged.v1",
+        );
+        set_test_c_string(
+            &mut info.device_symbol,
+            "sllm_causal_attention_decode_wave32_split_staged_v1",
+        );
+        set_test_c_string(&mut info.gcn_arch_name, "gfx1030");
+        assert!(
+            validate_causal_attention_info_impl(
+                &info, &context, 21, 30, descriptor, 24, None, None, None, None, false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_causal_attention_info_impl(
+                &info, &context, 21, 30, descriptor, 24, None, None, None, None, true,
+            )
+            .is_ok()
+        );
+    }
+
     fn set_test_c_string<const N: usize>(destination: &mut [std::ffi::c_char; N], value: &str) {
         for (slot, byte) in destination.iter_mut().zip(value.bytes()) {
             *slot = byte as std::ffi::c_char;
@@ -3293,6 +3469,7 @@ mod tests {
                 16,
                 sliding_window,
                 Some(1.0),
+                false,
             )
             .unwrap();
             assert_eq!(evidence.score_scale_bits, 1.0_f32.to_bits());
@@ -3312,6 +3489,7 @@ mod tests {
                     16,
                     sliding_window,
                     Some(1.0),
+                    false,
                 )
                 .is_err()
             );
@@ -3327,6 +3505,7 @@ mod tests {
                     16,
                     sliding_window,
                     Some(1.0),
+                    false,
                 )
                 .is_err()
             );
@@ -3410,9 +3589,10 @@ mod tests {
         );
         set_test_c_string(&mut info.gcn_arch_name, "gfx1030");
 
-        let evidence =
-            validate_causal_attention_info(&info, &context, 32, 33, descriptor, 24, None, None)
-                .unwrap();
+        let evidence = validate_causal_attention_info(
+            &info, &context, 32, 33, descriptor, 24, None, None, false,
+        )
+        .unwrap();
         assert_eq!(evidence.dispatch_count, 1);
         assert_eq!(evidence.query_count, 1);
         assert_eq!(evidence.start_position, 32);
@@ -3474,6 +3654,7 @@ mod tests {
                     24,
                     None,
                     None,
+                    false,
                 )
                 .unwrap();
                 assert_eq!(evidence.workgroup_size_x, 512);
@@ -3582,7 +3763,7 @@ mod tests {
     }
 
     #[test]
-    fn mxfp8_e4_staged32_metadata_accepts_both_supported_targets() {
+    fn mxfp8_e4_staged32_metadata_accepts_short_rows_on_both_targets() {
         let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
             0,
             8192,
@@ -3594,8 +3775,8 @@ mod tests {
         .unwrap();
         for target in ["gfx1030", "gfx1201"] {
             let context = Context::test_without_native_for_target(target);
-            for query_count in 1..=4_u64 {
-                let start_position = 1024;
+            for query_count in 1..=10_u64 {
+                let start_position = 0;
                 let committed_kv_length = start_position + query_count;
                 let mut info = empty_causal_attention_info();
                 info.backend = sys::SLLM_BACKEND_HIP;
@@ -3638,8 +3819,12 @@ mod tests {
                     None,
                     None,
                     None,
-                )
-                .unwrap();
+                );
+                if query_count == 10 {
+                    assert!(evidence.is_err());
+                    continue;
+                }
+                let evidence = evidence.unwrap();
                 assert_eq!(evidence.kernel_id, info.kernel_id);
                 assert_eq!(evidence.dispatch_count, 2);
                 assert_eq!(

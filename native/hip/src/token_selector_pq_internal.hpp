@@ -1,6 +1,7 @@
 #ifndef SLLM_TOKEN_SELECTOR_PQ_INTERNAL_HPP
 #define SLLM_TOKEN_SELECTOR_PQ_INTERNAL_HPP
 
+#include "decode_control_kernel_internal.hpp"
 #include "token_selector_pq_algorithm.hpp"
 
 #include <hip/hip_runtime.h>
@@ -11,6 +12,10 @@ inline constexpr const char *kLogicalKernelId =
     "token_selector.sparse_pq_k20.v1";
 inline constexpr const char *kDeviceSymbol =
     "sllm_token_selector_sparse_pq_k20_v1";
+inline constexpr const char *kGraphLogicalKernelId =
+    "token_selector.sparse_pq_k20.graph.v1";
+inline constexpr const char *kGraphDeviceSymbol =
+    "sllm_token_selector_sparse_pq_k20_graph_v1";
 
 hipError_t launch(const sllm_token_selector_pq::SupportRecordV1 *target_rows,
                   uint32_t target_row_count,
@@ -21,6 +26,17 @@ hipError_t launch(const sllm_token_selector_pq::SupportRecordV1 *target_rows,
                   uint64_t absolute_position,
                   sllm_token_selector_pq::DecisionRecordV1 *output,
                   hipStream_t stream) noexcept;
+
+hipError_t
+launch_graph(const sllm_token_selector_pq::SupportRecordV1 *target_rows,
+             uint32_t target_row_count,
+             const sllm_token_selector_pq::SupportRecordV1 *draft_rows,
+             uint32_t draft_row_count, const uint32_t *draft_ids,
+             uint32_t draft_id_count, uint32_t width,
+             const sllm_decode_control::SelectorRecordV1 *target_selector,
+             sllm_decode_control::ControlV1 *control, uint32_t phase_row,
+             sllm_token_selector_pq::DecisionRecordV1 *output,
+             hipStream_t stream) noexcept;
 
 } // namespace sllm_token_selector_pq_kernel
 

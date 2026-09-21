@@ -156,6 +156,13 @@ pub struct ResidualRmsNormSubmission {
     _plan: Arc<PreparedResidualRmsNormState>,
 }
 impl ResidualRmsNormSubmission {
+    pub(crate) fn capture_marker(
+        &mut self,
+        marker: &mut dyn sllm_core::ExecutionCaptureMarker,
+    ) -> Result<(), sllm_core::ExecutionError> {
+        marker.capture_completion(&mut self.completion)
+    }
+
     pub fn query(&mut self) -> Result<CompletionState, RuntimeError> {
         self.completion.query()
     }

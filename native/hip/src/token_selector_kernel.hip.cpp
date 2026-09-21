@@ -306,6 +306,14 @@ hipError_t launch(const uint16_t *const bf16_logits,
                 seed, counter, output, stream);
 }
 
+hipError_t launch_graph_fixed_k20_topp(
+    const uint16_t *const, const float *const, const uint8_t *const,
+    uint8_t *const, const uint64_t, const uint32_t,
+    sllm_decode_control::ControlV1 *const, const uint32_t,
+    sllm_token_selector_record_t *const, const hipStream_t) noexcept {
+  return hipErrorNotSupported;
+}
+
 } // namespace sllm_token_selector_kernel
 
 #else
@@ -1249,6 +1257,35 @@ __device__ __forceinline__ void token_selector_fixed_topk_final_impl(
   output->logprob = static_cast<float>(log(selected_weight / cumulative));
 }
 
+__device__ bool
+token_selector_graph_rng(sllm_decode_control::ControlV1 *const control,
+                         const uint32_t phase_row, uint64_t *const seed,
+                         uint64_t *const counter,
+                         sllm_token_selector_record_t *const output) {
+  if (control != nullptr && control->version == sllm_decode_control::kVersion &&
+      (control->phase_active == 0U || control->halted != 0U ||
+       phase_row >= control->phase_rows)) {
+    // Inactive rows belong to the fixed maximum graph shape. Preserve the
+    // last active selector record so an active-width-zero tail can commit the
+    // exact target row-zero draw after the remaining static rows no-op.
+    return false;
+  }
+  if (control == nullptr || seed == nullptr || counter == nullptr ||
+      output == nullptr || control->version != sllm_decode_control::kVersion ||
+      control->phase_counter > UINT64_MAX - phase_row) {
+    if (output != nullptr) {
+      output->token_id = -1;
+      output->status = SLLM_STATUS_INVALID_ARGUMENT;
+      output->logprob = -INFINITY;
+      output->reserved0 = 0U;
+    }
+    return false;
+  }
+  *seed = control->phase_seed;
+  *counter = control->phase_counter + phase_row;
+  return true;
+}
+
 extern "C" __global__ __launch_bounds__(
     SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE,
     1) void sllm_token_selector_fixed_topk_final_v1(const uint32_t *const input,
@@ -1284,9 +1321,134 @@ extern "C" __global__ __launch_bounds__(
                                              seed, counter, output, support);
 }
 
+extern "C" __global__ __launch_bounds__(
+    SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE,
+    1) void sllm_token_selector_fixed_topk_final_graph_v1(const uint32_t
+                                                              *const input,
+                                                          const uint64_t
+                                                              input_records,
+                                                          const uint32_t top_k,
+                                                          const float top_p,
+                                                          sllm_decode_control::
+                                                              ControlV1 *const
+                                                                  control,
+                                                          const uint32_t
+                                                              phase_row,
+                                                          sllm_token_selector_record_t
+                                                              *const output) {
+  uint64_t seed = 0U;
+  uint64_t counter = 0U;
+  if (!token_selector_graph_rng(control, phase_row, &seed, &counter, output)) {
+    return;
+  }
+  token_selector_fixed_topk_final_impl<false>(
+      input, input_records, top_k, top_p, seed, counter, output, nullptr);
+}
+
+extern "C" __global__ __launch_bounds__(
+    SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE,
+    1) void sllm_token_selector_fixed_topk_final_graph_support_v1(const uint32_t
+                                                                      *const
+                                                                          input,
+                                                                  const uint64_t
+                                                                      input_records,
+                                                                  const uint32_t
+                                                                      top_k,
+                                                                  const float
+                                                                      top_p,
+                                                                  sllm_decode_control::
+                                                                      ControlV1 *const
+                                                                          control,
+                                                                  const uint32_t
+                                                                      phase_row,
+                                                                  sllm_token_selector_record_t
+                                                                      *const
+                                                                          output,
+                                                                  uint8_t *const
+                                                                      support) {
+  uint64_t seed = 0U;
+  uint64_t counter = 0U;
+  if (!token_selector_graph_rng(control, phase_row, &seed, &counter, output)) {
+    return;
+  }
+  token_selector_fixed_topk_final_impl<true>(input, input_records, top_k, top_p,
+                                             seed, counter, output, support);
+}
+
 } // namespace
 
 namespace sllm_token_selector_kernel {
+
+hipError_t launch_graph_fixed_k20_topp(
+    const uint16_t *const bf16_logits, const float *const additive_logits,
+    const uint8_t *const valid_mask, uint8_t *const workspace,
+    const uint64_t vocab_size, const uint32_t flags,
+    sllm_decode_control::ControlV1 *const control, const uint32_t phase_row,
+    sllm_token_selector_record_t *const output,
+    const hipStream_t stream) noexcept {
+  if (bf16_logits == nullptr || additive_logits == nullptr ||
+      valid_mask == nullptr || workspace == nullptr || control == nullptr ||
+      output == nullptr || vocab_size == 0U ||
+      phase_row >= sllm_decode_control::kMaxEmitted) {
+    return hipErrorInvalidValue;
+  }
+  constexpr uint32_t kTopK = sllm_token_selector_support::kMaxCountV1;
+  constexpr float kTopP = 0.95F;
+  const dim3 block(SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE, 1U, 1U);
+  const uint64_t block_count =
+      (vocab_size + SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE - 1U) /
+      SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE;
+  const uint64_t region_bytes = block_count * static_cast<uint64_t>(kTopK) * 8U;
+  if (block_count == 0U || block_count > UINT32_MAX ||
+      region_bytes > UINT64_MAX / 2U ||
+      region_bytes * 2U > SLLM_HIP_TOKEN_SELECTOR_K0_WORKSPACE_BYTES) {
+    return hipErrorInvalidValue;
+  }
+  hipError_t status = hipMemsetAsync(output, 0, sizeof(*output), stream);
+  if (status != hipSuccess) {
+    return status;
+  }
+  const dim3 initial_grid(static_cast<uint32_t>(block_count), 1U, 1U);
+  hipLaunchKernelGGL(sllm_token_selector_fixed_topk_initial_v1, initial_grid,
+                     block, 0U, stream, bf16_logits, additive_logits,
+                     valid_mask, reinterpret_cast<uint32_t *>(workspace),
+                     vocab_size, kTopK, flags, output);
+  status = hipGetLastError();
+  if (status != hipSuccess) {
+    return status;
+  }
+  uint64_t input_records = block_count * static_cast<uint64_t>(kTopK);
+  uint64_t input_offset = 0U;
+  uint64_t output_offset = region_bytes;
+  while (input_records > SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE) {
+    const uint64_t reduce_blocks =
+        (input_records + SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE - 1U) /
+        SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE;
+    if (reduce_blocks > UINT32_MAX) {
+      return hipErrorInvalidValue;
+    }
+    const dim3 reduce_grid(static_cast<uint32_t>(reduce_blocks), 1U, 1U);
+    hipLaunchKernelGGL(
+        sllm_token_selector_fixed_topk_reduce_v1, reduce_grid, block, 0U,
+        stream, reinterpret_cast<const uint32_t *>(workspace + input_offset),
+        reinterpret_cast<uint32_t *>(workspace + output_offset), input_records,
+        kTopK);
+    status = hipGetLastError();
+    if (status != hipSuccess) {
+      return status;
+    }
+    input_records = reduce_blocks * static_cast<uint64_t>(kTopK);
+    const uint64_t old_input_offset = input_offset;
+    input_offset = output_offset;
+    output_offset = old_input_offset;
+  }
+  hipLaunchKernelGGL(
+      sllm_token_selector_fixed_topk_final_graph_support_v1, dim3(1U, 1U, 1U),
+      block, 0U, stream,
+      reinterpret_cast<const uint32_t *>(workspace + input_offset),
+      input_records, kTopK, kTopP, control, phase_row, output, workspace);
+  return hipGetLastError();
+}
 
 hipError_t launch(const uint16_t *const bf16_logits,
                   const float *const additive_logits,

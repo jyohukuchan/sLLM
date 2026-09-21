@@ -339,7 +339,7 @@ impl SamplingBench {
                 "host sampling: temperature=1 top_k=20 top_p=0.95; full logits readback"
             }
             SamplingMode::GpuFixed => {
-                "GPU sampling: temperature=1 top_k=20 top_p=0.95; 16-byte record readback"
+                "GPU sampling: temperature=1 top_k=20 top_p=0.95; eager selector record 16 bytes, whole graph result record 192 bytes"
             }
         }
     }
@@ -856,11 +856,26 @@ struct AuditReport {
     boundary_count: u64,
     physical_queue_fence_count: u64,
     graph_replay_count: u64,
+    whole_decode: Option<WholeDecodeAuditReport>,
     graph_span_count: u64,
     graph_capture_kernel_node_count: u64,
     kv_append_attention_chain_count: u64,
     selected_kernel_counts: Vec<KernelCountReport>,
     complete_identity_map: &'static str,
+}
+
+#[derive(Serialize)]
+struct WholeDecodeAuditReport {
+    result_record_bytes: usize,
+    startup_ns: u64,
+    completed_replays: u64,
+    discarded_replays: u64,
+    executed_replays: u64,
+    native_nodes_per_replay: u64,
+    native_kernel_nodes_per_replay: u64,
+    executed_native_kernel_nodes_total: u64,
+    logical_dispatch_count: u64,
+    provider_dispatch_count: u64,
 }
 
 #[derive(Serialize)]
@@ -1124,14 +1139,21 @@ impl Config {
         if measured == 0 || measured > MAX_REPETITIONS {
             return Err(format!("{MEASURED_ENV} must be in 1..={MAX_REPETITIONS}"));
         }
-        if !(512..=MAX_CHUNK_CAPACITY).contains(&chunk_capacity)
-            || !chunk_capacity.is_power_of_two()
+        let boundary_diagnostic =
+            phase83 && env::var("SLLM_PHASE87_BOUNDARY_TEST").ok().as_deref() == Some("1");
+        if chunk_capacity == 0
+            || chunk_capacity > MAX_CHUNK_CAPACITY
+            || (!boundary_diagnostic && (chunk_capacity < 512 || !chunk_capacity.is_power_of_two()))
         {
-            return Err(format!(
-                "{CHUNK_CAPACITY_ENV} must be a power of two in 512..={MAX_CHUNK_CAPACITY}"
-            ));
+            return Err(if boundary_diagnostic {
+                format!(
+                    "{CHUNK_CAPACITY_ENV} must be in 1..={MAX_CHUNK_CAPACITY} for a boundary diagnostic"
+                )
+            } else {
+                format!("{CHUNK_CAPACITY_ENV} must be a power of two in 512..={MAX_CHUNK_CAPACITY}")
+            });
         }
-        let rows = if phase83 {
+        let mut rows = if phase83 {
             match env::var(PHASE83_ROWS_ENV) {
                 Ok(text) => parse_phase83_rows(&text)?,
                 Err(env::VarError::NotPresent) => PHASE83_ROWS.to_vec(),
@@ -1144,6 +1166,19 @@ impl Config {
                 Err(error) => return Err(format!("cannot read {ROWS_ENV}: {error}")),
             }
         };
+        // Bounded diagnostic budgets exercise stop/capacity boundaries without
+        // changing the canonical benchmark rows or their default conditions.
+        if let Ok(value) = env::var("SLLM_PHASE87_OUTPUT_TOKENS") {
+            let output_tokens = value
+                .parse::<usize>()
+                .map_err(|_| "SLLM_PHASE87_OUTPUT_TOKENS must be an integer".to_owned())?;
+            if !phase83 || !(1..=128).contains(&output_tokens) {
+                return Err("SLLM_PHASE87_OUTPUT_TOKENS requires Phase83 and 1..=128".to_owned());
+            }
+            for row in &mut rows {
+                row.output_tokens = output_tokens;
+            }
+        }
         let state_capacity = parse_env_or(STATE_CAPACITY_ENV, Some(STATE_CAPACITY))?;
         if state_capacity == 0
             || rows.iter().any(|row| {
@@ -1336,6 +1371,23 @@ fn run(config: Config) -> Result<Report, String> {
         .available_memory_bytes()
         .map_err(|error| error.to_string())?;
 
+    // Diagnostic stop injection uses the same policy path as model EOS, allowing
+    // deterministic eager/graph comparisons at a token inside a replay block.
+    let diagnostic_stop_ids = std::env::var("SLLM_PHASE87_STOP_TOKEN_ID")
+        .ok()
+        .map(|value| {
+            if value == "none" {
+                return Ok(Vec::new());
+            }
+            let token = value
+                .parse::<u32>()
+                .map_err(|_| "invalid SLLM_PHASE87_STOP_TOKEN_ID".to_owned())?;
+            if token >= QWEN35_VOCAB_SIZE as u32 {
+                return Err("SLLM_PHASE87_STOP_TOKEN_ID exceeds vocabulary".to_owned());
+            }
+            Ok(vec![token])
+        })
+        .transpose()?;
     let operation = (|| -> Result<_, String> {
         let load_started = Instant::now();
         let resident = QwenResidentModel::new_unsloth_qwen38_nvfp4(
@@ -1377,11 +1429,11 @@ fn run(config: Config) -> Result<Report, String> {
                 &config.target,
                 &locked_tokenizer.tokenizer,
                 config.sampling,
-                if config.phase83 {
-                    Some(lock.generation_stop_policy().stop_token_ids.as_slice())
-                } else {
-                    None
-                },
+                diagnostic_stop_ids.as_deref().or_else(|| {
+                    config
+                        .phase83
+                        .then_some(lock.generation_stop_policy().stop_token_ids.as_slice())
+                }),
                 mtp_resident.as_ref(),
                 mtp_graph.as_ref(),
                 config.mtp,
@@ -2673,6 +2725,16 @@ fn run_one_target(
     let mut request = resident
         .new_request(graph.clone())
         .map_err(|error| format!("request creation failed: {error}"))?;
+    let whole_decode_configured = if sampling.mode == SamplingMode::GpuFixed
+        && !sampling.replay_inputs
+        && std::env::var("SLLM_QWEN38_WHOLE_DECODE").ok().as_deref() != Some("0")
+    {
+        request
+            .configure_whole_target_decode(output_tokens as u64, stop_token_ids.unwrap_or(&[]))
+            .map_err(|error| format!("whole target configuration failed: {error}"))?
+    } else {
+        false
+    };
     let request_setup_elapsed = e2e_started.elapsed();
     let mut sampling_state = if sampling.mode == SamplingMode::Greedy {
         None
@@ -2782,6 +2844,11 @@ fn run_one_target(
     {
         return Err(format!("request dispatch audit is not HIP-only: {audit:?}"));
     }
+    if whole_decode_configured && generated.len() > 2 && audit.whole_decode_audit().is_none() {
+        return Err(
+            "configured whole target decode did not produce any replay evidence".to_owned(),
+        );
+    }
     let audit = audit_report(&audit);
     let request_memory = request
         .memory_audit_snapshot()
@@ -2877,12 +2944,22 @@ fn run_one_mtp(
     let target_request = resident
         .new_request(graph.clone())
         .map_err(|error| format!("MTP target request creation failed: {error}"))?;
-    let mtp_request = mtp_resident
-        .new_request(mtp_graph.clone())
-        .map_err(|error| format!("MTP draft request creation failed: {error}"))?;
+    let whole_decode = target_request.supports_whole_decode()
+        && std::env::var("SLLM_QWEN38_WHOLE_DECODE").ok().as_deref() != Some("0");
+    let mtp_request = if whole_decode {
+        mtp_resident.new_request_on_queue_of(mtp_graph.clone(), &target_request)
+    } else {
+        mtp_resident.new_request(mtp_graph.clone())
+    }
+    .map_err(|error| format!("MTP draft request creation failed: {error}"))?;
     let mut executor =
         QwenMtpGenerationExecutorV1::new_with_draft_width(target_request, mtp_request, draft_width)
             .map_err(|error| format!("MTP executor construction failed: {error}"))?;
+    if whole_decode {
+        executor
+            .configure_whole_decode(output_tokens as u64, stop_token_ids.unwrap_or(&[]))
+            .map_err(|error| format!("whole MTP configuration failed: {error}"))?;
+    }
     let request_setup_elapsed = e2e_started.elapsed();
     let sampling_state = {
         let parameters =
@@ -3375,6 +3452,20 @@ fn audit_report(audit: &QwenExecutionAudit) -> AuditReport {
         boundary_count: audit.boundary_count(),
         physical_queue_fence_count: audit.physical_queue_fence_count(),
         graph_replay_count: audit.graph_replay_count(),
+        whole_decode: audit
+            .whole_decode_audit()
+            .map(|whole| WholeDecodeAuditReport {
+                result_record_bytes: sllm_core::DECODE_RESULT_BYTES_V1,
+                startup_ns: whole.startup_ns(),
+                completed_replays: whole.completed_replays(),
+                discarded_replays: whole.discarded_replays(),
+                executed_replays: whole.executed_replays(),
+                native_nodes_per_replay: whole.native_nodes_per_replay(),
+                native_kernel_nodes_per_replay: whole.native_kernel_nodes_per_replay(),
+                executed_native_kernel_nodes_total: whole.executed_native_kernel_nodes_total(),
+                logical_dispatch_count: whole.logical_dispatch_count(),
+                provider_dispatch_count: whole.provider_dispatch_count(),
+            }),
         graph_span_count: audit.graph_span_count(),
         graph_capture_kernel_node_count: audit.graph_capture_kernel_node_count(),
         kv_append_attention_chain_count: audit.kv_append_attention_chain_count(),

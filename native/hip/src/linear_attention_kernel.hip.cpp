@@ -6,6 +6,7 @@
 // ggml/src/ggml-cuda/gated_delta_net.cu
 // SPDX-License-Identifier: MIT
 
+#include "decode_control_kernel_internal.hpp"
 #include "linear_attention_kernel_internal.hpp"
 #include "linear_attention_register_state.hpp"
 
@@ -73,6 +74,38 @@ __device__ __forceinline__ uint64_t recurrent_state_index(
 #endif
 }
 
+__device__ __forceinline__ bool
+decode_linear_phase(sllm_decode_control::ControlV1 *const control,
+                    const uint32_t captured_token_count,
+                    uint32_t *const active_token_count,
+                    bool *const swap_slots) noexcept {
+  if (active_token_count == nullptr || swap_slots == nullptr ||
+      captured_token_count == 0U) {
+    return false;
+  }
+  if (control == nullptr) {
+    *active_token_count = captured_token_count;
+    *swap_slots = false;
+    return true;
+  }
+  if (control->status !=
+          static_cast<uint32_t>(sllm_decode_control::Status::Ok) ||
+      control->phase_active == 0U || control->halted != 0U) {
+    return false;
+  }
+  if (control->phase_rows == 0U || control->phase_rows > captured_token_count) {
+    atomicExch(
+        &control->status,
+        static_cast<uint32_t>(sllm_decode_control::Status::InvalidPhase));
+    atomicExch(&control->halted, 1U);
+    atomicExch(&control->phase_active, 0U);
+    return false;
+  }
+  *active_token_count = control->phase_rows;
+  *swap_slots = (control->generation & 1U) != 0U;
+  return true;
+}
+
 } // namespace
 
 extern "C" __global__
@@ -81,12 +114,28 @@ __launch_bounds__(128, 1) void sllm_linear_attention_causal_conv_silu_v1(
     const uint16_t *const previous_conv_state, uint16_t *const convolved_qkv,
     uint16_t *const next_conv_state, const uint32_t token_count,
     const uint32_t qkv_width, const uint32_t conv_kernel_size,
-    uint16_t *const checkpoint_conv_state, const uint32_t checkpoint_rows) {
+    uint16_t *const checkpoint_conv_state, const uint32_t checkpoint_rows,
+    sllm_decode_control::ControlV1 *const control) {
+  uint32_t active_token_count = token_count;
+  bool swap_slots = false;
+  if (!decode_linear_phase(control, token_count, &active_token_count,
+                           &swap_slots)) {
+    return;
+  }
+  const uint16_t *const previous_state =
+      swap_slots ? next_conv_state : previous_conv_state;
+  uint16_t *const next_state = swap_slots
+                                   ? const_cast<uint16_t *>(previous_conv_state)
+                                   : next_conv_state;
+  const uint32_t active_checkpoint_rows = checkpoint_rows < active_token_count
+                                              ? checkpoint_rows
+                                              : active_token_count - 1U;
   const uint64_t width = qkv_width;
   const uint64_t history = conv_kernel_size - 1U;
   const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
                          static_cast<uint64_t>(threadIdx.x);
-  const uint64_t output_elements = static_cast<uint64_t>(token_count) * width;
+  const uint64_t output_elements =
+      static_cast<uint64_t>(active_token_count) * width;
   if (index < output_elements) {
     const uint64_t token = index / width;
     const uint64_t channel = index % width;
@@ -95,12 +144,12 @@ __launch_bounds__(128, 1) void sllm_linear_attention_causal_conv_silu_v1(
       const int64_t source =
           static_cast<int64_t>(token + tap) - static_cast<int64_t>(history);
       const uint16_t value =
-          source < 0 ? previous_conv_state[static_cast<uint64_t>(
-                                               source +
-                                               static_cast<int64_t>(history)) *
-                                               width +
-                                           channel]
-                     : qkv[static_cast<uint64_t>(source) * width + channel];
+          source < 0
+              ? previous_state[static_cast<uint64_t>(
+                                   source + static_cast<int64_t>(history)) *
+                                   width +
+                               channel]
+              : qkv[static_cast<uint64_t>(source) * width + channel];
       sum += bf16_to_float(value) *
              bf16_to_float(conv_weight[channel * conv_kernel_size + tap]);
     }
@@ -111,24 +160,24 @@ __launch_bounds__(128, 1) void sllm_linear_attention_causal_conv_silu_v1(
     if (history_index < history * width) {
       const uint64_t history_row = history_index / width;
       const uint64_t channel = history_index % width;
-      const int64_t source = static_cast<int64_t>(token_count) -
+      const int64_t source = static_cast<int64_t>(active_token_count) -
                              static_cast<int64_t>(history) +
                              static_cast<int64_t>(history_row);
-      next_conv_state[history_index] =
-          source < 0 ? previous_conv_state[static_cast<uint64_t>(
-                                               source +
-                                               static_cast<int64_t>(history)) *
-                                               width +
-                                           channel]
-                     : qkv[static_cast<uint64_t>(source) * width + channel];
+      next_state[history_index] =
+          source < 0
+              ? previous_state[static_cast<uint64_t>(
+                                   source + static_cast<int64_t>(history)) *
+                                   width +
+                               channel]
+              : qkv[static_cast<uint64_t>(source) * width + channel];
     }
   }
 
   const uint64_t checkpoint_base = output_elements + history * width;
   const uint64_t checkpoint_index = index - checkpoint_base;
-  if (checkpoint_conv_state != nullptr && checkpoint_rows != 0U &&
+  if (checkpoint_conv_state != nullptr && active_checkpoint_rows != 0U &&
       checkpoint_index <
-          static_cast<uint64_t>(checkpoint_rows) * history * width) {
+          static_cast<uint64_t>(active_checkpoint_rows) * history * width) {
     const uint64_t checkpoint_plane = checkpoint_index / (history * width);
     const uint64_t local = checkpoint_index % (history * width);
     const uint64_t history_row = local / width;
@@ -138,10 +187,10 @@ __launch_bounds__(128, 1) void sllm_linear_attention_causal_conv_silu_v1(
                            static_cast<int64_t>(history_row);
     checkpoint_conv_state[checkpoint_index] =
         source < 0
-            ? previous_conv_state[static_cast<uint64_t>(
-                                      source + static_cast<int64_t>(history)) *
-                                      width +
-                                  channel]
+            ? previous_state[static_cast<uint64_t>(
+                                 source + static_cast<int64_t>(history)) *
+                                 width +
+                             channel]
             : qkv[static_cast<uint64_t>(source) * width + channel];
   }
 }
@@ -157,7 +206,22 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
     const uint32_t token_count, const uint32_t qk_heads,
     const uint32_t value_heads, const uint32_t head_dim,
     const uint32_t qkv_width, const uint32_t output_width,
-    float *const checkpoint_recurrent_state, const uint32_t checkpoint_rows) {
+    float *const checkpoint_recurrent_state, const uint32_t checkpoint_rows,
+    sllm_decode_control::ControlV1 *const control) {
+  uint32_t active_token_count = token_count;
+  bool swap_slots = false;
+  if (!decode_linear_phase(control, token_count, &active_token_count,
+                           &swap_slots)) {
+    return;
+  }
+  const float *const previous_state =
+      swap_slots ? next_recurrent_state : previous_recurrent_state;
+  float *const next_state = swap_slots
+                                ? const_cast<float *>(previous_recurrent_state)
+                                : next_recurrent_state;
+  const uint32_t active_checkpoint_rows = checkpoint_rows < active_token_count
+                                              ? checkpoint_rows
+                                              : active_token_count - 1U;
   const uint32_t value_head = blockIdx.x;
   const uint32_t dimension = threadIdx.x;
   if (value_head >= value_heads || dimension >= head_dim) {
@@ -180,7 +244,7 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
   const uint32_t lane = dimension & 31U;
   const uint32_t wave = dimension >> 5U;
 
-  for (uint32_t token = 0U; token != token_count; ++token) {
+  for (uint32_t token = 0U; token != active_token_count; ++token) {
     const uint64_t qkv_row = static_cast<uint64_t>(token) * qkv_width;
     q_values[dimension] = bf16_to_float(
         convolved_qkv[qkv_row + static_cast<uint64_t>(qk_head) * head_dim +
@@ -245,10 +309,10 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
       // later tokens continue from this request's next buffer. Combining the
       // copy, decay, and projection pass preserves the original FP32
       // operation order while removing one full recurrent-state traversal.
-      const float state = token == 0U ? previous_recurrent_state[state_index]
-                                      : next_recurrent_state[state_index];
+      const float state =
+          token == 0U ? previous_state[state_index] : next_state[state_index];
       const float decayed = state * decay;
-      next_recurrent_state[state_index] = decayed;
+      next_state[state_index] = decayed;
       previous_projection += decayed * k_values[key_dimension];
     }
     const float value = bf16_to_float(
@@ -262,9 +326,9 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
          ++key_dimension) {
       const uint64_t index =
           recurrent_state_index(state_base, dimension, key_dimension, head_dim);
-      const float updated = next_recurrent_state[index] +
-                            beta * residual * k_values[key_dimension];
-      next_recurrent_state[index] = updated;
+      const float updated =
+          next_state[index] + beta * residual * k_values[key_dimension];
+      next_state[index] = updated;
       current_projection += updated * q_values[key_dimension];
     }
     output_values[dimension] =
@@ -300,7 +364,8 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
         bf16_to_float(float_to_bf16_rne_bits(normalized));
     output[output_index] = float_to_bf16_rne_bits(
         normalized_bf16 * norm_weight[dimension] * z_silu);
-    if (checkpoint_recurrent_state != nullptr && token < checkpoint_rows) {
+    if (checkpoint_recurrent_state != nullptr &&
+        token < active_checkpoint_rows) {
       const uint64_t checkpoint_base =
           static_cast<uint64_t>(token) * value_heads * head_dim * head_dim;
       for (uint32_t key_dimension = 0U; key_dimension != head_dim;
@@ -310,8 +375,7 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
         checkpoint_recurrent_state[recurrent_state_index(
             checkpoint_base +
                 static_cast<uint64_t>(value_head) * head_dim * head_dim,
-            dimension, key_dimension, head_dim)] =
-            next_recurrent_state[state_index];
+            dimension, key_dimension, head_dim)] = next_state[state_index];
       }
     }
     __syncthreads();
@@ -334,7 +398,22 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_regist
     const uint32_t token_count, const uint32_t qk_heads,
     const uint32_t value_heads, const uint32_t head_dim,
     const uint32_t qkv_width, const uint32_t output_width,
-    float *const checkpoint_recurrent_state, const uint32_t checkpoint_rows) {
+    float *const checkpoint_recurrent_state, const uint32_t checkpoint_rows,
+    sllm_decode_control::ControlV1 *const control) {
+  uint32_t active_token_count = token_count;
+  bool swap_slots = false;
+  if (!decode_linear_phase(control, token_count, &active_token_count,
+                           &swap_slots)) {
+    return;
+  }
+  const float *const previous_state =
+      swap_slots ? next_recurrent_state : previous_recurrent_state;
+  float *const next_state = swap_slots
+                                ? const_cast<float *>(previous_recurrent_state)
+                                : next_recurrent_state;
+  const uint32_t active_checkpoint_rows = checkpoint_rows < active_token_count
+                                              ? checkpoint_rows
+                                              : active_token_count - 1U;
   const uint32_t value_head = blockIdx.x;
   const uint32_t dimension = threadIdx.x;
   if (value_head >= value_heads || dimension >= head_dim || head_dim != 128U ||
@@ -346,7 +425,7 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_regist
   float state[128];
 #pragma unroll
   for (uint32_t key_dimension = 0U; key_dimension != 128U; ++key_dimension) {
-    state[key_dimension] = previous_recurrent_state[recurrent_state_index(
+    state[key_dimension] = previous_state[recurrent_state_index(
         state_base, dimension, key_dimension, head_dim)];
   }
   __shared__ float q_values[128];
@@ -363,7 +442,7 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_regist
   const uint32_t lane = dimension & 31U;
   const uint32_t wave = dimension >> 5U;
 
-  for (uint32_t token = 0U; token != token_count; ++token) {
+  for (uint32_t token = 0U; token != active_token_count; ++token) {
     const uint64_t qkv_row = static_cast<uint64_t>(token) * qkv_width;
     q_values[dimension] = bf16_to_float(
         convolved_qkv[qkv_row + static_cast<uint64_t>(qk_head) * head_dim +
@@ -429,7 +508,8 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_regist
       state[key_dimension] = updated;
       current_projection += updated * q_values[key_dimension];
     }
-    if (checkpoint_recurrent_state != nullptr && token < checkpoint_rows) {
+    if (checkpoint_recurrent_state != nullptr &&
+        token < active_checkpoint_rows) {
       const uint64_t checkpoint_base =
           static_cast<uint64_t>(token) * value_heads * head_dim * head_dim;
       for (uint32_t key_dimension = 0U; key_dimension != 128U;
@@ -471,8 +551,8 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_regist
 
 #pragma unroll
   for (uint32_t key_dimension = 0U; key_dimension != 128U; ++key_dimension) {
-    next_recurrent_state[recurrent_state_index(
-        state_base, dimension, key_dimension, head_dim)] = state[key_dimension];
+    next_state[recurrent_state_index(state_base, dimension, key_dimension,
+                                     head_dim)] = state[key_dimension];
   }
 }
 
@@ -490,11 +570,23 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_row32_
     const uint16_t *const convolved_qkv, const uint16_t *const z,
     const uint16_t *const b_input, const uint16_t *const a_input,
     const float *const a_log, const uint16_t *const dt_bias,
-    const float *const norm_weight, const float *const previous_state,
-    float *const next_state, uint16_t *const output, const uint32_t token_count,
-    const uint32_t qk_heads, const uint32_t value_heads,
-    const uint32_t head_dim, const uint32_t qkv_width,
-    const uint32_t output_width) {
+    const float *const norm_weight, const float *const previous_recurrent_state,
+    float *const next_recurrent_state, uint16_t *const output,
+    const uint32_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const uint32_t qkv_width, const uint32_t output_width,
+    sllm_decode_control::ControlV1 *const control) {
+  uint32_t active_token_count = token_count;
+  bool swap_slots = false;
+  if (!decode_linear_phase(control, token_count, &active_token_count,
+                           &swap_slots)) {
+    return;
+  }
+  const float *const previous_state =
+      swap_slots ? next_recurrent_state : previous_recurrent_state;
+  float *const next_state = swap_slots
+                                ? const_cast<float *>(previous_recurrent_state)
+                                : next_recurrent_state;
   constexpr uint32_t kTileRows = 32U;
   const uint32_t value_head = blockIdx.x;
   const uint32_t dimension = threadIdx.x;
@@ -518,7 +610,7 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_row32_
   __shared__ float output_inverse_rms;
   __shared__ float state_tile[kTileRows][128];
 
-  for (uint32_t token = 0U; token != token_count; ++token) {
+  for (uint32_t token = 0U; token != active_token_count; ++token) {
     const uint64_t qkv_row = static_cast<uint64_t>(token) * qkv_width;
     q_values[dimension] = bf16_to_float(
         convolved_qkv[qkv_row + static_cast<uint64_t>(qk_head) * head_dim +
@@ -1233,7 +1325,8 @@ hipError_t launch_convolution(
     uint16_t *const next_conv_state, const uint32_t token_count,
     const uint32_t qkv_width, const uint32_t conv_kernel_size,
     const hipStream_t stream, uint16_t *const checkpoint_conv_state,
-    const uint32_t checkpoint_rows) noexcept {
+    const uint32_t checkpoint_rows,
+    sllm_decode_control::ControlV1 *const control) noexcept {
   if (qkv == nullptr || conv_weight == nullptr ||
       previous_conv_state == nullptr || convolved_qkv == nullptr ||
       next_conv_state == nullptr || token_count == 0U || qkv_width == 0U ||
@@ -1257,7 +1350,8 @@ hipError_t launch_convolution(
                      dim3(static_cast<uint32_t>(blocks)), dim3(kWorkgroupSize),
                      0U, stream, qkv, conv_weight, previous_conv_state,
                      convolved_qkv, next_conv_state, token_count, qkv_width,
-                     conv_kernel_size, checkpoint_conv_state, checkpoint_rows);
+                     conv_kernel_size, checkpoint_conv_state, checkpoint_rows,
+                     control);
   return hipGetLastError();
 }
 
@@ -1271,7 +1365,8 @@ hipError_t launch_recurrent(
     const uint32_t value_heads, const uint32_t head_dim,
     const uint32_t qkv_width, const uint32_t output_width,
     const hipStream_t stream, float *const checkpoint_recurrent_state,
-    const uint32_t checkpoint_rows) noexcept {
+    const uint32_t checkpoint_rows,
+    sllm_decode_control::ControlV1 *const control) noexcept {
   if (convolved_qkv == nullptr || z == nullptr || b_input == nullptr ||
       a_input == nullptr || a_log == nullptr || dt_bias == nullptr ||
       norm_weight == nullptr || previous_recurrent_state == nullptr ||
@@ -1285,6 +1380,16 @@ hipError_t launch_recurrent(
        std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1201") == 0) &&
       register_state_shape_supported(token_count, qk_heads, value_heads,
                                      head_dim, qkv_width, output_width)) {
+    if (control != nullptr) {
+      hipLaunchKernelGGL(
+          sllm_linear_attention_recurrent_gated_norm_register_state_v1,
+          dim3(kRegisterStateValueHeads), dim3(kWorkgroupSize), 0U, stream,
+          convolved_qkv, z, b_input, a_input, a_log, dt_bias, norm_weight,
+          previous_recurrent_state, next_recurrent_state, output, token_count,
+          qk_heads, value_heads, head_dim, qkv_width, output_width,
+          checkpoint_recurrent_state, checkpoint_rows, control);
+      return hipGetLastError();
+    }
     return launch_register_state(
         convolved_qkv, z, b_input, a_input, a_log, dt_bias, norm_weight,
         previous_recurrent_state, next_recurrent_state, output, token_count,
@@ -1298,7 +1403,7 @@ hipError_t launch_recurrent(
                      norm_weight, previous_recurrent_state,
                      next_recurrent_state, output, token_count, qk_heads,
                      value_heads, head_dim, qkv_width, output_width,
-                     checkpoint_recurrent_state, checkpoint_rows);
+                     checkpoint_recurrent_state, checkpoint_rows, control);
   return hipGetLastError();
 }
 
@@ -1327,7 +1432,7 @@ hipError_t launch_register_state(
       convolved_qkv, z, b_input, a_input, a_log, dt_bias, norm_weight,
       previous_recurrent_state, next_recurrent_state, output, token_count,
       qk_heads, value_heads, head_dim, qkv_width, output_width,
-      checkpoint_recurrent_state, checkpoint_rows);
+      checkpoint_recurrent_state, checkpoint_rows, nullptr);
   return hipGetLastError();
 }
 
@@ -1369,7 +1474,8 @@ launch_row32_lds(const uint16_t *const convolved_qkv, const uint16_t *const z,
                  const uint32_t token_count, const uint32_t qk_heads,
                  const uint32_t value_heads, const uint32_t head_dim,
                  const uint32_t qkv_width, const uint32_t output_width,
-                 const hipStream_t stream) noexcept {
+                 const hipStream_t stream,
+                 sllm_decode_control::ControlV1 *const control) noexcept {
   if (convolved_qkv == nullptr || z == nullptr || b_input == nullptr ||
       a_input == nullptr || a_log == nullptr || dt_bias == nullptr ||
       norm_weight == nullptr || previous_recurrent_state == nullptr ||
@@ -1383,7 +1489,7 @@ launch_row32_lds(const uint16_t *const convolved_qkv, const uint16_t *const z,
                      0U, stream, convolved_qkv, z, b_input, a_input, a_log,
                      dt_bias, norm_weight, previous_recurrent_state,
                      next_recurrent_state, output, token_count, qk_heads,
-                     value_heads, head_dim, qkv_width, output_width);
+                     value_heads, head_dim, qkv_width, output_width, control);
   return hipGetLastError();
 }
 
@@ -1582,4 +1688,95 @@ hipError_t launch_gfx942_wave64_column_postprocess(
 #endif
 }
 
+} // namespace sllm_linear_attention_kernel
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_linear_attention_decode_state_select_v1(
+    sllm_decode_control::ControlV1 *control, const uint16_t *final_conv,
+    const float *final_recurrent, const uint16_t *checkpoint_conv,
+    const float *checkpoint_recurrent, uint16_t *anchor_conv,
+    float *anchor_recurrent, uint64_t conv_elements,
+    uint64_t recurrent_elements, uint32_t token_count,
+    uint32_t checkpoint_rows) {
+  const uint32_t rows = control->commit_rows;
+  if (control->status !=
+          static_cast<uint32_t>(sllm_decode_control::Status::Ok) ||
+      rows == 0U)
+    return;
+  uint32_t active_rows = 0U;
+  if (control->mode == sllm_decode_control::kModeTargetOnly) {
+    active_rows = 1U;
+  } else if (control->mode == sllm_decode_control::kModeMtp &&
+             control->active_width <= control->width) {
+    active_rows = control->active_width + 1U;
+  }
+  const bool shape_valid =
+      active_rows != 0U && active_rows <= token_count &&
+      (control->mode != sllm_decode_control::kModeTargetOnly ||
+       (token_count == 1U && checkpoint_rows == 0U)) &&
+      (control->mode != sllm_decode_control::kModeMtp ||
+       (control->width + 1U == token_count &&
+        checkpoint_rows + 1U == token_count));
+  const bool partial = rows < active_rows;
+  if (!shape_valid || rows > active_rows ||
+      (partial &&
+       (rows > checkpoint_rows || !checkpoint_conv || !checkpoint_recurrent))) {
+    atomicExch(
+        &control->status,
+        static_cast<uint32_t>(sllm_decode_control::Status::InvalidDecision));
+    atomicExch(&control->halted, 1U);
+    return;
+  }
+  // A full commit already resides in the generation-parity output slot.
+  if (!partial)
+    return;
+  uint16_t *const destination_conv = (control->generation & 1U) != 0U
+                                         ? const_cast<uint16_t *>(final_conv)
+                                         : anchor_conv;
+  float *const destination_recurrent =
+      (control->generation & 1U) != 0U ? const_cast<float *>(final_recurrent)
+                                       : anchor_recurrent;
+  const uint64_t index =
+      static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index < conv_elements) {
+    destination_conv[index] =
+        checkpoint_conv[static_cast<uint64_t>(rows - 1U) * conv_elements +
+                        index];
+  }
+  if (index < recurrent_elements) {
+    destination_recurrent[index] =
+        checkpoint_recurrent[static_cast<uint64_t>(rows - 1U) *
+                                 recurrent_elements +
+                             index];
+  }
+}
+
+namespace sllm_linear_attention_kernel {
+hipError_t launch_decode_state_select(
+    sllm_decode_control::ControlV1 *control, const uint16_t *final_conv,
+    const float *final_recurrent, const uint16_t *checkpoint_conv,
+    const float *checkpoint_recurrent, uint16_t *anchor_conv,
+    float *anchor_recurrent, uint64_t conv_elements,
+    uint64_t recurrent_elements, uint32_t token_count, uint32_t checkpoint_rows,
+    hipStream_t stream) noexcept {
+  if (!control || !final_conv || !final_recurrent || !anchor_conv ||
+      !anchor_recurrent || !conv_elements || !recurrent_elements ||
+      !token_count || token_count > sllm_decode_control::kMaxEmitted ||
+      checkpoint_rows >= token_count ||
+      conv_elements > UINT64_MAX / sllm_decode_control::kMaxEmitted ||
+      recurrent_elements > UINT64_MAX / sllm_decode_control::kMaxEmitted)
+    return hipErrorInvalidValue;
+  const uint64_t elements =
+      conv_elements > recurrent_elements ? conv_elements : recurrent_elements;
+  const uint64_t blocks = (elements - 1U) / 256U + 1U;
+  if (blocks > UINT32_MAX)
+    return hipErrorInvalidValue;
+  hipLaunchKernelGGL(sllm_linear_attention_decode_state_select_v1,
+                     dim3(static_cast<uint32_t>(blocks)), dim3(256U), 0U,
+                     stream, control, final_conv, final_recurrent,
+                     checkpoint_conv, checkpoint_recurrent, anchor_conv,
+                     anchor_recurrent, conv_elements, recurrent_elements,
+                     token_count, checkpoint_rows);
+  return hipGetLastError();
+}
 } // namespace sllm_linear_attention_kernel

@@ -8,11 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use sllm_core::{
-    CompiledGrammar, DeviceTokenSelectorRequestV1, DraftProposalV1, DraftProviderV1,
-    Gemma4ExecutionRequest, Gemma4ModelLock, Gemma4MoeExecutionRequest, GrammarError,
-    MAX_SPECULATIVE_DRAFT_WIDTH_V1, QwenExecutionRequest, SamplerChainConfigV1, SamplerChainV1,
-    SamplingError, SamplingParametersV1, SamplingRandomSource, SamplingSelectionV1,
-    SpeculativeAccountingV1, SpeculativeError, TokenTrie, verify_target_selected,
+    CompiledGrammar, DecodeReplayController, DecodeResultV1, DeviceTokenSelectorRequestV1,
+    DraftProposalV1, DraftProviderV1, Gemma4ExecutionRequest, Gemma4ModelLock,
+    Gemma4MoeExecutionRequest, GrammarError, MAX_SPECULATIVE_DRAFT_WIDTH_V1, QwenExecutionRequest,
+    SamplerChainConfigV1, SamplerChainV1, SamplingError, SamplingParametersV1,
+    SamplingRandomSource, SamplingSelectionV1, SpeculativeAccountingV1, SpeculativeError,
+    TokenTrie, verify_target_selected,
 };
 
 use crate::reasoning::{ReasoningControllerV1, ReasoningErrorV1, ReasoningPolicyV1};
@@ -671,6 +672,16 @@ impl GenerationStepV1 {
 }
 
 pub trait GenerationExecutorV1 {
+    /// Configures an eligible request-owned whole-decode path before prefill.
+    /// Executors without such a path retain the ordinary generation loop.
+    fn configure_whole_decode(
+        &mut self,
+        _output_limit: u64,
+        _stop_ids: &[u32],
+    ) -> Result<(), GenerationServiceError> {
+        Ok(())
+    }
+
     fn prefill(
         &mut self,
         input_token_ids: &[u32],
@@ -962,6 +973,14 @@ impl<E: SpeculativeGenerationExecutorV1> SpeculativeGenerationAdapterV1<E> {
 impl<E: SpeculativeGenerationExecutorV1> GenerationExecutorV1
     for SpeculativeGenerationAdapterV1<E>
 {
+    fn configure_whole_decode(
+        &mut self,
+        output_limit: u64,
+        stop_ids: &[u32],
+    ) -> Result<(), GenerationServiceError> {
+        GenerationExecutorV1::configure_whole_decode(&mut self.inner, output_limit, stop_ids)
+    }
+
     fn prefill(
         &mut self,
         input_token_ids: &[u32],
@@ -1101,6 +1120,12 @@ struct QueuedSpeculativeDeviceStepV1 {
     step: GenerationStepV1,
 }
 
+#[derive(Clone, Debug)]
+struct WholeMtpDecodeConfigV1 {
+    output_limit: u64,
+    stop_ids: Vec<u32>,
+}
+
 fn queue_speculative_device_steps(
     steps: &[GenerationStepV1],
     selectors: &[DeviceTokenSelectorRequestV1],
@@ -1118,6 +1143,59 @@ fn queue_speculative_device_steps(
             step: steps[row].clone(),
         })
         .collect())
+}
+
+fn whole_decode_selector_eligible(selector: &DeviceTokenSelectorRequestV1) -> bool {
+    selector.temperature() == 1.0
+        && selector.top_k() == 20
+        && selector.top_p() == 0.95
+        && selector.additive_logits().is_empty()
+        && selector.valid_mask().is_empty()
+        && !selector.return_logprob()
+}
+
+fn whole_decode_request_eligible(
+    config: &GenerationConfigV1,
+    stop_ids: &[u32],
+    selector: &DeviceTokenSelectorRequestV1,
+) -> bool {
+    config.grammar().is_none()
+        && config.reasoning().is_none()
+        && !config.ignore_stop_tokens()
+        && config.stop_strings().is_empty()
+        && !stop_ids.is_empty()
+        && stop_ids.len() <= 16
+        && stop_ids
+            .iter()
+            .all(|&token| (token as usize) < selector.vocab_size())
+        && whole_decode_selector_eligible(selector)
+}
+
+fn queue_whole_mtp_result(
+    result: &DecodeResultV1,
+    selector: &DeviceTokenSelectorRequestV1,
+) -> Result<(GenerationStepV1, VecDeque<QueuedSpeculativeDeviceStepV1>), GenerationServiceError> {
+    let rows = usize::try_from(result.count).map_err(|_| GenerationServiceError::CountOverflow)?;
+    if rows == 0
+        || result.commit_rows != result.count
+        || result.selections.len() != rows
+        || result.counter_before != selector.counter()
+    {
+        return Err(GenerationServiceError::Execution(
+            "whole MTP result rows or sampler counter are inconsistent".to_owned(),
+        ));
+    }
+    let steps = result
+        .selections
+        .iter()
+        .cloned()
+        .map(GenerationStepV1::from_device_selection)
+        .collect::<Vec<_>>();
+    let selectors = (0..rows)
+        .map(|row| speculative_selector_for_draft_row(selector, row))
+        .collect::<Result<Vec<_>, _>>()?;
+    let queued = queue_speculative_device_steps(&steps, &selectors, rows)?;
+    Ok((steps[0].clone(), queued))
 }
 
 /// Checked publication counters shared by ordinary and fixed-device
@@ -1262,6 +1340,10 @@ pub struct QwenMtpGenerationExecutorV1 {
     pending_speculative_block: Option<PendingQwenSpeculativeBlockV1>,
     pending_device_block: Option<PendingQwenDeviceBlockV1>,
     queued_device_steps: VecDeque<QueuedSpeculativeDeviceStepV1>,
+    whole_decode_config: Option<WholeMtpDecodeConfigV1>,
+    whole_decode_controller: Option<DecodeReplayController>,
+    whole_decode_selector: Option<DeviceTokenSelectorRequestV1>,
+    whole_queued_device_steps: VecDeque<QueuedSpeculativeDeviceStepV1>,
 }
 
 impl QwenMtpGenerationExecutorV1 {
@@ -1294,6 +1376,10 @@ impl QwenMtpGenerationExecutorV1 {
             pending_speculative_block: None,
             pending_device_block: None,
             queued_device_steps: VecDeque::new(),
+            whole_decode_config: None,
+            whole_decode_controller: None,
+            whole_decode_selector: None,
+            whole_queued_device_steps: VecDeque::new(),
         }
     }
 
@@ -1327,7 +1413,255 @@ impl QwenMtpGenerationExecutorV1 {
             pending_speculative_block: None,
             pending_device_block: None,
             queued_device_steps: VecDeque::new(),
+            whole_decode_config: None,
+            whole_decode_controller: None,
+            whole_decode_selector: None,
+            whole_queued_device_steps: VecDeque::new(),
         })
+    }
+
+    /// Opts this request into the fixed-sampler whole-MTP replay path.
+    /// Configuration is inert until one ordinary MTP block has completed.
+    pub fn configure_whole_decode(
+        &mut self,
+        output_limit: u64,
+        stop_ids: &[u32],
+    ) -> Result<(), GenerationServiceError> {
+        if output_limit == 0 || stop_ids.len() > 16 {
+            return Err(GenerationServiceError::Execution(
+                "whole MTP decode requires a positive output limit and at most 16 stop IDs"
+                    .to_owned(),
+            ));
+        }
+        if stop_ids
+            .iter()
+            .enumerate()
+            .any(|(index, token)| stop_ids[..index].contains(token))
+        {
+            return Err(GenerationServiceError::Execution(
+                "whole MTP decode stop IDs must be unique".to_owned(),
+            ));
+        }
+        if self.whole_decode_controller.is_some()
+            || !self.whole_queued_device_steps.is_empty()
+            || self.pending_speculative_block.is_some()
+            || self.pending_device_block.is_some()
+            || !self.queued_device_steps.is_empty()
+        {
+            return Err(GenerationServiceError::Execution(
+                "whole MTP decode cannot be configured while generation work is pending".to_owned(),
+            ));
+        }
+        Self::validate_draft_width(self.draft_width)?;
+        self.target
+            .prepare_whole_decode_warmup()
+            .and_then(|()| self.mtp.prepare_whole_decode_warmup())
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        self.whole_decode_config = Some(WholeMtpDecodeConfigV1 {
+            output_limit,
+            stop_ids: stop_ids.to_vec(),
+        });
+        Ok(())
+    }
+
+    fn abort_whole_decode(&mut self) {
+        // Request cancellation must precede controller drop: the controller
+        // may still own a one-ahead replay whose state cannot be published.
+        self.target.cancel();
+        self.mtp.cancel();
+        self.whole_decode_controller = None;
+        self.whole_decode_selector = None;
+        self.whole_queued_device_steps.clear();
+        self.whole_decode_config = None;
+    }
+
+    fn pop_whole_queued_step(
+        &mut self,
+        token_id: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<Option<GenerationStepV1>, GenerationServiceError> {
+        let Some(front) = self.whole_queued_device_steps.front() else {
+            return Ok(None);
+        };
+        if self.whole_decode_controller.is_none()
+            || front.expected_input != token_id
+            || &front.selector != selector
+            || !selector.is_token_valid(front.step.device_argmax() as usize)
+        {
+            self.abort_whole_decode();
+            return Err(GenerationServiceError::Execution(
+                "whole MTP queued row received a different token or sampler request".to_owned(),
+            ));
+        }
+        let step = self
+            .whole_queued_device_steps
+            .pop_front()
+            .expect("whole MTP queued row checked above")
+            .step;
+        Ok(Some(step))
+    }
+
+    fn start_whole_decode(
+        &mut self,
+        token_id: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<(), GenerationServiceError> {
+        let config = match self.whole_decode_config.clone() {
+            Some(config) => config,
+            None => {
+                self.abort_whole_decode();
+                return Err(GenerationServiceError::Execution(
+                    "whole MTP decode was started without configuration".to_owned(),
+                ));
+            }
+        };
+        let output_count = match self.committed_target_rows.checked_add(1) {
+            Some(count) => count,
+            None => {
+                self.abort_whole_decode();
+                return Err(GenerationServiceError::CountOverflow);
+            }
+        };
+        if output_count >= config.output_limit
+            || selector.counter() != output_count
+            || config
+                .stop_ids
+                .iter()
+                .any(|&token| token as usize >= selector.vocab_size())
+            || self.last_target_hidden_bf16.len() != self.hidden_width
+        {
+            self.abort_whole_decode();
+            return Err(GenerationServiceError::Execution(
+                "whole MTP decode configuration does not match the warmed request".to_owned(),
+            ));
+        }
+        let controller = match self.target.start_whole_mtp_replay(
+            &mut self.mtp,
+            token_id,
+            selector,
+            output_count,
+            config.output_limit,
+            &config.stop_ids,
+            &self.last_target_hidden_bf16,
+            self.draft_width,
+        ) {
+            Ok(controller) => controller,
+            Err(error) => {
+                self.abort_whole_decode();
+                return Err(GenerationServiceError::Execution(error.to_string()));
+            }
+        };
+        self.whole_decode_selector = Some(selector.clone());
+        self.whole_decode_controller = Some(controller);
+        Ok(())
+    }
+
+    fn advance_whole_decode(
+        &mut self,
+        token_id: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let valid_request = match (
+            self.whole_decode_controller.as_ref(),
+            self.whole_decode_selector.as_ref(),
+        ) {
+            (Some(controller), Some(template)) if !controller.finished() => {
+                token_id == controller.control().pending_token
+                    && selector == &template.with_counter(controller.control().sampler_counter)
+                    && whole_decode_selector_eligible(selector)
+            }
+            _ => false,
+        };
+        if !valid_request {
+            self.abort_whole_decode();
+            return Err(GenerationServiceError::Execution(
+                "whole MTP replay received a different token or sampler request".to_owned(),
+            ));
+        }
+        let result = match self
+            .whole_decode_controller
+            .as_mut()
+            .expect("whole MTP controller checked above")
+            .next()
+        {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                self.abort_whole_decode();
+                return Err(GenerationServiceError::Execution(
+                    "whole MTP replay finished without a queued result".to_owned(),
+                ));
+            }
+            Err(error) => {
+                self.abort_whole_decode();
+                return Err(GenerationServiceError::Execution(error.to_string()));
+            }
+        };
+        let (result_width, result_accepted, result_committed) = match (
+            usize::try_from(result.width),
+            usize::try_from(result.accepted),
+            usize::try_from(result.commit_rows),
+        ) {
+            (Ok(width), Ok(accepted), Ok(committed)) => (width, accepted, committed),
+            _ => {
+                self.abort_whole_decode();
+                return Err(GenerationServiceError::CountOverflow);
+            }
+        };
+        if result_width > self.draft_width {
+            self.abort_whole_decode();
+            return Err(GenerationServiceError::Execution(
+                "whole MTP result width exceeds the configured draft width".to_owned(),
+            ));
+        }
+        let (first, queued) = match queue_whole_mtp_result(&result, selector) {
+            Ok(queued) => queued,
+            Err(error) => {
+                self.abort_whole_decode();
+                return Err(error);
+            }
+        };
+        let accounting = match next_speculative_commit_accounting(
+            self.proposal_blocks,
+            self.proposed_draft_tokens,
+            self.accepted_draft_tokens,
+            self.committed_target_rows,
+            result_width,
+            result_accepted,
+            result_committed,
+        ) {
+            Ok(accounting) => accounting,
+            Err(error) => {
+                self.abort_whole_decode();
+                return Err(error);
+            }
+        };
+        let fixed_k20_pq_blocks = match self.fixed_k20_pq_blocks.checked_add(1) {
+            Some(count) => count,
+            None => {
+                self.abort_whole_decode();
+                return Err(GenerationServiceError::CountOverflow);
+            }
+        };
+        let audit = self
+            .whole_decode_controller
+            .as_ref()
+            .expect("whole MTP controller owns validated result")
+            .audit();
+        let progress = self
+            .target
+            .record_whole_decode_progress(&result, Some(audit))
+            .and_then(|()| self.mtp.record_whole_decode_progress(&result, None));
+        if let Err(error) = progress {
+            self.abort_whole_decode();
+            return Err(GenerationServiceError::Execution(error.to_string()));
+        }
+        self.proposal_blocks = accounting.0;
+        self.proposed_draft_tokens = accounting.1;
+        self.accepted_draft_tokens = accounting.2;
+        self.committed_target_rows = accounting.3;
+        self.fixed_k20_pq_blocks = fixed_k20_pq_blocks;
+        self.whole_queued_device_steps = queued;
+        Ok(first)
     }
 
     fn validate_draft_width(draft_width: usize) -> Result<(), GenerationServiceError> {
@@ -1596,11 +1930,28 @@ impl QwenMtpGenerationExecutorV1 {
 }
 
 impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
+    fn configure_whole_decode(
+        &mut self,
+        output_limit: u64,
+        stop_ids: &[u32],
+    ) -> Result<(), GenerationServiceError> {
+        if !self.target.supports_whole_decode() {
+            return Ok(());
+        }
+        QwenMtpGenerationExecutorV1::configure_whole_decode(self, output_limit, stop_ids)
+    }
+
     fn prefill(
         &mut self,
         input_token_ids: &[u32],
         _: bool,
     ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.whole_decode_controller.is_some() || !self.whole_queued_device_steps.is_empty() {
+            self.abort_whole_decode();
+            return Err(GenerationServiceError::Execution(
+                "whole MTP replay cannot switch back to prefill".to_owned(),
+            ));
+        }
         if self.pending_speculative_block.is_some()
             || self.pending_device_block.is_some()
             || !self.queued_device_steps.is_empty()
@@ -1640,6 +1991,12 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
         token_id: u32,
         include_last_logits: bool,
     ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.whole_decode_controller.is_some() || !self.whole_queued_device_steps.is_empty() {
+            self.abort_whole_decode();
+            return Err(GenerationServiceError::Execution(
+                "whole MTP replay cannot switch to the host decode path".to_owned(),
+            ));
+        }
         let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
         let output = if include_last_logits {
             self.target.decode_with_last_logits(token)
@@ -1659,6 +2016,18 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
             self.queued_device_steps.clear();
             self.finalize_device_block()?;
         }
+        let whole_finished = self.whole_queued_device_steps.is_empty()
+            && self
+                .whole_decode_controller
+                .as_ref()
+                .is_none_or(DecodeReplayController::finished);
+        if whole_finished {
+            self.whole_decode_controller = None;
+            self.whole_decode_selector = None;
+            self.whole_decode_config = None;
+        } else {
+            self.abort_whole_decode();
+        }
         Ok(())
     }
 
@@ -1671,6 +2040,12 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
         input_token_ids: &[u32],
         selector: &DeviceTokenSelectorRequestV1,
     ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.whole_decode_controller.is_some() || !self.whole_queued_device_steps.is_empty() {
+            self.abort_whole_decode();
+            return Err(GenerationServiceError::Execution(
+                "whole MTP replay cannot switch back to prefill".to_owned(),
+            ));
+        }
         if self.pending_speculative_block.is_some()
             || self.pending_device_block.is_some()
             || !self.queued_device_steps.is_empty()
@@ -1709,6 +2084,12 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
         token_id: u32,
         selector: &DeviceTokenSelectorRequestV1,
     ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if let Some(step) = self.pop_whole_queued_step(token_id, selector)? {
+            return Ok(step);
+        }
+        if self.whole_decode_controller.is_some() {
+            return self.advance_whole_decode(token_id, selector);
+        }
         if let Some(front) = self.queued_device_steps.front() {
             if front.expected_input != token_id {
                 return Err(GenerationServiceError::Execution(
@@ -1754,6 +2135,13 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
                     .to_owned(),
             ));
         }
+        if self.whole_decode_config.is_some()
+            && self.proposal_blocks > 0
+            && whole_decode_selector_eligible(selector)
+        {
+            self.start_whole_decode(token_id, selector)?;
+            return self.advance_whole_decode(token_id, selector);
+        }
         if !selector.additive_logits().is_empty() || !selector.valid_mask().is_empty() {
             return self.decode_with_device_selector_single(token_id, selector);
         }
@@ -1771,10 +2159,14 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
     }
 
     fn cancel(&mut self) {
-        self.queued_device_steps.clear();
-        self.pending_device_block = None;
         self.target.cancel();
         self.mtp.cancel();
+        self.whole_decode_controller = None;
+        self.whole_decode_selector = None;
+        self.whole_queued_device_steps.clear();
+        self.whole_decode_config = None;
+        self.queued_device_steps.clear();
+        self.pending_device_block = None;
     }
 }
 
@@ -2483,6 +2875,16 @@ impl GenerationTextFrontendV1 for TokenizerFrontendV1 {
 }
 
 impl GenerationExecutorV1 for QwenExecutionRequest {
+    fn configure_whole_decode(
+        &mut self,
+        output_limit: u64,
+        stop_ids: &[u32],
+    ) -> Result<(), GenerationServiceError> {
+        QwenExecutionRequest::configure_whole_target_decode(self, output_limit, stop_ids)
+            .map(|_| ())
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))
+    }
+
     fn prefill(
         &mut self,
         input_token_ids: &[u32],
@@ -3244,6 +3646,12 @@ impl<'a> GenerationServiceV1<'a> {
                     .expect("device selector seed was resolved"),
                 0,
             )?;
+            if whole_decode_request_eligible(config, &self.stop_policy.stop_token_ids, &selector) {
+                executor.configure_whole_decode(
+                    u64::from(config.max_new_tokens()),
+                    &self.stop_policy.stop_token_ids,
+                )?;
+            }
             executor.prefill_with_device_selector(input_token_ids, &selector)?
         } else {
             executor.prefill(input_token_ids, include_logits)?
@@ -3806,6 +4214,7 @@ mod tests {
     struct TinyDeviceSelectorExecutor {
         selections: VecDeque<SamplingSelectionV1>,
         requests: Vec<(u64, u64, usize, usize)>,
+        whole_decode_configs: Vec<(u64, Vec<u32>)>,
         prefill_inputs: Vec<Vec<u32>>,
         decode_inputs: Vec<u32>,
         cancel_count: u32,
@@ -3832,6 +4241,16 @@ mod tests {
     }
 
     impl GenerationExecutorV1 for TinyDeviceSelectorExecutor {
+        fn configure_whole_decode(
+            &mut self,
+            output_limit: u64,
+            stop_ids: &[u32],
+        ) -> Result<(), GenerationServiceError> {
+            self.whole_decode_configs
+                .push((output_limit, stop_ids.to_vec()));
+            Ok(())
+        }
+
         fn prefill(
             &mut self,
             _: &[u32],
@@ -3868,6 +4287,45 @@ mod tests {
 
         fn cancel(&mut self) {
             self.cancel_count += 1;
+        }
+    }
+
+    #[derive(Default)]
+    struct WholeDecodeForwardingExecutor {
+        configs: Vec<(u64, Vec<u32>)>,
+    }
+
+    impl GenerationExecutorV1 for WholeDecodeForwardingExecutor {
+        fn configure_whole_decode(
+            &mut self,
+            output_limit: u64,
+            stop_ids: &[u32],
+        ) -> Result<(), GenerationServiceError> {
+            self.configs.push((output_limit, stop_ids.to_vec()));
+            Ok(())
+        }
+
+        fn prefill(
+            &mut self,
+            _: &[u32],
+            _: bool,
+        ) -> Result<GenerationStepV1, GenerationServiceError> {
+            unreachable!("forwarding test does not execute generation")
+        }
+
+        fn decode(&mut self, _: u32, _: bool) -> Result<GenerationStepV1, GenerationServiceError> {
+            unreachable!("forwarding test does not execute generation")
+        }
+
+        fn cancel(&mut self) {}
+    }
+
+    impl SpeculativeGenerationExecutorV1 for WholeDecodeForwardingExecutor {
+        fn speculative_decode_greedy(
+            &mut self,
+            _: u32,
+        ) -> Result<Vec<GenerationStepV1>, GenerationServiceError> {
+            unreachable!("forwarding test does not execute speculation")
         }
     }
 
@@ -4179,6 +4637,76 @@ mod tests {
     }
 
     #[test]
+    fn whole_mtp_result_queue_preserves_expected_inputs_and_exact_counters() {
+        let config = SamplerChainConfigV1::new(
+            SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).expect("sampling parameters"),
+        )
+        .with_top_k(20)
+        .expect("top-k selector");
+        let chain = SamplerChainV1::new(config, &[]).expect("sampler chain");
+        let selector = chain
+            .prepare_device_selector(32, None, 123, 77)
+            .expect("device selector");
+        assert!(whole_decode_selector_eligible(&selector));
+        let selections = [10_u32, 11, 12]
+            .into_iter()
+            .map(|token_id| SamplingSelectionV1 {
+                token_id,
+                logprob: -0.25,
+                top_logprobs: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let result = DecodeResultV1 {
+            generation: 1,
+            status: sllm_core::DecodeControlStatusV1::Ok,
+            count: 3,
+            commit_rows: 3,
+            accepted: 2,
+            width: 2,
+            halt_flags: 0,
+            stop_row: u32::MAX,
+            reserved_padding: 0,
+            reserved_tail: 0,
+            model_position_before: 100,
+            model_position_after: 103,
+            counter_before: 77,
+            counter_after: 80,
+            selections,
+        };
+        let (first, queued) = queue_whole_mtp_result(&result, &selector).expect("result queues");
+        assert_eq!(first.device_argmax(), 10);
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0].expected_input, 10);
+        assert_eq!(queued[0].step.device_argmax(), 11);
+        assert_eq!(queued[0].selector.counter(), 78);
+        assert_eq!(queued[1].expected_input, 11);
+        assert_eq!(queued[1].step.device_argmax(), 12);
+        assert_eq!(queued[1].selector.counter(), 79);
+
+        let mut target_tail = result.clone();
+        target_tail.count = 1;
+        target_tail.commit_rows = 1;
+        target_tail.accepted = 0;
+        target_tail.width = 0;
+        target_tail.counter_after = 78;
+        target_tail.model_position_after = 101;
+        target_tail.selections.truncate(1);
+        let (tail, queued_tail) =
+            queue_whole_mtp_result(&target_tail, &selector).expect("target-only tail queues");
+        assert_eq!(tail.device_argmax(), 10);
+        assert!(queued_tail.is_empty());
+        assert_eq!(
+            next_speculative_commit_accounting(2, 5, 3, 7, 0, 0, 1).unwrap(),
+            (3, 5, 3, 8)
+        );
+
+        let masked = chain
+            .prepare_device_selector(32, Some(&[true; 32]), 123, 77)
+            .expect("masked selector");
+        assert!(!whole_decode_selector_eligible(&masked));
+    }
+
+    #[test]
     fn speculative_proposal_rng_separates_domains_and_checks_counter_boundaries() {
         let config = SamplerChainConfigV1::new(
             SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).expect("parameters"),
@@ -4267,6 +4795,7 @@ mod tests {
         let mut executor = TinyDeviceSelectorExecutor {
             selections: VecDeque::from([selection(1), selection(9)]),
             requests: Vec::new(),
+            whole_decode_configs: Vec::new(),
             prefill_inputs: Vec::new(),
             decode_inputs: Vec::new(),
             cancel_count: 0,
@@ -4288,7 +4817,83 @@ mod tests {
         assert_eq!(executor.prefill_inputs, [vec![1, 3, 17]]);
         assert_eq!(executor.decode_inputs, [1]);
         assert_eq!(executor.requests, [(7, 0, 16, 16), (7, 1, 16, 16)]);
+        assert!(executor.whole_decode_configs.is_empty());
         assert_eq!(executor.cancel_count, 0);
+    }
+
+    #[test]
+    fn fixed_k20_configures_whole_decode_before_prefill_and_skips_host_constraints() {
+        let frontend = GrammarPieceFrontend::new();
+        let mut stop_policy = policy();
+        stop_policy.stop_token_ids = vec![9];
+        let service = GenerationServiceV1::new(&frontend, None, &stop_policy).unwrap();
+        let parameters = SamplingParametersV1::new(1.0, 0.95, 0.0, 0.0).unwrap();
+        let chain = SamplerChainConfigV1::new(parameters)
+            .with_top_k(20)
+            .unwrap();
+        let config = GenerationConfigV1::new(2, parameters, vec![])
+            .unwrap()
+            .with_sampler_chain(chain.clone())
+            .unwrap()
+            .with_device_selector_seed(7);
+        let selection = |token_id| SamplingSelectionV1 {
+            token_id,
+            logprob: -0.25,
+            top_logprobs: Vec::new(),
+        };
+        let mut executor = TinyDeviceSelectorExecutor {
+            selections: VecDeque::from([selection(1), selection(9)]),
+            requests: Vec::new(),
+            whole_decode_configs: Vec::new(),
+            prefill_inputs: Vec::new(),
+            decode_inputs: Vec::new(),
+            cancel_count: 0,
+        };
+        let result = service
+            .generate_tokens(
+                &mut executor,
+                &[1],
+                &config,
+                &GenerationCancellationV1::new(),
+                &mut FixedRandom(0.5),
+            )
+            .unwrap();
+        assert_eq!(result.generated_token_ids(), [1, 9]);
+        assert_eq!(executor.whole_decode_configs, [(2, vec![9])]);
+        assert_eq!(executor.prefill_inputs, [vec![1]]);
+        assert_eq!(executor.requests, [(7, 0, 0, 0), (7, 1, 0, 0)]);
+
+        let sampler = SamplerChainV1::new(chain.clone(), &[]).unwrap();
+        let selector = sampler.prepare_device_selector(16, None, 7, 0).unwrap();
+        assert!(whole_decode_request_eligible(&config, &[9], &selector));
+        let stop_string = GenerationConfigV1::new(2, parameters, vec!["stop".to_owned()])
+            .unwrap()
+            .with_sampler_chain(chain.clone())
+            .unwrap()
+            .with_device_selector_seed(7);
+        assert!(!whole_decode_request_eligible(
+            &stop_string,
+            &[9],
+            &selector
+        ));
+        assert!(!whole_decode_request_eligible(
+            &config.clone().with_ignore_stop_tokens(true),
+            &[9],
+            &selector
+        ));
+        assert!(!whole_decode_request_eligible(
+            &config.with_grammar(CompiledGrammar::json_object().unwrap()),
+            &[9],
+            &selector
+        ));
+    }
+
+    #[test]
+    fn speculative_adapter_forwards_whole_decode_configuration() {
+        let mut adapter =
+            SpeculativeGenerationAdapterV1::new(WholeDecodeForwardingExecutor::default());
+        GenerationExecutorV1::configure_whole_decode(&mut adapter, 17, &[1, 2]).unwrap();
+        assert_eq!(adapter.inner().configs, [(17, vec![1, 2])]);
     }
 
     #[test]

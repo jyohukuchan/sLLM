@@ -6,6 +6,10 @@
 mod adapter;
 mod backend;
 mod context_window;
+mod decode_control;
+#[cfg(test)]
+mod decode_control_native_fixture_tests;
+mod decode_replay;
 mod deepseek_v4;
 mod deepseek_v4_attention;
 mod deepseek_v4_gguf;
@@ -106,6 +110,12 @@ pub use context_window::{
     ContextPositionPolicyV1, ContextRetainedRangesV1, ContextShiftDecisionV1, ContextShiftError,
     ContextShiftKindV1, ContextShiftTransactionV1, ContextTokenRangeV1, ContextWindowStateV1,
 };
+pub use decode_control::{
+    DECODE_CONTROL_BYTES_V1, DECODE_CONTROL_VERSION_V1, DECODE_MAX_EMITTED_V1, DECODE_MAX_WIDTH_V1,
+    DECODE_NO_STOP_V1, DECODE_RESULT_BYTES_V1, DECODE_RESULT_RING_SLOTS_V1, DecodeControlModeV1,
+    DecodeControlStatusV1, DecodeControlV1, DecodePhaseKindV1, DecodeResultV1, decode_result_le,
+};
+pub use decode_replay::{DecodeReplayAuditV1, DecodeReplayController, DecodeReplayResultState};
 pub use deepseek_v4::{
     DEEPSEEK_V4_CATALOG_SHA256, DEEPSEEK_V4_CONFIG_BYTES,
     DEEPSEEK_V4_CONFIG_NEXTN_PREDICT_LAYER_COUNT, DEEPSEEK_V4_CONFIG_SHA256,
@@ -201,17 +211,17 @@ pub use execution::{
     AdapterResource, AllocationCategory, AllocationCategorySnapshot, AllocationSnapshot,
     BoundSemanticOp, BufferRange, BufferReadback, CausalAttentionSubmission, DeviceCopy,
     DeviceCopyAuditV1, DispatchEvidence, ExecutionAdapterAccess, ExecutionBuffer,
-    ExecutionBufferId, ExecutionCausalAttentionSubmissionAdapter, ExecutionError,
-    ExecutionGraphSpan, ExecutionKvStateSubmissionAdapter,
+    ExecutionBufferId, ExecutionCaptureMarker, ExecutionCausalAttentionSubmissionAdapter,
+    ExecutionDecodeCommand, ExecutionError, ExecutionGraphSpan, ExecutionKvStateSubmissionAdapter,
     ExecutionLinearAttentionSubmissionAdapter, ExecutionMinistral3YarnSubmissionAdapter,
     ExecutionQueue, ExecutionQueueFence, ExecutionQueueFenceAdapter, ExecutionQueueId,
     ExecutionReadbackAdapter, ExecutionSession, ExecutionSessionAdapter, ExecutionSessionId,
     ExecutionSessionRequest, ExecutionState, ExecutionStateImageV1, ExecutionSubmissionAdapter,
-    ExecutionTransferAdapter, KvState, KvStateAppendSubmission, KvStateId, LinearAttentionBindings,
-    LinearAttentionState, LinearAttentionStateId, LinearAttentionSubmission,
-    Ministral3YarnSubmission, OwnedTensorBinding, PrepareSupport, PreparedMatmulFootprint,
-    PreparedOperation, PreparedOperationId, QueueCompletionMode, Readback, ShutdownReport,
-    Submission, Transfer,
+    ExecutionTransferAdapter, ExecutionWholeDecodeCapture, ExecutionWholeDecodeCaptureAdapter,
+    KvState, KvStateAppendSubmission, KvStateId, LinearAttentionBindings, LinearAttentionState,
+    LinearAttentionStateId, LinearAttentionSubmission, Ministral3YarnSubmission,
+    OwnedTensorBinding, PrepareSupport, PreparedMatmulFootprint, PreparedOperation,
+    PreparedOperationId, QueueCompletionMode, Readback, ShutdownReport, Submission, Transfer,
 };
 pub use fake::{FakeBackend, MAX_FAKE_MATERIALIZATION_BYTES};
 pub use final_output::{

@@ -425,6 +425,19 @@ GQA型のKV読み出しが後続のNVFP4 M=1を約9〜10%遅くする現象に�
 
 ### 段階5: decode実行制御（graph化とサンプリング経路の通信削減）
 
+2026-09-21完了。targetの1 tokenとMTPのdraft／verify／状態選択を、それぞれ一つのHIP graphへ接続した。
+固定device samplingのeligibleなfresh requestで自動有効化し、次graphをreadback待ちより先にenqueueする。
+両GPU・MTPなし／ありの8192/128、1 warmup＋3 measuredで全生成tokenが変更前と一致した。
+停止・予算・context末尾・正常解放と、marker付きprofileによる非同期性／再instantiateなしを確認した。
+decode中央値はV620 15.6762／29.4250、R9700 20.8622／34.6104 tok/s（MTPなし／あり）。
+MTPありは直前baseline比+2.00%／+1.69%、MTPなしは-0.61%／-2.56%。速度下限は追加しない。
+実装方式、適用条件、GPU空白の分解と証拠は[段階5履歴](../../../../../history/2026/09/11-20/phase87-stage5.md)へ記録した。
+
+同日の追加依頼でMTPなしの速度低下を調査し、共通の状態コピー・attention定数最適化・既知budget終端の
+不要replayを修正した。V620 16.1868／30.1174、R9700 21.4909／35.6390 tok/sとなり、
+両GPUで低下を解消した。全12ケースのN0・停止・容量境界と最終traceを確認済み。
+MTP有無で全体経路を分ける必要はなかった。[追加修正履歴](../../../../../history/2026/09/21-30/phase87-mtp-off-regression.md)。
+
 段階0の補正で、GPU空白はkernel 1,171個/token（MTPなし）ごとの2〜10 µsの隙間と、tokenごとのhost往復
 （sampler後の読み戻し、約0.5 msのhost処理、同期的な`hipMemcpyAsync`、次tokenの送り直し）から成ると分かった。
 MTPありでは受理判定の読み戻しと、一部受理時のrestore＋replayの起動がhost主導である。
@@ -435,6 +448,7 @@ MTPありでは受理判定の読み戻しと、一部受理時のrestore＋repl
   引数更新で渡す。
 - **サンプリング経路の通信削減（MTPなし）**: sampler結果をdeviceのtoken bufferに置き、次段のembeddingが
   直接読む。hostへのtoken読み戻しは非同期にし、停止判定は1段遅れで行う（余分な1段は捨てる）。
+  残り1出力と確定したbudget終端だけは、不要な後続replayを予約しない。
   hostの送り直しと、次段起動前の同期待ちをなくす。
 - **サンプリング経路の通信削減（MTPあり）**: 既存のdevice上の受理判定（`speculative_device.rs`）の結果を、
   位置・KV長・次draftの入力（受理位置のtokenとhidden）としてdevice上で次段へ渡す。

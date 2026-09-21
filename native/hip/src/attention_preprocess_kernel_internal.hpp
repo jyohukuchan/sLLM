@@ -5,6 +5,10 @@
 
 #include <cstdint>
 
+namespace sllm_decode_control {
+struct ControlV1;
+}
+
 namespace sllm_attention_preprocess_kernel {
 
 constexpr const char *kLogicalKernelId =
@@ -15,6 +19,14 @@ constexpr const char *kWave32LogicalKernelId =
     "attention_preprocess.headwise_norm_rope.wave32.v1";
 constexpr const char *kWave32DeviceSymbol =
     "sllm_attention_preprocess_headwise_norm_rope_wave32_v1";
+
+hipError_t launch_device(const uint16_t *packed_q_gate, const uint16_t *k,
+                         const uint16_t *q_raw_scale,
+                         const uint16_t *k_raw_scale, uint16_t *q_output,
+                         uint16_t *gate_output, uint16_t *k_output, uint32_t m,
+                         uint32_t q_heads, uint32_t k_heads,
+                         sllm_decode_control::ControlV1 *control,
+                         hipStream_t stream) noexcept;
 
 hipError_t launch(const uint16_t *packed_q_gate, const uint16_t *k,
                   const uint16_t *q_raw_scale, const uint16_t *k_raw_scale,

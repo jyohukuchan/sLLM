@@ -6647,11 +6647,14 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 .map_err(|error| {
                     BackendErrorV1::new(format!("MTP request graph failed: {error}"))
                 })?;
-                let mtp_owner = mtp_resident
-                    .new_request_for_session(Arc::clone(&state.session), mtp_graph)
-                    .map_err(|error| {
-                        BackendErrorV1::new(format!("MTP request provisioning failed: {error}"))
-                    })?;
+                let mtp_owner = if owner.supports_whole_decode() {
+                    mtp_resident.new_request_on_queue_of(mtp_graph, &owner)
+                } else {
+                    mtp_resident.new_request_for_session(Arc::clone(&state.session), mtp_graph)
+                }
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("MTP request provisioning failed: {error}"))
+                })?;
                 allocated = state.session.memory_snapshot();
                 let mut executor = SpeculativeGenerationAdapterV1::new(
                     QwenMtpGenerationExecutorV1::new_with_draft_width(
@@ -9875,6 +9878,21 @@ impl QwenPrefixGenerationExecutorV1 {
 }
 
 impl GenerationExecutorV1 for QwenPrefixGenerationExecutorV1 {
+    fn configure_whole_decode(
+        &mut self,
+        output_limit: u64,
+        stop_ids: &[u32],
+    ) -> Result<(), GenerationServiceError> {
+        // Publishing a fresh prefix forks the request's VMM KV/GDN planes and
+        // leaves shared pages behind. Whole-decode capture requires exclusive
+        // request-owned state, so retain the legacy prefix-publication route
+        // and let only the plain fresh owner opt into graph capture.
+        if !self.supports_device_selector() || self.publish_prefix {
+            return Ok(());
+        }
+        GenerationExecutorV1::configure_whole_decode(&mut self.inner, output_limit, stop_ids)
+    }
+
     fn prefill(
         &mut self,
         input_token_ids: &[u32],

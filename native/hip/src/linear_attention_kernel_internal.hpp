@@ -5,6 +5,10 @@
 
 #include <cstdint>
 
+namespace sllm_decode_control {
+struct ControlV1;
+}
+
 namespace sllm_linear_attention_kernel {
 
 constexpr uint32_t kQkHeads = 16U;
@@ -43,14 +47,13 @@ constexpr const char *kGfx942Wave64ColumnLogicalKernelId =
 constexpr const char *kGfx942Wave64ColumnRecurrentDeviceSymbol =
     "sllm_linear_attention_column_state_wave64_v3";
 
-hipError_t launch_convolution(const uint16_t *qkv, const uint16_t *conv_weight,
-                              const uint16_t *previous_conv_state,
-                              uint16_t *convolved_qkv,
-                              uint16_t *next_conv_state, uint32_t token_count,
-                              uint32_t qkv_width, uint32_t conv_kernel_size,
-                              hipStream_t stream,
-                              uint16_t *checkpoint_conv_state = nullptr,
-                              uint32_t checkpoint_rows = 0U) noexcept;
+hipError_t launch_convolution(
+    const uint16_t *qkv, const uint16_t *conv_weight,
+    const uint16_t *previous_conv_state, uint16_t *convolved_qkv,
+    uint16_t *next_conv_state, uint32_t token_count, uint32_t qkv_width,
+    uint32_t conv_kernel_size, hipStream_t stream,
+    uint16_t *checkpoint_conv_state = nullptr, uint32_t checkpoint_rows = 0U,
+    sllm_decode_control::ControlV1 *control = nullptr) noexcept;
 
 hipError_t launch_recurrent(
     const uint16_t *convolved_qkv, const uint16_t *z, const uint16_t *b_input,
@@ -59,8 +62,8 @@ hipError_t launch_recurrent(
     float *next_recurrent_state, uint16_t *output, uint32_t token_count,
     uint32_t qk_heads, uint32_t value_heads, uint32_t head_dim,
     uint32_t qkv_width, uint32_t output_width, hipStream_t stream,
-    float *checkpoint_recurrent_state = nullptr,
-    uint32_t checkpoint_rows = 0U) noexcept;
+    float *checkpoint_recurrent_state = nullptr, uint32_t checkpoint_rows = 0U,
+    sllm_decode_control::ControlV1 *control = nullptr) noexcept;
 
 // Exact gfx1030 m=1 path. One block owns one Q/K head and processes its two
 // value heads in sequence, sharing the Q/K load and normalization while
@@ -83,7 +86,8 @@ hipError_t launch_row32_lds(
     const float *norm_weight, const float *previous_recurrent_state,
     float *next_recurrent_state, uint16_t *output, uint32_t token_count,
     uint32_t qk_heads, uint32_t value_heads, uint32_t head_dim,
-    uint32_t qkv_width, uint32_t output_width, hipStream_t stream) noexcept;
+    uint32_t qkv_width, uint32_t output_width, hipStream_t stream,
+    sllm_decode_control::ControlV1 *control = nullptr) noexcept;
 
 hipError_t launch_column_preprocess(
     uint16_t *convolved_qkv, const uint16_t *b_input, const uint16_t *a_input,
@@ -123,6 +127,15 @@ hipError_t launch_gfx942_wave64_column_postprocess(
     const uint16_t *z, const float *norm_weight, uint16_t *output,
     uint32_t token_count, uint32_t value_heads, uint32_t head_dim,
     uint32_t output_width, hipStream_t stream) noexcept;
+
+// Publish only the committed prefix into the stable graph input state.
+hipError_t launch_decode_state_select(
+    sllm_decode_control::ControlV1 *control, const uint16_t *final_conv,
+    const float *final_recurrent, const uint16_t *checkpoint_conv,
+    const float *checkpoint_recurrent, uint16_t *anchor_conv,
+    float *anchor_recurrent, uint64_t conv_elements,
+    uint64_t recurrent_elements, uint32_t token_count, uint32_t checkpoint_rows,
+    hipStream_t stream) noexcept;
 
 } // namespace sllm_linear_attention_kernel
 

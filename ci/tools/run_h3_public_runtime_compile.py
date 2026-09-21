@@ -77,6 +77,7 @@ PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS = (
     "native/hip/src/argmax_kernel.hip.cpp",
     "native/hip/src/attention_preprocess_kernel.hip.cpp",
     "native/hip/src/causal_attention_kernel.hip.cpp",
+    "native/hip/src/decode_control_kernel.hip.cpp",
     "native/hip/src/deepseek_v4_moe_route_kernel.hip.cpp",
     "native/hip/src/elementwise_kernel.hip.cpp",
     "native/hip/src/embedding_kernel.hip.cpp",
@@ -107,6 +108,8 @@ PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
     "native/hip/src/causal_attention_api.hpp",
     "native/hip/src/causal_attention_kernel_internal.hpp",
     "native/hip/src/causal_attention_runtime.inc",
+    "native/hip/src/decode_control_kernel_internal.hpp",
+    "native/hip/src/decode_graph_capture_internal.hpp",
     "native/hip/src/deepseek_v4_moe_route_api.hpp",
     "native/hip/src/deepseek_v4_moe_route_kernel_internal.hpp",
     "native/hip/src/deepseek_v4_moe_route_runtime.inc",
@@ -270,9 +273,19 @@ def validate_public_symbol_contract(repo: Path) -> None:
 # intentionally finite: adding a wildcard here would hide accidental exports.
 KERNEL_SYMBOLS = (
     "sllm_argmax_bf16_f32_v1",
+    "sllm_attention_preprocess_device_wave32_v1",
     "sllm_attention_preprocess_headwise_norm_rope_v1",
     "sllm_attention_preprocess_headwise_norm_rope_wave32_v1",
     "sllm_concat_rows_bf16_v1",
+    "sllm_decode_control_begin_phase_v1",
+    "sllm_decode_control_commit_decision_v1",
+    "sllm_decode_control_commit_selector_v1",
+    "sllm_decode_control_gather_active_hidden_v1",
+    "sllm_decode_control_gather_active_token_v1",
+    "sllm_decode_control_gather_decision_v1",
+    "sllm_decode_control_gather_hidden_v1",
+    "sllm_decode_control_gather_result_v1",
+    "sllm_decode_control_gather_selector_v1",
     "sllm_deepseek_v4_moe_route_score_hash_v1",
     "sllm_deepseek_v4_moe_route_stable_group_v1",
     "sllm_elementwise_add_bf16_fp32_v1",
@@ -285,6 +298,7 @@ KERNEL_SYMBOLS = (
     "sllm_elementwise_silu_mul_bf16_fp32_v1",
     "sllm_elementwise_tanh_softcap_bf16_fp32_v1",
     "sllm_embedding_gather_bf16_i32_v1",
+    "sllm_embedding_gather_device_bf16_i32_v1",
     "sllm_fp8_outer_decode_gfx1030_lds_lut_fp16_v1",
     "sllm_gdn_projection_bundle_bf16_fp32_decode_v1",
     "sllm_gemma4_moe_down_combine_nvfp4_v2",
@@ -302,6 +316,7 @@ KERNEL_SYMBOLS = (
     "sllm_linear_attention_causal_conv_silu_v1",
     "sllm_linear_attention_column_postprocess_v2",
     "sllm_linear_attention_column_preprocess_v2",
+    "sllm_linear_attention_decode_state_select_v1",
     "sllm_linear_attention_recurrent_column_state_v2",
     "sllm_linear_attention_recurrent_gated_norm_decode_pair_v1",
     "sllm_linear_attention_recurrent_gated_norm_register_state_v1",
@@ -316,7 +331,6 @@ KERNEL_SYMBOLS = (
     "sllm_matmul_bf16_fp32_prefill_short_serial_v1",
     "sllm_matmul_bf16_fp32_tiled16_v2",
     "sllm_matmul_bf16_fp32_v1",
-    "sllm_matmul_fp8_outer_gfx1201_dot4_v1",
     "sllm_matmul_bf16_to_fp8_outer_v1",
     "sllm_matmul_bf16_to_fp8_outer_v2",
     "sllm_matmul_bf16_to_mxfp4_block32_even_v1",
@@ -348,6 +362,7 @@ KERNEL_SYMBOLS = (
     "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k6144n5120_v1",
     "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_wave4col32_v1",
     "sllm_matmul_fp8_outer_emulation_v1",
+    "sllm_matmul_fp8_outer_gfx1201_dot4_v1",
     "sllm_matmul_fp8_outer_prefill_gfx1030_half2_128x64_v1",
     "sllm_matmul_fp8_outer_prefill_gfx1030_half2_32x32_v1",
     "sllm_matmul_fp8_outer_prefill_gfx1030_half2_32x64_v1",
@@ -438,6 +453,8 @@ KERNEL_SYMBOLS = (
     "sllm_rmsnorm_residual_fused_wave64_v1",
     "sllm_rotary_split_half_bf16_fp32_v1",
     "sllm_token_selector_bf16_f32_mask_v1",
+    "sllm_token_selector_fixed_topk_final_graph_support_v1",
+    "sllm_token_selector_fixed_topk_final_graph_v1",
     "sllm_token_selector_fixed_topk_final_support_v1",
     "sllm_token_selector_fixed_topk_final_v1",
     "sllm_token_selector_fixed_topk_initial_v1",
@@ -451,10 +468,19 @@ KERNEL_SYMBOLS = (
     "sllm_token_selector_fixed_topp_select_v1",
     "sllm_token_selector_fixed_topp_token_block_prefix_v1",
     "sllm_token_selector_fixed_topp_weight_prefix_v1",
+    "sllm_token_selector_sparse_pq_k20_graph_v1",
     "sllm_token_selector_sparse_pq_k20_v1",
 )
 INTERNAL_RUNTIME_SYMBOLS = (
     "sllm_concat_bf16_rows_v1",
+    "sllm_graph_span_abort_capture",
+    "sllm_graph_span_begin_capture",
+    "sllm_graph_span_bind_linear_state",
+    "sllm_graph_span_capture_marker",
+    "sllm_graph_span_decode_command",
+    "sllm_graph_span_end_capture",
+    "sllm_graph_span_publish_state_metadata",
+    "sllm_graph_span_select_linear_state",
     "sllm_hip_kv_view_readback",
     "sllm_hip_matmul_workspace_footprint",
     "sllm_linear_attention_state_commit_checkpoint",
@@ -462,6 +488,7 @@ INTERNAL_RUNTIME_SYMBOLS = (
     "sllm_linear_attention_state_discard_checkpoint",
     "sllm_linear_attention_state_prepare_checkpoint",
     "sllm_linear_attention_state_validate_checkpoint",
+    "sllm_token_selector_verify_fixed_k20_mtp_graph_v1",
     "sllm_token_selector_verify_fixed_k20_mtp_v1",
 )
 CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS = (
@@ -492,6 +519,28 @@ CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS = (
     "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage2_kernelILj8EEEvPKfPtjjjj",
     "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_171__device_stub__causal_attention_decode_gqa6_staged32_split_merge_kernelILj128EEEvPKfPtj",
     "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_172__device_stub__causal_attention_decode_gqa6_staged32_split_stage1_kernelILj128EEEvPKtPKvS5_S5_S5_Pfjm",
+)
+# Phase87 adds the device-control argument to these staged attention
+# instantiations. Keep the mangled compiler-owned shims explicit so an
+# unrelated new stub still fails closed.
+PHASE87_CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS = (
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb0ELj6ELj128ELb0EEEvPKtPKvS5_S5_S5_PKfS7_PfjmjjjffPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb0ELj6ELj128ELb1EEEvPKtPKvS5_S5_S5_PKfS7_PfjmjjjffPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb0ELj6ELj32ELb0EEEvPKtPKvS5_S5_S5_PKfS7_PfjmjjjffPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb0ELj6ELj32ELb1EEEvPKtPKvS5_S5_S5_PKfS7_PfjmjjjffPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb0ELj6ELj8ELb0EEEvPKtPKvS5_S5_S5_PKfS7_PfjmjjjffPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb1ELj6ELj128ELb0EEEvPKtPKvS5_S5_S5_PKfS7_PfjmjjjffPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb1ELj6ELj128ELb1EEEvPKtPKvS5_S5_S5_PKfS7_PfjmjjjffPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb1ELj6ELj32ELb0EEEvPKtPKvS5_S5_S5_PKfS7_PfjmjjjffPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb1ELj6ELj32ELb1EEEvPKtPKvS5_S5_S5_PKfS7_PfjmjjjffPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage1_kernelILb1ELj6ELj8ELb0EEEvPKtPKvS5_S5_S5_PKfS7_PfjmjjjffPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage2_kernelILj32ELb0EEEvPKfPtjjjjPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage2_kernelILj32ELb1EEEvPKfPtjjjjPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_170__device_stub__causal_attention_decode_wave_split_staged_stage2_kernelILj8ELb0EEEvPKfPtjjjjPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_171__device_stub__causal_attention_decode_gqa6_staged32_split_merge_kernelILj128ELb0EEEvPKfPtjPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_171__device_stub__causal_attention_decode_gqa6_staged32_split_merge_kernelILj128ELb1EEEvPKfPtjPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_172__device_stub__causal_attention_decode_gqa6_staged32_split_stage1_kernelILj128ELb0EEEvPKtPKvS5_S5_S5_PfjmPN19sllm_decode_control9ControlV1E",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_172__device_stub__causal_attention_decode_gqa6_staged32_split_stage1_kernelILj128ELb1EEEvPKtPKvS5_S5_S5_PfjmPN19sllm_decode_control9ControlV1E",
 )
 # Exact template instantiations emitted by the linked implementation.  Keep this
 # finite and source-backed; arbitrary names containing ``stub`` remain rejected.
@@ -604,6 +653,8 @@ EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS = (
     "hipGraphInstantiate",
     "hipGraphLaunch",
     "hipGraphNodeGetType",
+    "hipHostFree",
+    "hipHostMalloc",
     "hipLaunchKernel",
     "hipMalloc",
     "hipMemAddressFree",
@@ -2915,6 +2966,7 @@ def _require_host_symbols(output: str) -> list[str]:
     # symbol containing "stub" remains a hard failure.
     compiler_stub_symbols = {f"__device_stub__{name}" for name in (probe_name, *KERNEL_SYMBOLS)}
     compiler_stub_symbols.update(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)
+    compiler_stub_symbols.update(PHASE87_CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)
     compiler_stub_symbols.update(ADDITIONAL_DEVICE_STUB_SYMBOLS)
     stub_symbols = sorted(
         {

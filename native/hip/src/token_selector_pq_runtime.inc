@@ -140,6 +140,149 @@ bool release_pq_submission_locked(
 
 } // namespace
 
+/* Whole-decode capture variant. It intentionally has no Completion output:
+ * the decision record is a graph-owned device buffer and its lifetime is
+ * covered by the capture owner. The existing fixed-K20 ABI below retains its
+ * synchronous host DraftIds path unchanged. */
+extern "C" sllm_status_t sllm_token_selector_verify_fixed_k20_mtp_graph_v1(
+    const sllm_context_t *const raw_context,
+    const sllm_queue_t *const raw_queue,
+    const sllm_buffer_t *const raw_target_buffer, const uint64_t target_offset,
+    const uint32_t target_rows, const sllm_buffer_t *const raw_draft_buffer,
+    const uint64_t draft_offset, const uint32_t draft_rows,
+    const sllm_buffer_t *const raw_draft_ids_buffer,
+    const uint64_t draft_ids_offset, const uint32_t draft_id_count,
+    const uint32_t width, const sllm_buffer_t *const raw_decision_buffer,
+    const uint64_t decision_offset,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (raw_context == nullptr || raw_queue == nullptr ||
+        raw_target_buffer == nullptr || raw_draft_buffer == nullptr ||
+        raw_draft_ids_buffer == nullptr || raw_decision_buffer == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "graph p/q context, queue, support, draft IDs, or decision is null");
+    }
+    if (!whole_graph_capture_active() || graph_capture_queue == nullptr ||
+        graph_capture_queue != lookup<Queue>(raw_queue, HandleKind::Queue)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "graph p/q is only available during whole graph capture");
+    }
+    auto *const control = static_cast<sllm_decode_control::ControlV1 *>(
+        whole_graph_capture_device_control());
+    if (control == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "graph p/q capture has no device control plane");
+    }
+    if (width == 0U || width > sllm_token_selector_pq::kMaxWidth ||
+        target_rows != width + 1U || draft_rows != width ||
+        draft_id_count != width) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "graph p/q width, row count, or draft ID count is invalid");
+    }
+
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    Context *const context = lookup<Context>(raw_context, HandleKind::Context);
+    Queue *const queue = lookup<Queue>(raw_queue, HandleKind::Queue);
+    Buffer *const target = lookup<Buffer>(raw_target_buffer, HandleKind::Buffer);
+    Buffer *const draft = lookup<Buffer>(raw_draft_buffer, HandleKind::Buffer);
+    Buffer *const draft_ids =
+        lookup<Buffer>(raw_draft_ids_buffer, HandleKind::Buffer);
+    Buffer *const decision =
+        lookup<Buffer>(raw_decision_buffer, HandleKind::Buffer);
+    if (context == nullptr || queue == nullptr || target == nullptr ||
+        draft == nullptr || draft_ids == nullptr || decision == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "graph p/q handle is stale or has the wrong kind");
+    }
+    if (queue != graph_capture_queue) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "graph p/q queue differs from the active capture queue");
+    }
+    if (queue->context != context || target->context != context ||
+        draft->context != context || draft_ids->context != context ||
+        decision->context != context) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_CONTEXT_OR_DEVICE_MISMATCH,
+          "graph p/q buffers must belong to one context");
+    }
+    const uint64_t target_bytes =
+        static_cast<uint64_t>(target_rows) * kPqSupportBytes;
+    const uint64_t draft_bytes =
+        static_cast<uint64_t>(draft_rows) * kPqSupportBytes;
+    const uint64_t draft_ids_bytes =
+        static_cast<uint64_t>(draft_id_count) * sizeof(uint32_t);
+    if (validate_pq_buffer_range(target, target_offset, target_bytes,
+                                 alignof(PqSupportRecord), error_sink,
+                                 "graph p/q target range") != SLLM_STATUS_OK ||
+        validate_pq_buffer_range(draft, draft_offset, draft_bytes,
+                                 alignof(PqSupportRecord), error_sink,
+                                 "graph p/q draft range") != SLLM_STATUS_OK ||
+        validate_pq_buffer_range(draft_ids, draft_ids_offset, draft_ids_bytes,
+                                 alignof(uint32_t), error_sink,
+                                 "graph p/q draft ID range") != SLLM_STATUS_OK ||
+        validate_pq_buffer_range(decision, decision_offset, kPqDecisionBytes,
+                                 alignof(PqDecisionRecord), error_sink,
+                                 "graph p/q decision range") != SLLM_STATUS_OK) {
+      return SLLM_STATUS_BUFFER_OUT_OF_BOUNDS;
+    }
+    if (pq_ranges_overlap(target, target_offset, target_bytes, draft,
+                          draft_offset, draft_bytes) ||
+        pq_ranges_overlap(target, target_offset, target_bytes, draft_ids,
+                          draft_ids_offset, draft_ids_bytes) ||
+        pq_ranges_overlap(target, target_offset, target_bytes, decision,
+                          decision_offset, kPqDecisionBytes) ||
+        pq_ranges_overlap(draft, draft_offset, draft_bytes, draft_ids,
+                          draft_ids_offset, draft_ids_bytes) ||
+        pq_ranges_overlap(draft, draft_offset, draft_bytes, decision,
+                          decision_offset, kPqDecisionBytes) ||
+        pq_ranges_overlap(draft_ids, draft_ids_offset, draft_ids_bytes, decision,
+                          decision_offset, kPqDecisionBytes)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_ALIAS_OVERLAP,
+          "graph p/q ranges overlap");
+    }
+    for (Buffer *const buffer : {target, draft, draft_ids, decision}) {
+      if (!whole_graph_pin_buffer(buffer, error_sink)) {
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
+    }
+    auto byte_pointer = [](Buffer *const buffer,
+                           const uint64_t offset) -> void * {
+      return static_cast<char *>(buffer->device_pointer) +
+             static_cast<std::size_t>(offset);
+    };
+    const hipError_t launch_status = ::sllm_token_selector_pq_kernel::launch_graph(
+        static_cast<const PqSupportRecord *>(byte_pointer(target, target_offset)),
+        target_rows,
+        static_cast<const PqSupportRecord *>(byte_pointer(draft, draft_offset)),
+        draft_rows,
+        static_cast<const uint32_t *>(byte_pointer(draft_ids, draft_ids_offset)),
+        draft_id_count, width, nullptr, control, 0U,
+        static_cast<PqDecisionRecord *>(byte_pointer(decision, decision_offset)),
+        queue->stream);
+    if (launch_status != hipSuccess) {
+      return hip_failure(error_sink, launch_status,
+                         "graph p/q kernel launch");
+    }
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in graph p/q verification");
+  }
+}
+
 extern "C" sllm_status_t sllm_token_selector_verify_fixed_k20_mtp_v1(
     const sllm_context_t *const raw_context,
     const sllm_queue_t *const raw_queue,

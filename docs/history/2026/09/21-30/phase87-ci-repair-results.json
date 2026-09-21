@@ -1,0 +1,88 @@
+{
+  "schema_version": "phase87-ci-repair-v1",
+  "state": "PASS",
+  "date_jst": "2026-09-21",
+  "scope": "local-development; dirty working tree; not a published CI or GPU execution claim",
+  "host_rows": {
+    "h0": {
+      "path": ".local-artifacts/phase87/ci-repair/h0-r1/h0/report.json",
+      "sha256": "32409b9b944b8c528e2c38c19dbb1bc66b78dca69d4d672dea00611ac3b644ba",
+      "counts": {
+        "collected": 628,
+        "deselected": 0,
+        "failed": 0,
+        "passed": 628,
+        "selected": 628,
+        "skipped": 0
+      },
+      "duration_seconds": 460.120217,
+      "evidence_mode": "local-development"
+    },
+    "h1": {
+      "path": ".local-artifacts/phase87/ci-repair/h1-r1/h1/report.json",
+      "sha256": "adc5d596333b36ee7a028acd7c448c2aeffc15362d0034472ac7166f9d70cb78",
+      "counts": {
+        "collected": 1717,
+        "deselected": 75,
+        "failed": 0,
+        "passed": 1642,
+        "selected": 1642,
+        "skipped": 0
+      },
+      "duration_seconds": 140.394618,
+      "evidence_mode": "local-development"
+    },
+    "h2": {
+      "path": ".local-artifacts/phase87/ci-repair/h2-r1/h2/report.json",
+      "sha256": "850fe96609904dd22927334308e0ff8bbf966974a95cf6c4950a1c6f06817c77",
+      "counts": {
+        "collected": 47,
+        "deselected": 9,
+        "failed": 0,
+        "passed": 38,
+        "selected": 38,
+        "skipped": 0
+      },
+      "duration_seconds": 1.388606,
+      "evidence_mode": "local-development"
+    }
+  },
+  "public_hip_compile": {
+    "gfx1030": {
+      "compile": {
+        "path": ".local-artifacts/phase87/ci-repair/public-gfx1030/report.json",
+        "sha256": "f67c4c4380a02f93243c8e6daaf13dbebfcdcaf4a76d56fb884a7521ffabde11"
+      },
+      "inspection": {
+        "path": ".local-artifacts/phase87/ci-repair/public-gfx1030/inspection.json",
+        "sha256": "4d7342e8b13266ac879e96465328984b3f47149dd8a07fd61a9a91c70161d939"
+      },
+      "elf_sha256": "6114b9d8c916d95498aa2da9fcb243a07dc3d3412df8feba01238b4fd100364e",
+      "seconds": 86.07635056215804,
+      "execution_attempted": false,
+      "official_container": false
+    },
+    "gfx1201": {
+      "compile": {
+        "path": ".local-artifacts/phase87/ci-repair/public-gfx1201/report.json",
+        "sha256": "c451f78e5be00ddf5a400919cb83b4d7ce4ff58ddb796415a9993fadad3eb717"
+      },
+      "inspection": {
+        "path": ".local-artifacts/phase87/ci-repair/public-gfx1201/inspection.json",
+        "sha256": "84a48b3b8ebe363d39e4ec996361b316f1eb326a7cc9ab26c27cff6548ea60d5"
+      },
+      "elf_sha256": "d875f58dfa74f35c9771940d7107166f7266607c7140babc33819ce7db7ee87b",
+      "seconds": 93.94961326906923,
+      "execution_attempted": false,
+      "official_container": false
+    }
+  },
+  "ci_source_hashes": {
+    "ci/matrix/hip-runtime-compile-v1.json": "564359936dd99e105c6cf9c5ba03b57268bf7e9c3547e3e162c8c3ecfa0b6541",
+    "ci/matrix/rmsnorm-h3-compile-v1.json": "a0d26ac68b2087442f7356f1ab51e63ce6f429f36727668987e2304268942e38",
+    "ci/schema/hip-runtime-artifact-v1.schema.json": "e5579e0644108024bdb2a0702f627784ef937151829cf300dae348ea1459f827",
+    "ci/schema/hip-runtime-compile-v1.schema.json": "1d5b45bb21a90a35af31c5f7aa03a8d6ddcd6012888670b7974c40ac39ccf2fe",
+    "ci/tests/test_h3_public_runtime_contracts.py": "e659c76abe769feeef589c8a91b59545e03e9ee2c2a84a0b3ee454eb3e8cb578",
+    "ci/tools/run_h3_public_runtime_compile.py": "4c2e9d9bef662e666203d28e4e3bd848156496ada22d4379360fc1aa22a3ceca"
+  }
+}

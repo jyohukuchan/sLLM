@@ -4,6 +4,11 @@
  * handles: the native runtime resolves and pins the exact plan objects while
  * the request queue is idle. */
 
+#include "decode_graph_capture_internal.hpp"
+#include "decode_control_kernel_internal.hpp"
+
+#include <initializer_list>
+
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 
 namespace {
@@ -24,6 +29,26 @@ struct GraphSpanPlanRef final {
   QuarantineNode *node;
 };
 
+struct GraphKvStateBinding final {
+  KvState *state;
+  uint64_t initial_published_length;
+  uint64_t initial_generation;
+};
+
+struct GraphLinearStateBinding final {
+  LinearAttentionState *state;
+  void *checkpoint_conv;
+  void *checkpoint_recurrent;
+  uint32_t token_count;
+  uint32_t checkpoint_rows;
+  uint32_t anchor_slot;
+  uint32_t reserved0;
+  uint64_t conv_elements;
+  uint64_t recurrent_elements;
+  uint64_t initial_published_length;
+  uint64_t initial_generation;
+};
+
 struct GraphSpan final : QuarantineNode {
   Context *context;
   Queue *queue;
@@ -35,6 +60,18 @@ struct GraphSpan final : QuarantineNode {
   bool release_active;
   bool in_flight;
   bool capture_owner;
+  bool whole_capture;
+  bool capture_failed;
+  uint64_t whole_replay_in_flight;
+  Buffer *control_buffer;
+  uint64_t control_byte_offset;
+  bool control_buffer_pinned;
+  std::vector<Buffer *> capture_buffers;
+  std::vector<QuarantineNode *> capture_graph_nodes;
+  uint64_t matmul_workspace_pins;
+  uint64_t causal_workspace_pins;
+  std::vector<GraphKvStateBinding> kv_states;
+  std::vector<GraphLinearStateBinding> linear_states;
   std::vector<GraphSpanPlanRef> plans;
   std::vector<sllm_completion_t *> capture_markers;
 
@@ -43,9 +80,20 @@ struct GraphSpan final : QuarantineNode {
       : QuarantineNode(HandleKind::GraphSpan), context(context_value),
         queue(queue_value), raw_queue(raw_queue_value), graph(nullptr),
         graph_exec(nullptr), actual_node_count(0U), logical_plan_count(0U),
-        release_active(false), in_flight(false), capture_owner(false), plans(),
+        release_active(false), in_flight(false), capture_owner(false),
+        whole_capture(false), capture_failed(false), whole_replay_in_flight(0U),
+        control_buffer(nullptr),
+        control_byte_offset(0U), control_buffer_pinned(false),
+        capture_buffers(), capture_graph_nodes(), matmul_workspace_pins(0U),
+        causal_workspace_pins(0U), kv_states(), linear_states(), plans(),
         capture_markers() {}
 };
+
+/* The incremental whole-capture API is intentionally thread-local. Native
+ * execute entry points are called synchronously by the capture thread and use
+ * these accessors to discover the optional device control plane without
+ * adding it to the existing public operation ABIs. */
+thread_local GraphSpan *graph_capture_span = nullptr;
 
 bool graph_span_tensor_is_m1(
     const sllm_rmsnorm::TensorMetadata &tensor) noexcept {
@@ -314,6 +362,65 @@ void graph_span_unpin(GraphSpan *const span) noexcept {
   }
   if (span->queue != nullptr && span->queue->graph_pins != 0U) {
     --span->queue->graph_pins;
+    if (span->whole_capture) {
+      span->queue->whole_graph_result_readback_required.store(
+          false, std::memory_order_release);
+    }
+  }
+  if (span->control_buffer_pinned && span->control_buffer != nullptr) {
+    if (!sllm_public_runtime::AccountingState::release_two_buffer_prepared_plan(
+            span->context->accounting, span->control_buffer->accounting,
+            span->control_buffer->accounting)) {
+      span->context->poisoned.store(true);
+    }
+    span->control_buffer_pinned = false;
+  }
+  for (Buffer *const buffer : span->capture_buffers) {
+    if (buffer == nullptr || buffer == span->control_buffer) {
+      continue;
+    }
+    if (!sllm_public_runtime::AccountingState::release_two_buffer_prepared_plan(
+            span->context->accounting, buffer->accounting,
+            buffer->accounting)) {
+      span->context->poisoned.store(true);
+    }
+  }
+  span->capture_buffers.clear();
+  for (QuarantineNode *const node : span->capture_graph_nodes) {
+    if (node != nullptr && node->graph_pins != 0U) {
+      --node->graph_pins;
+    }
+  }
+  span->capture_graph_nodes.clear();
+  span->kv_states.clear();
+  span->linear_states.clear();
+  if (span->matmul_workspace_pins != 0U) {
+    if (span->context->matmul_f16_staging_owner_queue != span->queue ||
+        span->context->matmul_f16_staging_in_flight <
+            span->matmul_workspace_pins) {
+      span->context->poisoned.store(true);
+    } else {
+      span->context->matmul_f16_staging_in_flight -=
+          span->matmul_workspace_pins;
+      if (span->context->matmul_f16_staging_in_flight == 0U) {
+        span->context->matmul_f16_staging_owner_queue = nullptr;
+      }
+    }
+    span->matmul_workspace_pins = 0U;
+  }
+  if (span->causal_workspace_pins != 0U) {
+    if (span->context->causal_scaled_prefill_owner_queue != span->queue ||
+        span->context->causal_scaled_prefill_in_flight <
+            span->causal_workspace_pins) {
+      span->context->poisoned.store(true);
+    } else {
+      span->context->causal_scaled_prefill_in_flight -=
+          span->causal_workspace_pins;
+      if (span->context->causal_scaled_prefill_in_flight == 0U) {
+        span->context->causal_scaled_prefill_owner_queue = nullptr;
+      }
+    }
+    span->causal_workspace_pins = 0U;
   }
   const bool owned_capture = span->capture_owner;
   if (span->queue != nullptr && owned_capture) {
@@ -322,6 +429,9 @@ void graph_span_unpin(GraphSpan *const span) noexcept {
   }
   if (owned_capture && graph_capture_queue == span->queue) {
     graph_capture_queue = nullptr;
+  }
+  if (owned_capture && graph_capture_span == span) {
+    graph_capture_span = nullptr;
   }
 }
 
@@ -338,6 +448,29 @@ void graph_span_finish_capture(GraphSpan *const span) noexcept {
   if (owned_capture && graph_capture_queue == span->queue) {
     graph_capture_queue = nullptr;
   }
+  if (owned_capture && graph_capture_span == span) {
+    graph_capture_span = nullptr;
+  }
+}
+
+[[maybe_unused]] bool whole_graph_capture_active() noexcept {
+  return graph_capture_span != nullptr && graph_capture_span->whole_capture &&
+         graph_capture_span->capture_owner && graph_capture_queue != nullptr &&
+         graph_capture_span->queue == graph_capture_queue;
+}
+
+void invalidate_whole_graph_capture() noexcept {
+  if (graph_capture_span != nullptr) graph_capture_span->capture_failed = true;
+}
+
+[[maybe_unused]] void *whole_graph_capture_device_control() noexcept {
+  if (!whole_graph_capture_active() ||
+      graph_capture_span->control_buffer == nullptr ||
+      graph_capture_span->control_buffer->device_pointer == nullptr) {
+    return nullptr;
+  }
+  return static_cast<char *>(graph_capture_span->control_buffer->device_pointer) +
+         static_cast<std::size_t>(graph_capture_span->control_byte_offset);
 }
 
 void graph_span_quarantine_markers(GraphSpan *const span) noexcept {
@@ -388,6 +521,29 @@ bool graph_span_finalize_capture_markers(
     }
     graph_span_quarantine_markers(span);
     return false;
+  }
+  if (span->whole_capture) {
+    /* Whole-capture markers were rolled back when they were transferred into
+     * the span.  The graph owns the captured commands and the final fence
+     * above proves that every replay has drained; release the inert marker
+     * handles without publishing the host-side transition captured before the
+     * first replay. */
+    for (sllm_completion_t *&raw_marker : span->capture_markers) {
+      if (raw_marker == nullptr) {
+        continue;
+      }
+      const sllm_status_t release_status =
+          sllm_completion_release(&raw_marker, error_sink);
+      if (release_status != SLLM_STATUS_OK) {
+        graph_span_quarantine_markers(span);
+        (void)sllm_completion_release(&fence, error_sink);
+        return false;
+      }
+    }
+    span->capture_markers.clear();
+    const sllm_status_t fence_release =
+        sllm_completion_release(&fence, error_sink);
+    return fence_release == SLLM_STATUS_OK;
   }
   for (sllm_completion_t *&raw_marker : span->capture_markers) {
     if (raw_marker == nullptr) {
@@ -609,6 +765,652 @@ bool graph_span_destroy_graph_checked(GraphSpan *const span,
   return true;
 }
 
+bool graph_span_capture_info_valid(
+    const sllm_graph_span_capture_info_t *const info) noexcept {
+  return info != nullptr &&
+         info->struct_size == sizeof(sllm_graph_span_capture_info_t) &&
+         info->abi_version == SLLM_HIP_ABI_VERSION &&
+         info->info_version == SLLM_HIP_GRAPH_SPAN_CAPTURE_INFO_VERSION &&
+         info->reserved0 == 0U;
+}
+
+bool graph_span_capture_node_is_memcpy(const hipGraphNodeType type) noexcept {
+  return type == hipGraphNodeTypeMemcpy ||
+         type == hipGraphNodeTypeMemcpyFromSymbol ||
+         type == hipGraphNodeTypeMemcpyToSymbol;
+}
+
+/* Whole decode capture accepts the native nodes needed to transfer the device
+ * control plane and model inputs. Event nodes can be emitted by a capture-aware
+ * completion implementation; host, alloc/free, nested graph, and semaphore
+ * nodes remain rejected until they have an explicit lifetime contract. */
+bool graph_span_collect_whole_capture_nodes(
+    GraphSpan *const span,
+    sllm_graph_span_capture_info_t *const info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (span == nullptr || span->graph == nullptr || info == nullptr) {
+    return false;
+  }
+  std::size_t total_node_count = 0U;
+  hipError_t graph_status =
+      hipGraphGetNodes(span->graph, nullptr, &total_node_count);
+  if (graph_status != hipSuccess || total_node_count == 0U) {
+    if (graph_status != hipSuccess) {
+      (void)hip_failure(error_sink, graph_status,
+                        "hipGraphGetNodes whole graph capture");
+    } else {
+      (void)sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "whole graph capture produced no native nodes");
+    }
+    return false;
+  }
+  std::unique_ptr<hipGraphNode_t[]> graph_nodes;
+  try {
+    graph_nodes = std::make_unique<hipGraphNode_t[]>(total_node_count);
+  } catch (...) {
+    (void)sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "whole graph capture native node-list allocation failed");
+    return false;
+  }
+  std::size_t listed_node_count = total_node_count;
+  graph_status = hipGraphGetNodes(span->graph, graph_nodes.get(),
+                                  &listed_node_count);
+  if (graph_status != hipSuccess || listed_node_count != total_node_count) {
+    if (graph_status != hipSuccess) {
+      (void)hip_failure(error_sink, graph_status,
+                        "hipGraphGetNodes whole graph node list");
+    } else {
+      (void)sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "whole graph capture native node-list size changed");
+    }
+    return false;
+  }
+  uint64_t kernel_node_count = 0U;
+  uint64_t memcpy_node_count = 0U;
+  for (std::size_t index = 0U; index != listed_node_count; ++index) {
+    hipGraphNodeType node_type = hipGraphNodeTypeCount;
+    graph_status = hipGraphNodeGetType(graph_nodes[index], &node_type);
+    if (graph_status != hipSuccess) {
+      (void)hip_failure(error_sink, graph_status,
+                        "hipGraphNodeGetType whole graph capture");
+      return false;
+    }
+    if (node_type == hipGraphNodeTypeKernel) {
+      ++kernel_node_count;
+      continue;
+    }
+    if (graph_span_capture_node_is_memcpy(node_type)) {
+      ++memcpy_node_count;
+      continue;
+    }
+    // Fixed sampling clears its status record with a captured device memset.
+    // It is a device node, not a host callback, and remains in total_node_count.
+    if (node_type == hipGraphNodeTypeMemset ||
+        node_type == hipGraphNodeTypeEventRecord ||
+        node_type == hipGraphNodeTypeWaitEvent) {
+      continue;
+    }
+    (void)sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_UNSUPPORTED,
+        "whole graph capture contains an unsupported native node type");
+    return false;
+  }
+  if (kernel_node_count == 0U && memcpy_node_count == 0U) {
+    (void)sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_UNSUPPORTED,
+        "whole graph capture produced no kernel or memcpy nodes");
+    return false;
+  }
+  span->actual_node_count = static_cast<uint64_t>(listed_node_count);
+  span->logical_plan_count = 0U;
+  info->struct_size = sizeof(sllm_graph_span_capture_info_t);
+  info->abi_version = SLLM_HIP_ABI_VERSION;
+  info->info_version = SLLM_HIP_GRAPH_SPAN_CAPTURE_INFO_VERSION;
+  info->reserved0 = 0U;
+  info->actual_node_count = span->actual_node_count;
+  info->kernel_node_count = kernel_node_count;
+  info->memcpy_node_count = memcpy_node_count;
+  info->logical_plan_count = span->logical_plan_count;
+  return true;
+}
+
+bool graph_span_validate_control_binding(
+    const sllm_tensor_binding_t *const binding, Context *const context,
+    Buffer **const buffer_output, uint64_t *const byte_offset_output,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (buffer_output == nullptr || byte_offset_output == nullptr) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "whole graph control binding output is null") == SLLM_STATUS_OK;
+  }
+  *buffer_output = nullptr;
+  *byte_offset_output = 0U;
+  if (binding == nullptr) {
+    return true;
+  }
+  if (binding->struct_size != sizeof(sllm_tensor_binding_t) ||
+      binding->abi_version != SLLM_HIP_ABI_VERSION ||
+      binding->buffer == nullptr || (binding->byte_offset & UINT64_C(15)) != 0U) {
+    (void)sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "whole graph control binding ABI or buffer is invalid");
+    return false;
+  }
+  Buffer *const buffer =
+      lookup<Buffer>(binding->buffer, HandleKind::Buffer);
+  if (buffer == nullptr || buffer->context != context ||
+      buffer->release_active || binding->byte_offset > buffer->size_bytes ||
+      buffer->size_bytes - binding->byte_offset < UINT64_C(144)) {
+    (void)sllm_public_runtime::write_error(
+        error_sink, buffer == nullptr
+                        ? SLLM_STATUS_PUBLIC_INVALID_HANDLE
+                        : SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
+        "whole graph control binding buffer is stale, foreign, or out of bounds");
+    return false;
+  }
+  *buffer_output = buffer;
+  *byte_offset_output = binding->byte_offset;
+  return true;
+}
+
+bool graph_span_binding_element_bytes(const uint32_t dtype,
+                                     uint64_t *const bytes) noexcept {
+  if (bytes == nullptr) {
+    return false;
+  }
+  switch (dtype) {
+  case SLLM_TENSOR_DTYPE_BF16:
+  case SLLM_TENSOR_DTYPE_F16:
+    *bytes = 2U;
+    return true;
+  case SLLM_TENSOR_DTYPE_F32:
+  case SLLM_TENSOR_DTYPE_I32:
+    *bytes = 4U;
+    return true;
+  case SLLM_TENSOR_DTYPE_F8_E4M3_FN:
+  case SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ:
+  case SLLM_TENSOR_DTYPE_F8_E5M2:
+  case SLLM_TENSOR_DTYPE_U8:
+    *bytes = 1U;
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool graph_span_binding_end(const sllm_tensor_binding_t &binding,
+                            uint64_t *const end_offset) noexcept {
+  if (end_offset == nullptr || binding.struct_size != sizeof(binding) ||
+      binding.abi_version != SLLM_HIP_ABI_VERSION || binding.buffer == nullptr ||
+      binding.rank == 0U || binding.rank > SLLM_HIP_TENSOR_MAX_RANK ||
+      binding.encoding != SLLM_TENSOR_ENCODING_UNQUANTIZED ||
+      binding.reserved0 != 0U || binding.reserved[0] != 0U ||
+      binding.reserved[1] != 0U) {
+    return false;
+  }
+  uint64_t element_bytes = 0U;
+  if (!graph_span_binding_element_bytes(binding.dtype, &element_bytes)) {
+    return false;
+  }
+  uint64_t max_element = 0U;
+  for (uint32_t index = 0U; index != binding.rank; ++index) {
+    if (binding.shape[index] == 0U) {
+      return false;
+    }
+    const uint64_t extent = binding.shape[index] - 1U;
+    if (extent != 0U && binding.stride_elements[index] >
+                           (UINT64_MAX - max_element) / extent) {
+      return false;
+    }
+    max_element += extent * binding.stride_elements[index];
+  }
+  if (max_element == UINT64_MAX ||
+      max_element + 1U > UINT64_MAX / element_bytes) {
+    return false;
+  }
+  const uint64_t payload = (max_element + 1U) * element_bytes;
+  if (binding.byte_offset > UINT64_MAX - payload) {
+    return false;
+  }
+  *end_offset = binding.byte_offset + payload;
+  return true;
+}
+
+bool graph_span_binding_is_null(const sllm_tensor_binding_t &binding) noexcept {
+  return binding.buffer == nullptr && binding.byte_offset == 0U &&
+         binding.dtype == 0U && binding.encoding == 0U && binding.rank == 0U &&
+         binding.reserved0 == 0U && binding.reserved[0] == 0U &&
+         binding.reserved[1] == 0U &&
+         std::all_of(std::begin(binding.shape), std::end(binding.shape),
+                     [](const uint64_t value) { return value == 0U; }) &&
+         std::all_of(std::begin(binding.stride_elements),
+                     std::end(binding.stride_elements),
+                     [](const uint64_t value) { return value == 0U; });
+}
+
+bool graph_span_pin_command_buffer(GraphSpan *const span, Buffer *const buffer) {
+  if (span == nullptr || buffer == nullptr) {
+    return false;
+  }
+  if (buffer == span->control_buffer) {
+    return true;
+  }
+  if (std::find(span->capture_buffers.begin(), span->capture_buffers.end(),
+                buffer) != span->capture_buffers.end()) {
+    return true;
+  }
+  std::lock_guard<std::mutex> accounting_lock(span->context->accounting_mutex);
+  if (!sllm_public_runtime::AccountingState::
+          reserve_two_buffer_prepared_plan(span->context->accounting,
+                                           buffer->accounting,
+                                           buffer->accounting)) {
+    return false;
+  }
+  try {
+    span->capture_buffers.push_back(buffer);
+  } catch (...) {
+    (void)sllm_public_runtime::AccountingState::
+        release_two_buffer_prepared_plan(span->context->accounting,
+                                         buffer->accounting,
+                                         buffer->accounting);
+    return false;
+  }
+  return true;
+}
+
+/* Capture-aware native consumers that do not return a Completion (for
+ * example, the PQ selector's device-only route) use this hook to retain each
+ * backing allocation until the graph span is released.  It is deliberately
+ * private to this translation unit: callers must already be on the capture
+ * thread and the helper refuses every non-whole-capture call. */
+[[maybe_unused]] bool whole_graph_pin_buffer(
+    Buffer *const buffer, sllm_error_sink_t *const error_sink) noexcept {
+  if (!whole_graph_capture_active() || graph_capture_span == nullptr ||
+      buffer == nullptr || buffer->context != graph_capture_span->context ||
+      buffer->release_active || buffer->device_pointer == nullptr) {
+    (void)sllm_public_runtime::write_error(
+        error_sink, buffer == nullptr ? SLLM_STATUS_INVALID_ARGUMENT
+                                      : SLLM_STATUS_PUBLIC_BUSY,
+        "whole graph buffer pin requires an active matching capture");
+    return false;
+  }
+  if (!graph_span_pin_command_buffer(graph_capture_span, buffer)) {
+    (void)sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "whole graph buffer pin accounting exhausted");
+    return false;
+  }
+  return true;
+}
+
+bool graph_span_pin_completion_node(GraphSpan *const span,
+                                    QuarantineNode *const node) noexcept {
+  if (span == nullptr || node == nullptr) {
+    return false;
+  }
+  if (std::find(span->capture_graph_nodes.begin(),
+                span->capture_graph_nodes.end(),
+                node) != span->capture_graph_nodes.end()) {
+    return true;
+  }
+  std::lock_guard<std::mutex> accounting_lock(span->context->accounting_mutex);
+  if (node->graph_pins == UINT64_MAX) {
+    return false;
+  }
+  ++node->graph_pins;
+  try {
+    span->capture_graph_nodes.push_back(node);
+  } catch (...) {
+    --node->graph_pins;
+    return false;
+  }
+  return true;
+}
+
+GraphKvStateBinding *graph_span_find_kv_state(
+    GraphSpan *const span, KvState *const state) noexcept {
+  if (span == nullptr || state == nullptr) {
+    return nullptr;
+  }
+  for (GraphKvStateBinding &binding : span->kv_states) {
+    if (binding.state == state) {
+      return &binding;
+    }
+  }
+  return nullptr;
+}
+
+GraphLinearStateBinding *graph_span_find_linear_state(
+    GraphSpan *const span, LinearAttentionState *const state) noexcept {
+  if (span == nullptr || state == nullptr) {
+    return nullptr;
+  }
+  for (GraphLinearStateBinding &binding : span->linear_states) {
+    if (binding.state == state) {
+      return &binding;
+    }
+  }
+  return nullptr;
+}
+
+bool graph_span_register_kv_state(GraphSpan *const span,
+                                  KvState *const state) noexcept {
+  if (span == nullptr || state == nullptr || state->context != span->context) {
+    return false;
+  }
+  if (graph_span_find_kv_state(span, state) != nullptr) {
+    return true;
+  }
+  if (state->graph_pins != 0U) {
+    return false;
+  }
+  try {
+    span->kv_states.push_back(
+        GraphKvStateBinding{state, state->published_length, state->generation});
+  } catch (...) {
+    return false;
+  }
+  return true;
+}
+
+bool graph_span_register_linear_state(GraphSpan *const span,
+                                      LinearAttentionState *const state) noexcept {
+  if (span == nullptr || state == nullptr || state->context != span->context) {
+    return false;
+  }
+  if (graph_span_find_linear_state(span, state) != nullptr) {
+    return true;
+  }
+  if (state->graph_pins != 0U) {
+    return false;
+  }
+  GraphLinearStateBinding binding{};
+  binding.state = state;
+  binding.anchor_slot = state->active_slot;
+  binding.initial_published_length = state->published_length;
+  binding.initial_generation = state->generation;
+  try {
+    span->linear_states.push_back(binding);
+  } catch (...) {
+    return false;
+  }
+  return true;
+}
+
+bool graph_span_state_is_capture_owner(const GraphSpan *const span) noexcept {
+  return span != nullptr && span->whole_capture && span->capture_owner &&
+         span->queue != nullptr && graph_capture_queue == span->queue &&
+         graph_capture_span == span;
+}
+
+[[maybe_unused]] GraphLinearStateBinding *whole_graph_linear_binding(
+    LinearAttentionState *const state) noexcept {
+  if (!graph_span_state_is_capture_owner(graph_capture_span)) {
+    return nullptr;
+  }
+  return graph_span_find_linear_state(graph_capture_span, state);
+}
+
+bool graph_span_pin_shared_workspace(GraphSpan *const span,
+                                     const bool matmul,
+                                     const bool causal) noexcept {
+  if (span == nullptr || span->context == nullptr ||
+      (matmul && causal) || (!matmul && !causal)) {
+    return false;
+  }
+  std::lock_guard<std::mutex> accounting_lock(span->context->accounting_mutex);
+  uint64_t *const count = matmul ? &span->matmul_workspace_pins
+                                 : &span->causal_workspace_pins;
+  uint64_t *const context_count =
+      matmul ? &span->context->matmul_f16_staging_in_flight
+             : &span->context->causal_scaled_prefill_in_flight;
+  Queue **const owner_queue =
+      matmul ? &span->context->matmul_f16_staging_owner_queue
+             : &span->context->causal_scaled_prefill_owner_queue;
+  if (*owner_queue != nullptr && *owner_queue != span->queue) {
+    return false;
+  }
+  if (*count == UINT64_MAX || *context_count == UINT64_MAX) {
+    return false;
+  }
+  *owner_queue = span->queue;
+  ++*count;
+  ++*context_count;
+  return true;
+}
+
+void graph_span_rollback_shared_workspace_pins(
+    GraphSpan *const span, const uint64_t matmul_count,
+    const uint64_t causal_count) noexcept {
+  if (span == nullptr || span->context == nullptr) {
+    return;
+  }
+  std::lock_guard<std::mutex> accounting_lock(span->context->accounting_mutex);
+  if (matmul_count != 0U) {
+    if (span->matmul_workspace_pins < matmul_count ||
+        span->context->matmul_f16_staging_in_flight < matmul_count) {
+      span->context->poisoned.store(true);
+    } else {
+      span->matmul_workspace_pins -= matmul_count;
+      span->context->matmul_f16_staging_in_flight -= matmul_count;
+      if (span->context->matmul_f16_staging_in_flight == 0U) {
+        span->context->matmul_f16_staging_owner_queue = nullptr;
+      }
+    }
+  }
+  if (causal_count != 0U) {
+    if (span->causal_workspace_pins < causal_count ||
+        span->context->causal_scaled_prefill_in_flight < causal_count) {
+      span->context->poisoned.store(true);
+    } else {
+      span->causal_workspace_pins -= causal_count;
+      span->context->causal_scaled_prefill_in_flight -= causal_count;
+      if (span->context->causal_scaled_prefill_in_flight == 0U) {
+        span->context->causal_scaled_prefill_owner_queue = nullptr;
+      }
+    }
+  }
+}
+
+void graph_span_rollback_completion_pins(GraphSpan *const span,
+                                         const std::size_t buffer_count,
+                                         const std::size_t node_count,
+                                         const uint64_t matmul_count,
+                                         const uint64_t causal_count,
+                                         const std::size_t kv_state_count,
+                                         const std::size_t linear_state_count) noexcept {
+  if (span == nullptr || span->context == nullptr) {
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> accounting_lock(
+        span->context->accounting_mutex);
+    while (span->capture_buffers.size() > buffer_count) {
+      Buffer *const buffer = span->capture_buffers.back();
+      span->capture_buffers.pop_back();
+      if (buffer == nullptr || buffer == span->control_buffer) {
+        continue;
+      }
+      if (!sllm_public_runtime::AccountingState::
+              release_two_buffer_prepared_plan(
+                  span->context->accounting, buffer->accounting,
+                  buffer->accounting)) {
+        span->context->poisoned.store(true);
+      }
+    }
+    while (span->capture_graph_nodes.size() > node_count) {
+      QuarantineNode *const node = span->capture_graph_nodes.back();
+      span->capture_graph_nodes.pop_back();
+      if (node != nullptr && node->graph_pins != 0U) {
+        --node->graph_pins;
+      }
+    }
+  }
+  if (span->kv_states.size() > kv_state_count) {
+    span->kv_states.resize(kv_state_count);
+  }
+  if (span->linear_states.size() > linear_state_count) {
+    span->linear_states.resize(linear_state_count);
+  }
+  graph_span_rollback_shared_workspace_pins(span, matmul_count, causal_count);
+}
+
+bool graph_span_pin_completion_resources(GraphSpan *const span,
+                                         Completion *const completion) noexcept {
+  if (span == nullptr || completion == nullptr) {
+    return false;
+  }
+  const std::size_t buffer_count = span->capture_buffers.size();
+  const std::size_t node_count = span->capture_graph_nodes.size();
+  const uint64_t matmul_count = span->matmul_workspace_pins;
+  const uint64_t causal_count = span->causal_workspace_pins;
+  const std::size_t kv_state_count = span->kv_states.size();
+  const std::size_t linear_state_count = span->linear_states.size();
+  const auto pin_node = [span](QuarantineNode *const node) {
+    return graph_span_pin_completion_node(span, node);
+  };
+  const auto pin_buffer = [span](Buffer *const buffer) {
+    return buffer != nullptr && graph_span_pin_command_buffer(span, buffer);
+  };
+  const auto pin_plan_and_buffers = [&](QuarantineNode *const plan,
+                                        const std::initializer_list<Buffer *>
+                                            buffers) {
+    if (plan == nullptr || !pin_node(plan)) {
+      return false;
+    }
+    for (Buffer *const buffer : buffers) {
+      if (buffer == nullptr || !pin_buffer(buffer)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  bool ok = true;
+  if (completion->rmsnorm) {
+    ok = pin_plan_and_buffers(
+        completion->rmsnorm_plan,
+        {completion->rmsnorm_activation, completion->rmsnorm_raw_scale,
+         completion->rmsnorm_output});
+    if (ok && completion->rmsnorm_fused) {
+      ok = pin_buffer(completion->rmsnorm_addend) &&
+           pin_buffer(completion->rmsnorm_residual_output);
+    }
+  } else if (completion->elementwise) {
+    ok = pin_plan_and_buffers(
+        completion->elementwise_plan,
+        {completion->elementwise_input0, completion->elementwise_input1,
+         completion->elementwise_output});
+  } else if (completion->matmul) {
+    ok = pin_plan_and_buffers(
+        completion->matmul_plan,
+        {completion->matmul_activation, completion->matmul_weight,
+         completion->matmul_output});
+    if (ok && completion->matmul_f16_staging_workspace_acquired) {
+      ok = graph_span_pin_shared_workspace(span, true, false);
+    }
+  } else if (completion->gdn_bundle) {
+    ok = pin_node(completion->gdn_bundle_plan);
+    for (Buffer *const buffer : completion->gdn_bundle_weights) {
+      ok = ok && pin_buffer(buffer);
+    }
+    for (Buffer *const buffer : completion->gdn_bundle_outputs) {
+      ok = ok && pin_buffer(buffer);
+    }
+    ok = ok && pin_buffer(completion->gdn_bundle_activation);
+  } else if (completion->mlp_bundle) {
+    ok = pin_node(completion->mlp_bundle_plan);
+    ok = ok && pin_buffer(completion->mlp_bundle_activation);
+    for (Buffer *const buffer : completion->mlp_bundle_weights) {
+      ok = ok && pin_buffer(buffer);
+    }
+    for (Buffer *const buffer : completion->mlp_bundle_outputs) {
+      ok = ok && pin_buffer(buffer);
+    }
+  } else if (completion->qwen38_projection_pack2) {
+    ok = pin_node(completion->qwen38_projection_pack2_plan);
+    ok = ok && pin_buffer(completion->qwen38_projection_pack2_activation);
+    for (Buffer *const buffer : completion->qwen38_projection_pack2_weights) {
+      ok = ok && pin_buffer(buffer);
+    }
+    for (Buffer *const buffer : completion->qwen38_projection_pack2_outputs) {
+      ok = ok && pin_buffer(buffer);
+    }
+  } else if (completion->argmax) {
+    ok = pin_plan_and_buffers(
+        completion->argmax_plan,
+        {completion->argmax_logits, completion->argmax_output});
+  } else if (completion->token_selector) {
+    ok = pin_node(completion->token_selector_plan);
+    ok = ok && pin_buffer(completion->token_selector_logits);
+    ok = ok && pin_buffer(completion->token_selector_additive);
+    ok = ok && pin_buffer(completion->token_selector_valid_mask);
+    ok = ok && pin_buffer(completion->token_selector_output);
+    if (completion->token_selector_workspace != nullptr) {
+      ok = ok && pin_buffer(completion->token_selector_workspace);
+    }
+  } else if (completion->array_operation) {
+    ok = pin_node(completion->array_operation_plan);
+    for (Buffer *const buffer : completion->array_operation_buffers) {
+      ok = ok && pin_buffer(buffer);
+    }
+  } else if (completion->kv_state_append) {
+    ok = graph_span_register_kv_state(span, completion->kv_state);
+    ok = ok && pin_node(completion->kv_state);
+    ok = ok && pin_buffer(completion->kv_key_input);
+    ok = ok && pin_buffer(completion->kv_value_input);
+    ok = ok && pin_buffer(completion->kv_key_buffer);
+    ok = ok && pin_buffer(completion->kv_value_buffer);
+  } else if (completion->causal_attention) {
+    ok = graph_span_register_kv_state(span, completion->causal_attention_state);
+    ok = ok && pin_node(completion->causal_attention_state);
+    for (Buffer *const buffer : completion->causal_attention_buffers) {
+      ok = ok && pin_buffer(buffer);
+    }
+    if (ok && completion->causal_scaled_prefill_plan_acquired) {
+      ok = graph_span_pin_shared_workspace(span, false, true);
+    }
+  } else if (completion->linear_attention) {
+    ok = graph_span_register_linear_state(span,
+                                          completion->linear_attention_state);
+    ok = ok && pin_node(completion->linear_attention_state);
+    for (Buffer *const buffer : completion->linear_attention_buffers) {
+      ok = ok && pin_buffer(buffer);
+    }
+  } else if (completion->d2d_copy) {
+    ok = pin_buffer(completion->d2d_source);
+    ok = ok && pin_buffer(completion->d2d_destination);
+  } else if (completion->buffer != nullptr) {
+    ok = pin_buffer(completion->buffer);
+  }
+  if (!ok) {
+    graph_span_rollback_completion_pins(
+        span, buffer_count, node_count, matmul_count, causal_count,
+        kv_state_count, linear_state_count);
+  }
+  return ok;
+}
+
+void graph_span_unregister_and_delete(GraphSpan *const span,
+                                     const sllm_graph_span_t *const raw_span,
+                                     const bool unpin) noexcept {
+  if (span == nullptr) {
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    if (raw_span != nullptr) {
+      unregister_handle(raw_span);
+    }
+  }
+  if (unpin) {
+    graph_span_unpin(span);
+  }
+  delete span;
+}
+
 /* The stream capture has ended before callers use this helper.  A destroy
  * failure leaves the graph and its plan/queue pins in the durable quarantine;
  * successful destruction releases the temporary capture ownership. */
@@ -634,8 +1436,16 @@ bool release_graph_span_active(Completion *const completion) noexcept {
       completion->queue->accounting.active_submissions == 0U) {
     return false;
   }
+  if (completion->graph_span_owner->whole_capture &&
+      completion->graph_span_owner->whole_replay_in_flight == 0U) {
+    return false;
+  }
   --completion->queue->accounting.active_submissions;
-  completion->graph_span_owner->in_flight = false;
+  if (completion->graph_span_owner->whole_capture) {
+    --completion->graph_span_owner->whole_replay_in_flight;
+  } else {
+    completion->graph_span_owner->in_flight = false;
+  }
   return true;
 }
 
@@ -648,7 +1458,15 @@ bool rollback_graph_span_completion(Completion *const completion) noexcept {
       sllm_public_runtime::AccountingState::rollback_queue_fence(
           completion->context->accounting, completion->queue->accounting);
   if (released) {
-    completion->graph_span_owner->in_flight = false;
+    if (completion->graph_span_owner->whole_capture) {
+      if (completion->graph_span_owner->whole_replay_in_flight == 0U) {
+        completion->context->poisoned.store(true);
+        return false;
+      }
+      --completion->graph_span_owner->whole_replay_in_flight;
+    } else {
+      completion->graph_span_owner->in_flight = false;
+    }
   }
   return released;
 }
@@ -663,6 +1481,1306 @@ bool release_graph_span_completion(Completion *const completion) noexcept {
 }
 
 } // namespace
+
+/* Capture-aware execute entry points transfer their completion owner here.
+ * The caller retains the handle only on failure; success consumes it and
+ * GraphSpan keeps the operation/state/buffer pins until final fence release. */
+extern "C" sllm_status_t sllm_graph_span_capture_marker(
+    sllm_graph_span_t *const raw_span,
+    sllm_completion_t **const raw_marker,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (raw_span == nullptr || raw_marker == nullptr || *raw_marker == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "whole graph capture span or marker is null");
+    }
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    GraphSpan *const span = lookup<GraphSpan>(raw_span, HandleKind::GraphSpan);
+    Completion *const completion =
+        lookup<Completion>(*raw_marker, HandleKind::Completion);
+    if (span == nullptr || completion == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "whole graph capture span or marker handle is stale");
+    }
+    if (!span->whole_capture || !span->capture_owner || span->queue == nullptr ||
+        completion->queue != span->queue || span->release_active ||
+        span->capture_failed) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+                  "whole graph capture marker registration is outside active capture");
+    }
+    if (std::find(span->capture_markers.begin(), span->capture_markers.end(),
+                  *raw_marker) != span->capture_markers.end()) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "whole graph capture marker was registered twice");
+    }
+    const std::size_t buffer_count = span->capture_buffers.size();
+    const std::size_t node_count = span->capture_graph_nodes.size();
+    const uint64_t matmul_count = span->matmul_workspace_pins;
+    const uint64_t causal_count = span->causal_workspace_pins;
+    const std::size_t kv_state_count = span->kv_states.size();
+    const std::size_t linear_state_count = span->linear_states.size();
+    if (!graph_span_pin_completion_resources(span, completion)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "whole graph capture marker resource pin failed");
+    }
+    if (!rollback_submission_references(completion)) {
+      graph_span_rollback_completion_pins(
+          span, buffer_count, node_count, matmul_count, causal_count,
+          kv_state_count, linear_state_count);
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "whole graph capture marker accounting rollback failed");
+    }
+    {
+      std::lock_guard<std::mutex> completion_lock(completion->state_mutex);
+      completion->terminal = true;
+      completion->success = true;
+      completion->safe_to_release = true;
+      completion->event_destroyed = true;
+      completion->safety.observe_positive_completion();
+    }
+    try {
+      span->capture_markers.reserve(span->capture_markers.size() + 1U);
+      span->capture_markers.push_back(*raw_marker);
+    } catch (...) {
+      graph_span_rollback_completion_pins(
+          span, buffer_count, node_count, matmul_count, causal_count,
+          kv_state_count, linear_state_count);
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "whole graph capture marker registration allocation failed");
+    }
+    *raw_marker = nullptr;
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "whole graph capture marker registration failed");
+  }
+}
+
+extern "C" sllm_status_t sllm_graph_span_decode_command(
+    const sllm_graph_span_t *const raw_span,
+    const sllm_graph_span_decode_command_desc_t *const command,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (raw_span == nullptr || command == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "whole graph decode command span or descriptor is null");
+    }
+    if (command->struct_size != sizeof(*command) ||
+        command->abi_version != SLLM_HIP_ABI_VERSION ||
+        command->info_version != SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_VERSION ||
+        command->reserved0 != 0U) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ABI_VERSION,
+          "whole graph decode command ABI is unsupported");
+    }
+
+    GraphSpan *span = nullptr;
+    Queue *queue = nullptr;
+    std::array<Buffer *, 4> buffers{};
+    std::array<void *, 4> pointers{};
+    const std::array<const sllm_tensor_binding_t *, 4> bindings = {
+        &command->input0, &command->input1, &command->output,
+        &command->stop_ids};
+    std::array<bool, 4> binding_used{};
+    switch (command->opcode) {
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_BEGIN_PHASE:
+      if (!graph_span_binding_is_null(command->input0) ||
+          !graph_span_binding_is_null(command->input1) ||
+          !graph_span_binding_is_null(command->output) ||
+          !graph_span_binding_is_null(command->stop_ids) || command->rows == 0U) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "begin-phase decode command has unexpected bindings or rows");
+      }
+      break;
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_GATHER_SELECTOR:
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_GATHER_DECISION:
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_GATHER_RESULT:
+      binding_used[0] = true;
+      binding_used[2] = true;
+      if (!graph_span_binding_is_null(command->input1) ||
+          !graph_span_binding_is_null(command->stop_ids) ||
+          command->input0.dtype != SLLM_TENSOR_DTYPE_U8 ||
+          command->output.dtype != SLLM_TENSOR_DTYPE_I32 ||
+          command->token_capacity == 0U) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "gather decode command has unexpected bindings or capacity");
+      }
+      break;
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_GATHER_HIDDEN:
+      binding_used[0] = true;
+      binding_used[2] = true;
+      if (!graph_span_binding_is_null(command->input1) ||
+          !graph_span_binding_is_null(command->stop_ids) ||
+          command->input0.dtype != SLLM_TENSOR_DTYPE_BF16 ||
+          command->output.dtype != SLLM_TENSOR_DTYPE_BF16 ||
+          command->row_count == 0U || command->hidden_width == 0U) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "gather-hidden decode command has unexpected bindings or shape");
+      }
+      break;
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_GATHER_ACTIVE_TOKEN:
+      binding_used[0] = true;
+      binding_used[2] = true;
+      if (!graph_span_binding_is_null(command->input1) ||
+          !graph_span_binding_is_null(command->stop_ids) ||
+          command->input0.dtype != SLLM_TENSOR_DTYPE_I32 ||
+          command->output.dtype != SLLM_TENSOR_DTYPE_I32 ||
+          command->token_capacity == 0U) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "active-token gather metadata or bindings are invalid");
+      }
+      break;
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_GATHER_ACTIVE_HIDDEN:
+      binding_used[0] = true;
+      binding_used[1] = true;
+      binding_used[2] = true;
+      if (!graph_span_binding_is_null(command->stop_ids) ||
+          command->input0.dtype != SLLM_TENSOR_DTYPE_BF16 ||
+          command->input1.dtype != SLLM_TENSOR_DTYPE_BF16 ||
+          command->output.dtype != SLLM_TENSOR_DTYPE_BF16 ||
+          command->row_count == 0U || command->hidden_width == 0U) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "active-hidden gather metadata or bindings are invalid");
+      }
+      break;
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_COMMIT_STEP:
+      binding_used[0] = true;
+      binding_used[2] = true;
+      if (command->input_kind > 1U || command->vocabulary_size == 0U ||
+          command->stop_count > 16U ||
+          command->input0.dtype != SLLM_TENSOR_DTYPE_U8 ||
+          command->output.dtype != SLLM_TENSOR_DTYPE_U8 ||
+          (command->stop_count != 0U &&
+           command->stop_ids.dtype != SLLM_TENSOR_DTYPE_I32) ||
+          (command->stop_count == 0U &&
+           !graph_span_binding_is_null(command->stop_ids)) ||
+          (command->stop_count != 0U && command->stop_ids.buffer == nullptr)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "commit decode command metadata is invalid");
+      }
+      if (command->stop_count != 0U) {
+        binding_used[3] = true;
+      }
+      break;
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_VERIFY_FIXED_K20_PQ:
+      binding_used[0] = true;
+      binding_used[1] = true;
+      binding_used[2] = true;
+      binding_used[3] = true;
+      if (command->token_capacity == 0U ||
+          command->token_capacity > sllm_token_selector_pq::kMaxWidth ||
+          command->row_count != command->token_capacity + 1U ||
+          command->phase_kind != 0U || command->phase_index != 0U ||
+          command->rows != 0U || command->input_kind != 0U ||
+          command->hidden_width != 0U || command->vocabulary_size != 0U ||
+          command->stop_count != 0U ||
+          command->input0.dtype != SLLM_TENSOR_DTYPE_U8 ||
+          command->input1.dtype != SLLM_TENSOR_DTYPE_U8 ||
+          command->output.dtype != SLLM_TENSOR_DTYPE_U8 ||
+          command->stop_ids.dtype != SLLM_TENSOR_DTYPE_I32) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "graph fixed-K20 PQ command metadata or binding dtypes are invalid");
+      }
+      break;
+    default:
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "unknown whole graph decode command opcode");
+    }
+
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      span = lookup<GraphSpan>(raw_span, HandleKind::GraphSpan);
+      if (span == nullptr) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "whole graph decode command span handle is stale");
+      }
+      queue = span->queue;
+      if (!span->whole_capture || !span->capture_owner || span->capture_failed ||
+          queue == nullptr || graph_capture_queue != queue ||
+          graph_capture_span != span || span->graph != nullptr ||
+          span->context->poisoned.load()) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "whole graph decode command is outside active capture");
+      }
+      if (whole_graph_capture_device_control() == nullptr) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "whole graph decode command has no device control plane");
+      }
+      for (std::size_t index = 0U; index != bindings.size(); ++index) {
+        if (!binding_used[index]) {
+          continue;
+        }
+        uint64_t end_offset = 0U;
+        if (!graph_span_binding_end(*bindings[index], &end_offset)) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+              "whole graph decode command binding is malformed");
+        }
+        buffers[index] =
+            lookup<Buffer>(bindings[index]->buffer, HandleKind::Buffer);
+        if (buffers[index] == nullptr) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+              "whole graph decode command binding buffer is stale");
+        }
+        if (buffers[index]->context != span->context ||
+            buffers[index]->release_active) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
+              "whole graph decode command binding context differs");
+        }
+        if (end_offset > buffers[index]->size_bytes) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+              "whole graph decode command binding exceeds its buffer");
+        }
+        pointers[index] = static_cast<char *>(buffers[index]->device_pointer) +
+                          static_cast<std::size_t>(bindings[index]->byte_offset);
+      }
+      if (command->opcode ==
+          SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_VERIFY_FIXED_K20_PQ) {
+        const uint64_t width = command->token_capacity;
+        const uint64_t target_bytes =
+            (width + 1U) * sizeof(sllm_token_selector_pq::SupportRecordV1);
+        const uint64_t draft_bytes =
+            width * sizeof(sllm_token_selector_pq::SupportRecordV1);
+        const uint64_t decision_bytes =
+            sizeof(sllm_token_selector_pq::DecisionRecordV1);
+        const uint64_t draft_ids_bytes =
+            width * sizeof(uint32_t) +
+            sizeof(sllm_decode_control::SelectorRecordV1);
+        if (buffers[0]->size_bytes - bindings[0]->byte_offset < target_bytes ||
+            buffers[1]->size_bytes - bindings[1]->byte_offset < draft_bytes ||
+            buffers[2]->size_bytes - bindings[2]->byte_offset < decision_bytes ||
+            buffers[3]->size_bytes - bindings[3]->byte_offset < draft_ids_bytes) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+              "graph fixed-K20 PQ binding is smaller than its records");
+        }
+        const auto address_aligned = [](const void *const pointer,
+                                        const uint64_t alignment) noexcept {
+          return pointer != nullptr &&
+                 (reinterpret_cast<uintptr_t>(pointer) % alignment) == 0U;
+        };
+        if (!address_aligned(pointers[0], 16U) ||
+            !address_aligned(pointers[1], 16U) ||
+            !address_aligned(pointers[2], 16U) ||
+            !address_aligned(pointers[3], 4U)) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_MISALIGNED_OFFSET,
+              "graph fixed-K20 PQ records have unsupported alignment");
+        }
+        const auto ranges_overlap = [](const void *const left,
+                                       const uint64_t left_bytes,
+                                       const void *const right,
+                                       const uint64_t right_bytes) noexcept {
+          const uint64_t left_address = static_cast<uint64_t>(
+              reinterpret_cast<uintptr_t>(left));
+          const uint64_t right_address = static_cast<uint64_t>(
+              reinterpret_cast<uintptr_t>(right));
+          if (left_address > UINT64_MAX - left_bytes ||
+              right_address > UINT64_MAX - right_bytes) {
+            return true;
+          }
+          return left_address < right_address + right_bytes &&
+                 right_address < left_address + left_bytes;
+        };
+        const std::array<uint64_t, 4> bytes = {
+            target_bytes, draft_bytes, decision_bytes, draft_ids_bytes};
+        for (std::size_t left = 0U; left != bytes.size(); ++left) {
+          for (std::size_t right = left + 1U; right != bytes.size(); ++right) {
+            if (ranges_overlap(pointers[left], bytes[left], pointers[right],
+                               bytes[right])) {
+              return sllm_public_runtime::write_error(
+                  error_sink, SLLM_STATUS_ALIAS_OVERLAP,
+                  "graph fixed-K20 PQ record ranges overlap");
+            }
+          }
+        }
+      }
+    }
+
+    for (std::size_t index = 0U; index != buffers.size(); ++index) {
+      if (!binding_used[index] || buffers[index] == nullptr) {
+        continue;
+      }
+      bool already_pinned = false;
+      for (std::size_t prior = 0U; prior != index; ++prior) {
+        already_pinned = already_pinned ||
+                         (binding_used[prior] && buffers[prior] == buffers[index]);
+      }
+      if (!already_pinned && !graph_span_pin_command_buffer(span, buffers[index])) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "whole graph decode command buffer pin accounting exhausted");
+      }
+    }
+
+    auto *const control = static_cast<sllm_decode_control::ControlV1 *>(
+        whole_graph_capture_device_control());
+    hipError_t launch_status = hipSuccess;
+    switch (command->opcode) {
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_BEGIN_PHASE:
+      launch_status = sllm_decode_control::launch_begin_phase(
+          control, command->phase_kind, command->phase_index, command->rows,
+          queue->stream);
+      break;
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_GATHER_SELECTOR:
+      if (command->token_capacity < 1U ||
+          buffers[0]->size_bytes - bindings[0]->byte_offset <
+              sizeof(sllm_decode_control::SelectorRecordV1) ||
+          buffers[2]->size_bytes - bindings[2]->byte_offset < sizeof(int32_t)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+            "selector gather buffers are too small");
+      }
+      launch_status = sllm_decode_control::launch_gather_selector_token(
+          static_cast<const sllm_decode_control::SelectorRecordV1 *>(pointers[0]),
+          static_cast<int32_t *>(pointers[2]), queue->stream);
+      break;
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_GATHER_DECISION:
+      if (buffers[0]->size_bytes - bindings[0]->byte_offset <
+              sizeof(sllm_token_selector_pq::DecisionRecordV1) ||
+          command->token_capacity >
+              (buffers[2]->size_bytes - bindings[2]->byte_offset) / sizeof(int32_t)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+            "decision gather buffers are too small");
+      }
+      launch_status = sllm_decode_control::launch_gather_decision_tokens(
+          control,
+          static_cast<const sllm_token_selector_pq::DecisionRecordV1 *>(
+              pointers[0]),
+          static_cast<int32_t *>(pointers[2]), command->token_capacity,
+          queue->stream);
+      break;
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_GATHER_RESULT:
+      if (buffers[0]->size_bytes - bindings[0]->byte_offset <
+              sizeof(sllm_decode_control::ResultV1) ||
+          command->token_capacity >
+              (buffers[2]->size_bytes - bindings[2]->byte_offset) / sizeof(int32_t)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+            "result gather buffers are too small");
+      }
+      launch_status = sllm_decode_control::launch_gather_result_tokens(
+          static_cast<const sllm_decode_control::ResultV1 *>(pointers[0]),
+          static_cast<int32_t *>(pointers[2]), command->token_capacity,
+          queue->stream);
+      break;
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_GATHER_HIDDEN: {
+      const uint64_t elements = static_cast<uint64_t>(command->row_count) *
+                                command->hidden_width;
+      const uint64_t bytes = elements * sizeof(uint16_t);
+      if (command->row_count == 0U || command->hidden_width == 0U ||
+          elements / command->hidden_width != command->row_count ||
+          bytes / sizeof(uint16_t) != elements ||
+          bytes > buffers[0]->size_bytes - bindings[0]->byte_offset ||
+          static_cast<uint64_t>(command->hidden_width) * sizeof(uint16_t) >
+              buffers[2]->size_bytes - bindings[2]->byte_offset) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+            "hidden gather buffers are too small");
+      }
+      launch_status = sllm_decode_control::launch_gather_hidden(
+          control, static_cast<const uint16_t *>(pointers[0]),
+          command->row_count, command->hidden_width,
+          static_cast<uint16_t *>(pointers[2]), queue->stream);
+      break;
+    }
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_GATHER_ACTIVE_TOKEN:
+      if (static_cast<uint64_t>(command->token_capacity) * sizeof(int32_t) >
+              buffers[0]->size_bytes - bindings[0]->byte_offset ||
+          buffers[2]->size_bytes - bindings[2]->byte_offset < sizeof(int32_t)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+            "active-token gather buffers are too small");
+      }
+      launch_status = sllm_decode_control::launch_gather_active_token(
+          control, static_cast<const int32_t *>(pointers[0]),
+          command->token_capacity, static_cast<int32_t *>(pointers[2]),
+          queue->stream);
+      break;
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_GATHER_ACTIVE_HIDDEN: {
+      const uint64_t row_bytes =
+          static_cast<uint64_t>(command->hidden_width) * sizeof(uint16_t);
+      const uint64_t target_bytes =
+          static_cast<uint64_t>(command->row_count) * row_bytes;
+      if (row_bytes == 0U ||
+          target_bytes > buffers[0]->size_bytes - bindings[0]->byte_offset ||
+          row_bytes > buffers[1]->size_bytes - bindings[1]->byte_offset ||
+          row_bytes > buffers[2]->size_bytes - bindings[2]->byte_offset) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+            "active-hidden gather buffers are too small");
+      }
+      launch_status = sllm_decode_control::launch_gather_active_hidden(
+          control, static_cast<const uint16_t *>(pointers[0]),
+          command->row_count, static_cast<const uint16_t *>(pointers[1]),
+          command->hidden_width, static_cast<uint16_t *>(pointers[2]),
+          queue->stream);
+      break;
+    }
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_COMMIT_STEP: {
+      const uint64_t input_bytes = command->input_kind == 0U
+                                       ? sizeof(sllm_decode_control::SelectorRecordV1)
+                                       : sizeof(sllm_token_selector_pq::DecisionRecordV1);
+      if (buffers[0]->size_bytes - bindings[0]->byte_offset < input_bytes ||
+          buffers[2]->size_bytes - bindings[2]->byte_offset <
+              sizeof(sllm_decode_control::ResultV1) * 2U ||
+          (command->stop_count != 0U &&
+           buffers[3]->size_bytes - bindings[3]->byte_offset <
+               static_cast<uint64_t>(command->stop_count) * sizeof(uint32_t))) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+            "commit-step buffers are too small");
+      }
+      launch_status = sllm_decode_control::launch_commit_step(
+          control, pointers[0],
+          command->input_kind == 0U ? sllm_decode_control::InputKind::Selector
+                                    : sllm_decode_control::InputKind::Decision,
+          command->stop_count == 0U
+              ? nullptr
+              : static_cast<const uint32_t *>(pointers[3]),
+          command->stop_count, command->vocabulary_size,
+          static_cast<sllm_decode_control::ResultV1 *>(pointers[2]),
+          queue->stream);
+      break;
+    }
+    case SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_VERIFY_FIXED_K20_PQ:
+      launch_status = sllm_token_selector_pq_kernel::launch_graph(
+          static_cast<const sllm_token_selector_pq::SupportRecordV1 *>(
+              pointers[0]),
+          command->row_count,
+          static_cast<const sllm_token_selector_pq::SupportRecordV1 *>(
+              pointers[1]),
+          command->token_capacity, static_cast<const uint32_t *>(pointers[3]),
+          command->token_capacity, command->token_capacity,
+          reinterpret_cast<const sllm_decode_control::SelectorRecordV1 *>(
+              static_cast<const uint32_t *>(pointers[3]) +
+              command->token_capacity),
+          control, 0U,
+          static_cast<sllm_token_selector_pq::DecisionRecordV1 *>(pointers[2]),
+          queue->stream);
+      break;
+    default:
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "unknown whole graph decode command opcode");
+    }
+    if (launch_status != hipSuccess) {
+      return hip_failure(error_sink, launch_status,
+                         "whole graph decode command launch");
+    }
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected whole graph decode command failure");
+  }
+}
+
+extern "C" sllm_status_t sllm_graph_span_bind_linear_state(
+    sllm_graph_span_t *const raw_span,
+    const sllm_linear_attention_state_t *const raw_state,
+    const sllm_tensor_binding_t *const checkpoint_conv,
+    const sllm_tensor_binding_t *const checkpoint_recurrent,
+    const uint32_t token_count, const uint32_t checkpoint_rows,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (raw_span == nullptr || raw_state == nullptr || token_count == 0U ||
+        token_count > 9U || checkpoint_rows > 8U ||
+        checkpoint_rows >= token_count ||
+        ((checkpoint_conv == nullptr) != (checkpoint_recurrent == nullptr)) ||
+        (checkpoint_rows != 0U &&
+         (checkpoint_conv == nullptr || checkpoint_recurrent == nullptr))) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "linear graph binding state, checkpoints, or dimensions are invalid");
+    }
+    if ((checkpoint_conv != nullptr &&
+         checkpoint_conv->dtype != SLLM_TENSOR_DTYPE_BF16) ||
+        (checkpoint_recurrent != nullptr &&
+         checkpoint_recurrent->dtype != SLLM_TENSOR_DTYPE_F32)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_SHAPE_MISMATCH,
+          "linear graph checkpoint dtypes must be BF16 and F32");
+    }
+
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    GraphSpan *const span = lookup<GraphSpan>(raw_span, HandleKind::GraphSpan);
+    LinearAttentionState *const state = lookup<LinearAttentionState>(
+        raw_state, HandleKind::LinearAttentionState);
+    if (span == nullptr || state == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "linear graph binding handle is stale");
+    }
+    if (!graph_span_state_is_capture_owner(span) || state->context != span->context ||
+        state->release_active || state->transition_token != 0U ||
+        state->accounting.active_submissions != 0U ||
+        state->accounting.completion_references != 0U) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "linear graph binding requires a quiescent capture-owned state");
+    }
+    if (state->conv_kernel_size < 2U || state->qkv_width == 0U ||
+        state->value_heads == 0U || state->head_dim == 0U ||
+        state->active_slot > 1U || state->conv_state[state->active_slot] == nullptr ||
+        state->conv_state[1U - state->active_slot] == nullptr ||
+        state->recurrent_state[state->active_slot] == nullptr ||
+        state->recurrent_state[1U - state->active_slot] == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "linear graph binding state planes are invalid");
+    }
+    uint64_t conv_elements = 0U;
+    uint64_t recurrent_elements = 0U;
+    if (static_cast<uint64_t>(state->conv_kernel_size - 1U) >
+            UINT64_MAX / state->qkv_width ||
+        static_cast<uint64_t>(state->value_heads) >
+            UINT64_MAX / state->head_dim ||
+        static_cast<uint64_t>(state->value_heads) * state->head_dim >
+            UINT64_MAX / state->head_dim) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "linear graph checkpoint plane shape overflowed");
+    }
+    conv_elements = static_cast<uint64_t>(state->conv_kernel_size - 1U) *
+                    state->qkv_width;
+    recurrent_elements = static_cast<uint64_t>(state->value_heads) *
+                         state->head_dim * state->head_dim;
+    if (conv_elements > UINT64_MAX / sizeof(uint16_t) ||
+        recurrent_elements > UINT64_MAX / sizeof(float) ||
+        (checkpoint_rows != 0U &&
+         (conv_elements >
+              UINT64_MAX /
+                  (static_cast<uint64_t>(checkpoint_rows) * sizeof(uint16_t)) ||
+          recurrent_elements >
+              UINT64_MAX /
+                  (static_cast<uint64_t>(checkpoint_rows) * sizeof(float))))) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "linear graph checkpoint byte size overflowed");
+    }
+    const uint64_t conv_bytes = static_cast<uint64_t>(checkpoint_rows) *
+                                conv_elements * sizeof(uint16_t);
+    const uint64_t recurrent_bytes = static_cast<uint64_t>(checkpoint_rows) *
+                                     recurrent_elements * sizeof(float);
+    Buffer *conv_buffer = nullptr;
+    Buffer *recurrent_buffer = nullptr;
+    uint64_t conv_end = 0U;
+    uint64_t recurrent_end = 0U;
+    const void *conv_pointer = nullptr;
+    const void *recurrent_pointer = nullptr;
+    if (checkpoint_conv != nullptr) {
+      if (!graph_span_binding_end(*checkpoint_conv, &conv_end) ||
+          !graph_span_binding_end(*checkpoint_recurrent, &recurrent_end)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "linear graph checkpoint binding is malformed");
+      }
+      conv_buffer = lookup<Buffer>(checkpoint_conv->buffer, HandleKind::Buffer);
+      recurrent_buffer =
+          lookup<Buffer>(checkpoint_recurrent->buffer, HandleKind::Buffer);
+      if (conv_buffer == nullptr || recurrent_buffer == nullptr) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "linear graph checkpoint buffer is stale");
+      }
+      if (conv_buffer->context != span->context ||
+          recurrent_buffer->context != span->context ||
+          conv_buffer->release_active || recurrent_buffer->release_active ||
+          conv_end > conv_buffer->size_bytes ||
+          recurrent_end > recurrent_buffer->size_bytes ||
+          conv_end - checkpoint_conv->byte_offset < conv_bytes ||
+          recurrent_end - checkpoint_recurrent->byte_offset < recurrent_bytes) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+            "linear graph checkpoint binding exceeds its backing buffer");
+      }
+      conv_pointer = static_cast<const char *>(conv_buffer->device_pointer) +
+                     static_cast<std::size_t>(checkpoint_conv->byte_offset);
+      recurrent_pointer =
+          static_cast<const char *>(recurrent_buffer->device_pointer) +
+          static_cast<std::size_t>(checkpoint_recurrent->byte_offset);
+    }
+    const auto ranges_overlap = [](const void *const left, const uint64_t left_bytes,
+                                   const void *const right,
+                                   const uint64_t right_bytes) noexcept {
+      if (left == nullptr || right == nullptr || left_bytes == 0U ||
+          right_bytes == 0U) {
+        return false;
+      }
+      const uint64_t left_address = static_cast<uint64_t>(
+          reinterpret_cast<uintptr_t>(left));
+      const uint64_t right_address = static_cast<uint64_t>(
+          reinterpret_cast<uintptr_t>(right));
+      if (left_address > UINT64_MAX - left_bytes ||
+          right_address > UINT64_MAX - right_bytes) {
+        return true;
+      }
+      return left_address < right_address + right_bytes &&
+             right_address < left_address + left_bytes;
+    };
+    const uint64_t conv_plane_bytes = conv_elements * sizeof(uint16_t);
+    const uint64_t recurrent_plane_bytes = recurrent_elements * sizeof(float);
+    if (ranges_overlap(conv_pointer, conv_bytes, recurrent_pointer,
+                        recurrent_bytes) ||
+        ranges_overlap(conv_pointer, conv_bytes,
+                        state->conv_state[state->active_slot],
+                        conv_plane_bytes) ||
+        ranges_overlap(conv_pointer, conv_bytes,
+                        state->conv_state[1U - state->active_slot],
+                        conv_plane_bytes) ||
+        ranges_overlap(conv_pointer, conv_bytes,
+                        state->recurrent_state[state->active_slot],
+                        recurrent_plane_bytes) ||
+        ranges_overlap(conv_pointer, conv_bytes,
+                        state->recurrent_state[1U - state->active_slot],
+                        recurrent_plane_bytes) ||
+        ranges_overlap(recurrent_pointer, recurrent_bytes,
+                        state->conv_state[state->active_slot],
+                        conv_plane_bytes) ||
+        ranges_overlap(recurrent_pointer, recurrent_bytes,
+                        state->conv_state[1U - state->active_slot],
+                        conv_plane_bytes) ||
+        ranges_overlap(recurrent_pointer, recurrent_bytes,
+                        state->recurrent_state[state->active_slot],
+                        recurrent_plane_bytes) ||
+        ranges_overlap(recurrent_pointer, recurrent_bytes,
+                        state->recurrent_state[1U - state->active_slot],
+                        recurrent_plane_bytes)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_ALIAS_OVERLAP,
+          "linear graph checkpoints overlap state or each other");
+    }
+    GraphLinearStateBinding *const existing_binding =
+        graph_span_find_linear_state(span, state);
+    if (existing_binding != nullptr && existing_binding->checkpoint_conv != nullptr) {
+      if (existing_binding->checkpoint_conv != const_cast<void *>(conv_pointer) ||
+          existing_binding->checkpoint_recurrent !=
+              const_cast<void *>(recurrent_pointer) ||
+          existing_binding->token_count != token_count ||
+          existing_binding->checkpoint_rows != checkpoint_rows ||
+          existing_binding->conv_elements != conv_elements ||
+          existing_binding->recurrent_elements != recurrent_elements) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "linear graph state is already bound to different checkpoints");
+      }
+      return SLLM_STATUS_OK;
+    }
+    const std::size_t buffer_count = span->capture_buffers.size();
+    const std::size_t node_count = span->capture_graph_nodes.size();
+    const uint64_t matmul_count = span->matmul_workspace_pins;
+    const uint64_t causal_count = span->causal_workspace_pins;
+    const std::size_t kv_state_count = span->kv_states.size();
+    const std::size_t linear_state_count = span->linear_states.size();
+    if (!graph_span_register_linear_state(span, state) ||
+        !graph_span_pin_completion_node(span, state) ||
+        (conv_buffer != nullptr && !graph_span_pin_command_buffer(span, conv_buffer)) ||
+        (recurrent_buffer != nullptr && !graph_span_pin_command_buffer(span, recurrent_buffer))) {
+      graph_span_rollback_completion_pins(
+          span, buffer_count, node_count, matmul_count, causal_count,
+          kv_state_count, linear_state_count);
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "linear graph checkpoint resource pin failed");
+    }
+    GraphLinearStateBinding *const binding =
+        graph_span_find_linear_state(span, state);
+    if (binding == nullptr) {
+      graph_span_rollback_completion_pins(
+          span, buffer_count, node_count, matmul_count, causal_count,
+          kv_state_count, linear_state_count);
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "linear graph binding registration disappeared");
+    }
+    if (binding->checkpoint_conv != nullptr || binding->checkpoint_recurrent != nullptr) {
+      if (binding->checkpoint_conv != const_cast<void *>(conv_pointer) ||
+          binding->checkpoint_recurrent != const_cast<void *>(recurrent_pointer) ||
+          binding->token_count != token_count ||
+          binding->checkpoint_rows != checkpoint_rows ||
+          binding->conv_elements != conv_elements ||
+          binding->recurrent_elements != recurrent_elements) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "linear graph state is already bound to different checkpoints");
+      }
+      return SLLM_STATUS_OK;
+    }
+    binding->checkpoint_conv = const_cast<void *>(conv_pointer);
+    binding->checkpoint_recurrent = const_cast<void *>(recurrent_pointer);
+    binding->token_count = token_count;
+    binding->checkpoint_rows = checkpoint_rows;
+    binding->conv_elements = conv_elements;
+    binding->recurrent_elements = recurrent_elements;
+    binding->anchor_slot = state->active_slot;
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception binding linear graph state");
+  }
+}
+
+extern "C" sllm_status_t sllm_graph_span_select_linear_state(
+    sllm_graph_span_t *const raw_span,
+    const sllm_linear_attention_state_t *const raw_state,
+    const uint32_t token_count,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (raw_span == nullptr || raw_state == nullptr || token_count == 0U) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "linear graph state selection argument is null or empty");
+    }
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    GraphSpan *const span = lookup<GraphSpan>(raw_span, HandleKind::GraphSpan);
+    LinearAttentionState *const state = lookup<LinearAttentionState>(
+        raw_state, HandleKind::LinearAttentionState);
+    if (span == nullptr || state == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "linear graph state selection handle is stale");
+    }
+    GraphLinearStateBinding *const binding =
+        graph_span_find_linear_state(span, state);
+    if (!graph_span_state_is_capture_owner(span) || binding == nullptr ||
+        (binding->checkpoint_rows != 0U &&
+         (binding->checkpoint_conv == nullptr ||
+          binding->checkpoint_recurrent == nullptr)) ||
+        binding->token_count != token_count ||
+        state->active_slot != binding->anchor_slot ||
+        state->conv_state[state->active_slot] == nullptr ||
+        state->conv_state[1U - state->active_slot] == nullptr ||
+        state->recurrent_state[state->active_slot] == nullptr ||
+        state->recurrent_state[1U - state->active_slot] == nullptr ||
+        whole_graph_capture_device_control() == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "linear graph state selection is outside its active binding");
+    }
+    // Target-only M=1 always commits its sole state row when the generation is
+    // valid. The control-aware recurrent kernel already wrote that row into
+    // the generation-parity slot, so there is no prefix repair to capture.
+    if (binding->token_count == 1U && binding->checkpoint_rows == 0U) {
+      return SLLM_STATUS_OK;
+    }
+    auto *const control = static_cast<sllm_decode_control::ControlV1 *>(
+        whole_graph_capture_device_control());
+    const hipError_t launch_status =
+        ::sllm_linear_attention_kernel::launch_decode_state_select(
+            control,
+            static_cast<const uint16_t *>(state->conv_state[1U - state->active_slot]),
+            static_cast<const float *>(
+                state->recurrent_state[1U - state->active_slot]),
+            binding->checkpoint_conv != nullptr
+                ? static_cast<const uint16_t *>(binding->checkpoint_conv)
+                : static_cast<const uint16_t *>(
+                      state->conv_state[1U - state->active_slot]),
+            binding->checkpoint_recurrent != nullptr
+                ? static_cast<const float *>(binding->checkpoint_recurrent)
+                : static_cast<const float *>(
+                      state->recurrent_state[1U - state->active_slot]),
+            static_cast<uint16_t *>(state->conv_state[state->active_slot]),
+            static_cast<float *>(state->recurrent_state[state->active_slot]),
+            binding->conv_elements, binding->recurrent_elements, token_count,
+            binding->checkpoint_rows, span->queue->stream);
+    if (launch_status != hipSuccess) {
+      return hip_failure(error_sink, launch_status,
+                         "linear graph state selection launch");
+    }
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception selecting linear graph state");
+  }
+}
+
+extern "C" sllm_status_t sllm_graph_span_publish_state_metadata(
+    sllm_graph_span_t *const raw_span,
+    const uint64_t expected_initial_position, const uint64_t final_position,
+    const uint64_t successful_generations,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (raw_span == nullptr || final_position < expected_initial_position) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "graph state metadata publication range is invalid");
+    }
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    GraphSpan *const span = lookup<GraphSpan>(raw_span, HandleKind::GraphSpan);
+    if (span == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "graph state metadata publication span is stale");
+    }
+    if (!span->whole_capture || span->capture_owner || span->release_active ||
+        span->whole_replay_in_flight != 0U || span->graph_exec == nullptr ||
+        span->queue == nullptr ||
+        span->queue->graph_capture_active.load(std::memory_order_acquire)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "graph state metadata publication requires a drained graph");
+    }
+    std::lock_guard<std::mutex> accounting_lock(span->context->accounting_mutex);
+    if (final_position != expected_initial_position &&
+        successful_generations == 0U) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "graph state metadata moved without a successful generation");
+    }
+    for (const GraphKvStateBinding &binding : span->kv_states) {
+      KvState *const state = binding.state;
+      if (state == nullptr || state->context != span->context ||
+          state->release_active || state->graph_pins == 0U ||
+          state->published_length != binding.initial_published_length ||
+          state->generation != binding.initial_generation ||
+          state->transition_token != 0U ||
+          state->accounting.active_submissions != 0U ||
+          state->accounting.completion_references != 0U ||
+          binding.initial_published_length != expected_initial_position ||
+          final_position > state->capacity_tokens ||
+          binding.initial_generation > UINT64_MAX - successful_generations) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_KV_LENGTH_MISMATCH,
+            "captured KV state metadata no longer matches its initial snapshot");
+      }
+    }
+    for (const GraphLinearStateBinding &binding : span->linear_states) {
+      LinearAttentionState *const state = binding.state;
+      if (state == nullptr || state->context != span->context ||
+          state->release_active || state->graph_pins == 0U ||
+          state->published_length != binding.initial_published_length ||
+          state->generation != binding.initial_generation ||
+          state->active_slot != binding.anchor_slot ||
+          state->transition_token != 0U ||
+          state->accounting.active_submissions != 0U ||
+          state->accounting.completion_references != 0U ||
+          binding.initial_published_length != expected_initial_position ||
+          final_position > state->capacity_tokens ||
+          binding.initial_generation > UINT64_MAX - successful_generations) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_LINEAR_ATTENTION_LENGTH_MISMATCH,
+            "captured linear state metadata no longer matches its initial snapshot");
+      }
+    }
+    /* Every check above is complete before the first state is mutated. */
+    for (const GraphKvStateBinding &binding : span->kv_states) {
+      KvState *const state = binding.state;
+      state->last_published_start = expected_initial_position;
+      state->last_published_end = final_position;
+      state->published_length = final_position;
+      state->generation = binding.initial_generation + successful_generations;
+      // A whole-graph generation does not preserve the eager two-slot
+      // rollback snapshot. Never expose a scratch/one-ahead slot as a valid
+      // previous public state through the ordinary rewind API.
+      state->last_published_generation = 0U;
+      state->retained_start =
+          state->sliding_window == 0U
+              ? 0U
+              : final_position > state->sliding_window
+                    ? final_position - state->sliding_window
+                    : 0U;
+    }
+    for (const GraphLinearStateBinding &binding : span->linear_states) {
+      LinearAttentionState *const state = binding.state;
+      state->last_published_start = expected_initial_position;
+      state->last_published_end = final_position;
+      state->published_length = final_position;
+      state->generation = binding.initial_generation + successful_generations;
+      state->active_slot = binding.anchor_slot ^
+                           static_cast<uint32_t>(successful_generations & 1U);
+      // A whole-graph generation does not preserve the eager two-slot
+      // rollback snapshot. Never expose a scratch/one-ahead slot as a valid
+      // previous public state through the ordinary rewind API.
+      state->last_published_generation = 0U;
+      state->checkpoint_conv_state = {nullptr, nullptr};
+      state->checkpoint_recurrent_state = {nullptr, nullptr};
+      state->checkpoint_rows = 0U;
+      state->checkpoint_start = 0U;
+      state->checkpoint_end = 0U;
+      state->checkpoint_generation = 0U;
+      state->checkpoint_armed = false;
+    }
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception publishing graph state metadata");
+  }
+}
+
+extern "C" sllm_status_t sllm_graph_span_begin_capture(
+    const sllm_context_t *const raw_context,
+    const sllm_queue_t *const raw_queue,
+    const sllm_tensor_binding_t *const control_binding,
+    sllm_graph_span_t **const raw_span,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (raw_span != nullptr) {
+      *raw_span = nullptr;
+    }
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (raw_context == nullptr || raw_queue == nullptr || raw_span == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "whole graph capture context, queue, or output is null");
+    }
+
+    Context *context = nullptr;
+    Queue *queue = nullptr;
+    std::unique_ptr<GraphSpan> candidate;
+    uintptr_t token = 0U;
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      context = lookup<Context>(raw_context, HandleKind::Context);
+      queue = lookup<Queue>(raw_queue, HandleKind::Queue);
+      if (context == nullptr || queue == nullptr) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "whole graph capture context or queue handle is stale");
+      }
+      if (context != queue->context) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
+            "whole graph capture context and queue differ");
+      }
+      const char *const arch_name = context->device_properties.gcnArchName;
+      if (!matches_runtime_gcn_arch(arch_name, "gfx1030") &&
+          !matches_runtime_gcn_arch(arch_name, "gfx1201")) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
+            "whole graph capture requires exact gfx1030 or gfx1201");
+      }
+      if (context->poisoned.load() || context->release_active ||
+          queue->release_active ||
+          queue->graph_capture_active.load(std::memory_order_acquire) ||
+          queue->completion_mode != SLLM_QUEUE_COMPLETION_MODE_DEFERRED) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "whole graph capture queue is not an idle deferred queue");
+      }
+      std::lock_guard<std::mutex> accounting_lock(context->accounting_mutex);
+      if (queue->accounting.active_submissions != 0U ||
+          queue->accounting.completion_references != 0U) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "whole graph capture queue has active submissions or references");
+      }
+      if (!preallocate_pinned_d2h_slots(queue)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "whole graph capture could not preallocate pinned result staging");
+      }
+      candidate = std::make_unique<GraphSpan>(context, queue, raw_queue);
+      candidate->whole_capture = true;
+      candidate->plans.reserve(1U);
+      candidate->capture_markers.reserve(64U);
+      if (!graph_span_validate_control_binding(
+              control_binding, context, &candidate->control_buffer,
+              &candidate->control_byte_offset, error_sink)) {
+        return SLLM_STATUS_INVALID_ARGUMENT;
+      }
+      if (candidate->control_buffer != nullptr) {
+        if (!sllm_public_runtime::AccountingState::
+                reserve_two_buffer_prepared_plan(
+                    context->accounting,
+                    candidate->control_buffer->accounting,
+                    candidate->control_buffer->accounting)) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_INTERNAL_ERROR,
+              "whole graph capture control-buffer pin accounting exhausted");
+        }
+        candidate->control_buffer_pinned = true;
+      }
+      ++queue->graph_pins;
+      queue->graph_capture_active.store(true, std::memory_order_release);
+      candidate->capture_owner = true;
+      graph_capture_queue = queue;
+      graph_capture_span = candidate.get();
+      token = register_handle(candidate.get(), HandleKind::GraphSpan);
+      if (token == 0U) {
+        graph_capture_span = nullptr;
+        graph_capture_queue = nullptr;
+        queue->graph_capture_active.store(false, std::memory_order_release);
+        candidate->capture_owner = false;
+        if (candidate->control_buffer_pinned) {
+          (void)sllm_public_runtime::AccountingState::
+              release_two_buffer_prepared_plan(
+                  context->accounting, candidate->control_buffer->accounting,
+                  candidate->control_buffer->accounting);
+          candidate->control_buffer_pinned = false;
+        }
+        if (queue->graph_pins != 0U) {
+          --queue->graph_pins;
+        }
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "whole graph capture handle allocation failed");
+      }
+    }
+
+    const sllm_status_t device_status =
+        select_context_device(context, error_sink);
+    if (device_status != SLLM_STATUS_OK) {
+      {
+        std::lock_guard<std::mutex> registry_lock(registry_mutex);
+        unregister_handle_token(token);
+      }
+      graph_span_unpin(candidate.get());
+      return device_status;
+    }
+    const hipError_t begin_status =
+        hipStreamBeginCapture(queue->stream, hipStreamCaptureModeThreadLocal);
+    if (begin_status != hipSuccess) {
+      {
+        std::lock_guard<std::mutex> registry_lock(registry_mutex);
+        unregister_handle_token(token);
+      }
+      graph_span_unpin(candidate.get());
+      return hip_failure(error_sink, begin_status,
+                         "hipStreamBeginCapture whole graph");
+    }
+    queue->whole_graph_result_readback_required.store(
+        true, std::memory_order_release);
+    *raw_span = reinterpret_cast<sllm_graph_span_t *>(token);
+    (void)candidate.release();
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception beginning whole graph capture");
+  }
+}
+
+extern "C" sllm_status_t sllm_graph_span_end_capture(
+    sllm_graph_span_t *const raw_span,
+    sllm_graph_span_capture_info_t *const info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (raw_span == nullptr || !graph_span_capture_info_valid(info)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "whole graph capture span or info is invalid");
+    }
+    GraphSpan *span = nullptr;
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      span = lookup<GraphSpan>(raw_span, HandleKind::GraphSpan);
+      if (span == nullptr) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "whole graph capture span handle is stale");
+      }
+      std::lock_guard<std::mutex> accounting_lock(
+          span->context->accounting_mutex);
+      if (!span->whole_capture || span->capture_failed ||
+          !span->capture_owner || span->release_active || span->in_flight ||
+          span->whole_replay_in_flight != 0U ||
+          span->graph != nullptr || span->graph_exec != nullptr ||
+          span->queue == nullptr ||
+          span->queue->graph_capture_active.load(std::memory_order_acquire) ==
+              false) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "whole graph capture span is not actively capturing");
+      }
+    }
+
+    hipGraph_t graph = nullptr;
+    const hipError_t end_status =
+        hipStreamEndCapture(span->queue->stream, &graph);
+    graph_span_finish_capture(span);
+    if (end_status != hipSuccess || graph == nullptr) {
+      if (graph != nullptr) {
+        span->graph = graph;
+        hipError_t destroy_status = hipSuccess;
+        if (!graph_span_destroy_graph_checked(span, &destroy_status)) {
+          span->capture_failed = true;
+          graph_span_quarantine_markers(span);
+          retain_poisoned(span, span->context);
+          return hip_failure(error_sink, destroy_status,
+                             "whole graph capture failure graph destruction");
+        }
+      }
+      span->capture_failed = true;
+      graph_span_quarantine_markers(span);
+      return end_status != hipSuccess
+                 ? hip_failure(error_sink, end_status,
+                               "hipStreamEndCapture whole graph")
+                 : sllm_public_runtime::write_error(
+                       error_sink, SLLM_STATUS_UNSUPPORTED,
+                       "whole graph capture returned a null graph");
+    }
+    span->graph = graph;
+    if (!graph_span_collect_whole_capture_nodes(span, info, error_sink)) {
+      span->capture_failed = true;
+      hipError_t destroy_status = hipSuccess;
+      if (!graph_span_destroy_graph_checked(span, &destroy_status)) {
+        graph_span_quarantine_markers(span);
+        retain_poisoned(span, span->context);
+        return hip_failure(error_sink, destroy_status,
+                           "whole graph capture node validation destruction");
+      }
+      graph_span_quarantine_markers(span);
+      return SLLM_STATUS_UNSUPPORTED;
+    }
+    hipGraphNode_t error_node = nullptr;
+    std::array<char, 4096> log{};
+    const hipError_t instantiate_status =
+        hipGraphInstantiate(&span->graph_exec, span->graph, &error_node,
+                            log.data(), log.size());
+    if (instantiate_status != hipSuccess || span->graph_exec == nullptr) {
+      span->capture_failed = true;
+      hipError_t destroy_status = hipSuccess;
+      if (!graph_span_destroy_graph_checked(span, &destroy_status)) {
+        graph_span_quarantine_markers(span);
+        retain_poisoned(span, span->context);
+        return hip_failure(error_sink, destroy_status,
+                           "whole graph capture instantiate destruction");
+      }
+      graph_span_quarantine_markers(span);
+      return hip_failure(error_sink, instantiate_status,
+                         "hipGraphInstantiate whole graph capture");
+    }
+    /* Do not fence or read a token here. Captured operation markers stay in the
+     * GraphSpan until the replay owner finalizes them after a queue fence. */
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception ending whole graph capture");
+  }
+}
+
+extern "C" sllm_status_t sllm_graph_span_abort_capture(
+    sllm_graph_span_t **const raw_span,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (raw_span == nullptr || *raw_span == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "whole graph capture span is null");
+    }
+    GraphSpan *span = nullptr;
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      span = lookup<GraphSpan>(*raw_span, HandleKind::GraphSpan);
+      if (span == nullptr) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "whole graph capture span handle is stale");
+      }
+      std::lock_guard<std::mutex> accounting_lock(
+          span->context->accounting_mutex);
+      if (!span->whole_capture || span->release_active || span->in_flight ||
+          span->whole_replay_in_flight != 0U) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "whole graph capture span is not abortable");
+      }
+      span->release_active = true;
+    }
+
+    hipError_t capture_status = hipSuccess;
+    if (span->capture_owner) {
+      hipGraph_t graph = nullptr;
+      capture_status = hipStreamEndCapture(span->queue->stream, &graph);
+      if (graph != nullptr) {
+        span->graph = graph;
+      }
+      graph_span_finish_capture(span);
+    }
+    graph_span_quarantine_markers(span);
+    hipError_t destroy_status = hipSuccess;
+    const bool destroyed = graph_span_destroy_graph_checked(span, &destroy_status);
+    if (!destroyed) {
+      {
+        std::lock_guard<std::mutex> accounting_lock(
+            span->context->accounting_mutex);
+        span->release_active = false;
+      }
+      retain_poisoned(span, span->context);
+      return hip_failure(error_sink, destroy_status,
+                         "whole graph capture abort destruction");
+    }
+    graph_span_unregister_and_delete(span, *raw_span, true);
+    *raw_span = nullptr;
+    if (capture_status != hipSuccess) {
+      return hip_failure(error_sink, capture_status,
+                         "hipStreamEndCapture whole graph abort");
+    }
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception aborting whole graph capture");
+  }
+}
 
 extern "C" sllm_status_t
 sllm_graph_span_create(const sllm_queue_t *const raw_queue,
@@ -992,7 +3110,9 @@ sllm_graph_span_execute(const sllm_graph_span_t *const raw_span,
       }
       std::lock_guard<std::mutex> accounting_lock(
           span->context->accounting_mutex);
-      if (span->release_active || span->in_flight || span->queue == nullptr ||
+      if (span->release_active ||
+          ((!span->whole_capture) && span->in_flight) ||
+          span->queue == nullptr ||
           span->queue->release_active ||
           span->queue->completion_mode != SLLM_QUEUE_COMPLETION_MODE_DEFERRED ||
           span->queue->graph_capture_active.load(std::memory_order_acquire) ||
@@ -1016,7 +3136,18 @@ sllm_graph_span_execute(const sllm_graph_span_t *const raw_span,
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
             "graph span submission serial is exhausted");
       }
-      span->in_flight = true;
+      if (span->whole_capture) {
+        if (span->whole_replay_in_flight == UINT64_MAX) {
+          (void)sllm_public_runtime::AccountingState::rollback_queue_fence(
+              span->context->accounting, span->queue->accounting);
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_INTERNAL_ERROR,
+              "whole graph replay count is exhausted");
+        }
+        ++span->whole_replay_in_flight;
+      } else {
+        span->in_flight = true;
+      }
     }
     std::unique_ptr<Completion> candidate;
     try {
@@ -1031,7 +3162,15 @@ sllm_graph_span_execute(const sllm_graph_span_t *const raw_span,
           span->context->accounting_mutex);
       (void)sllm_public_runtime::AccountingState::rollback_queue_fence(
           span->context->accounting, span->queue->accounting);
-      span->in_flight = false;
+      if (span->whole_capture) {
+        if (span->whole_replay_in_flight != 0U) {
+          --span->whole_replay_in_flight;
+        } else {
+          span->context->poisoned.store(true);
+        }
+      } else {
+        span->in_flight = false;
+      }
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INTERNAL_ERROR,
           "graph span completion allocation failed");
@@ -1044,7 +3183,9 @@ sllm_graph_span_execute(const sllm_graph_span_t *const raw_span,
       std::lock_guard<std::mutex> accounting_lock(
           span->context->accounting_mutex);
       (void)rollback_graph_span_completion(candidate.get());
-      span->in_flight = false;
+      if (!span->whole_capture) {
+        span->in_flight = false;
+      }
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INTERNAL_ERROR,
           "graph span completion registry allocation failed");
@@ -1055,7 +3196,9 @@ sllm_graph_span_execute(const sllm_graph_span_t *const raw_span,
       std::lock_guard<std::mutex> accounting_lock(
           span->context->accounting_mutex);
       (void)rollback_graph_span_completion(candidate.get());
-      span->in_flight = false;
+      if (!span->whole_capture) {
+        span->in_flight = false;
+      }
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INTERNAL_ERROR,
           "graph span completion handle allocation failed");
@@ -1157,6 +3300,7 @@ sllm_graph_span_release(sllm_graph_span_t **const raw_span,
       std::lock_guard<std::mutex> accounting_lock(
           span->context->accounting_mutex);
       if (span->release_active || span->in_flight ||
+          span->whole_replay_in_flight != 0U ||
           span->graph_exec == nullptr || span->queue == nullptr ||
           span->queue->graph_capture_active.load(std::memory_order_acquire)) {
         return sllm_public_runtime::write_error(
@@ -1173,6 +3317,15 @@ sllm_graph_span_release(sllm_graph_span_t **const raw_span,
           span->context->accounting_mutex);
       span->release_active = false;
       return device_status;
+    }
+    if (span->whole_capture && !span->capture_markers.empty() &&
+        !graph_span_finalize_capture_markers(span, error_sink)) {
+      std::lock_guard<std::mutex> accounting_lock(
+          span->context->accounting_mutex);
+      span->release_active = false;
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "whole graph capture marker finalization failed at release");
     }
     hipError_t destroy_status = hipSuccess;
     if (!graph_span_destroy_graph_checked(span, &destroy_status)) {
@@ -1208,7 +3361,185 @@ bool rollback_graph_span_completion(Completion *const) noexcept {
   return false;
 }
 bool release_graph_span_completion(Completion *const) noexcept { return false; }
+void invalidate_whole_graph_capture() noexcept {}
+[[maybe_unused]] bool whole_graph_capture_active() noexcept { return false; }
+[[maybe_unused]] void *whole_graph_capture_device_control() noexcept {
+  return nullptr;
+}
+[[maybe_unused]] bool whole_graph_pin_buffer(
+    Buffer *const buffer, sllm_error_sink_t *const error_sink) noexcept {
+  (void)buffer;
+  (void)sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "whole graph buffer pin is unavailable in the host runtime");
+  return false;
+}
 } // namespace
+
+extern "C" sllm_status_t sllm_graph_span_capture_marker(
+    sllm_graph_span_t *const span, sllm_completion_t **const marker,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (span == nullptr || marker == nullptr || *marker == nullptr) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "whole graph capture span or marker is null");
+  }
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "whole graph capture is unavailable in the host runtime");
+}
+
+extern "C" sllm_status_t sllm_graph_span_decode_command(
+    const sllm_graph_span_t *const span,
+    const sllm_graph_span_decode_command_desc_t *const command,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (span == nullptr || command == nullptr) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "whole graph decode command span or descriptor is null");
+  }
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "whole graph decode commands are unavailable in the host runtime");
+}
+
+extern "C" sllm_status_t sllm_graph_span_bind_linear_state(
+    sllm_graph_span_t *const span,
+    const sllm_linear_attention_state_t *const state,
+    const sllm_tensor_binding_t *const checkpoint_conv,
+    const sllm_tensor_binding_t *const checkpoint_recurrent,
+    const uint32_t token_count, const uint32_t checkpoint_rows,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (span == nullptr || state == nullptr || token_count == 0U ||
+      checkpoint_rows >= token_count ||
+      ((checkpoint_conv == nullptr) != (checkpoint_recurrent == nullptr)) ||
+      (checkpoint_rows != 0U &&
+       (checkpoint_conv == nullptr || checkpoint_recurrent == nullptr))) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "linear graph binding state, checkpoints, or dimensions are invalid");
+  }
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "linear graph state binding is unavailable in the host runtime");
+}
+
+extern "C" sllm_status_t sllm_graph_span_select_linear_state(
+    sllm_graph_span_t *const span,
+    const sllm_linear_attention_state_t *const state,
+    const uint32_t token_count,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (span == nullptr || state == nullptr || token_count == 0U) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "linear graph state selection argument is null or empty");
+  }
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "linear graph state selection is unavailable in the host runtime");
+}
+
+extern "C" sllm_status_t sllm_graph_span_publish_state_metadata(
+    sllm_graph_span_t *const span,
+    const uint64_t expected_initial_position, const uint64_t final_position,
+    const uint64_t successful_generations,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (span == nullptr || final_position < expected_initial_position) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "graph state metadata publication range is invalid");
+  }
+  (void)successful_generations;
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "graph state metadata publication is unavailable in the host runtime");
+}
+
+extern "C" sllm_status_t sllm_graph_span_begin_capture(
+    const sllm_context_t *const context, const sllm_queue_t *const queue,
+    const sllm_tensor_binding_t *const control_binding,
+    sllm_graph_span_t **const span,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (span != nullptr) {
+    *span = nullptr;
+  }
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (context == nullptr || queue == nullptr || span == nullptr) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "whole graph capture context, queue, or output is null");
+  }
+  (void)control_binding;
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "whole graph capture is unavailable in the host runtime");
+}
+
+extern "C" sllm_status_t sllm_graph_span_end_capture(
+    sllm_graph_span_t *const span,
+    sllm_graph_span_capture_info_t *const info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (span == nullptr || info == nullptr) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "whole graph capture span or info is null");
+  }
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "whole graph capture is unavailable in the host runtime");
+}
+
+extern "C" sllm_status_t sllm_graph_span_abort_capture(
+    sllm_graph_span_t **const span,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (span == nullptr || *span == nullptr) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "whole graph capture span is null");
+  }
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "whole graph capture is unavailable in the host runtime");
+}
 
 extern "C" sllm_status_t sllm_graph_span_create(
     const sllm_queue_t *const queue, const void *const *const plan_handles,

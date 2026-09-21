@@ -171,7 +171,9 @@ impl LinearAttentionStateResource {
         })
     }
 
-    fn raw_handle(&self) -> Result<NonNull<sys::sllm_linear_attention_state_t>, RuntimeError> {
+    pub(crate) fn raw_handle(
+        &self,
+    ) -> Result<NonNull<sys::sllm_linear_attention_state_t>, RuntimeError> {
         NonNull::new(self.inner.raw as *mut sys::sllm_linear_attention_state_t).ok_or_else(|| {
             RuntimeError::local(
                 RuntimeStatus::InvalidHandle,
@@ -740,6 +742,13 @@ pub(crate) struct LinearAttentionCompletion {
 }
 
 impl LinearAttentionCompletion {
+    pub(crate) fn capture_marker(
+        &mut self,
+        capture: &mut crate::graph_span::WholeDecodeCapture,
+    ) -> Result<(), RuntimeError> {
+        capture.capture_opaque_completion(&mut self.raw)
+    }
+
     pub(crate) fn query(&mut self) -> Result<CompletionState, RuntimeError> {
         self.call_completion(None)
     }

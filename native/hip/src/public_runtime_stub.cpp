@@ -1,6 +1,7 @@
 #include "argmax_api.hpp"
 #include "attention_preprocess_api.hpp"
 #include "causal_attention_api.hpp"
+#include "decode_graph_capture_internal.hpp"
 #include "elementwise_api.hpp"
 #include "embedding_api.hpp"
 #include "evidence_abi.h"
@@ -640,6 +641,182 @@ extern "C" sllm_status_t sllm_graph_span_create(
   } catch (...) {
     return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
                        "unexpected exception creating graph span");
+  }
+}
+
+extern "C" sllm_status_t sllm_graph_span_begin_capture(
+    const sllm_context_t *const context, const sllm_queue_t *const queue,
+    const sllm_tensor_binding_t *const control_binding,
+    sllm_graph_span_t **const span,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (span != nullptr) {
+      *span = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (context == nullptr || queue == nullptr || span == nullptr) {
+      return write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "whole graph capture context, queue, or output is null");
+    }
+    (void)control_binding;
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected whole graph capture begin");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_graph_span_end_capture(sllm_graph_span_t *const span,
+                            sllm_graph_span_capture_info_t *const info,
+                            sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (span == nullptr || info == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "whole graph capture span or info is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected whole graph capture end");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_graph_span_abort_capture(sllm_graph_span_t **const span,
+                              sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (span == nullptr || *span == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "whole graph capture span is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected whole graph capture abort");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_graph_span_capture_marker(sllm_graph_span_t *const span,
+                               sllm_completion_t **const completion,
+                               sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (span == nullptr || completion == nullptr || *completion == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "whole graph capture span or marker is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected whole graph capture marker");
+  }
+}
+
+extern "C" sllm_status_t sllm_graph_span_decode_command(
+    const sllm_graph_span_t *const span,
+    const sllm_graph_span_decode_command_desc_t *const command,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (span == nullptr || command == nullptr) {
+      return write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "whole graph decode command span or descriptor is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected whole graph decode command");
+  }
+}
+
+extern "C" sllm_status_t sllm_graph_span_bind_linear_state(
+    sllm_graph_span_t *const span,
+    const sllm_linear_attention_state_t *const state,
+    const sllm_tensor_binding_t *const checkpoint_conv,
+    const sllm_tensor_binding_t *const checkpoint_recurrent,
+    const uint32_t token_count, const uint32_t checkpoint_rows,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (span == nullptr || state == nullptr || token_count == 0U ||
+        checkpoint_rows >= token_count ||
+        ((checkpoint_conv == nullptr) != (checkpoint_recurrent == nullptr)) ||
+        (checkpoint_rows != 0U &&
+         (checkpoint_conv == nullptr || checkpoint_recurrent == nullptr))) {
+      return write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "linear graph binding state, checkpoints, or dimensions are invalid");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected linear graph state binding");
+  }
+}
+
+extern "C" sllm_status_t sllm_graph_span_select_linear_state(
+    sllm_graph_span_t *const span,
+    const sllm_linear_attention_state_t *const state,
+    const uint32_t token_count, sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (span == nullptr || state == nullptr || token_count == 0U) {
+      return write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "linear graph state selection argument is null or empty");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected linear graph state selection");
+  }
+}
+
+extern "C" sllm_status_t sllm_graph_span_publish_state_metadata(
+    sllm_graph_span_t *const span, const uint64_t expected_initial_position,
+    const uint64_t final_position, const uint64_t successful_generations,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (span == nullptr || final_position < expected_initial_position) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "graph state metadata publication range is invalid");
+    }
+    (void)successful_generations;
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected graph state metadata publication");
   }
 }
 

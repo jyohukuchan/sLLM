@@ -1,11 +1,30 @@
 #ifndef SLLM_CAUSAL_ATTENTION_KERNEL_INTERNAL_HPP
 #define SLLM_CAUSAL_ATTENTION_KERNEL_INTERNAL_HPP
 
+#include "decode_control_kernel_internal.hpp"
+
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
 
 namespace sllm_causal_attention_kernel {
+
+constexpr uint64_t kDecodeDynamicSplitBoundary = 8192U;
+constexpr uint32_t kDecodeDynamicSplitShort = 32U;
+constexpr uint32_t kDecodeDynamicSplitLong = 128U;
+
+constexpr uint32_t decode_dynamic_split_count(const uint64_t phase_position,
+                                              const uint32_t phase_rows) {
+  return phase_position <= UINT64_MAX - phase_rows &&
+                 phase_position + phase_rows >= kDecodeDynamicSplitBoundary
+             ? kDecodeDynamicSplitLong
+             : kDecodeDynamicSplitShort;
+}
+
+static_assert(decode_dynamic_split_count(8191U, 1U) == 128U,
+              "P32/P128 boundary must include the committed token");
+static_assert(decode_dynamic_split_count(8190U, 1U) == 32U,
+              "P32 remains active below the boundary");
 
 constexpr const char *kLogicalKernelId =
     "causal_attention.online_softmax_gqa.v2";
@@ -251,6 +270,20 @@ hipError_t launch_decode_wave_split_staged32(
     float static_value_scale, void *workspace, uint64_t workspace_bytes,
     bool use_query_preload, bool use_gqa_shared, bool use_split128,
     hipStream_t stream) noexcept;
+
+/* Whole-decode graph variant.  The graph always captures the P128 workspace
+ * shape; the stage-1 and merge kernels select P32 or P128 from the resident
+ * ControlV1 phase position/row count on every replay. */
+hipError_t launch_decode_wave_split_staged32_device(
+    const uint16_t *query, const void *key, const void *value,
+    const void *key_scales, const void *value_scales,
+    const float *key_outer_scales, const float *value_outer_scales,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, uint32_t encoding, float static_key_scale,
+    float static_value_scale, void *workspace, uint64_t workspace_bytes,
+    bool use_query_preload, bool use_gqa_shared,
+    sllm_decode_control::ControlV1 *control, hipStream_t stream) noexcept;
 
 hipError_t launch_decode_gqa4_split(
     const uint16_t *query, const void *key, const void *value,

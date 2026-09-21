@@ -133,14 +133,10 @@ constexpr uint64_t kDecodeWaveSplitStagedWorkspaceBytesPerQuery =
     kDecodeWaveSplitStagedWaveCount * (kDecodeWaveSplitStagedHeadDim + 2U) *
     sizeof(float);
 constexpr uint32_t kDecodeWaveSplitStaged32WaveCount = 32U;
-constexpr uint32_t kDecodeWaveSplitStaged32MaxQueryCount = 4U;
+constexpr uint32_t kDecodeWaveSplitStaged32MaxQueryCount = 9U;
 constexpr uint32_t kDecodeWaveSplitStaged32QHeads = 24U;
 constexpr uint32_t kDecodeWaveSplitStaged32KvHeads = 4U;
 constexpr uint32_t kDecodeWaveSplitStaged32HeadDim = 256U;
-constexpr uint64_t kDecodeWaveSplitStaged32WorkspaceBytesPerQuery =
-    static_cast<uint64_t>(kDecodeWaveSplitStaged32QHeads) *
-    kDecodeWaveSplitStaged32WaveCount * (kDecodeWaveSplitStaged32HeadDim + 2U) *
-    sizeof(float);
 constexpr uint32_t kDecodeWaveSplitStaged32Split128 = 128U;
 constexpr uint64_t kDecodeWaveSplitStaged32Split128WorkspaceBytesPerQuery =
     static_cast<uint64_t>(kDecodeWaveSplitStaged32QHeads) *
@@ -537,7 +533,7 @@ CausalAttentionProviderSelection select_causal_attention_provider(
         std::strcmp(staged32_decode_opt_in, "1") == 0)) &&
       metadata.query_count >= 1U &&
       metadata.query_count <= kDecodeWaveSplitStaged32MaxQueryCount &&
-      metadata.expected_kv_length >= 1024U &&
+      metadata.expected_kv_length >= 1U &&
       metadata.query.q_heads == kDecodeWaveSplitStaged32QHeads &&
       kv_heads == kDecodeWaveSplitStaged32KvHeads &&
       metadata.query.head_dim == kDecodeWaveSplitStaged32HeadDim &&
@@ -1260,24 +1256,37 @@ static sllm_status_t causal_attention_execute_impl(
       if (chained) {
         dependency_lock = std::unique_lock<std::mutex>(dependency->state_mutex);
       }
+      const bool whole_decode_control_capture =
+          graph_capture_queue == queue && whole_graph_capture_active();
       const CausalAttentionBuffers resolved = {query, output};
       std::lock_guard<std::mutex> accounting_lock(context->accounting_mutex);
       if (context->poisoned.load() || context->release_active ||
           queue->release_active || state->release_active ||
           query->release_active || output->release_active ||
-          (!chained && state->transition_token != 0U) ||
-          (!chained && state->accounting.active_submissions != 0U) ||
-          (!chained && state->accounting.completion_references != 0U)) {
+          (!chained && state->transition_token != 0U &&
+           !whole_decode_control_capture) ||
+          (!chained && state->accounting.active_submissions != 0U &&
+           !whole_decode_control_capture) ||
+          (!chained && state->accounting.completion_references != 0U &&
+           !whole_decode_control_capture)) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_CAUSAL_ATTENTION_STATE_BUSY,
             "causal attention requires an immutable committed KV snapshot");
       }
       const bool range_valid =
           !chained
-              ? metadata.expected_kv_length == state->published_length &&
-                    metadata.expected_kv_length <= state->capacity_tokens &&
-                    metadata.start_position + metadata.query_count ==
-                        state->published_length
+              ? (whole_decode_control_capture
+                     ? metadata.query_count != 0U &&
+                           metadata.query_count <= 9U &&
+                           metadata.start_position >= state->published_length &&
+                           metadata.start_position - state->published_length <= 8U &&
+                           metadata.start_position <=
+                               UINT64_MAX - metadata.query_count
+                     : metadata.expected_kv_length == state->published_length &&
+                           metadata.expected_kv_length <=
+                               state->capacity_tokens &&
+                           metadata.start_position + metadata.query_count ==
+                               state->published_length)
               : dependency->kv_state == state &&
                     dependency->context == context &&
                     dependency->queue == queue && dependency->kv_state_append &&
@@ -1449,10 +1458,8 @@ static sllm_status_t causal_attention_execute_impl(
     if (selection.use_decode_wave_split_staged32) {
       const hipError_t plan_status = prepare_causal_workspace_plan_for_bytes(
           context, queue,
-          (selection.use_decode_wave_split128
-               ? kDecodeWaveSplitStaged32Split128WorkspaceBytesPerQuery
-               : kDecodeWaveSplitStaged32WorkspaceBytesPerQuery) *
-              metadata.query_count,
+          kDecodeWaveSplitStaged32Split128WorkspaceBytesPerQuery *
+              kDecodeWaveSplitStaged32MaxQueryCount,
           &scaled_prefill_workspace, &scaled_prefill_workspace_bytes);
       if (plan_status != hipSuccess) {
         execute_guard.disarm();
@@ -1625,10 +1632,47 @@ static sllm_status_t causal_attention_execute_impl(
         byte_pointer(query, metadata.query.byte_offset));
     uint16_t *const output_pointer = static_cast<uint16_t *>(
         byte_pointer(output, metadata.output.byte_offset));
+    auto *const device_control =
+        graph_capture_queue == queue
+            ? static_cast<sllm_decode_control::ControlV1 *>(
+                  whole_graph_capture_device_control())
+            : nullptr;
+    if (whole_graph_capture_active() && device_control == nullptr) {
+      execute_guard.disarm();
+      return cleanup_failed_submission(
+          candidate, token, hipErrorInvalidValue,
+          "whole-decode attention requires a device control buffer", queue,
+          error_sink);
+    }
+    if (device_control != nullptr &&
+        (!selection.use_decode_wave_split_staged32 ||
+         state->encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1)) {
+      execute_guard.disarm();
+      return cleanup_failed_submission(
+          candidate, token, hipErrorNotSupported,
+          "whole-decode attention control supports MXFP8 E4 staged32 only",
+          queue, error_sink);
+    }
     hipError_t launch_status = hipSuccess;
     if (selection.use_decode_wave_split_staged32) {
-      launch_status =
-          ::sllm_causal_attention_kernel::launch_decode_wave_split_staged32(
+      launch_status = device_control != nullptr
+          ? ::sllm_causal_attention_kernel::launch_decode_wave_split_staged32_device(
+              query_pointer, state->key_buffer->device_pointer,
+              state->value_buffer->device_pointer,
+              state->key_scale_plane.address, state->value_scale_plane.address,
+              static_cast<const float *>(state->key_outer_scale_plane.address),
+              static_cast<const float *>(
+                  state->value_outer_scale_plane.address),
+              output_pointer, static_cast<uint32_t>(metadata.query_count),
+              metadata.start_position, metadata.expected_kv_length,
+              metadata.query.q_heads, state->head_count, state->head_dim,
+              state->encoding, state->static_key_scale,
+              state->static_value_scale, scaled_prefill_workspace,
+              scaled_prefill_workspace_bytes,
+              selection.use_decode_wave_split_q_preload,
+              selection.use_decode_wave_split_gqa_shared, device_control,
+              queue->stream)
+          : ::sllm_causal_attention_kernel::launch_decode_wave_split_staged32(
               query_pointer, state->key_buffer->device_pointer,
               state->value_buffer->device_pointer,
               state->key_scale_plane.address, state->value_scale_plane.address,

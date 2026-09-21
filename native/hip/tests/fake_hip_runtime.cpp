@@ -1,5 +1,6 @@
 #include <hip/hip_runtime.h>
 
+#include "decode_control_kernel_internal.hpp"
 #include "sllm/hip.h"
 
 #include <array>
@@ -1254,6 +1255,30 @@ hipError_t launch_decode_wave_split_staged32(
     const hipStream_t stream) noexcept {
   if ((use_gqa_shared || use_split128) &&
       (!use_query_preload || query_count == 0U || query_count > 3U)) {
+    return hipErrorInvalidValue;
+  }
+  return fake_decode_wave_split_staged_launch(
+      query, key, value, key_scales, value_scales, key_outer_scales,
+      value_outer_scales, output, query_count, start_position,
+      committed_kv_length, q_heads, kv_heads, head_dim, encoding,
+      static_key_scale, static_value_scale, workspace, workspace_bytes,
+      use_query_preload, stream);
+}
+
+hipError_t launch_decode_wave_split_staged32_device(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t start_position, const uint64_t committed_kv_length,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    const uint32_t encoding, const float static_key_scale,
+    const float static_value_scale, void *const workspace,
+    const uint64_t workspace_bytes, const bool use_query_preload,
+    const bool use_gqa_shared, sllm_decode_control::ControlV1 *const control,
+    const hipStream_t stream) noexcept {
+  if (control == nullptr || query_count == 0U || query_count > 9U ||
+      (use_gqa_shared && (!use_query_preload || query_count > 3U))) {
     return hipErrorInvalidValue;
   }
   return fake_decode_wave_split_staged_launch(

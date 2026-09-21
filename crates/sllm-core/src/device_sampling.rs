@@ -102,6 +102,22 @@ impl DeviceSamplingBuffers {
         row: usize,
         timeout: Duration,
     ) -> Result<(), ExecutionError> {
+        let mut copy = self.enqueue_fixed_k20_support_row(session, queue, row)?;
+        match copy.wait(timeout)? {
+            ExecutionState::Success => Ok(()),
+            ExecutionState::Pending => Err(ExecutionError::NotReady),
+            ExecutionState::Failure => Err(invalid("fixed-K20 support copy failed")),
+        }
+    }
+
+    /// Enqueue the support copy without observing completion. Whole-decode
+    /// capture transfers the returned owner to the graph before workspace reuse.
+    pub(crate) fn enqueue_fixed_k20_support_row(
+        &self,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        row: usize,
+    ) -> Result<crate::DeviceCopy, ExecutionError> {
         let (workspace, workspace_view) = self
             .workspace
             .as_ref()
@@ -124,12 +140,7 @@ impl DeviceSamplingBuffers {
             .and_then(|row| row.checked_mul(FIXED_K20_SUPPORT_BYTES))
             .ok_or_else(|| invalid("fixed-K20 support row offset overflowed"))?;
         let destination = support.range(offset, FIXED_K20_SUPPORT_BYTES)?;
-        let mut copy = session.copy_device_to_device(queue, source, destination)?;
-        match copy.wait(timeout)? {
-            ExecutionState::Success => Ok(()),
-            ExecutionState::Pending => Err(ExecutionError::NotReady),
-            ExecutionState::Failure => Err(invalid("fixed-K20 support copy failed")),
-        }
+        session.copy_device_to_device(queue, source, destination)
     }
 
     pub(crate) fn fixed_k20_support_range(

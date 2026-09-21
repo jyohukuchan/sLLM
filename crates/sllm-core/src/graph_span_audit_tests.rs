@@ -14,6 +14,19 @@ impl SegmentCompletionOwner for GraphOwner {
         &self.dispatch
     }
 
+    fn capture_marker(
+        &mut self,
+        _marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "synthetic graph owner has no native capture marker".to_owned(),
+        })
+    }
+
+    fn into_capture_owner(self: Box<Self>) -> Box<dyn ExecutionCaptureOwner> {
+        self
+    }
+
     fn graph_logical_dispatches(&self) -> Option<&[(String, DispatchEvidence)]> {
         Some(&self.logical_members)
     }

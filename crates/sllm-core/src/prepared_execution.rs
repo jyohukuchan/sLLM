@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::execution::{
-    BoundSemanticOp, CausalAttentionSubmission, ExecutionError, ExecutionQueue,
-    ExecutionQueueFence, ExecutionSession, ExecutionState, KvStateAppendSubmission,
+    BoundSemanticOp, CausalAttentionSubmission, DeviceCopy, ExecutionCaptureMarker,
+    ExecutionCaptureOwner, ExecutionError, ExecutionQueue, ExecutionQueueFence, ExecutionSession,
+    ExecutionState, ExecutionWholeDecodeCapture, KvStateAppendSubmission,
     LinearAttentionSubmission, OwnedTensorBinding, PreparedOperation, QueueCompletionMode,
     Submission,
 };
@@ -521,7 +522,7 @@ impl<N> PreparedExecutionPlan<N> {
     }
 }
 
-trait SegmentCompletionOwner: Send {
+trait SegmentCompletionOwner: Send + 'static {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
     /// Waits for terminal completion during abort cleanup.  The default keeps
     /// host-only test owners compatible while native adapters override this
@@ -537,6 +538,17 @@ trait SegmentCompletionOwner: Send {
         self.query()
     }
     fn dispatch(&self) -> &DispatchEvidence;
+
+    fn capture_metadata(&self) -> Option<(PreparedOperation, DispatchEvidence)> {
+        None
+    }
+
+    fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError>;
+
+    fn into_capture_owner(self: Box<Self>) -> Box<dyn ExecutionCaptureOwner>;
     fn graph_logical_dispatches(&self) -> Option<&[(String, DispatchEvidence)]> {
         None
     }
@@ -571,6 +583,21 @@ impl SegmentCompletionOwner for Submission {
     fn dispatch(&self) -> &DispatchEvidence {
         self.dispatch()
     }
+
+    fn capture_metadata(&self) -> Option<(PreparedOperation, DispatchEvidence)> {
+        Some(Submission::capture_metadata(self))
+    }
+
+    fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        self.capture_marker(marker)
+    }
+
+    fn into_capture_owner(self: Box<Self>) -> Box<dyn ExecutionCaptureOwner> {
+        self
+    }
 }
 
 impl SegmentCompletionOwner for CausalAttentionSubmission {
@@ -591,6 +618,17 @@ impl SegmentCompletionOwner for CausalAttentionSubmission {
 
     fn dispatch(&self) -> &DispatchEvidence {
         self.dispatch()
+    }
+
+    fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        self.capture_marker(marker)
+    }
+
+    fn into_capture_owner(self: Box<Self>) -> Box<dyn ExecutionCaptureOwner> {
+        self
     }
 
     fn is_dependent_attention(&self) -> bool {
@@ -617,6 +655,17 @@ impl SegmentCompletionOwner for KvStateAppendSubmission {
     fn dispatch(&self) -> &DispatchEvidence {
         self.dispatch()
     }
+
+    fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        self.capture_marker(marker)
+    }
+
+    fn into_capture_owner(self: Box<Self>) -> Box<dyn ExecutionCaptureOwner> {
+        self
+    }
 }
 
 impl SegmentCompletionOwner for LinearAttentionSubmission {
@@ -638,6 +687,17 @@ impl SegmentCompletionOwner for LinearAttentionSubmission {
     fn dispatch(&self) -> &DispatchEvidence {
         self.dispatch()
     }
+
+    fn capture_marker(
+        &mut self,
+        marker: &mut dyn ExecutionCaptureMarker,
+    ) -> Result<(), ExecutionError> {
+        self.capture_marker(marker)
+    }
+
+    fn into_capture_owner(self: Box<Self>) -> Box<dyn ExecutionCaptureOwner> {
+        self
+    }
 }
 
 struct RetainedSubmission {
@@ -647,17 +707,19 @@ struct RetainedSubmission {
 
 /// Completion owners retained until a declared boundary on one ordered queue.
 #[derive(Default)]
-pub(crate) struct ExecutionSegment {
+pub(crate) struct ExecutionSegment<'capture> {
     pending: Vec<RetainedSubmission>,
+    pending_device_copies: Vec<DeviceCopy>,
     deferred: Option<(ExecutionSession, ExecutionQueue, Duration)>,
     profiled_timeout: Option<Duration>,
+    capture: Option<&'capture mut ExecutionWholeDecodeCapture>,
     // Number of append -> attention chains retained in this segment.  A
     // decode segment contains one pair per full-attention layer, so a boolean
     // would under-report the physical routes in the audit.
     chain_route_count: u64,
 }
 
-impl ExecutionSegment {
+impl<'capture> ExecutionSegment<'capture> {
     pub(crate) fn for_mode(
         session: &ExecutionSession,
         queue: &ExecutionQueue,
@@ -675,8 +737,10 @@ impl ExecutionSegment {
     pub(crate) fn profiled(timeout: Duration) -> Self {
         Self {
             pending: Vec::new(),
+            pending_device_copies: Vec::new(),
             deferred: None,
             profiled_timeout: Some(timeout),
+            capture: None,
             chain_route_count: 0,
         }
     }
@@ -694,8 +758,10 @@ impl ExecutionSegment {
             Err(ExecutionError::Unsupported { .. }) => {
                 return Ok(Self {
                     pending: Vec::new(),
+                    pending_device_copies: Vec::new(),
                     deferred: None,
                     profiled_timeout: Some(timeout),
+                    capture: None,
                     chain_route_count: 0,
                 });
             }
@@ -703,18 +769,56 @@ impl ExecutionSegment {
         }
         Ok(Self {
             pending: Vec::new(),
+            pending_device_copies: Vec::new(),
             deferred: Some((session.clone(), queue.clone(), timeout)),
             profiled_timeout: Some(timeout),
+            capture: None,
             chain_route_count: 0,
         })
     }
 
+    pub(crate) fn for_capture(
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        timeout: Duration,
+        capture: &'capture mut ExecutionWholeDecodeCapture,
+    ) -> Self {
+        Self {
+            pending: Vec::new(),
+            pending_device_copies: Vec::new(),
+            deferred: Some((session.clone(), queue.clone(), timeout)),
+            profiled_timeout: Some(timeout),
+            capture: Some(capture),
+            chain_route_count: 0,
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
-        self.pending.is_empty()
+        self.pending.is_empty() && self.pending_device_copies.is_empty()
     }
 
     pub(crate) fn is_deferred(&self) -> bool {
         self.deferred.is_some()
+    }
+
+    pub(crate) fn is_capturing(&self) -> bool {
+        self.capture.is_some()
+    }
+
+    pub(crate) fn capture_command(
+        &mut self,
+        command: &crate::execution::ExecutionDecodeCommand,
+        bindings: [Option<&OwnedTensorBinding>; 4],
+    ) -> Result<(), PreparedExecutionError> {
+        self.capture
+            .as_deref_mut()
+            .ok_or_else(|| {
+                PreparedExecutionError::InvalidPlan(
+                    "capture command requested on a profiled execution segment".to_owned(),
+                )
+            })?
+            .command(command, bindings)
+            .map_err(PreparedExecutionError::from)
     }
 
     /// Restores the shared queue's normal completion mode.  A deferred
@@ -723,6 +827,9 @@ impl ExecutionSegment {
     /// later profiled completion stay pending forever.  Keep the state when
     /// restoration fails so `Drop` can retry and callers can fail closed.
     fn restore_profiled(&mut self) -> Result<(), PreparedExecutionError> {
+        if self.is_capturing() {
+            return Ok(());
+        }
         let Some((session, queue, _timeout)) = self.deferred.as_ref() else {
             return Ok(());
         };
@@ -734,13 +841,31 @@ impl ExecutionSegment {
     /// Drains a deferred segment after a failed execution without publishing
     /// audit evidence or a boundary.
     pub(crate) fn abort(&mut self) -> Result<(), PreparedExecutionError> {
-        let result = if let Some((session, queue, timeout)) = self.deferred.as_ref() {
-            if self.pending.is_empty() {
+        if self.is_capturing() {
+            let pending = std::mem::take(&mut self.pending);
+            let mut copies = std::mem::take(&mut self.pending_device_copies);
+            let capture = self.capture.as_deref_mut().ok_or_else(|| {
+                PreparedExecutionError::InvalidPlan("capture guard disappeared".to_owned())
+            })?;
+            let result = transfer_pending_to_capture(pending, capture)
+                .and(transfer_device_copies_to_capture(&mut copies, capture));
+            self.chain_route_count = 0;
+            self.deferred = None;
+            self.capture = None;
+            return result;
+        }
+        let result = if let Some((session, queue, timeout)) = self
+            .deferred
+            .as_ref()
+            .map(|(session, queue, timeout)| (session.clone(), queue.clone(), *timeout))
+        {
+            if self.pending.is_empty() && self.pending_device_copies.is_empty() {
                 Ok(())
             } else {
-                let mut fence = session.create_queue_fence(queue)?;
-                require_terminal_success("execution segment abort fence", fence.wait(*timeout)?)?;
+                let mut fence = session.create_queue_fence(&queue)?;
+                require_terminal_success("execution segment abort fence", fence.wait(timeout)?)?;
                 self.finalize_deferred_pending_in_dependency_order(&fence, None)?;
+                self.drain_device_copies(timeout)?;
                 Ok(())
             }
         } else {
@@ -789,6 +914,10 @@ impl ExecutionSegment {
         self.retain(label, owner);
     }
 
+    pub(crate) fn retain_device_copy(&mut self, copy: DeviceCopy) {
+        self.pending_device_copies.push(copy);
+    }
+
     fn retain(&mut self, label: impl Into<String>, owner: impl SegmentCompletionOwner + 'static) {
         self.pending.push(RetainedSubmission {
             label: label.into(),
@@ -796,11 +925,38 @@ impl ExecutionSegment {
         });
     }
 
+    // Kept as a request-local helper for callers that transfer a complete
+    // segment explicitly; the current decode path uses `flush` so it can
+    // preserve its boundary-specific cleanup behavior.
+    #[allow(dead_code)]
+    pub(crate) fn capture_into(
+        &mut self,
+        capture: &mut ExecutionWholeDecodeCapture,
+    ) -> Result<(), PreparedExecutionError> {
+        let pending = std::mem::take(&mut self.pending);
+        let mut copies = std::mem::take(&mut self.pending_device_copies);
+        let result = transfer_pending_to_capture(pending, capture)
+            .and(transfer_device_copies_to_capture(&mut copies, capture));
+        self.chain_route_count = 0;
+        result
+    }
+
     pub(crate) fn flush(
         &mut self,
         boundary: ExecutionBoundaryKind,
         audit: &mut ExecutionAuditAccumulator,
     ) -> Result<(), PreparedExecutionError> {
+        if self.is_capturing() {
+            let pending = std::mem::take(&mut self.pending);
+            let mut copies = std::mem::take(&mut self.pending_device_copies);
+            let capture = self.capture.as_deref_mut().ok_or_else(|| {
+                PreparedExecutionError::InvalidPlan("capture guard disappeared".to_owned())
+            })?;
+            let result = transfer_pending_to_capture(pending, capture)
+                .and(transfer_device_copies_to_capture(&mut copies, capture));
+            self.chain_route_count = 0;
+            return result;
+        }
         let had_work = !self.pending.is_empty();
         let result = (|| {
             if let Some((session, queue, timeout)) = self
@@ -813,6 +969,7 @@ impl ExecutionSegment {
                 require_terminal_success("execution segment fence", fence.wait(timeout)?)?;
                 audit.record_queue_fence()?;
                 self.finalize_deferred_pending(&fence, audit)?;
+                self.flush_device_copies()?;
             } else {
                 let chain_route_count = std::mem::take(&mut self.chain_route_count);
                 for mut retained in self.pending.drain(..) {
@@ -820,6 +977,7 @@ impl ExecutionSegment {
                     audit.record_owner(&retained.label, retained.owner.as_ref())?;
                 }
                 audit.record_kv_append_attention_chain(chain_route_count)?;
+                self.flush_device_copies()?;
             }
             audit.record_boundary(boundary, had_work)?;
             Ok(())
@@ -839,6 +997,11 @@ impl ExecutionSegment {
         boundary: ExecutionBoundaryKind,
         audit: &mut ExecutionAuditAccumulator,
     ) -> Result<(), PreparedExecutionError> {
+        if self.is_capturing() {
+            return Err(PreparedExecutionError::InvalidPlan(
+                "terminal semantic flush is not valid during whole-decode capture".to_owned(),
+            ));
+        }
         let result = (|| {
             let Some((session, queue, timeout)) = self
                 .deferred
@@ -856,6 +1019,7 @@ impl ExecutionSegment {
             require_terminal_success("execution segment fence", fence.wait(timeout)?)?;
             audit.record_queue_fence()?;
             self.finalize_deferred_pending(&fence, audit)?;
+            self.flush_device_copies()?;
             require_terminal_success(label, terminal.finalize_after_fence(&fence)?)?;
             audit.record_labeled(label, terminal.dispatch())?;
             audit.record_boundary(boundary, true)?;
@@ -876,6 +1040,11 @@ impl ExecutionSegment {
         audited_boundary: Option<ExecutionBoundaryKind>,
         audit: &mut ExecutionAuditAccumulator,
     ) -> Result<(), PreparedExecutionError> {
+        if self.is_capturing() {
+            return Err(PreparedExecutionError::InvalidPlan(
+                "KV terminal flush is not valid during whole-decode capture".to_owned(),
+            ));
+        }
         let result = (|| {
             let Some((session, queue, timeout)) = self
                 .deferred
@@ -896,6 +1065,7 @@ impl ExecutionSegment {
             require_terminal_success("execution segment fence", fence.wait(timeout)?)?;
             audit.record_queue_fence()?;
             self.finalize_deferred_pending(&fence, audit)?;
+            self.flush_device_copies()?;
             require_terminal_success(label, terminal.finalize_after_fence(&fence)?)?;
             audit.record_labeled(label, terminal.dispatch())?;
             if let Some(boundary) = audited_boundary {
@@ -927,7 +1097,29 @@ impl ExecutionSegment {
             audit.record_owner(&retained.label, retained.owner.as_ref())?;
         }
         audit.record_kv_append_attention_chain(chain_route_count)?;
+        self.flush_device_copies()?;
         Ok(())
+    }
+
+    fn flush_device_copies(&mut self) -> Result<(), PreparedExecutionError> {
+        for mut copy in self.pending_device_copies.drain(..) {
+            require_terminal_success("device-to-device capture handoff", copy.query()?)?;
+        }
+        Ok(())
+    }
+
+    fn drain_device_copies(&mut self, timeout: Duration) -> Result<(), PreparedExecutionError> {
+        let mut first_error = None;
+        for mut copy in self.pending_device_copies.drain(..) {
+            let result = match copy.wait(timeout) {
+                Ok(state) => require_terminal_success("device-to-device capture handoff", state),
+                Err(error) => Err(error.into()),
+            };
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     fn finalize_deferred_pending(
@@ -1007,6 +1199,18 @@ impl ExecutionSegment {
                 }
             }
         }
+        for mut copy in self.pending_device_copies.drain(..) {
+            let remaining = deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
+            let result = match copy.wait(remaining) {
+                Ok(state) => require_terminal_success("device-to-device capture handoff", state),
+                Err(error) => Err(error.into()),
+            };
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
         first_error.map_or(Ok(()), Err)
     }
 
@@ -1018,6 +1222,52 @@ impl ExecutionSegment {
     ) {
         self.retain(label, owner);
     }
+}
+
+fn transfer_pending_to_capture(
+    mut pending: Vec<RetainedSubmission>,
+    capture: &mut ExecutionWholeDecodeCapture,
+) -> Result<(), PreparedExecutionError> {
+    let mut first_error = None;
+    for mut retained in pending.drain(..) {
+        if first_error.is_none() {
+            if let Err(error) = capture.record_provider_dispatch(retained.owner.dispatch()) {
+                first_error = Some(PreparedExecutionError::from(error));
+            }
+        }
+        if let Some((prepared, dispatch)) = retained.owner.capture_metadata() {
+            capture.record_submission(retained.label.clone(), prepared, dispatch);
+        }
+        let result = if first_error.is_none() {
+            retained.owner.capture_marker(capture)
+        } else {
+            Ok(())
+        };
+        capture.retain_owner(retained.owner.into_capture_owner());
+        if let Err(error) = result {
+            first_error.get_or_insert(PreparedExecutionError::from(error));
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn transfer_device_copies_to_capture(
+    pending: &mut Vec<DeviceCopy>,
+    capture: &mut ExecutionWholeDecodeCapture,
+) -> Result<(), PreparedExecutionError> {
+    let mut first_error = None;
+    for mut copy in pending.drain(..) {
+        let result = if first_error.is_none() {
+            copy.capture_marker(capture)
+        } else {
+            Ok(())
+        };
+        capture.retain_owner(Box::new(copy));
+        if let Err(error) = result {
+            first_error.get_or_insert(PreparedExecutionError::from(error));
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Captures adjacent stateless prepared operations into replayable graph
@@ -1087,7 +1337,7 @@ pub(crate) fn capture_prepared_graph_spans(
     }
 }
 
-impl Drop for ExecutionSegment {
+impl<'capture> Drop for ExecutionSegment<'capture> {
     fn drop(&mut self) {
         if self.deferred.is_some() {
             // Drop cannot return an error.  Abort drains eventless owners and
@@ -1619,6 +1869,19 @@ mod tests {
         fn dispatch(&self) -> &DispatchEvidence {
             &self.evidence
         }
+
+        fn capture_marker(
+            &mut self,
+            _marker: &mut dyn ExecutionCaptureMarker,
+        ) -> Result<(), ExecutionError> {
+            Err(ExecutionError::Unsupported {
+                reason: "synthetic owner has no native capture marker".to_owned(),
+            })
+        }
+
+        fn into_capture_owner(self: Box<Self>) -> Box<dyn ExecutionCaptureOwner> {
+            self
+        }
     }
 
     impl Drop for SyntheticOwner {
@@ -1655,6 +1918,19 @@ mod tests {
 
         fn dispatch(&self) -> &DispatchEvidence {
             &self.evidence
+        }
+
+        fn capture_marker(
+            &mut self,
+            _marker: &mut dyn ExecutionCaptureMarker,
+        ) -> Result<(), ExecutionError> {
+            Err(ExecutionError::Unsupported {
+                reason: "synthetic owner has no native capture marker".to_owned(),
+            })
+        }
+
+        fn into_capture_owner(self: Box<Self>) -> Box<dyn ExecutionCaptureOwner> {
+            self
         }
     }
 

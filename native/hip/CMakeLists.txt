@@ -551,6 +551,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set(SLLM_ARGMAX_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/argmax_kernel.hip.o")
         set(SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/token_selector_kernel.hip.o")
+        set(SLLM_DECODE_CONTROL_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/decode_control_kernel.hip.o")
         set(SLLM_TOKEN_SELECTOR_PQ_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/token_selector_pq_kernel.hip.o")
         set(SLLM_ROW_CONCAT_G1_KERNEL_OBJECT
@@ -605,6 +607,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 src/linear_attention_runtime.inc
                 src/public_runtime_internal.hpp src/embedding_api.hpp
                 src/embedding_kernel_internal.hpp src/elementwise_api.hpp
+                src/decode_graph_capture_internal.hpp
                 src/elementwise_kernel_internal.hpp src/matmul_api.hpp
                 src/matmul_kernel_internal.hpp src/argmax_api.hpp
                 src/argmax_kernel_internal.hpp src/rmsnorm_api.hpp
@@ -661,6 +664,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 "${PROJECT_SOURCE_DIR}/src/embedding_kernel.hip.cpp"
                 -o "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
             DEPENDS src/embedding_kernel.hip.cpp src/embedding_kernel_internal.hpp
+                src/decode_control_kernel_internal.hpp src/token_selector_pq_algorithm.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -710,6 +714,16 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 src/token_selector_kernel_internal.hpp
                 src/token_selector_support_internal.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_DECODE_CONTROL_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/decode_control_kernel.hip.cpp"
+                -o "${SLLM_DECODE_CONTROL_G1_KERNEL_OBJECT}"
+            DEPENDS src/decode_control_kernel.hip.cpp
+                src/decode_control_kernel_internal.hpp src/token_selector_pq_algorithm.hpp
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
         )
@@ -787,6 +801,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 "${PROJECT_SOURCE_DIR}/src/attention_preprocess_kernel.hip.cpp"
                 -o "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
             DEPENDS src/attention_preprocess_kernel.hip.cpp
+                src/decode_control_kernel_internal.hpp src/token_selector_pq_algorithm.hpp
                 src/attention_preprocess_kernel_internal.hpp
                 src/rmsnorm_kernel_internal.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
@@ -823,6 +838,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 "${PROJECT_SOURCE_DIR}/src/linear_attention_kernel.hip.cpp"
                 -o "${SLLM_LINEAR_ATTENTION_G1_KERNEL_OBJECT}"
             DEPENDS src/linear_attention_kernel.hip.cpp
+                src/decode_control_kernel_internal.hpp src/token_selector_pq_algorithm.hpp
                 src/linear_attention_kernel_internal.hpp
                 src/linear_attention_register_state.hpp
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
@@ -867,6 +883,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
             "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
             "${SLLM_TOKEN_SELECTOR_PQ_G1_KERNEL_OBJECT}"
+            "${SLLM_DECODE_CONTROL_G1_KERNEL_OBJECT}"
             "${SLLM_ROW_CONCAT_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
             "${SLLM_DEEPSEEK_V4_MOE_ROUTE_G1_KERNEL_OBJECT}"
@@ -890,6 +907,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
             "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
             "${SLLM_TOKEN_SELECTOR_PQ_G1_KERNEL_OBJECT}"
+            "${SLLM_DECODE_CONTROL_G1_KERNEL_OBJECT}"
             "${SLLM_ROW_CONCAT_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
             "${SLLM_DEEPSEEK_V4_MOE_ROUTE_G1_KERNEL_OBJECT}"
@@ -916,6 +934,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set_source_files_properties(src/argmax_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/token_selector_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/token_selector_pq_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/decode_control_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/row_concat_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/moe_route_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/deepseek_v4_moe_route_kernel.hip.cpp
@@ -947,6 +966,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/argmax_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/token_selector_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/token_selector_pq_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/decode_control_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/row_concat_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/moe_route_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES

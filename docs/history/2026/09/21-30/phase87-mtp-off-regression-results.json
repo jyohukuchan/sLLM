@@ -1,0 +1,813 @@
+{
+  "schema_version": "phase87-mtp-off-regression-v1",
+  "state": "PASS",
+  "date_jst": "2026-09-21",
+  "scope": "local dirty candidate; no commit or push",
+  "protocol": {
+    "model": {
+      "root": "/home/homelab1/datapool/ai_models/safetensors/Qwen3.8-27B-NVFP4",
+      "path_environment": "SLLM_PHASE78_MODEL_PATH",
+      "repository": "unsloth/Qwen3.8-27B-NVFP4",
+      "revision": "57926baca9a82b4d6906b43f2750d55315f5b10f",
+      "model_bytes": 22568192096,
+      "model_sha256": "c473512c70eace07e2256fe9fd76596ac03e3295bee7d54cfb72676416afcc05"
+    },
+    "fixture": "sha256:855240c09609a19b9c1124043b763ecc97e3cfde84a16acfaba445a0f8c83b23",
+    "input_tokens": 8192,
+    "output_tokens": 128,
+    "warmups": 1,
+    "measured": 3,
+    "statistics": "median and MAD; profiler disabled for normal performance",
+    "sampling": {
+      "mode": "gpu_fixed",
+      "replay_inputs": false,
+      "seed": 123
+    },
+    "kv": "MXFP8-E4",
+    "state_capacity": 10240,
+    "prefill_chunk": 2048,
+    "mtp_width": 2,
+    "mtp_companion": "native BF16",
+    "mtp_report": {
+      "requested": true,
+      "draft_width": 2,
+      "supported_draft_widths": [
+        1,
+        2,
+        3
+      ],
+      "execution": "fixed_gpu_sampler_speculative",
+      "contract": "Qwen3.8 companion resident and fixed GPU-selector speculative executor are active",
+      "timing_contract": "prefill_ns must include target prefill and MTP prefix draft priming; decode_ns includes proposal, verify, sampling, accept/reject, replay, and commit",
+      "companion_encoding": null,
+      "companion_digest": null
+    }
+  },
+  "performance": [
+    {
+      "target": "gfx1030",
+      "uuid": "GPU-76a08c022586fed6",
+      "mtp": false,
+      "stages": {
+        "stage5_frozen": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/baseline-gfx1030-r1/off-whole/report.json",
+          "sha256": "2ea09e63288ddb6782779a4ac662210dcd8f2585b75f4e611ac2c3b4696da819",
+          "decode_tokens_per_second": {
+            "median": 15.71919014740777,
+            "mad": 0.005256974417374494
+          },
+          "tpot_ms": {
+            "median": 63.616508905511814,
+            "mad": 0.021282409448815542
+          },
+          "token_sha256": "sha256:c9c0b4ee401b11544fe0faaec15d882cb2491c31a460a32a89dce28e437bcc0e"
+        },
+        "parity_only": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/parity-gfx1030-r1/off-whole/report.json",
+          "sha256": "7fc83b3a56c5404882c64dc1dd570225e3f9032be424d5b5379dfcb02a3f62b6",
+          "decode_tokens_per_second": {
+            "median": 15.925710118620565,
+            "mad": 0.0024362996720306285
+          },
+          "tpot_ms": {
+            "median": 62.79154854330709,
+            "mad": 0.00960725984251809
+          },
+          "token_sha256": "sha256:c9c0b4ee401b11544fe0faaec15d882cb2491c31a460a32a89dce28e437bcc0e"
+        },
+        "constant_split": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1030-r1/off-whole/report.json",
+          "sha256": "56910e545865029e5e721fedce85da9d4431459b066ef8d4c1ec1f7512d6845a",
+          "decode_tokens_per_second": {
+            "median": 16.07437338872277,
+            "mad": 0.00441713525135512
+          },
+          "tpot_ms": {
+            "median": 62.210823141732284,
+            "mad": 0.017090440944883767
+          },
+          "token_sha256": "sha256:c9c0b4ee401b11544fe0faaec15d882cb2491c31a460a32a89dce28e437bcc0e"
+        },
+        "final": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1030-r2/off-whole/report.json",
+          "sha256": "0be7a5b55c1368443cff4772c075c64b2050f58f033a028fe5e1471f50d613b0",
+          "decode_tokens_per_second": {
+            "median": 16.18678401660229,
+            "mad": 0.00401807625778261
+          },
+          "tpot_ms": {
+            "median": 61.77879429133858,
+            "mad": 0.015339275590555701
+          },
+          "token_sha256": "sha256:c9c0b4ee401b11544fe0faaec15d882cb2491c31a460a32a89dce28e437bcc0e"
+        },
+        "prestage5_rerun": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/prestage5-gfx1030-r1/off-prestage5/report.json",
+          "sha256": "9cfefa3bb9c133af39f117feb745edaa9ababa7eab2fdc7aa7326e9b398ef2bb",
+          "decode_tokens_per_second": {
+            "median": 15.838434850796665,
+            "mad": 0.022506345383893844
+          },
+          "tpot_ms": {
+            "median": 63.1375517480315,
+            "mad": 0.08984585039369364
+          },
+          "token_sha256": "sha256:c9c0b4ee401b11544fe0faaec15d882cb2491c31a460a32a89dce28e437bcc0e"
+        }
+      },
+      "gain_vs_frozen_percent": 2.9746689543775684
+    },
+    {
+      "target": "gfx1030",
+      "uuid": "GPU-76a08c022586fed6",
+      "mtp": true,
+      "stages": {
+        "stage5_frozen": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/baseline-gfx1030-r1/on-whole/report.json",
+          "sha256": "03b62821198ea499c0b7fc22f3b4241ed888fb9c65aec8fcfac0ee6b08cfe66e",
+          "decode_tokens_per_second": {
+            "median": 29.450341884682548,
+            "mad": 0.00333705021870756
+          },
+          "tpot_ms": {
+            "median": 33.955463196850395,
+            "mad": 0.003847094488186542
+          },
+          "token_sha256": "sha256:ba058a1b282a368e6b253d9532bf3a4933fb72428804c6baf94e756315f08c6f"
+        },
+        "parity_only": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/parity-gfx1030-r1/on-whole/report.json",
+          "sha256": "fa6a9114837a55df5bb77961bbcef5c4cb3b54a4d0b9a5a12df7ba5bcfa9d3ff",
+          "decode_tokens_per_second": {
+            "median": 29.41406780423074,
+            "mad": 0.03421196238327795
+          },
+          "tpot_ms": {
+            "median": 33.997337826771656,
+            "mad": 0.03958888188976317
+          },
+          "token_sha256": "sha256:ba058a1b282a368e6b253d9532bf3a4933fb72428804c6baf94e756315f08c6f"
+        },
+        "constant_split": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1030-r1/on-whole/report.json",
+          "sha256": "ad8e913d6976d645996c0ae1013566837abaa3e46f1024d8c90e6fece8e74f97",
+          "decode_tokens_per_second": {
+            "median": 29.720600913388015,
+            "mad": 0.0011099152054576678
+          },
+          "tpot_ms": {
+            "median": 33.646695196850395,
+            "mad": 0.0012564881889787216
+          },
+          "token_sha256": "sha256:ba058a1b282a368e6b253d9532bf3a4933fb72428804c6baf94e756315f08c6f"
+        },
+        "final": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1030-r2/on-whole/report.json",
+          "sha256": "e1885076e4255e1bc4e03a3c5a06426f14b5e675e84207c666a0a43a14011837",
+          "decode_tokens_per_second": {
+            "median": 30.117398065864542,
+            "mad": 0.008207865599317188
+          },
+          "tpot_ms": {
+            "median": 33.20339950393701,
+            "mad": 0.009046425196849839
+          },
+          "token_sha256": "sha256:ba058a1b282a368e6b253d9532bf3a4933fb72428804c6baf94e756315f08c6f"
+        }
+      },
+      "gain_vs_frozen_percent": 2.265020161035669
+    },
+    {
+      "target": "gfx1201",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "mtp": false,
+      "stages": {
+        "stage5_frozen": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/baseline-gfx1201-r1/off-whole/report.json",
+          "sha256": "b2ad8ece4804037a863ccc3896ec33f06155e53c81b59e52bc80abd1b38251ea",
+          "decode_tokens_per_second": {
+            "median": 20.86946258050269,
+            "mad": 0.003391454378970593
+          },
+          "tpot_ms": {
+            "median": 47.916902322834645,
+            "mad": 0.007785614173222655
+          },
+          "token_sha256": "sha256:75d36def8ff45d155373ebb05b885d0e4f0e7197ba9adb2123adfb1fe63b189d"
+        },
+        "parity_only": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/parity-gfx1201-r1/off-whole/report.json",
+          "sha256": "61361e2d3518be73a40684493924c2e6ea8287f1168e696b9631448fdd92116d",
+          "decode_tokens_per_second": {
+            "median": 21.147048887766267,
+            "mad": 0.004853599375739037
+          },
+          "tpot_ms": {
+            "median": 47.28792207874015,
+            "mad": 0.010850874015744694
+          },
+          "token_sha256": "sha256:75d36def8ff45d155373ebb05b885d0e4f0e7197ba9adb2123adfb1fe63b189d"
+        },
+        "constant_split": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1201-r1/off-whole/report.json",
+          "sha256": "2790a4a4d84a5af4a6800ad167644ddf801ce758550785661cabbaed696f91fa",
+          "decode_tokens_per_second": {
+            "median": 21.327122635193874,
+            "mad": 0.0012211776855828305
+          },
+          "tpot_ms": {
+            "median": 46.88865052755905,
+            "mad": 0.0026849685039422866
+          },
+          "token_sha256": "sha256:75d36def8ff45d155373ebb05b885d0e4f0e7197ba9adb2123adfb1fe63b189d"
+        },
+        "final": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1201-r2/off-whole/report.json",
+          "sha256": "ec13a46ccab1a1deefd45f6eb6ff74e5499473f75a1fd90dd9447c2619260da0",
+          "decode_tokens_per_second": {
+            "median": 21.49085097068252,
+            "mad": 0.00131150205918118
+          },
+          "tpot_ms": {
+            "median": 46.53142871653543,
+            "mad": 0.0028394566929108578
+          },
+          "token_sha256": "sha256:75d36def8ff45d155373ebb05b885d0e4f0e7197ba9adb2123adfb1fe63b189d"
+        },
+        "prestage5_rerun": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/prestage5-gfx1201-r1/off-prestage5/report.json",
+          "sha256": "32b2d253bb46691bb4e34a4fdcfb1e24ba89ea38306d32d0cee49ea33d2646ab",
+          "decode_tokens_per_second": {
+            "median": 21.396535066912143,
+            "mad": 0.02140663478351712
+          },
+          "tpot_ms": {
+            "median": 46.73653920472441,
+            "mad": 0.046711866141734504
+          },
+          "token_sha256": "sha256:75d36def8ff45d155373ebb05b885d0e4f0e7197ba9adb2123adfb1fe63b189d"
+        }
+      },
+      "gain_vs_frozen_percent": 2.977500679679035
+    },
+    {
+      "target": "gfx1201",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "mtp": true,
+      "stages": {
+        "stage5_frozen": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/baseline-gfx1201-r1/on-whole/report.json",
+          "sha256": "46d71204fe828b092c3ec2dd362d56d31c17d9b02ea19079582feb9fa520db8c",
+          "decode_tokens_per_second": {
+            "median": 34.62253387923578,
+            "mad": 0.015354025725201836
+          },
+          "tpot_ms": {
+            "median": 28.88292357480315,
+            "mad": 0.012803007874019556
+          },
+          "token_sha256": "sha256:d3a69272d18f951c4ccf5eabf00377a3ecb9dc1c45e340ef43baca5e3aa888b2"
+        },
+        "parity_only": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/parity-gfx1201-r1/on-whole/report.json",
+          "sha256": "6ad81295736d478f884289e0e4b69b90958e40041601d6a89aa7c8899a8b9b6c",
+          "decode_tokens_per_second": {
+            "median": 34.749385466079,
+            "mad": 0.011264647240558645
+          },
+          "tpot_ms": {
+            "median": 28.77748733070866,
+            "mad": 0.009325724409446678
+          },
+          "token_sha256": "sha256:d3a69272d18f951c4ccf5eabf00377a3ecb9dc1c45e340ef43baca5e3aa888b2"
+        },
+        "constant_split": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1201-r1/on-whole/report.json",
+          "sha256": "e131b9b275d7d6d2794d5d8b649614014bca2d7ecfc08a7e5dcc5d307d9188d3",
+          "decode_tokens_per_second": {
+            "median": 35.07631050899534,
+            "mad": 0.017912385286834365
+          },
+          "tpot_ms": {
+            "median": 28.509269803149603,
+            "mad": 0.014551370078734749
+          },
+          "token_sha256": "sha256:d3a69272d18f951c4ccf5eabf00377a3ecb9dc1c45e340ef43baca5e3aa888b2"
+        },
+        "final": {
+          "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1201-r2/on-whole/report.json",
+          "sha256": "2e0a9f38d5f29a53728ad8d24bc9ba43e6f3f4988acf81f0f0afbcf989ce523f",
+          "decode_tokens_per_second": {
+            "median": 35.638975247816305,
+            "mad": 0.005500710186879587
+          },
+          "tpot_ms": {
+            "median": 28.059168173228347,
+            "mad": 0.004330133858264418
+          },
+          "token_sha256": "sha256:d3a69272d18f951c4ccf5eabf00377a3ecb9dc1c45e340ef43baca5e3aa888b2"
+        }
+      },
+      "gain_vs_frozen_percent": 2.9357798366979493
+    }
+  ],
+  "final_cases": [
+    {
+      "target": "gfx1030",
+      "case": "off-whole",
+      "report_sha256": "0be7a5b55c1368443cff4772c075c64b2050f58f033a028fe5e1471f50d613b0",
+      "token_sha256": "sha256:c9c0b4ee401b11544fe0faaec15d882cb2491c31a460a32a89dce28e437bcc0e",
+      "tps": {
+        "median": 16.18678401660229,
+        "mad": 0.00401807625778261
+      },
+      "whole": {
+        "result_record_bytes": 192,
+        "startup_ns": 11570807,
+        "completed_replays": 126,
+        "discarded_replays": 0,
+        "executed_replays": 126,
+        "native_nodes_per_replay": 1172,
+        "native_kernel_nodes_per_replay": 1170,
+        "executed_native_kernel_nodes_total": 147420,
+        "logical_dispatch_count": 620,
+        "provider_dispatch_count": 700
+      },
+      "validation": {
+        "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1030-r2/off-whole/final-check.json",
+        "sha256": "3a55c35fed20bcb3893fd872f255f0071c9fe66b1dce70a9c4722da24db5775d"
+      },
+      "published_positions": [
+        8319
+      ],
+      "generated_token_counts": [
+        128
+      ]
+    },
+    {
+      "target": "gfx1030",
+      "case": "on-whole",
+      "report_sha256": "e1885076e4255e1bc4e03a3c5a06426f14b5e675e84207c666a0a43a14011837",
+      "token_sha256": "sha256:ba058a1b282a368e6b253d9532bf3a4933fb72428804c6baf94e756315f08c6f",
+      "tps": {
+        "median": 30.117398065864542,
+        "mad": 0.008207865599317188
+      },
+      "whole": {
+        "result_record_bytes": 192,
+        "startup_ns": 15712523,
+        "completed_replays": 50,
+        "discarded_replays": 0,
+        "executed_replays": 50,
+        "native_nodes_per_replay": 1325,
+        "native_kernel_nodes_per_replay": 1308,
+        "executed_native_kernel_nodes_total": 65400,
+        "logical_dispatch_count": 679,
+        "provider_dispatch_count": 764
+      },
+      "validation": {
+        "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1030-r2/on-whole/final-check.json",
+        "sha256": "87247028bb1d53dd2d6719e7cb203fc964d5bf82d1ab385ff9602ac012e9f586"
+      },
+      "published_positions": [
+        8319
+      ],
+      "generated_token_counts": [
+        128
+      ]
+    },
+    {
+      "target": "gfx1030",
+      "case": "eos-off",
+      "report_sha256": "4f484919d476acee58b4ed7be8509a2b2d9a3526d37b053e11bd915f0343d978",
+      "token_sha256": "sha256:a92ea3831d81aa160d7d106715ef1a1f3bd6eccd70961a137765ff8dbcbe5fd1",
+      "tps": {
+        "median": 10.05772991132014,
+        "mad": 0.0
+      },
+      "whole": {
+        "result_record_bytes": 192,
+        "startup_ns": 11061054,
+        "completed_replays": 1,
+        "discarded_replays": 1,
+        "executed_replays": 2,
+        "native_nodes_per_replay": 1172,
+        "native_kernel_nodes_per_replay": 1170,
+        "executed_native_kernel_nodes_total": 2340,
+        "logical_dispatch_count": 620,
+        "provider_dispatch_count": 700
+      },
+      "validation": {
+        "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1030-r2/eos-off/final-check.json",
+        "sha256": "9d2428e15135dc1aa79d0c145f17e5fd0043ac10a4c6138fc192e3fc04e96dd7"
+      },
+      "published_positions": [
+        8194
+      ],
+      "generated_token_counts": [
+        3
+      ]
+    },
+    {
+      "target": "gfx1030",
+      "case": "eos-on",
+      "report_sha256": "95977bef52bc6e23b873192f5b4e86614d6e689bfe205bca95e60bc6cacee55b",
+      "token_sha256": "sha256:83cfc8c90ae86e12ec7051dfbdde4463fdb94cd0e3268bea0461f911d96aa226",
+      "tps": {
+        "median": 16.05971851296257,
+        "mad": 0.0
+      },
+      "whole": {
+        "result_record_bytes": 192,
+        "startup_ns": 14463609,
+        "completed_replays": 3,
+        "discarded_replays": 1,
+        "executed_replays": 4,
+        "native_nodes_per_replay": 1325,
+        "native_kernel_nodes_per_replay": 1308,
+        "executed_native_kernel_nodes_total": 5232,
+        "logical_dispatch_count": 679,
+        "provider_dispatch_count": 764
+      },
+      "validation": {
+        "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1030-r2/eos-on/final-check.json",
+        "sha256": "e59fd567163fb148b56953e988b7bbbb2bfee9492a6751cd95a1ded69d50af93"
+      },
+      "published_positions": [
+        8199
+      ],
+      "generated_token_counts": [
+        8
+      ]
+    },
+    {
+      "target": "gfx1030",
+      "case": "entry-w2-n5-whole",
+      "report_sha256": "dc1362bfe854a93461a911b8aa4a0d5e8f93d76d15a47b36f69a2cc8684aad71",
+      "token_sha256": "sha256:727f12c8996e4a6bedf9d118608dbdec03e25421875889f4ea953119389bca26",
+      "tps": {
+        "median": 22.556482093759435,
+        "mad": 0.0
+      },
+      "whole": {
+        "result_record_bytes": 192,
+        "startup_ns": 15390542,
+        "completed_replays": 1,
+        "discarded_replays": 0,
+        "executed_replays": 1,
+        "native_nodes_per_replay": 1325,
+        "native_kernel_nodes_per_replay": 1308,
+        "executed_native_kernel_nodes_total": 1308,
+        "logical_dispatch_count": 679,
+        "provider_dispatch_count": 764
+      },
+      "validation": {
+        "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1030-r2/entry-w2-n5-whole/final-check.json",
+        "sha256": "6c340ff63cc9dc04a2bee79e3a93adf824e8ee7b06ce0c7e37b3de2d9da91170"
+      },
+      "published_positions": [
+        21
+      ],
+      "generated_token_counts": [
+        5
+      ]
+    },
+    {
+      "target": "gfx1030",
+      "case": "entry-w3-n6-whole",
+      "report_sha256": "259aaa12adfa4c764e42109635f464cec887d319b05a3a6ea4498ea9f91f4159",
+      "token_sha256": "sha256:637a33dcf0ca608cfc7f7ea7ffd9d412cb2abb1fa510797748c2240f4056e80b",
+      "tps": {
+        "median": 24.000494602192763,
+        "mad": 0.0
+      },
+      "whole": {
+        "result_record_bytes": 192,
+        "startup_ns": 17296727,
+        "completed_replays": 1,
+        "discarded_replays": 0,
+        "executed_replays": 1,
+        "native_nodes_per_replay": 1366,
+        "native_kernel_nodes_per_replay": 1344,
+        "executed_native_kernel_nodes_total": 1344,
+        "logical_dispatch_count": 703,
+        "provider_dispatch_count": 790
+      },
+      "validation": {
+        "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1030-r2/entry-w3-n6-whole/final-check.json",
+        "sha256": "cbfef23110aaa6bae7c6ef08f8f3bb0e367105bb67791b00d26226eb398da617"
+      },
+      "published_positions": [
+        22
+      ],
+      "generated_token_counts": [
+        6
+      ]
+    },
+    {
+      "target": "gfx1201",
+      "case": "off-whole",
+      "report_sha256": "ec13a46ccab1a1deefd45f6eb6ff74e5499473f75a1fd90dd9447c2619260da0",
+      "token_sha256": "sha256:75d36def8ff45d155373ebb05b885d0e4f0e7197ba9adb2123adfb1fe63b189d",
+      "tps": {
+        "median": 21.49085097068252,
+        "mad": 0.00131150205918118
+      },
+      "whole": {
+        "result_record_bytes": 192,
+        "startup_ns": 10167717,
+        "completed_replays": 126,
+        "discarded_replays": 0,
+        "executed_replays": 126,
+        "native_nodes_per_replay": 1172,
+        "native_kernel_nodes_per_replay": 1170,
+        "executed_native_kernel_nodes_total": 147420,
+        "logical_dispatch_count": 620,
+        "provider_dispatch_count": 700
+      },
+      "validation": {
+        "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1201-r2/off-whole/final-check.json",
+        "sha256": "17d03e10e775ea694be05c2ee35d80f9ddb517db3d3852365a3c66d10bc3137e"
+      },
+      "published_positions": [
+        8319
+      ],
+      "generated_token_counts": [
+        128
+      ]
+    },
+    {
+      "target": "gfx1201",
+      "case": "on-whole",
+      "report_sha256": "2e0a9f38d5f29a53728ad8d24bc9ba43e6f3f4988acf81f0f0afbcf989ce523f",
+      "token_sha256": "sha256:d3a69272d18f951c4ccf5eabf00377a3ecb9dc1c45e340ef43baca5e3aa888b2",
+      "tps": {
+        "median": 35.638975247816305,
+        "mad": 0.005500710186879587
+      },
+      "whole": {
+        "result_record_bytes": 192,
+        "startup_ns": 16500570,
+        "completed_replays": 52,
+        "discarded_replays": 0,
+        "executed_replays": 52,
+        "native_nodes_per_replay": 1325,
+        "native_kernel_nodes_per_replay": 1308,
+        "executed_native_kernel_nodes_total": 68016,
+        "logical_dispatch_count": 679,
+        "provider_dispatch_count": 764
+      },
+      "validation": {
+        "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1201-r2/on-whole/final-check.json",
+        "sha256": "f42dba8ea4343ed37cfc66633d9be4c2e0157aed4cd45d2a66b0908523942e08"
+      },
+      "published_positions": [
+        8319
+      ],
+      "generated_token_counts": [
+        128
+      ]
+    },
+    {
+      "target": "gfx1201",
+      "case": "eos-off",
+      "report_sha256": "bbac90d4e222849b04276dd15cf1138d50e30d18bbc1c47433e3843d2c120711",
+      "token_sha256": "sha256:a92ea3831d81aa160d7d106715ef1a1f3bd6eccd70961a137765ff8dbcbe5fd1",
+      "tps": {
+        "median": 13.377521605968258,
+        "mad": 0.0
+      },
+      "whole": {
+        "result_record_bytes": 192,
+        "startup_ns": 11472858,
+        "completed_replays": 1,
+        "discarded_replays": 1,
+        "executed_replays": 2,
+        "native_nodes_per_replay": 1172,
+        "native_kernel_nodes_per_replay": 1170,
+        "executed_native_kernel_nodes_total": 2340,
+        "logical_dispatch_count": 620,
+        "provider_dispatch_count": 700
+      },
+      "validation": {
+        "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1201-r2/eos-off/final-check.json",
+        "sha256": "fced5ff8d576455a34556442cfbcaa975e0ad347947c46547778ce5b0fd2e21b"
+      },
+      "published_positions": [
+        8194
+      ],
+      "generated_token_counts": [
+        3
+      ]
+    },
+    {
+      "target": "gfx1201",
+      "case": "eos-on",
+      "report_sha256": "17902923ace15cc8b5b99b3f878ce8f6b92153b0704f869c90521bd81586259a",
+      "token_sha256": "sha256:5c5aef1bbf894ac60d20abafff346f6bdcd52abd768068291cabe48dc74b9b4e",
+      "tps": {
+        "median": 3.2920546080970574,
+        "mad": 0.0
+      },
+      "whole": {
+        "result_record_bytes": 192,
+        "startup_ns": 15993097,
+        "completed_replays": 3,
+        "discarded_replays": 1,
+        "executed_replays": 4,
+        "native_nodes_per_replay": 1325,
+        "native_kernel_nodes_per_replay": 1308,
+        "executed_native_kernel_nodes_total": 5232,
+        "logical_dispatch_count": 679,
+        "provider_dispatch_count": 764
+      },
+      "validation": {
+        "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1201-r2/eos-on/final-check.json",
+        "sha256": "128624e7ad13bad275f3a5492576fd48308a5fdeaf6c372d28dfd2fc0c777761"
+      },
+      "published_positions": [
+        8198
+      ],
+      "generated_token_counts": [
+        7
+      ]
+    },
+    {
+      "target": "gfx1201",
+      "case": "entry-w2-n5-whole",
+      "report_sha256": "5a8d6d5b8fd85751e305a4e6064d121a7b0869b6ea5faef49005ba3d24f5be44",
+      "token_sha256": "sha256:25439876f3263b30dc1612dd335676d5a28380642d152c985539a411aebaffe2",
+      "tps": {
+        "median": 2.5066203273782635,
+        "mad": 0.0
+      },
+      "whole": {
+        "result_record_bytes": 192,
+        "startup_ns": 18343079,
+        "completed_replays": 1,
+        "discarded_replays": 0,
+        "executed_replays": 1,
+        "native_nodes_per_replay": 1325,
+        "native_kernel_nodes_per_replay": 1308,
+        "executed_native_kernel_nodes_total": 1308,
+        "logical_dispatch_count": 679,
+        "provider_dispatch_count": 764
+      },
+      "validation": {
+        "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1201-r2/entry-w2-n5-whole/final-check.json",
+        "sha256": "ca0e27c8b0e9091a1555bc950d9b72b3df910c68aee7af162a9665ff3cf6185d"
+      },
+      "published_positions": [
+        21
+      ],
+      "generated_token_counts": [
+        5
+      ]
+    },
+    {
+      "target": "gfx1201",
+      "case": "entry-w3-n6-whole",
+      "report_sha256": "3e33e6f4499c89a41f67103481151f2e8144ba9c538393ea9cf29b05b3bfc5cb",
+      "token_sha256": "sha256:b81950f14650cf066ccd85b4bb3997fcf0c297e52aa3b49e49da4e19289663a6",
+      "tps": {
+        "median": 3.024013668348244,
+        "mad": 0.0
+      },
+      "whole": {
+        "result_record_bytes": 192,
+        "startup_ns": 17034913,
+        "completed_replays": 1,
+        "discarded_replays": 0,
+        "executed_replays": 1,
+        "native_nodes_per_replay": 1366,
+        "native_kernel_nodes_per_replay": 1344,
+        "executed_native_kernel_nodes_total": 1344,
+        "logical_dispatch_count": 703,
+        "provider_dispatch_count": 790
+      },
+      "validation": {
+        "path": ".local-artifacts/phase87/stage5-off-regression/final-gfx1201-r2/entry-w3-n6-whole/final-check.json",
+        "sha256": "f6ca2d7797379b8b26141efd6dd262bfa9193ae6ce7156a4ff9d41b9920d8025"
+      },
+      "published_positions": [
+        22
+      ],
+      "generated_token_counts": [
+        6
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "scope": "linear-select",
+      "target": "gfx1030",
+      "path": ".local-artifacts/phase87/stage5/parity/linear-select-run-gfx1030-r1.log",
+      "sha256": "8d212453073ab6c08b5238bb7d247f583f1c835560bb9a49d9969ad72af5d10c"
+    },
+    {
+      "scope": "gdn-lifecycle",
+      "target": "gfx1030",
+      "path": ".local-artifacts/phase87/stage5/parity/gdn-lifecycle-run-gfx1030-r1.log",
+      "sha256": "12eeaa111ff357b1f884830c2c323a787d24a2fa5f0baae19470e555e44587c9"
+    },
+    {
+      "scope": "attention-kv-control-boundaries-and-oracle",
+      "target": "gfx1030",
+      "path": ".local-artifacts/phase87/stage5-off-regression/attention-device-control-current/run-final-gfx1030.log",
+      "sha256": "ea45813b24db04a712c272f80152e4dbaefa9d93264944722c193f660e2d0417"
+    },
+    {
+      "scope": "linear-select",
+      "target": "gfx1201",
+      "path": ".local-artifacts/phase87/stage5/parity/linear-select-run-gfx1201-r1.log",
+      "sha256": "b8655bd0eca1371a392dfb7b21bc4964fe32ae5d30560ec5ea63567e34c59827"
+    },
+    {
+      "scope": "gdn-lifecycle",
+      "target": "gfx1201",
+      "path": ".local-artifacts/phase87/stage5/parity/gdn-lifecycle-run-gfx1201-r1.log",
+      "sha256": "e2b91a683087c2bb306074b13e34ae323b7a6f721463f4c0884bad1fedd8b2a4"
+    },
+    {
+      "scope": "attention-kv-control-boundaries-and-oracle",
+      "target": "gfx1201",
+      "path": ".local-artifacts/phase87/stage5-off-regression/attention-device-control-current/run-final-gfx1201.log",
+      "sha256": "e69735f07965ca5b781bf6d49289175ea6cc9ff47506216085d188446dd2ba1a"
+    },
+    {
+      "scope": "host-runtime",
+      "path": ".local-artifacts/phase87/stage5/parity/strict-host-test-r1.log",
+      "sha256": "a0cd7e0763f2ad4084fddb03a4cb2c238e77fed71decc11f4e844d3f2b5cb5a3"
+    },
+    {
+      "scope": "host-replay",
+      "path": ".local-artifacts/phase87/stage5/terminal-budget/decode-replay-tests-r1.log",
+      "sha256": "39e44c92b7b28a1fd55138c06ada48b679b38c80e11258db9d00cf8350b2c907"
+    }
+  ],
+  "profile": {
+    "report": {
+      "path": ".local-artifacts/phase87/stage5-off-regression/profile-final-gfx1201-off/report.json",
+      "sha256": "37fb4e886ce1351d251f81408fa67a46c8019e5acc7d8c1459b59c743a14292d"
+    },
+    "analysis": {
+      "path": ".local-artifacts/phase87/stage5-off-regression/profile-final-gfx1201-off/analysis.json",
+      "sha256": "8c833459dd826dc82de16cb0ef27a60d44c42180dc7b780887daa784c6d92aac"
+    },
+    "breakdown": {
+      "path": ".local-artifacts/phase87/stage5-off-regression/profile-final-gfx1201-off/breakdown.json",
+      "sha256": "6dbee8b541245748c3b708efae41c76d239c8c72d075175acdc012eef3d8c6eb"
+    },
+    "async_check": {
+      "path": ".local-artifacts/phase87/stage5-off-regression/profile-final-gfx1201-off/async-check.json",
+      "sha256": "eba13ffb9943b369da282470c61cc247d5787253c95e47309f09fbc5045b192a"
+    },
+    "replays": 126,
+    "overlap_pairs": 125,
+    "minimum_enqueue_lead_ns": 45872201,
+    "discarded_replays": 0,
+    "no_late_graph_instantiation": true,
+    "no_late_pinned_allocation": true,
+    "timeline_ms_per_token": {
+      "idle_outside_hip_api": 5.314809614173228,
+      "idle_in_other_hip_api": 0.06249651968503937,
+      "idle_in_transfer_api": 0.0044799370078740155,
+      "idle_in_sync_or_poll": 0.014984629921259842,
+      "gpu": 44.77250733070866,
+      "idle_in_launch": 0.11472261417322835
+    }
+  },
+  "final_build": {
+    "binaries": {
+      "gfx1030": {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase87/stage5-off-regression/final-gfx1030",
+        "sha256": "d6901c056693b50e36a8b1fe632d798e73a718b9682ab150b6167b81ef1fccd9"
+      },
+      "gfx1201": {
+        "path": "/home/homelab1/coding-local/sLLM/.local-artifacts/phase87/stage5-off-regression/final-gfx1201",
+        "sha256": "7a6edf442a7a98c87f9f43bca783fe5f895907595ed56dd0f5c86c29a5448c5d"
+      }
+    },
+    "sources": {
+      "crates/sllm-core/src/decode_replay.rs": "b61578aed96feb89c24bbc376e79774beb187208b53b69d0736abf61f871221c",
+      "native/hip/src/linear_attention_kernel.hip.cpp": "2880c53175626c943d4a96b89e081cb893c07a6c3c416b3d55e2f3f9e698d54f",
+      "native/hip/src/linear_attention_kernel_internal.hpp": "5336cf7c7b912d0585e48da6e5672de926e7594882facd42c3d67bc12de9113c",
+      "native/hip/src/linear_attention_runtime.inc": "7bc63e16f452e4cabad9cdd61e6042117269750aab5a8efa99453a64b4edff7a",
+      "native/hip/src/graph_span_runtime.inc": "0ba201eec81cd1c213ee4a6f33ec639ca052889f048576f91e1ec292f0cb17d3",
+      "native/hip/src/causal_attention_kernel.hip.cpp": "af7290f1459d74dc322a1a424b491ff481a4048043e4ae8b12fa9b9da1f67e67",
+      "native/hip/src/public_runtime.hip.cpp": "d0072e491d0effa6ebde7279bbb4781efbd5fa93801d05df96bffc6cf94fab1e",
+      "native/hip/tests/linear_decode_state_select_gpu_test.hip.cpp": "5921dd791a4da37b1eb94db311e61745e160d7119f5c35b32c26f688751ab39e",
+      "native/hip/tests/phase87_gdn_graph_lifecycle_gpu_test.cpp": "5c9ab73a644df1cfe1e61283fdaff4ef45badb74bf771257b086a15aa8e5ff87"
+    }
+  },
+  "uniform_probe": {
+    "state": "not_adopted",
+    "reason": "matched M1 4warm/20measured controlled median .215801 vs .215080 ms does not establish material benefit; both eager .1448ms, numerical PASS; bounded experiment ends",
+    "source_restored_sha256": "af7290f1459d74dc322a1a424b491ff481a4048043e4ae8b12fa9b9da1f67e67",
+    "exact_pre_experiment_source": false,
+    "logs": [
+      "attention-device-control-current/timing-preuniform-r1.log",
+      "attention-device-control-current/timing-uniform-r1.log"
+    ]
+  }
+}

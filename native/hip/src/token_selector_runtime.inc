@@ -539,7 +539,44 @@ extern "C" sllm_status_t sllm_token_selector_execute(
       return static_cast<char *>(buffer->device_pointer) +
              static_cast<std::size_t>(offset);
     };
-    const hipError_t launch_status = ::sllm_token_selector_kernel::launch(
+    const bool whole_capture = whole_graph_capture_active() &&
+                               graph_capture_queue == queue;
+    auto *const device_control = whole_capture
+        ? static_cast<sllm_decode_control::ControlV1 *>(
+              whole_graph_capture_device_control())
+        : nullptr;
+    if (whole_capture && device_control == nullptr) {
+      execute_guard.disarm();
+      return cleanup_failed_submission(
+          candidate, token, hipErrorInvalidValue,
+          "token selector whole-graph control is absent", queue, error_sink);
+    }
+    if (whole_capture &&
+        (plan->metadata.temperature != 1.0F || plan->metadata.top_k != 20U ||
+         plan->metadata.top_p != 0.95F)) {
+      execute_guard.disarm();
+      return cleanup_failed_submission(
+          candidate, token, hipErrorNotSupported,
+          "whole-graph token selector requires fixed top-k20/top-p0.95",
+          queue, error_sink);
+    }
+    const hipError_t launch_status = device_control != nullptr
+        ? ::sllm_token_selector_kernel::launch_graph_fixed_k20_topp(
+              static_cast<const uint16_t *>(
+                  byte_pointer(plan->logits, plan->metadata.logits.byte_offset)),
+              static_cast<const float *>(byte_pointer(
+                  plan->additive_logits,
+                  plan->metadata.additive_logits.byte_offset)),
+              static_cast<const uint8_t *>(byte_pointer(
+                  plan->valid_mask, plan->metadata.valid_mask.byte_offset)),
+              static_cast<uint8_t *>(byte_pointer(
+                  plan->workspace, plan->metadata.workspace.byte_offset)),
+              plan->metadata.vocab_size, plan->metadata.flags, device_control,
+              0U,
+              static_cast<sllm_token_selector_record_t *>(
+                  byte_pointer(plan->output, plan->metadata.output.byte_offset)),
+              queue->stream)
+        : ::sllm_token_selector_kernel::launch(
         static_cast<const uint16_t *>(
             byte_pointer(plan->logits, plan->metadata.logits.byte_offset)),
         static_cast<const float *>(byte_pointer(

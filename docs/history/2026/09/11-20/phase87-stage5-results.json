@@ -1,0 +1,422 @@
+{
+  "schema": "phase87-stage5-results-v1",
+  "state": "PASS",
+  "observed_at": "2026-09-21T04:12:30.277502+09:00",
+  "base_head": "b866c8bab8e8a7943900b5aecae6122b51a3603a",
+  "source_state": "dirty local implementation; no publication",
+  "scope": "Stage5 fixed device sampling, Qwen3.8 NVFP4, fresh single request; not all Phase87 acceptance criteria",
+  "protocol": {
+    "prompt_tokens": 8192,
+    "output_tokens": 128,
+    "warmups": 1,
+    "measured": 3,
+    "profile_warmups": 1,
+    "profile_measured": 1,
+    "temperature": 1,
+    "top_p": 0.95,
+    "top_k": 20,
+    "seed": 123,
+    "chunk": 2048,
+    "capacity": 10240,
+    "kv": "MXFP8 E4",
+    "mtp_width": 2
+  },
+  "rows": [
+    {
+      "target": "gfx1030",
+      "uuid": "GPU-76a08c022586fed6",
+      "mtp": "off",
+      "binary_sha256": "18710b0d72eae9dd220bcbc4987eea242370d701b9fd46d678bc3552be8e2ac8",
+      "generated_tokens_sha256": "sha256:c9c0b4ee401b11544fe0faaec15d882cb2491c31a460a32a89dce28e437bcc0e",
+      "normal": {
+        "measured_samples": 3,
+        "request_setup_ms": {
+          "median": 20.136634,
+          "mad": 0.5385200000000019
+        },
+        "prefill_ms": {
+          "median": 36275.38893,
+          "mad": 132.91277399999672
+        },
+        "ttft_ms": {
+          "median": 36295.846998,
+          "mad": 132.32695399999648
+        },
+        "decode_ms": {
+          "median": 8101.459642,
+          "mad": 1.8943959999996878
+        },
+        "e2e_ms": {
+          "median": 44471.21401,
+          "mad": 58.495544999997946
+        },
+        "prefill_tokens_per_second": {
+          "median": 225.82804048794523,
+          "mad": 0.824411738626651
+        },
+        "decode_tokens_per_second": {
+          "median": 15.67618745412248,
+          "mad": 0.0036664815834424047
+        },
+        "tpot_ms": {
+          "median": 63.79102080314961,
+          "mad": 0.014916503937016046
+        }
+      },
+      "baseline_decode_tps": 15.772662458928178,
+      "decode_change_percent": -0.6116596044384859,
+      "formal_report": ".local-artifacts/phase87/stage5/final-gfx1030-r1/formal/whole-mtp-off/report.json",
+      "formal_report_sha256": "dc38d57ace9eb54b90baba8395c8392f05c41c94074e3609dffdab970e61c540",
+      "baseline_report_sha256": "78b2065aa1002e5816ce1fa613be22027461ed8f15e88be3bce13a45706774ef",
+      "profile_report_sha256": "e2aed472f1953c5c864f0ce0121ffe61d761928539eaa4dd34228edbaa9e4cf3",
+      "profile_timeline_ms_per_token": {
+        "idle_outside_hip_api": 7.997226015748032,
+        "idle_in_other_hip_api": 0.06254084251968503,
+        "idle_in_transfer_api": 0.004091905511811024,
+        "idle_in_sync_or_poll": 0.022978645669291337,
+        "gpu": 59.87181521259843,
+        "idle_in_launch": 0.12151064566929133
+      },
+      "profile_startup_ms": 18.857743,
+      "whole_decode": {
+        "result_record_bytes": 192,
+        "startup_ns": 18857743,
+        "completed_replays": 126,
+        "discarded_replays": 1,
+        "executed_replays": 127,
+        "native_nodes_per_replay": 1220,
+        "native_kernel_nodes_per_replay": 1218,
+        "executed_native_kernel_nodes_total": 154686,
+        "logical_dispatch_count": 620,
+        "provider_dispatch_count": 700
+      },
+      "async": {
+        "adjacent_pairs": 126,
+        "min_enqueue_lead_ns": 56155895,
+        "intra_graph_gap_ns": 1005287593,
+        "inter_graph_interval_ns": 4057706,
+        "graph_kernel_busy_union_ns": 7544674083,
+        "no_replay_instantiation": true,
+        "no_replay_host_allocation": true,
+        "check_sha256": "c5b1dc6fe268d3d7d15d54f4d37895e8de7abdedc56e75fe0502457ecc2e895c"
+      },
+      "eos": {
+        "generated_tokens": 3,
+        "stop_token": 9988,
+        "published_kv_length": 8194,
+        "published_gdn_length": 8194,
+        "whole_decode": {
+          "result_record_bytes": 192,
+          "startup_ns": 13981451,
+          "completed_replays": 1,
+          "discarded_replays": 1,
+          "executed_replays": 2,
+          "native_nodes_per_replay": 1220,
+          "native_kernel_nodes_per_replay": 1218,
+          "executed_native_kernel_nodes_total": 2436,
+          "logical_dispatch_count": 620,
+          "provider_dispatch_count": 700
+        },
+        "report_sha256": "0d4b6bc5af4964019be4339c16acee7b7d373fd53a1721e10da99ee285e81ad8"
+      },
+      "cleanup_zero": true
+    },
+    {
+      "target": "gfx1030",
+      "uuid": "GPU-76a08c022586fed6",
+      "mtp": "on",
+      "binary_sha256": "18710b0d72eae9dd220bcbc4987eea242370d701b9fd46d678bc3552be8e2ac8",
+      "generated_tokens_sha256": "sha256:ba058a1b282a368e6b253d9532bf3a4933fb72428804c6baf94e756315f08c6f",
+      "normal": {
+        "measured_samples": 3,
+        "request_setup_ms": {
+          "median": 30.452014,
+          "mad": 0.05573700000000059
+        },
+        "prefill_ms": {
+          "median": 38330.443343,
+          "mad": 465.6287349999984
+        },
+        "ttft_ms": {
+          "median": 38361.05143,
+          "mad": 465.67387099999905
+        },
+        "decode_ms": {
+          "median": 4316.064323,
+          "mad": 5.100235000000794
+        },
+        "e2e_ms": {
+          "median": 42682.306569,
+          "mad": 460.5672360000026
+        },
+        "prefill_tokens_per_second": {
+          "median": 213.72046043647038,
+          "mad": 2.5650634795341603
+        },
+        "decode_tokens_per_second": {
+          "median": 29.42495535185285,
+          "mad": 0.03473003287530574
+        },
+        "tpot_ms": {
+          "median": 33.984758448818894,
+          "mad": 0.0401593307086614
+        }
+      },
+      "baseline_decode_tps": 28.846991262865764,
+      "decode_change_percent": 2.0035506778521173,
+      "formal_report": ".local-artifacts/phase87/stage5/final-gfx1030-r1/formal/whole-mtp-on/report.json",
+      "formal_report_sha256": "c40e8f216bf901a26ba668d3e85dc0367a974162782626ee07e0f6f60dcc9798",
+      "baseline_report_sha256": "8abe8a19212f1b4726b6f10766546d6151c3ee6d4b0d444eaa90ab8617f9695b",
+      "profile_report_sha256": "5ccb040905a67c5550524206f0b822cb7ae11bb6237d7a2030fd5db3a949b1cb",
+      "profile_timeline_ms_per_token": {
+        "idle_outside_hip_api": 3.552388952755906,
+        "idle_in_other_hip_api": 0.08880350393700788,
+        "idle_in_transfer_api": 0.00642151968503937,
+        "idle_in_sync_or_poll": 0.01227971653543307,
+        "gpu": 32.05769605511811,
+        "idle_in_launch": 0.04168017322834646
+      },
+      "profile_startup_ms": 20.624421,
+      "whole_decode": {
+        "result_record_bytes": 192,
+        "startup_ns": 20624421,
+        "completed_replays": 50,
+        "discarded_replays": 1,
+        "executed_replays": 51,
+        "native_nodes_per_replay": 1325,
+        "native_kernel_nodes_per_replay": 1308,
+        "executed_native_kernel_nodes_total": 66708,
+        "logical_dispatch_count": 679,
+        "provider_dispatch_count": 764
+      },
+      "async": {
+        "adjacent_pairs": 50,
+        "min_enqueue_lead_ns": 81611453,
+        "intra_graph_gap_ns": 426050209,
+        "inter_graph_interval_ns": 1533980,
+        "graph_kernel_busy_union_ns": 3985863280,
+        "no_replay_instantiation": true,
+        "no_replay_host_allocation": true,
+        "check_sha256": "f7620a7b88a957b61ed8ae9a2181ebbd71a38a46689c57ed2b8863350c8ff15a"
+      },
+      "eos": {
+        "generated_tokens": 8,
+        "stop_token": 9858,
+        "published_kv_length": 8199,
+        "published_gdn_length": 8199,
+        "whole_decode": {
+          "result_record_bytes": 192,
+          "startup_ns": 16009980,
+          "completed_replays": 3,
+          "discarded_replays": 1,
+          "executed_replays": 4,
+          "native_nodes_per_replay": 1325,
+          "native_kernel_nodes_per_replay": 1308,
+          "executed_native_kernel_nodes_total": 5232,
+          "logical_dispatch_count": 679,
+          "provider_dispatch_count": 764
+        },
+        "report_sha256": "c8d6511483acb80e676ea5c6a1eb68aca3804e28a49995a34a65dc8ee7f1f3bb"
+      },
+      "cleanup_zero": true
+    },
+    {
+      "target": "gfx1201",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "mtp": "off",
+      "binary_sha256": "535ba40160daef2a38571ea6668b2df13375db873f117b9cb29a9f115770c328",
+      "generated_tokens_sha256": "sha256:75d36def8ff45d155373ebb05b885d0e4f0e7197ba9adb2123adfb1fe63b189d",
+      "normal": {
+        "measured_samples": 3,
+        "request_setup_ms": {
+          "median": 18.554254,
+          "mad": 0.6829469999999986
+        },
+        "prefill_ms": {
+          "median": 15017.917754,
+          "mad": 47.58780400000069
+        },
+        "ttft_ms": {
+          "median": 15036.010084,
+          "mad": 48.28443200000038
+        },
+        "decode_ms": {
+          "median": 6087.554488,
+          "mad": 1.1563470000000962
+        },
+        "e2e_ms": {
+          "median": 21123.616652,
+          "mad": 47.13302599999952
+        },
+        "prefill_tokens_per_second": {
+          "median": 545.481746150732,
+          "mad": 1.7230273701378565
+        },
+        "decode_tokens_per_second": {
+          "median": 20.86223626422512,
+          "mad": 0.003963589590849637
+        },
+        "tpot_ms": {
+          "median": 47.933499905511816,
+          "mad": 0.009105094488198517
+        }
+      },
+      "baseline_decode_tps": 21.4094121227843,
+      "decode_change_percent": -2.555772458492045,
+      "formal_report": ".local-artifacts/phase87/stage5/final-gfx1201-r1/formal/whole-mtp-off/report.json",
+      "formal_report_sha256": "4d5540e5a524df998a6572f4a067f0df26792cd7451114ab293cad21d5340504",
+      "baseline_report_sha256": "05153a1b8097cb0e1116896d8a1f424212c6eab963c4d235f53fc2245f37fbaa",
+      "profile_report_sha256": "d2f3e577b4e4613efe38fd4c695909ac702c04b36171c3a62e4a323d58383f69",
+      "profile_timeline_ms_per_token": {
+        "idle_outside_hip_api": 6.677638732283465,
+        "idle_in_other_hip_api": 0.05635420472440945,
+        "idle_in_transfer_api": 0.00555384251968504,
+        "idle_in_sync_or_poll": 0.017577015748031496,
+        "gpu": 49.169671362204724,
+        "idle_in_launch": 0.14513857480314962
+      },
+      "profile_startup_ms": 17.956838,
+      "whole_decode": {
+        "result_record_bytes": 192,
+        "startup_ns": 17956838,
+        "completed_replays": 126,
+        "discarded_replays": 1,
+        "executed_replays": 127,
+        "native_nodes_per_replay": 1220,
+        "native_kernel_nodes_per_replay": 1218,
+        "executed_native_kernel_nodes_total": 154686,
+        "logical_dispatch_count": 620,
+        "provider_dispatch_count": 700
+      },
+      "async": {
+        "adjacent_pairs": 126,
+        "min_enqueue_lead_ns": 41345271,
+        "intra_graph_gap_ns": 834494868,
+        "inter_graph_interval_ns": 4226083,
+        "graph_kernel_busy_union_ns": 6164847852,
+        "no_replay_instantiation": true,
+        "no_replay_host_allocation": true,
+        "check_sha256": "2abd201bb6b2075acd8746c02031c8d577b358dffd13da86832344ef5c0739d4"
+      },
+      "eos": {
+        "generated_tokens": 3,
+        "stop_token": 9988,
+        "published_kv_length": 8194,
+        "published_gdn_length": 8194,
+        "whole_decode": {
+          "result_record_bytes": 192,
+          "startup_ns": 11350172,
+          "completed_replays": 1,
+          "discarded_replays": 1,
+          "executed_replays": 2,
+          "native_nodes_per_replay": 1220,
+          "native_kernel_nodes_per_replay": 1218,
+          "executed_native_kernel_nodes_total": 2436,
+          "logical_dispatch_count": 620,
+          "provider_dispatch_count": 700
+        },
+        "report_sha256": "a012eb01accafb58fb7c0b78febdb21f955da270993c2d227d4e6ba665bfc51f"
+      },
+      "cleanup_zero": true
+    },
+    {
+      "target": "gfx1201",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "mtp": "on",
+      "binary_sha256": "535ba40160daef2a38571ea6668b2df13375db873f117b9cb29a9f115770c328",
+      "generated_tokens_sha256": "sha256:d3a69272d18f951c4ccf5eabf00377a3ecb9dc1c45e340ef43baca5e3aa888b2",
+      "normal": {
+        "measured_samples": 3,
+        "request_setup_ms": {
+          "median": 27.433825,
+          "mad": 1.4934860000000008
+        },
+        "prefill_ms": {
+          "median": 15188.543278,
+          "mad": 43.87441899999976
+        },
+        "ttft_ms": {
+          "median": 15213.61217,
+          "mad": 41.31929300000047
+        },
+        "decode_ms": {
+          "median": 3669.418156,
+          "mad": 2.165332000000035
+        },
+        "e2e_ms": {
+          "median": 18883.082876,
+          "mad": 39.12537000000157
+        },
+        "prefill_tokens_per_second": {
+          "median": 539.3538965560829,
+          "mad": 1.5625193965678363
+        },
+        "decode_tokens_per_second": {
+          "median": 34.610391784413466,
+          "mad": 0.02041162596690782
+        },
+        "tpot_ms": {
+          "median": 28.893056346456692,
+          "mad": 0.01704985826771832
+        }
+      },
+      "baseline_decode_tps": 34.03450235134019,
+      "decode_change_percent": 1.692075374360802,
+      "formal_report": ".local-artifacts/phase87/stage5/final-gfx1201-r1/formal/whole-mtp-on/report.json",
+      "formal_report_sha256": "8131b40283f87619d152bbbefc5bbfa0ed03cd38675901bebc1ccbacba4ac576",
+      "baseline_report_sha256": "19854357c1ccf450ec6505d249e8265f424e4baf1c70741959f5ebe0de08beb9",
+      "profile_report_sha256": "3f7c19242490786b4e6411c366eb75a4f79d7124ff015af52402551c2929fa46",
+      "profile_timeline_ms_per_token": {
+        "idle_outside_hip_api": 2.759990070866142,
+        "idle_in_other_hip_api": 0.10455666141732282,
+        "idle_in_transfer_api": 0.00857931496062992,
+        "idle_in_sync_or_poll": 0.011628795275590551,
+        "gpu": 27.841899937007874,
+        "idle_in_launch": 0.04849162204724409
+      },
+      "profile_startup_ms": 21.775668,
+      "whole_decode": {
+        "result_record_bytes": 192,
+        "startup_ns": 21775668,
+        "completed_replays": 52,
+        "discarded_replays": 1,
+        "executed_replays": 53,
+        "native_nodes_per_replay": 1325,
+        "native_kernel_nodes_per_replay": 1308,
+        "executed_native_kernel_nodes_total": 69324,
+        "logical_dispatch_count": 679,
+        "provider_dispatch_count": 764
+      },
+      "async": {
+        "adjacent_pairs": 52,
+        "min_enqueue_lead_ns": 67524937,
+        "intra_graph_gap_ns": 319984031,
+        "inter_graph_interval_ns": 1684261,
+        "graph_kernel_busy_union_ns": 3468877253,
+        "no_replay_instantiation": true,
+        "no_replay_host_allocation": true,
+        "check_sha256": "8ba1d59a0594c7579d760e63c67231cfcc66be476d791838c80eafe05b9be567"
+      },
+      "eos": {
+        "generated_tokens": 7,
+        "stop_token": 9988,
+        "published_kv_length": 8198,
+        "published_gdn_length": 8198,
+        "whole_decode": {
+          "result_record_bytes": 192,
+          "startup_ns": 17102680,
+          "completed_replays": 3,
+          "discarded_replays": 1,
+          "executed_replays": 4,
+          "native_nodes_per_replay": 1325,
+          "native_kernel_nodes_per_replay": 1308,
+          "executed_native_kernel_nodes_total": 5232,
+          "logical_dispatch_count": 679,
+          "provider_dispatch_count": 764
+        },
+        "report_sha256": "eb909a7bff4d2c18116d41ecdd05ac7e7f0a9afcc8d97c6f8182690d046a396b"
+      },
+      "cleanup_zero": true
+    }
+  ]
+}

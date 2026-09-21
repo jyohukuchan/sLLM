@@ -428,12 +428,75 @@ def _build_script_rerun_paths(build_script: Path) -> list[tuple[str, str]]:
             return None
         return end + len(expected), bindings
 
+    def literal_source_name_loop(index: int) -> tuple[int, list[tuple[str, str]]] | None:
+        """Expand a bounded ``for name in ["src/file", ...]`` form."""
+
+        if (
+            index + 4 >= len(tokens)
+            or tokens[index] != ("ident", "for")
+            or tokens[index + 1][0] != "ident"
+            or tokens[index + 2] != ("ident", "in")
+            or tokens[index + 3] != ("punct", "[")
+        ):
+            return None
+        variable = tokens[index + 1][1]
+        cursor = index + 4
+        names: list[str] = []
+        while cursor < len(tokens) and tokens[cursor] != ("punct", "]"):
+            if tokens[cursor][0] != "string":
+                return None
+            names.append(tokens[cursor][1])
+            cursor += 1
+            if cursor >= len(tokens) or tokens[cursor] != ("punct", ","):
+                return None
+            cursor += 1
+        if not names or cursor + 29 >= len(tokens) or tokens[cursor] != ("punct", "]"):
+            return None
+        expected = [
+            ("punct", "{"),
+            ("ident", "println"),
+            ("punct", "!"),
+            ("punct", "("),
+            ("string", "cargo:rerun-if-changed={}"),
+            ("punct", ","),
+            ("ident", "source_dir"),
+            ("punct", "."),
+            ("ident", "join"),
+            ("punct", "("),
+            ("string", "src"),
+            ("punct", ")"),
+            ("punct", "."),
+            ("ident", "join"),
+            ("punct", "("),
+            ("ident", variable),
+            ("punct", ")"),
+            ("punct", "."),
+            ("ident", "display"),
+            ("punct", "("),
+            ("punct", ")"),
+            ("punct", ")"),
+            ("punct", ";"),
+            ("punct", "}"),
+        ]
+        end = cursor + 1
+        if tokens[end : end + len(expected)] != expected:
+            return None
+        if "source_dir" not in known_paths:
+            return None
+        base = posixpath.normpath(posixpath.join(known_paths["source_dir"], "src"))
+        return end + len(expected), [(name, posixpath.join(base, name)) for name in names]
+
     index = 0
     while index < len(tokens):
         loop = literal_path_loop(index)
         if loop is not None:
             index, bindings = loop
             registrations.extend((binding, path_bindings[binding]) for binding in bindings)
+            continue
+        source_name_loop = literal_source_name_loop(index)
+        if source_name_loop is not None:
+            index, bindings = source_name_loop
+            registrations.extend(bindings)
             continue
         token = tokens[index]
         if (
@@ -794,7 +857,7 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_mxfp6_w6a16_m1_col2_v1",
             "sllm_mxfp8_w8a16_m1_col2_v1",
         }
-        self.assertEqual(len(KERNEL_SYMBOLS), 182)
+        self.assertEqual(len(KERNEL_SYMBOLS), 198)
         self.assertEqual(tuple(sorted(KERNEL_SYMBOLS)), KERNEL_SYMBOLS)
         self.assertTrue(expected_additions <= set(KERNEL_SYMBOLS))
         self.assertEqual(len(expected_additions), 79)
@@ -893,8 +956,8 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "hipStreamBeginCapture",
             "hipStreamEndCapture",
         }
-        self.assertEqual(len(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS), 63)
-        self.assertEqual(len(set(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS)), 63)
+        self.assertEqual(len(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS), 65)
+        self.assertEqual(len(set(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS)), 65)
         self.assertEqual(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS, tuple(sorted(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS)))
         self.assertEqual(additions, additions & set(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS))
 
@@ -1040,15 +1103,24 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
         registrations = _build_script_rerun_paths(build_script)
         binding_by_path = {path: name for name, path in registrations}
         required = set(EXPECTED_DIRECT_COMPILE_SOURCE_PATHS) | {"native/hip/CMakeLists.txt"}
+        name_loop_paths = {
+            "native/hip/src/decode_control_kernel.hip.cpp",
+            "native/hip/src/decode_control_kernel_internal.hpp",
+            "native/hip/src/decode_graph_capture_internal.hpp",
+        }
         self.assertTrue(required.issubset(binding_by_path))
         for relative_path in sorted(required):
             binding = binding_by_path[relative_path]
             loop_binding = f"&{binding},"
             is_literal_loop_binding = loop_binding in source
+            name_literal = f'"{Path(relative_path).name}",'
+            is_literal_name_loop = relative_path in name_loop_paths and name_literal in source
             registration = f'println!("cargo:rerun-if-changed={{}}", {binding}.display());'
             with self.subTest(label=f"missing {relative_path}"):
                 if is_literal_loop_binding:
                     missing = source.replace(loop_binding, "&missing_h3_build_input,", 1)
+                elif is_literal_name_loop:
+                    missing = source.replace(name_literal, '"missing_h3_build_input",', 1)
                 else:
                     missing = source.replace(
                         f"{binding}.display()",
@@ -1063,6 +1135,8 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             with self.subTest(label=f"duplicate {relative_path}"):
                 if is_literal_loop_binding:
                     duplicate = source.replace(loop_binding, f"{loop_binding} {loop_binding}", 1)
+                elif is_literal_name_loop:
+                    duplicate = source.replace(name_literal, f"{name_literal} {name_literal}", 1)
                 else:
                     duplicate = source + "\n" + registration + "\n"
                 with tempfile.TemporaryDirectory(prefix="sllm-h3-build-script-duplicate-") as directory:
@@ -1075,6 +1149,8 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             with self.subTest(label=f"substituted {relative_path}"):
                 if is_literal_loop_binding:
                     substituted = source.replace(loop_binding, f"&{other_binding},", 1)
+                elif is_literal_name_loop:
+                    substituted = source.replace(name_literal, f'"{Path(other_path).name}",', 1)
                 else:
                     substituted = source.replace(
                         f"{binding}.display()",

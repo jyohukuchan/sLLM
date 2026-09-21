@@ -200,6 +200,16 @@ hipError_t launch_gather(const uint16_t *const weight,
   return fake_hip::embedding_gather_launch(weight, token_ids, output,
                                            token_count, hidden_size, stream);
 }
+
+hipError_t launch_gather_device(const uint16_t *const, const int32_t *const,
+                                uint16_t *const, const uint64_t, const uint64_t,
+                                const uint64_t,
+                                sllm_decode_control::ControlV1 *,
+                                const hipStream_t) noexcept {
+  /* Host fake mode must not emulate a device-control graph path or claim
+   * numerical GPU correctness. */
+  return hipErrorNotSupported;
+}
 } // namespace sllm_embedding_kernel
 
 namespace sllm_matmul_kernel {
@@ -316,6 +326,16 @@ hipError_t launch(const uint16_t *const logits, int32_t *const output,
 } // namespace sllm_argmax_kernel
 
 namespace sllm_attention_preprocess_kernel {
+hipError_t launch_device(const uint16_t *const, const uint16_t *const,
+                         const uint16_t *const, const uint16_t *const,
+                         uint16_t *const, uint16_t *const, uint16_t *const,
+                         const uint32_t, const uint32_t, const uint32_t,
+                         sllm_decode_control::ControlV1 *,
+                         const hipStream_t) noexcept {
+  /* Host fake mode must remain fail-closed for the device-position path. */
+  return hipErrorNotSupported;
+}
+
 hipError_t
 launch(const uint16_t *const packed_q_gate, const uint16_t *const k,
        const uint16_t *const q_raw_scale, const uint16_t *const k_raw_scale,
@@ -458,6 +478,40 @@ hipError_t launch(const uint16_t *const key_input,
       key_input, value_input, static_cast<uint16_t *>(key_output),
       static_cast<uint16_t *>(value_output), token_count, capacity_tokens,
       start_position, stream);
+}
+
+/* Host contract builds must never turn a graph-only device-control route into
+ * a CPU success.  Keep the symbol available for the production dispatcher's
+ * compile-time branch while returning an explicit unsupported result. */
+hipError_t
+launch_device(const uint16_t *const key_input,
+              const uint16_t *const value_input, void *const key_output,
+              void *const value_output, void *const key_scales,
+              void *const value_scales, float *const key_outer_scales,
+              float *const value_outer_scales, const uint32_t token_count,
+              const uint64_t capacity_tokens, const uint32_t head_count,
+              const uint32_t head_dim, const uint32_t encoding,
+              const float static_key_scale, const float static_value_scale,
+              sllm_decode_control::ControlV1 *const control,
+              const hipStream_t stream) noexcept {
+  (void)key_input;
+  (void)value_input;
+  (void)key_output;
+  (void)value_output;
+  (void)key_scales;
+  (void)value_scales;
+  (void)key_outer_scales;
+  (void)value_outer_scales;
+  (void)token_count;
+  (void)capacity_tokens;
+  (void)head_count;
+  (void)head_dim;
+  (void)encoding;
+  (void)static_key_scale;
+  (void)static_value_scale;
+  (void)control;
+  (void)stream;
+  return hipErrorNotSupported;
 }
 } // namespace sllm_kv_state_kernel
 
@@ -641,7 +695,8 @@ hipError_t launch_convolution(const uint16_t *const, const uint16_t *const,
                               const uint16_t *const, uint16_t *const,
                               uint16_t *const, const uint32_t, const uint32_t,
                               const uint32_t, const hipStream_t,
-                              uint16_t *const, const uint32_t) noexcept {
+                              uint16_t *const, const uint32_t,
+                              sllm_decode_control::ControlV1 *const) noexcept {
   return hipSuccess;
 }
 
@@ -652,7 +707,8 @@ hipError_t launch_recurrent(const uint16_t *const, const uint16_t *const,
                             float *const, uint16_t *const, const uint32_t,
                             const uint32_t, const uint32_t, const uint32_t,
                             const uint32_t, const uint32_t, const hipStream_t,
-                            float *const, const uint32_t) noexcept {
+                            float *const, const uint32_t,
+                            sllm_decode_control::ControlV1 *const) noexcept {
   return hipSuccess;
 }
 
@@ -738,9 +794,11 @@ struct MatmulScratchSlot final {
       : allocation(allocation_value), bytes(bytes_value) {}
 };
 struct Completion;
+void release_pinned_host_storage(Completion *completion) noexcept;
 bool release_graph_span_active(Completion *completion) noexcept;
 bool release_graph_span_completion(Completion *completion) noexcept;
 bool rollback_graph_span_completion(Completion *completion) noexcept;
+bool rollback_submission_references(Completion *completion) noexcept;
 void destroy_causal_scaled_prefill_workspace(Context *context) noexcept;
 void destroy_matmul_f16_staging_workspace(Context *context) noexcept;
 hipError_t free_allocation_with_fault_injection(void *allocation) noexcept;
@@ -884,6 +942,10 @@ struct Queue final : QuarantineNode {
   /* Monotonic submission order for deferred completion/fence validation. */
   uint64_t next_submission_serial;
   std::atomic<bool> graph_capture_active;
+  std::mutex pinned_d2h_mutex;
+  std::array<void *, 2> pinned_d2h_slots;
+  std::array<bool, 2> pinned_d2h_in_use;
+  std::atomic<bool> whole_graph_result_readback_required;
 
   Queue(Context *const context_value, const hipStream_t stream_value)
       : QuarantineNode(HandleKind::Queue), context(context_value),
@@ -891,7 +953,20 @@ struct Queue final : QuarantineNode {
         matmul_scratch_pool(), matmul_scratch_current_bytes(0U),
         matmul_scratch_high_water_bytes(0U), release_active(false),
         completion_mode(SLLM_QUEUE_COMPLETION_MODE_PROFILED),
-        next_submission_serial(0U), graph_capture_active(false) {}
+        next_submission_serial(0U), graph_capture_active(false),
+        pinned_d2h_mutex(), pinned_d2h_slots{nullptr, nullptr},
+        pinned_d2h_in_use{false, false},
+        whole_graph_result_readback_required(false) {}
+
+  ~Queue() {
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    for (void *const slot : pinned_d2h_slots) {
+      if (slot != nullptr) {
+        (void)hipHostFree(slot);
+      }
+    }
+#endif
+  }
 };
 
 /* A non-null value is installed only by the thread performing a bounded graph
@@ -899,6 +974,81 @@ struct Queue final : QuarantineNode {
  * capture is active, while allowing the existing C ABI execute calls to
  * reuse their eventless deferred completion path on the capture thread. */
 thread_local Queue *graph_capture_queue = nullptr;
+
+constexpr std::size_t kWholeDecodeResultReadbackBytes = 192U;
+
+bool reserve_pinned_d2h_slot(Queue *const queue, void **const pointer,
+                             uint32_t *const slot) noexcept {
+  if (queue == nullptr || pointer == nullptr || slot == nullptr) {
+    return false;
+  }
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  return false;
+#else
+  std::lock_guard<std::mutex> lock(queue->pinned_d2h_mutex);
+  for (std::size_t index = 0; index != queue->pinned_d2h_slots.size();
+       ++index) {
+    // Whole-graph replay must never allocate or register host memory after
+    // capture begins.  begin_capture preallocates every slot; a missing slot
+    // is a hard resource failure, even if another slot is available.
+    if (queue->pinned_d2h_slots[index] == nullptr) {
+      return false;
+    }
+    if (!queue->pinned_d2h_in_use[index]) {
+      queue->pinned_d2h_in_use[index] = true;
+      *pointer = queue->pinned_d2h_slots[index];
+      *slot = static_cast<uint32_t>(index);
+      return true;
+    }
+  }
+  return false;
+#endif
+}
+
+[[maybe_unused]] bool
+preallocate_pinned_d2h_slots(Queue *const queue) noexcept {
+  if (queue == nullptr) {
+    return false;
+  }
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  return false;
+#else
+  std::lock_guard<std::mutex> lock(queue->pinned_d2h_mutex);
+  std::array<void *, 2> allocated{};
+  for (std::size_t index = 0; index != allocated.size(); ++index) {
+    if (queue->pinned_d2h_slots[index] != nullptr) {
+      continue;
+    }
+    if (hipHostMalloc(&allocated[index], kWholeDecodeResultReadbackBytes,
+                      hipHostMallocPortable) != hipSuccess) {
+      for (void *const pointer : allocated) {
+        if (pointer != nullptr) {
+          (void)hipHostFree(pointer);
+        }
+      }
+      return false;
+    }
+  }
+  for (std::size_t index = 0; index != allocated.size(); ++index) {
+    if (queue->pinned_d2h_slots[index] == nullptr) {
+      queue->pinned_d2h_slots[index] = allocated[index];
+    }
+  }
+  return true;
+#endif
+}
+
+void release_pinned_d2h_slot(Queue *const queue, const uint32_t slot) noexcept {
+  if (queue == nullptr || slot >= queue->pinned_d2h_in_use.size()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(queue->pinned_d2h_mutex);
+  queue->pinned_d2h_in_use[slot] = false;
+}
+
+bool whole_graph_capture_active() noexcept;
+void invalidate_whole_graph_capture() noexcept;
+void *whole_graph_capture_device_control() noexcept;
 
 bool queue_profiles_completions(const Queue *const queue) noexcept {
   return queue != nullptr &&
@@ -1899,6 +2049,10 @@ struct Completion final : QuarantineNode {
   std::mutex state_mutex;
   sllm_public_runtime::CompletionSafetyState safety;
   std::vector<uint8_t> host_storage;
+  void *pinned_host_storage;
+  std::size_t pinned_host_size;
+  Queue *pinned_host_queue;
+  uint32_t pinned_host_slot;
   bool rmsnorm;
   bool rmsnorm_fused;
   RmsNormPlan *rmsnorm_plan;
@@ -2029,8 +2183,9 @@ struct Completion final : QuarantineNode {
         validator_kind(CompletionValidatorKind::None),
         semantic_failure_detail(SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK),
         api_pins(0U), wait_active(false), state_mutex(), safety(),
-        host_storage(std::move(storage)),
-        rmsnorm(rmsnorm_plan_value != nullptr),
+        host_storage(std::move(storage)), pinned_host_storage(nullptr),
+        pinned_host_size(0U), pinned_host_queue(nullptr),
+        pinned_host_slot(UINT32_MAX), rmsnorm(rmsnorm_plan_value != nullptr),
         rmsnorm_fused(rmsnorm_fused_value), rmsnorm_plan(rmsnorm_plan_value),
         rmsnorm_activation(rmsnorm_activation_value),
         rmsnorm_raw_scale(rmsnorm_raw_scale_value),
@@ -2092,7 +2247,28 @@ struct Completion final : QuarantineNode {
                    nullptr, nullptr, nullptr, {}, nullptr, nullptr, nullptr,
                    nullptr, nullptr, 0U, 0U, 0U, 0U, nullptr, {}, plan_value,
                    logits_value, output_value) {}
+
+  ~Completion() {
+    if (!orphaned)
+      release_pinned_host_storage(this);
+  }
 };
+
+/* A pinned result slot is a queue-owned resource.  Every path that drops a
+ * completion's queue/accounting reference calls this first; the destructor is
+ * only a defensive fallback for a candidate that never entered accounting
+ * rollback. */
+void release_pinned_host_storage(Completion *const completion) noexcept {
+  if (completion == nullptr || completion->pinned_host_storage == nullptr) {
+    return;
+  }
+  release_pinned_d2h_slot(completion->pinned_host_queue,
+                          completion->pinned_host_slot);
+  completion->pinned_host_storage = nullptr;
+  completion->pinned_host_size = 0U;
+  completion->pinned_host_queue = nullptr;
+  completion->pinned_host_slot = UINT32_MAX;
+}
 
 /* The plan stores copied descriptor metadata and its three retained buffer
  * identities.  Execution adds a single in-flight reservation to this graph. */
@@ -5561,6 +5737,11 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
   if (completion->context_child_released) {
     return true;
   }
+  // Return a reusable pinned D2H slot while the completion still owns its
+  // queue reference. Do this before accounting release can make the queue
+  // releasable; uncertain accounting failures leave the completion quarantined
+  // but the host staging memory is no longer touched by the completed event.
+  release_pinned_host_storage(completion);
   std::lock_guard<std::mutex> lock(completion->context->accounting_mutex);
   bool released = false;
   if (!sllm_public_runtime::FaultInjector::consume(
@@ -5994,7 +6175,9 @@ void fill_completion_result(const Completion *const completion,
   result->transfer_size_bytes = completion->transfer_size_bytes;
   result->available_bytes =
       completion->d2h && completion->terminal && completion->success
-          ? static_cast<uint64_t>(completion->host_storage.size())
+          ? static_cast<uint64_t>(completion->pinned_host_storage != nullptr
+                                      ? completion->pinned_host_size
+                                      : completion->host_storage.size())
           : 0U;
 }
 
@@ -6039,6 +6222,15 @@ sllm_status_t cleanup_failed_submission(
     std::lock_guard<std::mutex> registry_lock(registry_mutex);
     unregister_handle_token(token);
   }
+  if (queue == graph_capture_queue && whole_graph_capture_active()) {
+    // Captured work has not executed. A stream synchronize is forbidden here
+    // and would mask the actual launch error. Abort owns graph destruction;
+    // retain uncertain native resources until that failure is resolved.
+    invalidate_whole_graph_capture();
+    candidate->orphaned = true;
+    retain_poisoned(candidate, candidate->context);
+    return hip_failure(sink, primary_error, primary_operation);
+  }
   const hipError_t synchronize_status = hipStreamSynchronize(queue->stream);
   if (synchronize_status != hipSuccess) {
     candidate->orphaned = true;
@@ -6068,6 +6260,10 @@ sllm_status_t cleanup_failed_submission(
     }
     candidate->timing_start_event = nullptr;
   }
+  // The stream has been synchronized and the event ownership is settled, so
+  // no device work can still touch the pinned staging slot.  Return it before
+  // dropping queue/buffer accounting references.
+  release_pinned_host_storage(candidate.get());
   if (!rollback_submission_references(candidate.get())) {
     candidate->orphaned = true;
     retain_poisoned(candidate, candidate->context);
@@ -6278,6 +6474,9 @@ sllm_status_t rollback_unpublished_submission(
     return hip_failure(sink, timing_destroy_status,
                        "hipEventDestroy timing registry rollback");
   }
+  // Registration failed before the transfer was enqueued.  Release staging
+  // while the completion still owns its queue reference.
+  release_pinned_host_storage(candidate.get());
   if (!rollback_submission_references(candidate.get())) {
     candidate->orphaned = true;
     retain_poisoned(candidate, candidate->context);
@@ -6682,12 +6881,7 @@ sllm_status_t submit_copy(const sllm_queue_t *const raw_queue,
         sink, SLLM_STATUS_INVALID_ARGUMENT,
         "H2D transfer host pointer is null");
   }
-  std::vector<uint8_t> host_storage(
-      static_cast<std::size_t>(transfer->size_bytes));
-  if (!d2h) {
-    std::memcpy(host_storage.data(), transfer->host_pointer,
-                static_cast<std::size_t>(transfer->size_bytes));
-  }
+  std::vector<uint8_t> host_storage;
   Queue *queue = nullptr;
   Buffer *buffer = nullptr;
   {
@@ -6729,12 +6923,46 @@ sllm_status_t submit_copy(const sllm_queue_t *const raw_queue,
     }
   }
 
+  void *pinned_host_storage = nullptr;
+  uint32_t pinned_host_slot = UINT32_MAX;
+  const bool use_pinned_host =
+      d2h && transfer->size_bytes == kWholeDecodeResultReadbackBytes &&
+      reserve_pinned_d2h_slot(queue, &pinned_host_storage, &pinned_host_slot);
+  if (d2h && transfer->size_bytes == kWholeDecodeResultReadbackBytes &&
+      queue->whole_graph_result_readback_required.load(
+          std::memory_order_acquire) &&
+      !use_pinned_host) {
+    (void)rollback_reserved_submission(queue->context, queue, buffer, sink);
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_PUBLIC_BUSY,
+        "whole graph result readback pinned staging is unavailable");
+  }
   std::unique_ptr<Completion> candidate;
   try {
+    // Keep all allocations/copies after the accounting reservation inside the
+    // rollback scope.  A host allocation failure must release both the
+    // reserved submission and, when applicable, the pinned result slot.
+    if (!use_pinned_host) {
+      host_storage.resize(static_cast<std::size_t>(transfer->size_bytes));
+    }
+    if (!d2h) {
+      std::memcpy(host_storage.data(), transfer->host_pointer,
+                  static_cast<std::size_t>(transfer->size_bytes));
+    }
     candidate = std::make_unique<Completion>(queue->context, queue, buffer,
                                              transfer->size_bytes, d2h,
                                              std::move(host_storage));
+    if (use_pinned_host) {
+      candidate->pinned_host_storage = pinned_host_storage;
+      candidate->pinned_host_size =
+          static_cast<std::size_t>(transfer->size_bytes);
+      candidate->pinned_host_queue = queue;
+      candidate->pinned_host_slot = pinned_host_slot;
+    }
   } catch (...) {
+    if (use_pinned_host) {
+      release_pinned_d2h_slot(queue, pinned_host_slot);
+    }
     if (!rollback_reserved_submission(queue->context, queue, buffer, sink)) {
       return sllm_public_runtime::write_error(
           sink, SLLM_STATUS_INTERNAL_ERROR,
@@ -6748,6 +6976,9 @@ sllm_status_t submit_copy(const sllm_queue_t *const raw_queue,
   const sllm_status_t device_status =
       select_context_device(queue->context, sink);
   if (device_status != SLLM_STATUS_OK) {
+    // No HIP work has been enqueued yet; return the queue-owned staging slot
+    // before accounting rollback can make the queue releasable.
+    release_pinned_host_storage(candidate.get());
     if (!rollback_submission_references(candidate.get())) {
       candidate->orphaned = true;
       retain_poisoned(candidate, candidate->context);
@@ -6762,6 +6993,7 @@ sllm_status_t submit_copy(const sllm_queue_t *const raw_queue,
   const hipError_t event_status =
       hipEventCreateWithFlags(&native_event, hipEventDisableTiming);
   if (event_status != hipSuccess) {
+    release_pinned_host_storage(candidate.get());
     if (!rollback_submission_references(candidate.get())) {
       candidate->orphaned = true;
       retain_poisoned(candidate, candidate->context);
@@ -6792,7 +7024,9 @@ sllm_status_t submit_copy(const sllm_queue_t *const raw_queue,
   void *const destination =
       static_cast<char *>(buffer->device_pointer) +
       static_cast<std::size_t>(transfer->buffer_offset_bytes);
-  void *const source = candidate->host_storage.data();
+  void *const source = candidate->pinned_host_storage != nullptr
+                           ? candidate->pinned_host_storage
+                           : candidate->host_storage.data();
   const hipMemcpyKind direction =
       d2h ? hipMemcpyDeviceToHost : hipMemcpyHostToDevice;
   const hipError_t copy_status = hipMemcpyAsync(
@@ -8664,19 +8898,24 @@ extern "C" sllm_status_t sllm_completion_read(
           error_sink, SLLM_STATUS_UNSUPPORTED,
           "H2D completion has no host output");
     }
-    if (destination_capacity < completion->host_storage.size()) {
+    const std::size_t host_size = completion->pinned_host_storage != nullptr
+                                      ? completion->pinned_host_size
+                                      : completion->host_storage.size();
+    const void *const host_source = completion->pinned_host_storage != nullptr
+                                        ? completion->pinned_host_storage
+                                        : completion->host_storage.data();
+    if (destination_capacity < host_size) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_BUFFER_TOO_SMALL,
           "completion output destination is too small");
     }
-    if (destination == nullptr && !completion->host_storage.empty()) {
+    if (destination == nullptr && host_size != 0U) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INVALID_ARGUMENT,
           "completion output destination is null");
     }
-    std::memcpy(destination, completion->host_storage.data(),
-                completion->host_storage.size());
-    *bytes_written = static_cast<uint64_t>(completion->host_storage.size());
+    std::memcpy(destination, host_source, host_size);
+    *bytes_written = static_cast<uint64_t>(host_size);
     return SLLM_STATUS_OK;
   } catch (...) {
     return sllm_public_runtime::write_error(
@@ -11287,8 +11526,8 @@ sllm_kv_state_release(sllm_kv_state_t **const raw_state,
       }
       std::lock_guard<std::mutex> accounting_lock(
           state->context->accounting_mutex);
-      if (state->release_active || state->transition_token != 0U ||
-          state->view_count != 0U ||
+      if (state->release_active || state->graph_pins != 0U ||
+          state->transition_token != 0U || state->view_count != 0U ||
           state->accounting.active_submissions != 0U ||
           state->accounting.completion_references != 0U) {
         return sllm_public_runtime::write_error(
@@ -11842,6 +12081,7 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
     Buffer *value_input = nullptr;
     uint64_t dispatch_id = 0U;
     uint64_t submission_serial = 0U;
+    bool capture_append = false;
     {
       std::lock_guard<std::mutex> registry_lock(registry_mutex);
       state = lookup<KvState>(raw_state, HandleKind::KvState);
@@ -11877,8 +12117,28 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
             error_sink, SLLM_STATUS_PUBLIC_BUSY,
             "KV state already has an append in flight");
       }
-      if (metadata.expected_length != state->published_length ||
-          metadata.start_position != state->published_length) {
+      capture_append = whole_graph_capture_active() &&
+                       graph_capture_queue == queue &&
+                       whole_graph_capture_device_control() != nullptr;
+      if (state->graph_pins != 0U && !capture_append) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "KV state is owned by a whole-decode graph");
+      }
+      if (capture_append) {
+        // Capture describes future ordered draft positions. The published
+        // state stays at the initial position until replay has drained.
+        if (metadata.expected_length != metadata.start_position ||
+            metadata.start_position < state->published_length ||
+            metadata.start_position - state->published_length > 8U ||
+            (state->memory_kind == SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
+             state->shared_page_count != 0U)) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_PUBLIC_BUSY,
+              "captured KV append requires unshared or resident storage");
+        }
+      } else if (metadata.expected_length != state->published_length ||
+                 metadata.start_position != state->published_length) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_KV_LENGTH_MISMATCH,
             "KV append expected length is not the published state length");
@@ -11889,7 +12149,7 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
             error_sink, SLLM_STATUS_SHAPE_MISMATCH,
             "KV append input head layout differs from the state layout");
       }
-      if (metadata.end_position > state->capacity_tokens) {
+      if (!capture_append && metadata.end_position > state->capacity_tokens) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_KV_CAPACITY_EXCEEDED,
             "KV append exceeds state capacity");
@@ -12045,8 +12305,12 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
       if (bytes_per_token == 0U) {
         return hipSuccess;
       }
+      // Capture may describe inactive rows beyond the logical tail. Reserve
+      // the physical capacity for both resident and VMM planes; device
+      // control admits the active prefix before any write.
       const uint64_t required_tokens =
-          state->sliding_window == 0U
+          capture_append ? state->storage_capacity_tokens
+          : state->sliding_window == 0U
               ? metadata.end_position
               : std::min(metadata.end_position, state->storage_capacity_tokens);
       const uint64_t required_bytes = required_tokens * bytes_per_token;
@@ -12059,7 +12323,9 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
     };
     const auto cow_plane = [&](KvVmmPlane &plane,
                                const uint64_t bytes_per_token) -> hipError_t {
-      if (bytes_per_token == 0U || plane.contiguous) {
+      if (bytes_per_token == 0U || plane.contiguous ||
+          (capture_append &&
+           state->memory_kind == SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS)) {
         return hipSuccess;
       }
       const uint64_t physical_start =
@@ -12295,16 +12561,37 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
         byte_pointer(key_input, metadata.key_input.byte_offset));
     const uint16_t *const value_input_pointer = static_cast<const uint16_t *>(
         byte_pointer(value_input, metadata.value_input.byte_offset));
-    const hipError_t launch_status = ::sllm_kv_state_kernel::launch(
-        key_input_pointer, value_input_pointer,
-        state->key_buffer->device_pointer, state->value_buffer->device_pointer,
-        state->key_scale_plane.address, state->value_scale_plane.address,
-        static_cast<float *>(state->key_outer_scale_plane.address),
-        static_cast<float *>(state->value_outer_scale_plane.address),
-        static_cast<uint32_t>(metadata.token_count),
-        state->storage_capacity_tokens, metadata.start_position,
-        state->head_count, state->head_dim, state->encoding,
-        state->static_key_scale, state->static_value_scale, queue->stream);
+    const bool whole_capture = whole_graph_capture_active();
+    const hipError_t launch_status =
+        whole_capture
+            ? ::sllm_kv_state_kernel::launch_device(
+                  key_input_pointer, value_input_pointer,
+                  state->key_buffer->device_pointer,
+                  state->value_buffer->device_pointer,
+                  state->key_scale_plane.address,
+                  state->value_scale_plane.address,
+                  static_cast<float *>(state->key_outer_scale_plane.address),
+                  static_cast<float *>(state->value_outer_scale_plane.address),
+                  static_cast<uint32_t>(metadata.token_count),
+                  state->storage_capacity_tokens, state->head_count,
+                  state->head_dim, state->encoding, state->static_key_scale,
+                  state->static_value_scale,
+                  static_cast<sllm_decode_control::ControlV1 *>(
+                      whole_graph_capture_device_control()),
+                  queue->stream)
+            : ::sllm_kv_state_kernel::launch(
+                  key_input_pointer, value_input_pointer,
+                  state->key_buffer->device_pointer,
+                  state->value_buffer->device_pointer,
+                  state->key_scale_plane.address,
+                  state->value_scale_plane.address,
+                  static_cast<float *>(state->key_outer_scale_plane.address),
+                  static_cast<float *>(state->value_outer_scale_plane.address),
+                  static_cast<uint32_t>(metadata.token_count),
+                  state->storage_capacity_tokens, metadata.start_position,
+                  state->head_count, state->head_dim, state->encoding,
+                  state->static_key_scale, state->static_value_scale,
+                  queue->stream);
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,

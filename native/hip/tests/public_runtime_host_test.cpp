@@ -1,3 +1,4 @@
+#include "decode_graph_capture_internal.hpp"
 #include "evidence_abi.h"
 #include "matmul_api.hpp"
 #include "matmul_kernel_internal.hpp"
@@ -145,6 +146,68 @@ bool create_queue(const sllm_context_t *const context,
   Error error;
   return expect_status(sllm_queue_create(context, &info, queue, &error.sink),
                        SLLM_STATUS_OK, "sllm_queue_create", error);
+}
+
+bool whole_graph_capture_private_abi_host_contract() {
+  Error error;
+  auto *const fake_context =
+      reinterpret_cast<sllm_context_t *>(static_cast<uintptr_t>(1U));
+  auto *const fake_queue =
+      reinterpret_cast<sllm_queue_t *>(static_cast<uintptr_t>(2U));
+  auto *const fake_span =
+      reinterpret_cast<sllm_graph_span_t *>(static_cast<uintptr_t>(3U));
+  auto *const fake_completion =
+      reinterpret_cast<sllm_completion_t *>(static_cast<uintptr_t>(4U));
+  sllm_graph_span_t *span = nullptr;
+  const sllm_status_t invalid_begin = sllm_graph_span_begin_capture(
+      nullptr, fake_queue, nullptr, &span, &error.sink);
+  if (!expect_status(invalid_begin, SLLM_STATUS_INVALID_ARGUMENT,
+                     "whole graph capture null-context validation", error) ||
+      span != nullptr) {
+    return false;
+  }
+  const sllm_status_t begin = sllm_graph_span_begin_capture(
+      fake_context, fake_queue, nullptr, &span, &error.sink);
+  if (!expect_status(begin, SLLM_STATUS_HIP_UNAVAILABLE,
+                     "whole graph capture host stub", error) ||
+      span != nullptr) {
+    return false;
+  }
+  sllm_graph_span_capture_info_t info{};
+  info.struct_size = sizeof(info);
+  info.abi_version = SLLM_HIP_ABI_VERSION;
+  info.info_version = SLLM_HIP_GRAPH_SPAN_CAPTURE_INFO_VERSION;
+  const sllm_status_t end =
+      sllm_graph_span_end_capture(fake_span, &info, &error.sink);
+  if (!expect_status(end, SLLM_STATUS_HIP_UNAVAILABLE,
+                     "whole graph capture end host stub", error)) {
+    return false;
+  }
+  sllm_graph_span_t *abort_span = fake_span;
+  const sllm_status_t abort =
+      sllm_graph_span_abort_capture(&abort_span, &error.sink);
+  if (!expect_status(abort, SLLM_STATUS_HIP_UNAVAILABLE,
+                     "whole graph capture abort host stub", error)) {
+    return false;
+  }
+  sllm_completion_t *completion = fake_completion;
+  const sllm_status_t marker =
+      sllm_graph_span_capture_marker(fake_span, &completion, &error.sink);
+  if (!expect_status(marker, SLLM_STATUS_HIP_UNAVAILABLE,
+                     "whole graph capture marker host stub", error) ||
+      completion != fake_completion) {
+    return false;
+  }
+  sllm_graph_span_decode_command_desc_t command{};
+  command.struct_size = sizeof(command);
+  command.abi_version = SLLM_HIP_ABI_VERSION;
+  command.info_version = SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_VERSION;
+  command.opcode = SLLM_HIP_GRAPH_SPAN_DECODE_COMMAND_BEGIN_PHASE;
+  command.rows = 1U;
+  const sllm_status_t command_status =
+      sllm_graph_span_decode_command(fake_span, &command, &error.sink);
+  return expect_status(command_status, SLLM_STATUS_HIP_UNAVAILABLE,
+                       "whole graph decode command host stub", error);
 }
 
 bool linear_attention_gfx942_wave64_column_selector_contract() {
@@ -1152,14 +1215,13 @@ bool causal_attention_target_scoped_selector_contract() {
   constexpr const char *kStaged32Flag =
       "SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32";
   for (const auto target : {"gfx1030", "gfx1201"}) {
-    for (const auto length : {1023U, 1024U, 1025U}) {
-      for (const auto queries : {1U, 2U, 3U, 4U, 5U}) {
+    for (const auto length : {1U, 17U, 1023U, 1024U, 1025U}) {
+      for (const auto queries : {1U, 2U, 3U, 4U, 5U, 8U, 9U, 10U}) {
         const auto mask = select(length, queries, 24U, 4U, 256U,
                                  SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, target);
-        valid = valid && (((mask & kStaged32) != 0U) ==
-                          (length >= 1024U && queries <= 4U));
-        const bool shared_expected = std::strcmp(target, "gfx1030") == 0 &&
-                                     length >= 1024U && queries <= 3U;
+        valid = valid && (((mask & kStaged32) != 0U) == (queries <= 9U));
+        const bool shared_expected =
+            std::strcmp(target, "gfx1030") == 0 && queries <= 3U;
         valid = valid && (((mask & kGqaShared) != 0U) == shared_expected);
       }
     }
@@ -15248,6 +15310,10 @@ bool minimax_m3_moe_route_public_contract() {
 } // namespace
 
 int main() {
+  if (!whole_graph_capture_private_abi_host_contract()) {
+    std::cerr << "whole graph capture private ABI host contract test failed\n";
+    return 1;
+  }
   if (!minimax_m3_moe_route_public_contract()) {
     std::cerr << "MiniMax M3 MoE route public contract test failed\n";
     return 1;

@@ -1,6 +1,8 @@
 #ifndef SLLM_KV_STATE_KERNEL_INTERNAL_HPP
 #define SLLM_KV_STATE_KERNEL_INTERNAL_HPP
 
+#include "decode_control_kernel_internal.hpp"
+
 #include "sllm/hip.h"
 
 #include <hip/hip_runtime.h>
@@ -68,6 +70,20 @@ hipError_t launch(const uint16_t *key_input, const uint16_t *value_input,
                   uint32_t head_count, uint32_t head_dim, uint32_t encoding,
                   float static_key_scale, float static_value_scale,
                   hipStream_t stream) noexcept;
+
+/* Whole-decode graph append route.  The graph keeps base KV allocations and
+ * reads phase_position/phase_rows from the device control at replay time;
+ * unsupported legacy/static encodings fail closed instead of using a stale
+ * host position. */
+hipError_t launch_device(const uint16_t *key_input, const uint16_t *value_input,
+                         void *key_output, void *value_output, void *key_scales,
+                         void *value_scales, float *key_outer_scales,
+                         float *value_outer_scales, uint32_t token_count,
+                         uint64_t capacity_tokens, uint32_t head_count,
+                         uint32_t head_dim, uint32_t encoding,
+                         float static_key_scale, float static_value_scale,
+                         sllm_decode_control::ControlV1 *control,
+                         hipStream_t stream) noexcept;
 
 } // namespace sllm_kv_state_kernel
 

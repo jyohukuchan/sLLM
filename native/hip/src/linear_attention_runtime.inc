@@ -404,7 +404,8 @@ hipError_t launch_row32_lds(const uint16_t *const, const uint16_t *const,
                             float *const, uint16_t *const, const uint32_t,
                             const uint32_t, const uint32_t, const uint32_t,
                             const uint32_t, const uint32_t,
-                            const hipStream_t) noexcept {
+                            const hipStream_t,
+                            sllm_decode_control::ControlV1 *const) noexcept {
   return hipSuccess;
 }
 } // namespace sllm_linear_attention_kernel
@@ -693,7 +694,8 @@ extern "C" sllm_status_t sllm_linear_attention_state_release(
             "linear attention state handle is stale or has the wrong kind");
       }
       std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
-      if (state->release_active || state->transition_token != 0U ||
+      if (state->release_active || state->graph_pins != 0U ||
+          state->transition_token != 0U ||
           state->accounting.active_submissions != 0U ||
           state->accounting.completion_references != 0U) {
         return sllm_public_runtime::write_error(
@@ -1360,6 +1362,11 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
     LinearAttentionState *state = nullptr;
     LinearAttentionBuffers buffers{};
     uint64_t dispatch_id = 0U;
+    const bool capture_linear = whole_graph_capture_active();
+    uint32_t capture_anchor_slot = 0U;
+    uint32_t capture_checkpoint_rows = 0U;
+    uint16_t *capture_checkpoint_conv = nullptr;
+    float *capture_checkpoint_recurrent = nullptr;
     {
       std::lock_guard<std::mutex> registry_lock(registry_mutex);
       context = lookup<Context>(raw_context, HandleKind::Context);
@@ -1404,9 +1411,32 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
               "linear attention tensor interval exceeds its backing buffer");
         }
       }
+      if (capture_linear) {
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+        const GraphLinearStateBinding *const binding = whole_graph_linear_binding(state);
+        if (queue != graph_capture_queue || binding == nullptr ||
+            binding->token_count != metadata.token_count ||
+            binding->anchor_slot != state->active_slot ||
+            binding->initial_published_length != state->published_length ||
+            binding->initial_generation != state->generation) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+              "linear capture requires a matching stable state binding");
+        }
+        capture_anchor_slot = binding->anchor_slot;
+        capture_checkpoint_rows = binding->checkpoint_rows;
+        capture_checkpoint_conv = static_cast<uint16_t *>(binding->checkpoint_conv);
+        capture_checkpoint_recurrent = static_cast<float *>(binding->checkpoint_recurrent);
+#else
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+            "linear capture is unavailable in the host runtime");
+#endif
+      }
       std::lock_guard<std::mutex> lock(context->accounting_mutex);
       if (context->poisoned.load() || context->release_active ||
           queue->release_active || state->release_active ||
+          (state->graph_pins != 0U && !whole_graph_capture_active()) ||
           state->transition_token != 0U ||
           state->accounting.active_submissions != 0U ||
           state->accounting.completion_references != 0U ||
@@ -1418,8 +1448,14 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
             error_sink, SLLM_STATUS_LINEAR_ATTENTION_STATE_BUSY,
             "linear attention state or dependency is busy");
       }
-      if (metadata.start_position != state->published_length ||
-          metadata.expected_length > state->capacity_tokens) {
+      const bool length_valid =
+          capture_linear
+              ? metadata.token_count != 0U && metadata.token_count <= 9U &&
+                    metadata.start_position >= state->published_length &&
+                    metadata.start_position - state->published_length <= 8U
+              : metadata.start_position == state->published_length &&
+                    metadata.expected_length <= state->capacity_tokens;
+      if (!length_valid) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_LINEAR_ATTENTION_LENGTH_MISMATCH,
             "linear attention range does not start at the committed state "
@@ -1433,7 +1469,7 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
             error_sink, SLLM_STATUS_SHAPE_MISMATCH,
             "linear attention tensor layout differs from the state layout");
       }
-      if (state->checkpoint_armed &&
+      if (!capture_linear && state->checkpoint_armed &&
           (metadata.token_count != 3U ||
            metadata.start_position != state->checkpoint_start ||
            metadata.expected_length != state->checkpoint_end ||
@@ -1575,6 +1611,13 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
     const bool use_row32_lds_provider = row32_lds_state_opt_in(
         metadata.token_count, metadata.qk_heads, metadata.value_heads,
         metadata.head_dim, arch_name, force_baseline);
+    if (capture_linear &&
+        (use_decode_pair_provider || use_column_provider ||
+         use_gfx942_wave64_column_provider)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "linear attention whole capture requires a control-aware recurrent provider");
+    }
     try {
       candidate = std::make_unique<Completion>(context, queue, nullptr, 0U,
                                                false, std::vector<uint8_t>{});
@@ -1639,7 +1682,29 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
           candidate, token, timing_record_status,
           "hipEventRecord linear attention timing start", queue, error_sink);
     }
-    const uint32_t active_slot = state->active_slot;
+    sllm_decode_control::ControlV1 *capture_control = nullptr;
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    capture_control = capture_linear
+                          ? static_cast<sllm_decode_control::ControlV1 *>(
+                                whole_graph_capture_device_control())
+                          : nullptr;
+#endif
+    if (capture_linear && capture_control == nullptr) {
+      return cleanup_failed_submission(
+          candidate, token, hipErrorInvalidValue,
+          "linear attention capture control binding disappeared", queue,
+          error_sink);
+    }
+    const uint32_t active_slot =
+        capture_linear ? capture_anchor_slot : state->active_slot;
+    const uint32_t checkpoint_rows = capture_linear ? capture_checkpoint_rows
+        : (state->checkpoint_armed ? state->checkpoint_rows : 0U);
+    uint16_t *const checkpoint_conv = capture_linear ? capture_checkpoint_conv
+        : (state->checkpoint_armed
+               ? static_cast<uint16_t *>(state->checkpoint_conv_state[0]) : nullptr);
+    float *const checkpoint_recurrent = capture_linear ? capture_checkpoint_recurrent
+        : (state->checkpoint_armed
+               ? static_cast<float *>(state->checkpoint_recurrent_state[0]) : nullptr);
     const uint32_t inactive_slot = 1U - active_slot;
     const auto *const qkv = static_cast<const uint16_t *>(
         linear_binding_pointer(buffers[0], metadata.qkv.byte_offset));
@@ -1667,10 +1732,7 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
             static_cast<uint16_t *>(state->conv_state[inactive_slot]),
             static_cast<uint32_t>(metadata.token_count), metadata.qkv_width,
             metadata.conv_kernel_size, queue->stream,
-            state->checkpoint_armed
-                ? static_cast<uint16_t *>(state->checkpoint_conv_state[0])
-                : nullptr,
-            state->checkpoint_armed ? state->checkpoint_rows : 0U);
+            checkpoint_conv, checkpoint_rows, capture_control);
     if (conv_status != hipSuccess) {
       return cleanup_failed_submission(candidate, token, conv_status,
                                        "linear attention convolution launch",
@@ -1685,7 +1747,8 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
               static_cast<float *>(state->recurrent_state[inactive_slot]),
               output, static_cast<uint32_t>(metadata.token_count),
               metadata.qk_heads, metadata.value_heads, metadata.head_dim,
-              metadata.qkv_width, metadata.output_width, queue->stream);
+              metadata.qkv_width, metadata.output_width, queue->stream,
+              capture_control);
       if (recurrent_status != hipSuccess) {
         return cleanup_failed_submission(
             candidate, token, recurrent_status,
@@ -1799,10 +1862,7 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
               output, static_cast<uint32_t>(metadata.token_count),
               metadata.qk_heads, metadata.value_heads, metadata.head_dim,
               metadata.qkv_width, metadata.output_width, queue->stream,
-              state->checkpoint_armed
-                  ? static_cast<float *>(state->checkpoint_recurrent_state[0])
-                  : nullptr,
-              state->checkpoint_armed ? state->checkpoint_rows : 0U);
+              checkpoint_recurrent, checkpoint_rows, capture_control);
       if (recurrent_status != hipSuccess) {
         return cleanup_failed_submission(candidate, token, recurrent_status,
                                          "linear attention recurrent launch",

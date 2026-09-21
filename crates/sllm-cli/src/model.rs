@@ -5708,9 +5708,12 @@ impl ModelFrontendBackend for ProductionBackend {
                         ),
                     }
                     .map_err(|error| format!("MTP resident provisioning failed: {error}"))?;
-                    let mtp_owner = mtp_resident
-                        .new_request(mtp_graph)
-                        .map_err(|error| format!("MTP request provisioning failed: {error}"))?;
+                    let mtp_owner = if owner.supports_whole_decode() {
+                        mtp_resident.new_request_on_queue_of(mtp_graph, &owner)
+                    } else {
+                        mtp_resident.new_request(mtp_graph)
+                    }
+                    .map_err(|error| format!("MTP request provisioning failed: {error}"))?;
                     let draft_width = usize::from(mtp_plan.effective_width.ok_or_else(|| {
                         "MTP selection omitted an effective draft width".to_owned()
                     })?);

@@ -6,12 +6,17 @@
 //! Every operation reaches a backend only through the existing owned
 //! execution/session contracts.
 
+#[path = "qwen_decode_capture.rs"]
+mod decode_capture;
+#[path = "qwen_mtp_decode_capture.rs"]
+mod mtp_decode_capture;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -689,6 +694,44 @@ fn should_skip_derived_position_upload(
         && !mtp
         && !has_multimodal_payload
         && !has_explicit_positions
+}
+
+const WHOLE_DECODE_CAPTURE_MAX_ROWS: u64 = 9;
+
+fn attention_preprocess_context_limit(
+    explicit_positions: bool,
+    multimodal: bool,
+    capturing: bool,
+    state_capacity: u64,
+    token_count: u64,
+) -> Result<u32, QwenExecutionError> {
+    let limit = if capturing {
+        if multimodal || !(1..=WHOLE_DECODE_CAPTURE_MAX_ROWS).contains(&token_count) {
+            return Err(QwenExecutionError::InvalidRequest(
+                "whole-decode attention preprocess requires one through nine derived text rows"
+                    .to_owned(),
+            ));
+        }
+        // The captured descriptor keeps the maximum nine-row graph shape. At
+        // the physical tail, inactive rows may therefore extend at most eight
+        // positions past the request capacity; device control masks them.
+        state_capacity
+            .checked_add(WHOLE_DECODE_CAPTURE_MAX_ROWS - 1)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "capture attention position limit overflowed".to_owned(),
+                )
+            })?
+    } else if explicit_positions {
+        QWEN_RUNTIME_MAX_CONTEXT_TOKENS
+    } else {
+        state_capacity
+    };
+    u32::try_from(limit).map_err(|_| {
+        QwenExecutionError::InvalidRequest(
+            "request context exceeds the u32 execution ABI".to_owned(),
+        )
+    })
 }
 
 const QWEN_DEFERRED_COMPLETION_ENV: &str = "SLLM_QWEN_DEFERRED_COMPLETION";
@@ -1516,6 +1559,7 @@ pub struct QwenExecutionAudit {
     boundary_count: u64,
     physical_queue_fence_count: u64,
     graph_replay_count: u64,
+    whole_decode_audit: Option<crate::DecodeReplayAuditV1>,
     graph_span_count: u64,
     graph_capture_kernel_node_count: u64,
     kv_append_attention_chain_count: u64,
@@ -1583,6 +1627,10 @@ impl QwenExecutionAudit {
     pub const fn graph_replay_count(&self) -> u64 {
         self.graph_replay_count
     }
+    pub const fn whole_decode_audit(&self) -> Option<crate::DecodeReplayAuditV1> {
+        self.whole_decode_audit
+    }
+
     pub const fn graph_span_count(&self) -> u64 {
         self.graph_span_count
     }
@@ -2507,6 +2555,31 @@ impl QwenResidentModel {
         })
     }
 
+    /// Creates a companion request on the same queue as a fresh target.
+    /// Both requests must belong to one execution session. This permits one
+    /// ordered decode graph to contain the target and its MTP companion.
+    pub fn new_request_on_queue_of(
+        &self,
+        graph: QwenGraph,
+        peer: &QwenExecutionRequest,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        if self.session_id() != peer.session_id() || peer.committed_length() != 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "paired request queue requires a fresh peer in the same session".to_owned(),
+            ));
+        }
+        let core = QwenExecutionCore::from_resident_on_queue(
+            Arc::clone(&self.inner),
+            graph,
+            AdapterRequestSetV1::disabled(),
+            Some(peer.core.queue.clone()),
+        )?;
+        Ok(QwenExecutionRequest {
+            _resident: Arc::clone(&self.inner),
+            core,
+        })
+    }
+
     /// Builds a fresh explicit-position Qwen request from retained prefix and
     /// recent token ranges. The source history is only read; state publication
     /// occurs on the fresh request after the retained prefill succeeds.
@@ -2783,6 +2856,161 @@ impl QwenExecutionRequest {
         let resident =
             QwenResidentModel::new(session, graph.clone(), plan, cache, completion_timeout)?;
         resident.new_request(graph)
+    }
+
+    /// Keeps the eager warmup from building partial graphs that the following
+    /// whole-decode graph would supersede. Configure before generation starts.
+    pub fn prepare_whole_decode_warmup(&mut self) -> Result<(), QwenExecutionError> {
+        if self.core.lifecycle.is_poisoned() || self.core.committed_length != 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "whole-decode warmup must be configured on a fresh request".to_owned(),
+            ));
+        }
+        self.core.qwen38_graph_spans_enabled = false;
+        Ok(())
+    }
+
+    /// Reports whether this fresh request is inside the conservative automatic
+    /// whole-decode target scope. Ineligible requests keep the established
+    /// eager decode path.
+    pub fn supports_whole_decode(&self) -> bool {
+        self.core.supports_whole_decode()
+    }
+
+    /// Enables automatic target whole-decode activation after the first eager
+    /// decode step. No frontend path enables this without an explicit budget.
+    pub fn configure_whole_target_decode(
+        &mut self,
+        output_limit: u64,
+        stop_ids: &[u32],
+    ) -> Result<bool, QwenExecutionError> {
+        self.core
+            .configure_whole_target_decode(output_limit, stop_ids)
+    }
+
+    /// Starts a fixed-sampler whole-decode replay after an eager warmup step.
+    /// The output budget includes selections already returned to the caller.
+    pub fn start_whole_target_decode(
+        &mut self,
+        pending_token: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+        output_count: u64,
+        output_limit: u64,
+        stop_ids: &[u32],
+    ) -> Result<(), QwenExecutionError> {
+        self.core.start_whole_target_decode(
+            pending_token,
+            selector,
+            output_count,
+            output_limit,
+            stop_ids,
+        )
+    }
+
+    /// Starts the paired fixed-sampler MTP graph after a completed eager block.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_whole_mtp_replay(
+        &mut self,
+        companion: &mut Self,
+        pending_token: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+        output_count: u64,
+        output_limit: u64,
+        stop_ids: &[u32],
+        initial_target_hidden: &[u16],
+        draft_width: usize,
+    ) -> Result<crate::DecodeReplayController, QwenExecutionError> {
+        if self.core.lifecycle.is_poisoned() || companion.core.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        let hidden_id = self.core.final_hidden_tensor_ids()?.0;
+        let view = self.core.view(hidden_id, 1)?;
+        let bytes = initial_target_hidden
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        upload_exact_bytes(
+            self.core.session.as_ref(),
+            &self.core.queue,
+            &self.core.tensors[hidden_id].buffer,
+            &view,
+            &bytes,
+            self.core.completion_timeout,
+            "whole MTP initial target hidden",
+        )?;
+        let mut initial = crate::DecodeControlV1::new(
+            crate::DecodeControlModeV1::Mtp,
+            u32::try_from(draft_width)
+                .map_err(|_| QwenExecutionError::InvalidRequest("MTP width overflow".to_owned()))?,
+            self.core
+                .graph
+                .state_capacity()
+                .min(companion.core.graph.state_capacity()),
+            self.core.committed_length,
+            selector.counter(),
+            selector.seed(),
+            output_limit,
+            pending_token,
+            selector.vocab_size() as u32,
+        )?;
+        initial.output_count = output_count;
+        initial.hidden_row = 0;
+        let startup = Instant::now();
+        let captured =
+            self.core
+                .capture_mtp_decode_graph(&mut companion.core, initial, selector, stop_ids)?;
+        let mut replay = crate::DecodeReplayController::new(
+            Arc::clone(&self.core.session),
+            captured.graph,
+            captured.ring,
+            captured.initial,
+            selector.vocab_size() as u32,
+            self.core.completion_timeout,
+        )?;
+        replay.set_startup_ns(u64::try_from(startup.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        replay.start()?;
+        Ok(replay)
+    }
+
+    /// Records a validated whole-graph result. Native state publication remains
+    /// the replay controller's responsibility after all GPU work has drained.
+    pub fn record_whole_decode_progress(
+        &mut self,
+        result: &crate::DecodeResultV1,
+        audit: Option<crate::DecodeReplayAuditV1>,
+    ) -> Result<(), QwenExecutionError> {
+        if self.core.lifecycle.is_poisoned()
+            || result.model_position_before != self.core.committed_length
+            || result.count == 0
+            || result.status != crate::DecodeControlStatusV1::Ok
+            || result.selections.is_empty()
+        {
+            self.core.lifecycle.cancel();
+            return Err(QwenExecutionError::InvalidRequest(
+                "whole decode result does not continue this request".to_owned(),
+            ));
+        }
+        self.core.committed_length = result.model_position_after;
+        self.core.last_output = Some(QwenExecutionOutput {
+            token_ids: result
+                .selected_token_ids()
+                .into_iter()
+                .map(|id| id as i32)
+                .collect(),
+            last_logits: None,
+            selection: result.selections.last().cloned(),
+            selections: Some(result.selections.clone()),
+            logits_bf16: None,
+            hidden_states_bf16: None,
+            embeddings_bf16: None,
+            committed_length: result.model_position_after,
+        });
+        *self
+            .core
+            .whole_decode_audit
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)? = audit;
+        Ok(())
     }
 
     /// Runs the graph from position zero. A request accepts exactly the D0
@@ -3465,6 +3693,9 @@ fn qwen38_graph_node_is_stateless(node: &QwenGraphNode) -> bool {
 
 struct QwenExecutionCore {
     // Graph payloads release before cached plans, buffers and the queue.
+    whole_decode: Mutex<Option<decode_capture::RunningTargetDecode>>,
+    whole_decode_audit: Mutex<Option<crate::DecodeReplayAuditV1>>,
+    whole_decode_config: Option<decode_capture::WholeTargetDecodeConfig>,
     graph_replay: Mutex<PreparedGraphReplayState>,
     device_sampling: Mutex<Option<DeviceSamplingBuffers>>,
     fixed_k20_support_capture: Mutex<Option<FixedK20SupportCapture>>,
@@ -3473,6 +3704,7 @@ struct QwenExecutionCore {
     graph_collect_node: AtomicBool,
     qwen38_graph_spans_enabled: bool,
     session: Arc<ExecutionSession>,
+    qwen38_artifact: Option<Arc<crate::VerifiedUnslothQwen38Nvfp4>>,
     graph: QwenGraph,
     execution_plan: PreparedExecutionPlan<QwenGraphNode>,
     plan: Arc<WeightLoadPlan>,
@@ -5844,6 +6076,10 @@ impl QwenExecutionCore {
             }
         }
         self.lifecycle.cancel();
+        if let Ok(running) = self.whole_decode.get_mut() {
+            drop(running.take());
+        }
+        self.whole_decode_config = None;
     }
 
     fn begin_fixed_k20_support_capture(
@@ -6308,6 +6544,23 @@ impl QwenExecutionCore {
         graph: QwenGraph,
         adapters: AdapterRequestSetV1,
     ) -> Result<Self, QwenExecutionError> {
+        Self::from_resident_on_queue(resident, graph, adapters, None)
+    }
+
+    fn from_resident_on_queue(
+        resident: Arc<QwenResidentInner>,
+        graph: QwenGraph,
+        adapters: AdapterRequestSetV1,
+        shared_queue: Option<ExecutionQueue>,
+    ) -> Result<Self, QwenExecutionError> {
+        if shared_queue
+            .as_ref()
+            .is_some_and(|queue| queue.session_id() != resident.session.id())
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "shared decode queue belongs to another session".to_owned(),
+            ));
+        }
         // The graph is already owned by this request. Disabled rewrites must
         // pass it through without the borrowed rewrite API's deep clone.
         let residual_rmsnorm_scope = qwen_residual_rmsnorm_fusion_scope(
@@ -6508,7 +6761,9 @@ impl QwenExecutionCore {
                             KvCacheEncoding::Fp16 | KvCacheEncoding::Mxfp8E4
                         )
                     });
-        let queue = if qwen38_deferred_completion || qwen38_kv_append_attention_chain {
+        let queue = if let Some(queue) = shared_queue {
+            queue
+        } else if qwen38_deferred_completion || qwen38_kv_append_attention_chain {
             resident.session.create_queue()?
         } else {
             resident.queue.clone()
@@ -6559,6 +6814,9 @@ impl QwenExecutionCore {
             graph_span_env.and_then(std::env::var_os).as_deref(),
         );
         let core = Self {
+            whole_decode: Mutex::new(None),
+            whole_decode_audit: Mutex::new(None),
+            whole_decode_config: None,
             graph_replay: Mutex::new(PreparedGraphReplayState::default()),
             device_sampling: Mutex::new(None),
             fixed_k20_support_capture: Mutex::new(None),
@@ -6567,6 +6825,7 @@ impl QwenExecutionCore {
             graph_collect_node: AtomicBool::new(false),
             qwen38_graph_spans_enabled,
             session: Arc::clone(&resident.session),
+            qwen38_artifact: resident.qwen38_artifact.clone(),
             graph,
             execution_plan,
             plan: Arc::clone(&resident.plan),
@@ -7402,6 +7661,9 @@ impl QwenExecutionCore {
             short_terminal_last_row: false,
             bf16_row_concat_count: AtomicU64::new(0),
             qwen38_nvfp4_prefill_shared_activation: false,
+            whole_decode: Mutex::new(None),
+            whole_decode_audit: Mutex::new(None),
+            whole_decode_config: None,
             graph_replay: Mutex::new(PreparedGraphReplayState::default()),
             device_sampling: Mutex::new(None),
             fixed_k20_support_capture: Mutex::new(None),
@@ -7409,6 +7671,7 @@ impl QwenExecutionCore {
             selector_batch: None,
             graph_collect_node: AtomicBool::new(false),
             qwen38_graph_spans_enabled: false,
+            qwen38_artifact: None,
             qwen38_deferred_completion: false,
             qwen38_kv_append_attention_chain: false,
             chain_active: AtomicBool::new(false),
@@ -7801,7 +8064,18 @@ impl QwenExecutionCore {
                 "device token selector is unsupported for MTP graphs".to_owned(),
             ));
         }
-        self.decode_impl(token_id, false, false, false, None, Some(selector))
+        if let Some(output) = self.whole_decode_step(token_id, selector)? {
+            return Ok(output);
+        }
+        let output = match self.decode_impl(token_id, false, false, false, None, Some(selector)) {
+            Ok(output) => output,
+            Err(error) => {
+                self.whole_decode_config = None;
+                return Err(error);
+            }
+        };
+        self.maybe_activate_whole_target_decode(&output, selector)?;
+        Ok(output)
     }
 
     fn decode_with_mtp_state(
@@ -8608,6 +8882,7 @@ impl QwenExecutionCore {
             emit_terminal,
             device_selector,
             stop_after_kv_append,
+            None,
         )?;
         let last_logits = include_last_logits
             .then(|| self.read_last_logits(token_count, terminal_rows))
@@ -8671,7 +8946,9 @@ impl QwenExecutionCore {
         emit_terminal: bool,
         device_selector: Option<&DeviceTokenSelectorRequestV1>,
         stop_after_kv_append: bool,
+        capture: Option<&mut crate::ExecutionWholeDecodeCapture>,
     ) -> Result<TerminalSelection, QwenExecutionError> {
+        let capturing = capture.is_some();
         let plan = self.execution_plan.clone();
         self.chain_active.store(false, Ordering::Release);
         let transition = PreparedTransition::new(token_count, start_position, 0, start_position)?;
@@ -8683,7 +8960,8 @@ impl QwenExecutionCore {
         // Layer graph spans and the KV append/attention chain finish before
         // terminal selection. The sampler is submitted after them on the same
         // queue, outside capture, with fresh request-local RNG scalars.
-        let chain_active = self.qwen38_kv_append_attention_chain
+        let chain_active = !capturing
+            && self.qwen38_kv_append_attention_chain
             && token_count == 1
             && emit_terminal
             && !stop_after_kv_append
@@ -8692,7 +8970,8 @@ impl QwenExecutionCore {
                 AttentionPreprocessPositionMode::DecodeContinuation
             );
         self.chain_active.store(chain_active, Ordering::Release);
-        let graph_active = self.qwen38_graph_spans_enabled
+        let graph_active = !capturing
+            && self.qwen38_graph_spans_enabled
             && token_count == 1
             && emit_terminal
             && matches!(
@@ -8729,12 +9008,20 @@ impl QwenExecutionCore {
         } else {
             PreparedCompletionMode::Profiled
         };
-        let mut pending = ExecutionSegment::for_mode(
-            self.session.as_ref(),
-            &self.queue,
-            self.completion_timeout,
-            completion_mode,
-        )?;
+        let mut pending = match capture {
+            Some(capture) => ExecutionSegment::for_capture(
+                self.session.as_ref(),
+                &self.queue,
+                self.completion_timeout,
+                capture,
+            ),
+            None => ExecutionSegment::for_mode(
+                self.session.as_ref(),
+                &self.queue,
+                self.completion_timeout,
+                completion_mode,
+            )?,
+        };
         let execute_result =
             plan.execute_with_ordinal(transition, |planned, transition, node_ordinal| {
                 self.current_node_ordinal
@@ -9850,6 +10137,13 @@ impl QwenExecutionCore {
             true,
             pending,
         )?;
+        if pending.is_capturing() {
+            return Ok(Some(TerminalSelection {
+                token_ids: Vec::new(),
+                selection: None,
+                selections: None,
+            }));
+        }
         let selection = selection.ok_or_else(|| {
             QwenExecutionError::InvalidRequest(
                 "single device selector cannot omit its public selection".to_owned(),
@@ -9942,18 +10236,37 @@ impl QwenExecutionCore {
                 selector,
                 self.completion_timeout,
             )?;
+        let capturing = pending.is_capturing();
+        if capturing && !self.graph.is_mtp() {
+            let row = u32::try_from(row).map_err(|_| {
+                QwenExecutionError::InvalidRequest(
+                    "selector capture row does not fit device control".to_owned(),
+                )
+            })?;
+            pending.capture_command(
+                &crate::ExecutionDecodeCommand::new(1, 0, row, 1, 0, 0, 0, 0, 0, 0),
+                [None, None, None, None],
+            )?;
+        }
         let mut submission = self.submit_semantic(
             prepared.descriptor,
             prepared.inputs,
             prepared.outputs,
             PreparedCachePolicy::Transient,
         )?;
-        self.close_boundary_with_semantic(
-            pending,
-            node.label(),
-            &mut submission,
-            ExecutionBoundaryKind::TerminalReadback,
-        )?;
+        let mut submission = if capturing {
+            pending.retain_semantic(node.label(), submission);
+            self.close_boundary(pending, ExecutionBoundaryKind::TerminalReadback)?;
+            None
+        } else {
+            self.close_boundary_with_semantic(
+                pending,
+                node.label(),
+                &mut submission,
+                ExecutionBoundaryKind::TerminalReadback,
+            )?;
+            Some(submission)
+        };
         let capture_slot = {
             let capture = self
                 .fixed_k20_support_capture
@@ -9969,8 +10282,11 @@ impl QwenExecutionCore {
             self.lifecycle.cancel();
             return Err(error);
         }
-        let selection = if publish_public_selection {
-            let mut readback = submission.start_output_readback(0)?;
+        let selection = if publish_public_selection && !capturing {
+            let mut readback = submission
+                .as_mut()
+                .expect("eager selector owner")
+                .start_output_readback(0)?;
             require_terminal_success(node.label(), readback.wait(self.completion_timeout)?)?;
             let mut bytes = [0_u8; 16];
             let copied = readback.read_into(&mut bytes)?;
@@ -9990,7 +10306,13 @@ impl QwenExecutionCore {
                     "fixed-K20 support capture requires a top-k 20 selector".to_owned(),
                 ));
             }
-            if let Err(error) = storage
+            if capturing {
+                let copy = storage
+                    .as_ref()
+                    .expect("device sampling storage")
+                    .enqueue_fixed_k20_support_row(self.session.as_ref(), &self.queue, slot)?;
+                pending.retain_device_copy(copy);
+            } else if let Err(error) = storage
                 .as_mut()
                 .expect("device sampling storage")
                 .capture_fixed_k20_support_row(
@@ -10692,23 +11014,22 @@ impl QwenExecutionCore {
             execution.q_heads,
             execution.kv_heads,
             execution.head_dim,
-            u32::try_from(if self.graph.position_payload_mode()
-                == crate::AttentionPreprocessPositionPayloadModeV1::Explicit
-            {
-                QWEN_RUNTIME_MAX_CONTEXT_TOKENS
-            } else {
-                self.graph.state_capacity()
-            })
-            .map_err(|_| {
-                QwenExecutionError::InvalidRequest(
-                    "request context exceeds the u32 execution ABI".to_owned(),
-                )
-            })?,
-            execution_position_payload_mode(
-                self.graph.position_payload_mode(),
+            attention_preprocess_context_limit(
+                self.graph.position_payload_mode()
+                    == crate::AttentionPreprocessPositionPayloadModeV1::Explicit,
                 self.graph.is_multimodal(),
-                self.graph.is_mtp(),
-            ),
+                pending.is_capturing(),
+                self.graph.state_capacity(),
+                execution.token_count,
+            )?,
+            if pending.is_capturing() && !self.graph.is_multimodal() {
+                crate::AttentionPreprocessPositionPayloadModeV1::DerivedContiguous
+            } else {
+                execution_position_payload_mode(
+                    self.graph.position_payload_mode(),
+                    self.graph.is_multimodal(), self.graph.is_mtp(),
+                )
+            },
         )?;
         let descriptor = SemanticOpDescriptor::new_attention_preprocess(
             self.views(node.inputs(), execution.token_count)?,
@@ -10750,14 +11071,29 @@ impl QwenExecutionCore {
         self.phase54_transform_vo_value(layer, descriptor, &value)?;
         #[cfg(feature = "phase54-research")]
         self.phase54_roundtrip_kv_inputs(layer, descriptor, &key, &value)?;
-        let mut submission = self.session.append_kv_state(
-            state,
-            &self.queue,
-            key,
-            value,
-            execution.start_position,
-            execution.start_position,
-        )?;
+        let mut submission = if pending.is_capturing() {
+            self.session.append_kv_state_for_capture(
+                state,
+                &self.queue,
+                key,
+                value,
+                execution.start_position,
+                execution.start_position,
+            )?
+        } else {
+            self.session.append_kv_state(
+                state,
+                &self.queue,
+                key,
+                value,
+                execution.start_position,
+                execution.start_position,
+            )?
+        };
+        if pending.is_capturing() {
+            pending.retain_kv_append(node.label(), submission)?;
+            return self.close_boundary(pending, ExecutionBoundaryKind::StatePublication);
+        }
         if self.chain_active.load(Ordering::Acquire) {
             if boundary_after != Some(ExecutionBoundaryKind::StatePublication) {
                 return Err(QwenExecutionError::InvalidGraph(format!(
@@ -10840,9 +11176,18 @@ impl QwenExecutionCore {
             pending.retain_kv_append(format!("{}.kv_append", node.label()), append)?;
             pending.retain_causal_attention(node.label(), submission);
         } else {
-            let submission =
+            let submission = if pending.is_capturing() {
+                self.session.causal_attention_for_capture(
+                    state,
+                    &self.queue,
+                    query,
+                    output,
+                    descriptor,
+                )?
+            } else {
                 self.session
-                    .causal_attention(state, &self.queue, query, output, descriptor)?;
+                    .causal_attention(state, &self.queue, query, output, descriptor)?
+            };
             pending.retain_causal_attention(node.label(), submission);
         }
         // Retain the accepted attention submission before the research-only
@@ -10887,9 +11232,13 @@ impl QwenExecutionCore {
             execution.expected_length,
         )
         .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
-        let submission = self
-            .session
-            .linear_attention(state, &self.queue, bindings, descriptor)?;
+        let submission = if pending.is_capturing() {
+            self.session
+                .linear_attention_for_capture(state, &self.queue, bindings, descriptor)?
+        } else {
+            self.session
+                .linear_attention(state, &self.queue, bindings, descriptor)?
+        };
         pending.retain_linear_attention(node.label(), submission);
         Ok(())
     }
@@ -10901,6 +11250,7 @@ impl QwenExecutionCore {
     ) -> Result<(), QwenExecutionError> {
         let mut physical_fence_recorded = false;
         if boundary == ExecutionBoundaryKind::PrefillChunkCompletion
+            && !pending.is_capturing()
             && !pending.is_empty()
             && !pending.is_deferred()
         {
@@ -10975,6 +11325,10 @@ impl QwenExecutionCore {
             .map(|span| span.graph.native_kernel_nodes())
             .sum();
         Ok(QwenExecutionAudit {
+            whole_decode_audit: *self
+                .whole_decode_audit
+                .lock()
+                .map_err(|_| QwenExecutionError::Poisoned)?,
             selected_backend: "hip",
             target: audit.target().to_owned(),
             submission_count: audit.submission_count(),
@@ -14040,6 +14394,44 @@ mod tests {
         assert!(!should_skip_derived_position_upload(
             Explicit, false, false, false, false,
         ));
+    }
+
+    #[test]
+    fn capture_attention_position_limit_admits_static_tail_only() {
+        assert_eq!(
+            attention_preprocess_context_limit(false, false, true, 22, 3).unwrap(),
+            30
+        );
+        let capture = AttentionPreprocessContract::new_qwen3_5_with_layout_and_context(
+            AttentionPreprocessPositionMode::DecodeContinuation,
+            20,
+            3,
+            24,
+            4,
+            256,
+            30,
+        )
+        .expect("capture permits a static final position equal to physical capacity");
+        assert_eq!(capture.start_position(), 20);
+        assert_eq!(capture.token_count(), 3);
+        assert!(
+            AttentionPreprocessContract::new_qwen3_5_with_layout_and_context(
+                AttentionPreprocessPositionMode::DecodeContinuation,
+                20,
+                3,
+                24,
+                4,
+                256,
+                22,
+            )
+            .is_err()
+        );
+        assert!(attention_preprocess_context_limit(false, false, true, 22, 10).is_err());
+        assert!(attention_preprocess_context_limit(false, true, true, 22, 3).is_err());
+        assert_eq!(
+            attention_preprocess_context_limit(false, false, false, 22, 3).unwrap(),
+            22
+        );
     }
 
     #[test]
@@ -19353,6 +19745,16 @@ mod tests {
     }
 
     #[test]
+    fn whole_decode_configuration_is_conservative_and_budgeted() {
+        let recorder = Arc::new(ExecutionRecorder::default());
+        let (mut core, _) = provisioned_core(Arc::clone(&recorder));
+        assert!(!core.supports_whole_decode());
+        assert!(!core.configure_whole_target_decode(2, &[]).unwrap());
+        assert!(!core.configure_whole_target_decode(128, &[]).unwrap());
+        assert!(core.whole_decode_config.is_none());
+    }
+
+    #[test]
     fn device_selector_reads_only_the_fixed_record_and_preserves_metadata() {
         let recorder = Arc::new(ExecutionRecorder::default());
         let (mut core, _) = provisioned_core(Arc::clone(&recorder));
@@ -19704,6 +20106,60 @@ mod tests {
         let mut wrong_target = first;
         wrong_target.target = "other".to_owned();
         assert!(mixed_target.record(&wrong_target).is_err());
+    }
+
+    #[test]
+    fn paired_request_queue_keeps_session_identity_and_requires_fresh_peer() {
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let session = Arc::new(ExecutionSession::new(
+            "recorder",
+            Arc::new(ExecutionRecorder::default()),
+        ));
+        let model = QwenResidentModel {
+            inner: Arc::new(
+                QwenResidentInner::provision(
+                    Arc::clone(&session),
+                    graph.clone(),
+                    plan.clone(),
+                    Duration::from_millis(1),
+                    &TestProvisionSource::default(),
+                )
+                .unwrap(),
+            ),
+        };
+        let mut peer = model.new_request(graph.clone()).unwrap();
+        // A distinct queue makes this test detect accidental use of the
+        // resident queue instead of the explicit paired queue.
+        peer.core.queue = session.create_queue().unwrap();
+        let paired = model.new_request_on_queue_of(graph.clone(), &peer).unwrap();
+        assert_eq!(paired.core.queue.id(), peer.core.queue.id());
+        assert_ne!(paired.core.queue.id(), model.inner.queue.id());
+        assert_eq!(paired.session_id(), peer.session_id());
+        peer.core.committed_length = 1;
+        assert!(model.new_request_on_queue_of(graph.clone(), &peer).is_err());
+        peer.core.committed_length = 0;
+        let other_session = Arc::new(ExecutionSession::new(
+            "recorder",
+            Arc::new(ExecutionRecorder::default()),
+        ));
+        let other_model = QwenResidentModel {
+            inner: Arc::new(
+                QwenResidentInner::provision(
+                    other_session,
+                    graph.clone(),
+                    plan,
+                    Duration::from_millis(1),
+                    &TestProvisionSource::default(),
+                )
+                .unwrap(),
+            ),
+        };
+        assert!(other_model.new_request_on_queue_of(graph, &peer).is_err());
+        drop(peer);
+        assert_eq!(paired.core.queue.session_id(), session.id());
+        drop(paired);
+        assert_eq!(session.memory_snapshot().request_state().current_bytes(), 0);
+        assert_eq!(session.memory_snapshot().workspace().current_bytes(), 0);
     }
 
     #[test]

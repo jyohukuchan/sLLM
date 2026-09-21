@@ -5,6 +5,10 @@ mod bindings;
 
 pub use bindings::*;
 
+mod decode_graph_bindings;
+#[doc(hidden)]
+pub use decode_graph_bindings::*;
+
 /// Private model-free G1 evidence ABI. This is not the installed public ABI.
 #[doc(hidden)]
 #[allow(non_camel_case_types, non_upper_case_globals)]

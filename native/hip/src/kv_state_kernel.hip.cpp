@@ -137,6 +137,46 @@ __device__ __forceinline__ uint8_t float_to_e2m1(float value) {
   return sllm_lowp::ScalarCodec<sllm_lowp::E2M1>::encode(value);
 }
 
+__device__ __forceinline__ void
+mark_graph_phase_invalid(sllm_decode_control::ControlV1 *const control,
+                         const sllm_decode_control::Status status);
+
+__device__ __forceinline__ bool resolve_graph_phase(
+    sllm_decode_control::ControlV1 *const control,
+    const uint32_t requested_tokens, const uint64_t capacity_tokens,
+    uint32_t *const active_tokens, uint64_t *const start_position) {
+  if (control == nullptr) {
+    *active_tokens = requested_tokens;
+    return true;
+  }
+  if (control->phase_active == 0U || control->halted != 0U) {
+    return false;
+  }
+  if (control->phase_rows > requested_tokens ||
+      control->phase_position > UINT64_MAX - control->phase_rows ||
+      (capacity_tokens != 0U &&
+       control->phase_position + control->phase_rows > capacity_tokens)) {
+    mark_graph_phase_invalid(
+        control, control->phase_rows > requested_tokens
+                     ? sllm_decode_control::Status::InvalidWidth
+                     : sllm_decode_control::Status::InvalidCapacity);
+    return false;
+  }
+  *active_tokens = control->phase_rows;
+  *start_position = control->phase_position;
+  return true;
+}
+
+__device__ __forceinline__ void
+mark_graph_phase_invalid(sllm_decode_control::ControlV1 *const control,
+                         const sllm_decode_control::Status status) {
+  if (control != nullptr) {
+    atomicExch(&control->status, static_cast<uint32_t>(status));
+    atomicExch(&control->halted, 1U);
+    atomicExch(&control->phase_active, 0U);
+  }
+}
+
 } // namespace
 
 extern "C" __global__ __launch_bounds__(
@@ -363,19 +403,32 @@ extern "C" __global__ __launch_bounds__(
                                                           const uint32_t
                                                               token_count,
                                                           const uint64_t
+                                                              capacity_tokens,
+                                                          const uint64_t
                                                               start_position,
                                                           const uint32_t
                                                               head_count,
                                                           const uint32_t
                                                               head_dim,
-                                                          const uint32_t /*encoding*/) {
+                                                          const uint32_t /*encoding*/
+                                                          ,
+                                                          sllm_decode_control::
+                                                              ControlV1 *const
+                                                                  control) {
+  uint32_t active_tokens = token_count;
+  uint64_t device_start_position = start_position;
+  if (!resolve_graph_phase(control, token_count, capacity_tokens,
+                           &active_tokens, &device_start_position)) {
+    return;
+  }
   const uint64_t row = blockIdx.x;
-  if (row >= static_cast<uint64_t>(token_count) * head_count) {
+  if (row >= static_cast<uint64_t>(active_tokens) * head_count) {
     return;
   }
   const uint64_t token = row / head_count;
   const uint64_t head = row % head_count;
-  const uint64_t output_row = (start_position + token) * head_count + head;
+  const uint64_t output_row =
+      (device_start_position + token) * head_count + head;
   const uint64_t input_base = row * head_dim;
   quantize_mxfp8_pair<sllm_lowp::Mxfp8E4Block32>(
       key_input, value_input, key_output, value_output, key_scales,
@@ -751,22 +804,31 @@ extern "C" __global__ __launch_bounds__(
                                                          *const value_output,
                                                      const uint32_t token_count,
                                                      const uint64_t
-                                                     /*capacity_tokens*/,
+                                                         capacity_tokens,
                                                      const uint64_t
                                                          start_position,
                                                      const uint32_t head_count,
-                                                     const uint32_t head_dim) {
+                                                     const uint32_t head_dim,
+                                                     sllm_decode_control::
+                                                         ControlV1
+                                                             *const control) {
+  uint32_t active_tokens = token_count;
+  uint64_t device_start_position = start_position;
+  if (!resolve_graph_phase(control, token_count, capacity_tokens,
+                           &active_tokens, &device_start_position)) {
+    return;
+  }
   const uint64_t element = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
                            static_cast<uint64_t>(threadIdx.x);
   const uint64_t row_width = static_cast<uint64_t>(head_count) * head_dim;
-  const uint64_t total = static_cast<uint64_t>(token_count) * row_width;
+  const uint64_t total = static_cast<uint64_t>(active_tokens) * row_width;
   if (element >= total) {
     return;
   }
   const uint64_t row = element / row_width;
   const uint64_t within_row = element % row_width;
   const uint64_t output_offset =
-      (start_position + row) * row_width + within_row;
+      (device_start_position + row) * row_width + within_row;
   key_output[output_offset] = bf16_to_f16(key_input[element]);
   value_output[output_offset] = bf16_to_f16(value_input[element]);
 }
@@ -793,11 +855,11 @@ hipError_t launch(const uint16_t *const key_input,
   const dim3 grid(grid_count, 1U, 1U);
   const dim3 block(SLLM_HIP_KV_WORKGROUP_SIZE, 1U, 1U);
   if (encoding == SLLM_HIP_KV_ENCODING_FP16_V1) {
-    hipLaunchKernelGGL(sllm_kv_state_bf16_to_f16_token_major_v2, grid, block,
-                       0U, stream, key_input, value_input,
-                       static_cast<uint16_t *>(key_output),
-                       static_cast<uint16_t *>(value_output), token_count,
-                       capacity_tokens, start_position, head_count, head_dim);
+    hipLaunchKernelGGL(
+        sllm_kv_state_bf16_to_f16_token_major_v2, grid, block, 0U, stream,
+        key_input, value_input, static_cast<uint16_t *>(key_output),
+        static_cast<uint16_t *>(value_output), token_count, capacity_tokens,
+        start_position, head_count, head_dim, nullptr);
   } else if (encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
              encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1) {
     hipLaunchKernelGGL(
@@ -874,13 +936,13 @@ hipError_t launch(const uint16_t *const key_input,
     }
 #endif
   } else if (encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
-    hipLaunchKernelGGL(sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1, grid,
-                       block, 0U, stream, key_input, value_input,
-                       static_cast<uint8_t *>(key_output),
-                       static_cast<uint8_t *>(value_output),
-                       static_cast<uint8_t *>(key_scales),
-                       static_cast<uint8_t *>(value_scales), token_count,
-                       start_position, head_count, head_dim, encoding);
+    hipLaunchKernelGGL(
+        sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1, grid, block, 0U, stream,
+        key_input, value_input, static_cast<uint8_t *>(key_output),
+        static_cast<uint8_t *>(value_output),
+        static_cast<uint8_t *>(key_scales),
+        static_cast<uint8_t *>(value_scales), token_count, capacity_tokens,
+        start_position, head_count, head_dim, encoding, nullptr);
   } else if (encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) {
     hipLaunchKernelGGL(sllm_kv_state_bf16_to_mxfp8_e5_token_major_v1, grid,
                        block, 0U, stream, key_input, value_input,
@@ -891,6 +953,57 @@ hipError_t launch(const uint16_t *const key_input,
                        start_position, head_count, head_dim, encoding);
   } else {
     return hipErrorInvalidValue;
+  }
+  return hipGetLastError();
+}
+
+hipError_t
+launch_device(const uint16_t *const key_input,
+              const uint16_t *const value_input, void *const key_output,
+              void *const value_output, void *const key_scales,
+              void *const value_scales, float *const key_outer_scales,
+              float *const value_outer_scales, const uint32_t token_count,
+              const uint64_t capacity_tokens, const uint32_t head_count,
+              const uint32_t head_dim, const uint32_t encoding,
+              const float static_key_scale, const float static_value_scale,
+              sllm_decode_control::ControlV1 *const control,
+              const hipStream_t stream) noexcept {
+  (void)key_outer_scales;
+  (void)value_outer_scales;
+  (void)static_key_scale;
+  (void)static_value_scale;
+  if (control == nullptr || key_input == nullptr || value_input == nullptr ||
+      key_output == nullptr || value_output == nullptr || token_count == 0U ||
+      capacity_tokens == 0U || head_count == 0U || head_dim == 0U) {
+    return hipErrorInvalidValue;
+  }
+  if (encoding != SLLM_HIP_KV_ENCODING_FP16_V1 &&
+      encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
+    return hipErrorNotSupported;
+  }
+  const uint64_t total = static_cast<uint64_t>(token_count) * head_count;
+  const uint32_t grid_count =
+      encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+          ? static_cast<uint32_t>(
+                (total * head_dim + SLLM_HIP_KV_WORKGROUP_SIZE - 1U) /
+                SLLM_HIP_KV_WORKGROUP_SIZE)
+          : static_cast<uint32_t>(total);
+  const dim3 grid(grid_count, 1U, 1U);
+  const dim3 block(SLLM_HIP_KV_WORKGROUP_SIZE, 1U, 1U);
+  if (encoding == SLLM_HIP_KV_ENCODING_FP16_V1) {
+    hipLaunchKernelGGL(
+        sllm_kv_state_bf16_to_f16_token_major_v2, grid, block, 0U, stream,
+        key_input, value_input, static_cast<uint16_t *>(key_output),
+        static_cast<uint16_t *>(value_output), token_count, capacity_tokens,
+        UINT64_C(0), head_count, head_dim, control);
+  } else {
+    hipLaunchKernelGGL(
+        sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1, grid, block, 0U, stream,
+        key_input, value_input, static_cast<uint8_t *>(key_output),
+        static_cast<uint8_t *>(value_output),
+        static_cast<uint8_t *>(key_scales),
+        static_cast<uint8_t *>(value_scales), token_count, capacity_tokens,
+        UINT64_C(0), head_count, head_dim, encoding, control);
   }
   return hipGetLastError();
 }

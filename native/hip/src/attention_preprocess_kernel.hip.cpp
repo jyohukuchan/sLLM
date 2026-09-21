@@ -1,4 +1,5 @@
 #include "attention_preprocess_kernel_internal.hpp"
+#include "decode_control_kernel_internal.hpp"
 
 #include "rmsnorm_kernel_internal.hpp"
 #include "sllm/hip.h"
@@ -159,8 +160,7 @@ __launch_bounds__(1, 1) void sllm_attention_preprocess_headwise_norm_rope_v1(
   }
 }
 
-extern "C" __global__
-__launch_bounds__(32, 1) void sllm_attention_preprocess_headwise_norm_rope_wave32_v1(
+__device__ __forceinline__ void attention_preprocess_wave32_body(
     const uint16_t *const packed_q_gate, const uint16_t *const k,
     const uint16_t *const q_raw_scale, const uint16_t *const k_raw_scale,
     const int32_t *const positions, uint16_t *const q_output,
@@ -258,7 +258,85 @@ __launch_bounds__(32, 1) void sllm_attention_preprocess_headwise_norm_rope_wave3
   }
 }
 
+extern "C" __global__
+__launch_bounds__(32, 1) void sllm_attention_preprocess_headwise_norm_rope_wave32_v1(
+    const uint16_t *const packed_q_gate, const uint16_t *const k,
+    const uint16_t *const q_raw_scale, const uint16_t *const k_raw_scale,
+    const int32_t *const positions, uint16_t *const q_output,
+    uint16_t *const gate_output, uint16_t *const k_output, const uint32_t m,
+    const uint32_t q_heads, const uint32_t k_heads, const uint32_t head_dim,
+    const uint32_t position_components, const uint32_t start_position,
+    const uint32_t position_payload_mode) {
+  attention_preprocess_wave32_body(
+      packed_q_gate, k, q_raw_scale, k_raw_scale, positions, q_output,
+      gate_output, k_output, m, q_heads, k_heads, head_dim, position_components,
+      start_position, position_payload_mode);
+}
+
+extern "C" __global__
+__launch_bounds__(32, 1) void sllm_attention_preprocess_device_wave32_v1(
+    const uint16_t *const packed_q_gate, const uint16_t *const k,
+    const uint16_t *const q_raw_scale, const uint16_t *const k_raw_scale,
+    const int32_t *const positions, uint16_t *const q_output,
+    uint16_t *const gate_output, uint16_t *const k_output, const uint32_t m,
+    const uint32_t q_heads, const uint32_t k_heads, const uint32_t head_dim,
+    sllm_decode_control::ControlV1 *const control) {
+  if (control->status !=
+          static_cast<uint32_t>(sllm_decode_control::Status::Ok) ||
+      control->phase_active == 0U || control->halted != 0U) {
+    return;
+  }
+  const bool phase_valid =
+      control->phase_rows != 0U && control->phase_rows <= m &&
+      control->phase_position <= control->capacity &&
+      static_cast<uint64_t>(control->phase_rows) <=
+          control->capacity - control->phase_position &&
+      control->phase_position <=
+          static_cast<uint64_t>(INT32_MAX) - (control->phase_rows - 1U);
+  if (!phase_valid) {
+    atomicExch(
+        &control->status,
+        static_cast<uint32_t>(sllm_decode_control::Status::InvalidPosition));
+    atomicExch(&control->halted, 1U);
+    atomicExch(&control->phase_active, 0U);
+    return;
+  }
+  const uint64_t block = static_cast<uint64_t>(blockIdx.x);
+  const uint64_t q_block_count = static_cast<uint64_t>(m) * q_heads;
+  const uint64_t local_block =
+      block < q_block_count ? block : block - q_block_count;
+  const uint32_t heads = block < q_block_count ? q_heads : k_heads;
+  const uint64_t row = local_block / heads;
+  if (row >= control->phase_rows) {
+    return;
+  }
+  attention_preprocess_wave32_body(
+      packed_q_gate, k, q_raw_scale, k_raw_scale, positions, q_output,
+      gate_output, k_output, m, q_heads, k_heads, head_dim, 1U,
+      static_cast<uint32_t>(control->phase_position),
+      SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1);
+}
+
 namespace sllm_attention_preprocess_kernel {
+
+hipError_t launch_device(const uint16_t *packed_q_gate, const uint16_t *k,
+                         const uint16_t *q_raw_scale,
+                         const uint16_t *k_raw_scale, uint16_t *q_output,
+                         uint16_t *gate_output, uint16_t *k_output, uint32_t m,
+                         uint32_t q_heads, uint32_t k_heads,
+                         sllm_decode_control::ControlV1 *control,
+                         hipStream_t stream) noexcept {
+  const uint64_t blocks =
+      static_cast<uint64_t>(m) * (static_cast<uint64_t>(q_heads) + k_heads);
+  if (!control || !m || m > 9U || !q_heads || !k_heads || blocks > UINT32_MAX)
+    return hipErrorInvalidValue;
+  hipLaunchKernelGGL(sllm_attention_preprocess_device_wave32_v1,
+                     dim3(static_cast<uint32_t>(blocks)), dim3(32U), 0U, stream,
+                     packed_q_gate, k, q_raw_scale, k_raw_scale, nullptr,
+                     q_output, gate_output, k_output, m, q_heads, k_heads, 256U,
+                     control);
+  return hipGetLastError();
+}
 
 hipError_t
 launch(const uint16_t *const packed_q_gate, const uint16_t *const k,
