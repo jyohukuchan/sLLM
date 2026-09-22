@@ -30,6 +30,19 @@
 - Future changes to `AGENTS.md` or `sLLM.md` still require explicit user
   confirmation.
 
+## Agent runtimes and subagents
+
+- The agent runtime may be Codex or opencode; neither is required by itself.
+  Whichever runs, the subagent model follows the same provider as the running
+  main model, and named agents bound to another provider are not spawned while
+  that provider is inactive. The opencode setup on this machine, including its
+  MCP servers, model choice and the accounts that are funded, is recorded in
+  [opencode environment](docs/development/opencode-environment.md).
+- The rules below are written for Codex. Read them as the general contract for
+  delegation and apply the same intent under opencode: the main agent inspects
+  what a subagent changed, subagents do not commit or push, and a runtime that
+  cannot start a subagent continues the work directly.
+
 ## Native Codex subagents
 
 - Proactively delegate bounded coding, repository inspection, focused tests,
@@ -217,5 +230,6 @@
 - Model locking: `docs/models/model-lock.md`
 - OpenAI compatibility: `docs/api/openai-compatibility.md`
 - Local Qwen subagent: `docs/development/local-qwen-subagent.md`
+- opencode environment: `docs/development/opencode-environment.md`
 - CI and tests: `docs/plans/active/2026/08/1-10/ci-test-strategy.md`
 - Provenance: `docs/provenance/README.md`

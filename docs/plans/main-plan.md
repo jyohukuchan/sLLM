@@ -572,7 +572,7 @@ Phase 79の共通化内容は[Phase 79計画](archive/2026/09/1-10/phase79-commo
 | 完了 | 84.5 | MTP接続・固定p/q・採否後の状態を限定照合。R9700のtarget差はattention演算順へ切り分け。本番既定は維持 |
 | 完了・実装検証済み | 85 | 共通MXFP8／MXFP6 kernelをscope限定採用。両GPUの広範shape、本体・KV・MTP、chunk末尾の効果と数値を確認。BF16 MTP既定を維持 |
 | 完了・既定採用せず | 86 | Qwen MTP catch-upを両GPU26条件で検証。期待p/q受理率では小さい正の効果があるが、分離catch-upは正味マイナスで既定不採用。ベンチマーク主指標を期待受理率へ切替 |
-| 段階6完了・段階7未着手 | 87 | Qwen3.8 NVFP4の計測・棚卸しとread帯域計測を完了。WU1でV620 attentionのGQA共有を採用（MTPなし+8.09%／あり+6.88%）。WU1.1で両GPUのlong contextへsplit128を採用（単体TPOT比1.85%／2.22%短縮）。WU-C1で不要な切替を削除し、N0とCI hash連鎖の整合を確認。WU2でR9700 FP8のM1 dot4 GEMVを採用（単体TPOT比6.40%、モデルMTPなし+9.40%／あり+1.50%）。段階5でwhole graphと非同期readbackを接続し、段階6でV620のNVFP4/FP8 M1 packを並列captureへ採用（MTPなし+4.1%）。次は段階7（活性値量子化のproducer融合）、続いてW×A16廃止、MTP companion形式、残るdecode最適化 |
+| 段階7未着手 | 87 | Qwen3.8 NVFP4の計測・棚卸しとread帯域計測を完了。WU1でV620 attentionのGQA共有を採用（MTPなし+8.09%／あり+6.88%）。WU1.1で両GPUのlong contextへsplit128を採用（単体TPOT比1.85%／2.22%短縮）。WU-C1で不要な切替を削除し、N0とCI hash連鎖の整合を確認。WU2でR9700 FP8のM1 dot4 GEMVを採用（単体TPOT比6.40%、モデルMTPなし+9.40%／あり+1.50%）。段階5でwhole graphと非同期readbackを接続し、段階6でV620のNVFP4/FP8 M1 packを並列captureへ採用（MTPなし+4.1%）。段階7は2026-09-22に対象を取り違えた試行（consumer側への量子化取り込み）を1件破棄し、本来のproducer融合は未着手（[記録](../history/2026/09/21-30/phase87-stage7.md)）。次は段階7のやり直し、W×A16廃止、MTP companion形式、残るdecode最適化 |
 | 計画済み・繰下げ | 88 | NVFP4のGPUリクエストバッチ処理を最適化（旧87、さらに前は旧86） |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
@@ -706,7 +706,9 @@ Phase 76以降は、Qwen3.8 27B NVFP4を単一GPUで実用速度にすること�
   R9700は従来scheduler・直列依存を維持し、MTPなし21.4663／あり35.6270 token/s、全run token一致。
   2026-09-22に残りの作業を整理し直した（[Phase 87計画の「今後の順序」](active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#今後の順序2026-09-22整理)）。
   最大の塊はgraph内のkernel間dispatch固定費（MTPなしでV620約6.1／R9700約5.2 ms/token）であり、
-  graph化でも並列枝でも取り切れないため、次はnode数自体を減らす段階7（活性値量子化を前段producerへ融合）とする。
+  graph化でも並列枝でも取り切れないため、node数自体を減らす段階7（活性値量子化を前段producerへ融合）を候補検証した。
+  2026-09-22の試行はconsumer側へ量子化を取り込むもので段階7の対象ではなく、計測へ到達しないまま破棄した
+  （[記録](../history/2026/09/21-30/phase87-stage7.md)）。producerへの融合は未着手のままである。
   [vllm-mxfp4の分析](../history/2026/09/21-30/vllm-mxfp4-optimization-analysis.md)も同じ設計へ到達しており、
   そこから採る候補はproducer融合とdual-output bundleに限る（形式・kernelの流用はしない）。
   以降は段階4（W×A16廃止、受入条件1の未達項目）、段階3（MTP companion形式）、

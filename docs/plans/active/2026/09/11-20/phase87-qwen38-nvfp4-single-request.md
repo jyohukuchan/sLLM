@@ -2,7 +2,8 @@
 
 ## 状態
 
-- 段階0・WU0・WU1・WU1.1・WU-C1・WU2・WU-D1・WU-D2・WU-D3完了（2026-09-20）。後続の作業単位は未着手。[Phase 76〜88計画](../1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)のPhase 87を置き換える。
+- 段階0・WU0・WU1・WU1.1・WU-C1・WU2・WU-D1〜D3・段階5・段階6完了。段階7は実施中で、着手時の上限・families別の対象外判定・候補C1/C2まで確定し、実装は未着手（2026-09-22）。
+  2026-09-22に別途あった「consumer側へ量子化を取り込む」試行は段階7の対象ではなく破棄済みで、producer融合の評価結果ではない（[記録](../../../../../history/2026/09/21-30/phase87-stage7.md)）。[Phase 76〜88計画](../1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)のPhase 87を置き換える。
 - 両GPU・MTPなし／ありの通常速度、kernel時間、read-request counter、形状別copy、R9700の2 KV形式のKLD、
   W×A16利用箇所と過去の棄却候補の棚卸しを完了した。
   [段階0履歴](../../../../../history/2026/09/11-20/phase87-stage0.md)と
@@ -539,7 +540,7 @@ graph化でも取れないことは段階5で確認済みである。したが�
 
 ### 順序と根拠
 
-1. **段階7: 活性値量子化を前段producerへ融合（最優先）**
+1. **段階7: 活性値量子化を前段producerへ融合（未着手。2026-09-22に対象を取り違えた試行を1件破棄）**
    - 1 tokenあたり量子化185回、RMSNorm・residual・SiLU等の軽いkernelも多数あり、
      これらをproducerへ畳み込めばnodeとgapを同時に減らせる。1,170 nodeのうち削減余地が最も大きい。
    - vllm-mxfp4も同じ結論に達しており、decodeの128箇所で2〜3 kernelを1個へ集約し、
@@ -548,6 +549,11 @@ graph化でも取れないことは段階5で確認済みである。したが�
    - sLLM側の上限は「削減できるnode数×1 nodeあたりのgap（V620約5.2／R9700約4.4 µs）＋量子化kernel自体の時間」。
      着手時に対象families（FP8 per-row、NVFP4 block16＋tensor scale、MXFP8 KV前処理）ごとに上限を算出し、半分を打切り線とする。
    - 数値はbit一致を目指しN0。NVFP4のtensor scaleはreduction契約を変えないことを先に確認する。
+   - 2026-09-22の試行はconsumer側（gate/up projection pack kernel内）へ量子化を取り込むもので、段階7の対象ではなかった。
+     WU2のC2と同種で1%未達と判定済みの設計であり、実装もexact gfx1030の最初のsmokeで`execution resource is busy`となって計測へ到達していない。
+     productionへ残っていたdraftは破棄し、対象familiesは一つも評価していない。[破棄の記録](../../../../../history/2026/09/21-30/phase87-stage7.md)
+   - **consumer側（matmul kernel内）への量子化取り込みは段階7の候補にしない。** producerへの融合だけを対象とする。
+     実装は[AGENTS.mdのkernel融合方針](../../../../../../AGENTS.md)に従い、ビット一致版を先に作って分解版を対照にする。
    - 段階6のfork（V620のNVFP4 M1/M3、FP8 M1）を対照に含める。両者は別種の削減なので加算しない。
 2. **段階4: W×A16の廃止と契約の整理**
    - 受入条件1が未達のまま残っている唯一の項目であり、性能作業と独立に完了できる。
@@ -570,6 +576,58 @@ graph化でも取れないことは段階5で確認済みである。したが�
      対照はV620が並列枝、R9700が直列枝。
 6. **Phase 88（リクエストバッチ処理）**
    - prefill向けのA-tiled producer-consumerやKV容量設計（group size選択）は、ここで扱う。
+
+### 段階7の着手時上限と候補（2026-09-22）
+
+計画の「着手時に対象familiesごとに上限を算出し、半分を打切り線とする」に従い、実装前に上限を固定する。
+式は `削減できるnode数 × nodeあたりgap（V620 5.2µs／R9700 4.4µs）＋ 量子化kernel時間`。
+node数と量子化時間は[段階0結果JSON](../../../../../history/2026/09/11-20/phase87-stage0-results.json)の
+MTPなし・127 transition実測（`sllm_matmul_bf16_to_fp8_outer_v2` 185回、
+`sllm_matmul_bf16_to_nvfp4_block16_wave8_v1` 112回、
+`sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1` 16回）を使う。
+採用に必要な速度は採用基準3より「通常計測TPOTの1%以上」＝ **V620 0.5948 ms/token、R9700 0.4662 ms/token**
+（段階6後の通常計測 16.8134／21.4513 tok/s を基準とする）。
+
+| family | node/token | 上限 V620 | 打切り線 V620 | 上限 R9700 | 打切り線 R9700 | 採用に必要 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| FP8 per-row | 185 | 2.9215 | 1.4607 | 2.4514 | 1.2257 | 0.5948／0.4662 |
+| NVFP4 block16＋tensor scale | 112 | 0.9869 | 0.4935 | 0.8217 | 0.4109 | 0.5948／0.4662 |
+| MXFP8 KV前処理 | 16 | 0.1590 | 0.0795 | 0.1192 | 0.0596 | 0.5948／0.4662 |
+
+単位はms/token。**MXFP8 KV前処理は上限0.1590／0.1192が採用に必要な0.5948／0.4662を
+26%／25%しか満たさないため、100%実現しても採用基準3に到達できない。**
+候補C3として実装を開始せず、この算術で対象外とする（打切りではなく到達不能）。
+
+**量子化185回／112回の producer 対応表（MTPなし）**
+
+| producer | 消費者 | FP8 node | NVFP4 node |
+| --- | --- | ---: | ---: |
+| `input_rmsnorm`（FullAttention層のみ） | full q/k/v | 48 | 0 |
+| `input_rmsnorm`（LinearAttention層） | GDN qkv/z（FP8）＋b/a（**BF16**） | 48 | 0 |
+| `linear_attention_state` | GDN out | 48 | 0 |
+| `post_attention_rmsnorm` | mlp gate/up | 16 | 56 |
+| `mlp_silu_mul` | mlp down | 8 | 56 |
+| `full.sigmoid_mul` | full o | 16 | 0 |
+| `final_rmsnorm` | lm_head | 1 | 0 |
+| 合計 | | **185** | **112** |
+
+**候補（作業単位あたり3つまで）**
+
+1. **C1: FP8 per-rowのproducer融合**。対象は上表のうち LinearAttention層 `input_rmsnorm` を除く
+   **137 node**（`input_rmsnorm` FullAttention層48＋`linear_attention_state` 48＋`post_attention_rmsnorm` 16
+   ＋`mlp_silu_mul` 8＋`sigmoid_mul` 16＋`final_rmsnorm` 1）。到達上限 V620 2.161／R9700 1.810 ms/token。
+   FP8の行スケールは `amax/448` を当該kernel内で完結でき、**producerへ渡す外部スケールが不要**。
+2. **C2: NVFP4 block16＋tensor scaleのproducer融合**。対象は `post_attention_rmsnorm` 56＋`mlp_silu_mul` 56
+   ＝ **112 node**（family全量）。上限0.9869／0.8217、採用に必要な0.5948／0.4662は上限の60%／57%。
+   producerには `input_global_scale`（`lowp`の`input_tensor_scale[0]`）が必須で、**現行producer descriptorは
+   このスケールを持たない**。ABI拡張の要否は着手時に決める。
+3. **C3: MXFP8 KV前処理** — 上表のとおり到達不能のため対象外。
+
+**LinearAttention層の`input_rmsnorm`（48 node）をC1から外す理由**: 同一出力 `normed` を
+BF16の`linear.b_matmul`／`linear.a_matmul`とFP8のqkv/zが同時に消費し、出力をencodedへ置き換えられない。
+2本目の出力bindingが要るため、段階7では残件とする。C1到達上限はこの除外を織り込む。
+
+段階7の実装方針は下記のままとし、**consumer側（matmul kernel内）への量子化取り込みは候補にしない**。
 
 ### 当面着手しないもの
 
