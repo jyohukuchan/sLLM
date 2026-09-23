@@ -854,13 +854,15 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n12288_v1",
             "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k5120n17408_v1",
             "sllm_matmul_fp8_outer_decode_gfx1030_lds_lut_m1_k6144n5120_v1",
-            "sllm_mxfp6_w6a16_m1_col2_v1",
-            "sllm_mxfp8_w8a16_m1_col2_v1",
         }
-        self.assertEqual(len(KERNEL_SYMBOLS), 198)
+        self.assertEqual(len(KERNEL_SYMBOLS), 194)
         self.assertEqual(tuple(sorted(KERNEL_SYMBOLS)), KERNEL_SYMBOLS)
         self.assertTrue(expected_additions <= set(KERNEL_SYMBOLS))
-        self.assertEqual(len(expected_additions), 79)
+        self.assertEqual(len(expected_additions), 77)
+        self.assertNotIn("sllm_matmul_nvfp4_block16_packed_dequant_v1", KERNEL_SYMBOLS)
+        self.assertNotIn(
+            "sllm_matmul_nvfp4_block16_prefill_row8_tiled256_v2", KERNEL_SYMBOLS
+        )
 
     def test_causal_attention_stub_allowlist_is_exact_and_duplicate_free(self) -> None:
         expected = (

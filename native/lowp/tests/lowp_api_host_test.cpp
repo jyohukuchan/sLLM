@@ -47,8 +47,8 @@ int main() {
   assert(lowp_get_format_info(LOWP_MXFP8_E4M3_W8A8, &info) == LOWP_SUCCESS);
   assert(info.weight_bits == 8U && info.activation_bits == 8U);
   assert(info.weight_block_size == 32U && info.activation_block_size == 32U);
-  assert(lowp_get_format_info(LOWP_MXFP4_W4A8_V1, &info) == LOWP_SUCCESS);
-  assert(info.weight_bits == 4U && info.activation_bits == 8U);
+  assert(lowp_get_format_info(LOWP_MXFP4_W4A6_V1, &info) == LOWP_SUCCESS);
+  assert(info.weight_bits == 4U && info.activation_bits == 6U);
   assert(lowp_get_format_info(LOWP_MXFP8_E4M3_W8A8, nullptr) ==
          LOWP_INVALID_ARGUMENT);
   assert(lowp_get_format_info(4U, &info) == LOWP_NOT_SUPPORTED);
@@ -102,8 +102,17 @@ int main() {
   reserved.format = 4U;
   expect_rejected(reserved, LOWP_NOT_SUPPORTED, 6U);
   auto public_mxfp4 = valid;
-  public_mxfp4.format = LOWP_MXFP4_W4A8_V1;
+  public_mxfp4.format = LOWP_MXFP4_W4A6_V1;
   expect_rejected(public_mxfp4, LOWP_NOT_SUPPORTED, 6U);
+  auto retired_nvfp4 = valid;
+  retired_nvfp4.format = LOWP_RETIRED_NVFP4_W4A16;
+  expect_rejected(retired_nvfp4, LOWP_NOT_SUPPORTED, 6U);
+  auto retired_mxfp8 = valid;
+  retired_mxfp8.format = LOWP_RETIRED_MXFP8_E4M3_W8A16;
+  expect_rejected(retired_mxfp8, LOWP_NOT_SUPPORTED, 6U);
+  auto retired_mxfp6 = valid;
+  retired_mxfp6.format = LOWP_RETIRED_MXFP6_E3M2_W6A16;
+  expect_rejected(retired_mxfp6, LOWP_NOT_SUPPORTED, 6U);
 
   auto unscaled_layout = valid;
   unscaled_layout.activation_layout = LOWP_ROW_MAJOR;

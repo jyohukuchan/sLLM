@@ -97,6 +97,27 @@ hipError_t launch_residual_fused(
       residual, addend, raw_scale, residual_output, output, normalized_size,
       row_count, epsilon, scale_mode, stream);
 }
+
+/* Host validation builds intentionally do not emulate producer-side
+ * quantization.  Keep these entry points defined so the public runtime has
+ * the same launcher surface as the HIP build, while remaining fail-closed
+ * instead of claiming GPU numerical evidence. */
+hipError_t
+launch_residual_prequant_fp8(const uint16_t *const, const uint16_t *const,
+                             const uint16_t *const, uint16_t *const,
+                             uint8_t *const, float *const, const uint32_t,
+                             const uint32_t, const float, const uint32_t,
+                             const uint32_t, const hipStream_t) noexcept {
+  return hipErrorNotSupported;
+}
+
+hipError_t launch_residual_prequant_nvfp4(
+    const uint16_t *const, const uint16_t *const, const uint16_t *const,
+    uint16_t *const, uint8_t *const, uint8_t *const, const float *const,
+    const uint32_t, const uint32_t, const float, const uint32_t,
+    const hipStream_t) noexcept {
+  return hipErrorNotSupported;
+}
 } // namespace sllm_rmsnorm_kernel
 
 namespace sllm_gdn_projection_bundle_kernel {
@@ -147,6 +168,30 @@ hipError_t launch_sigmoid_mul(const uint16_t *const gate,
                               const hipStream_t stream) noexcept {
   return fake_hip::elementwise_sigmoid_mul_launch(gate, attention_value, output,
                                                   element_count, stream);
+}
+
+hipError_t launch_silu_mul_prequant_fp8(const uint16_t *const,
+                                        const uint16_t *const, uint8_t *const,
+                                        float *const, const uint32_t,
+                                        const uint32_t,
+                                        const hipStream_t) noexcept {
+  return hipErrorNotSupported;
+}
+
+hipError_t launch_silu_mul_prequant_nvfp4(const uint16_t *const,
+                                          const uint16_t *const, uint8_t *const,
+                                          uint8_t *const, const float *const,
+                                          const uint32_t, const uint32_t,
+                                          const hipStream_t) noexcept {
+  return hipErrorNotSupported;
+}
+
+hipError_t launch_sigmoid_mul_prequant_fp8(const uint16_t *const,
+                                           const uint16_t *const,
+                                           uint8_t *const, float *const,
+                                           const uint32_t, const uint32_t,
+                                           const hipStream_t) noexcept {
+  return hipErrorNotSupported;
 }
 
 hipError_t launch_scalar_mul(const uint16_t *const input,
@@ -2282,6 +2327,7 @@ struct RmsNormPlan final : QuarantineNode {
   Buffer *addend;
   Buffer *residual_output;
   sllm_residual_rmsnorm::DescriptorMetadata residual_metadata;
+  void *input_tensor_scale_device;
   bool release_active;
   bool in_flight;
 
@@ -2292,7 +2338,8 @@ struct RmsNormPlan final : QuarantineNode {
         activation(activation_value), raw_scale(raw_scale_value),
         output(output_value), metadata(metadata_value), fused(false),
         addend(nullptr), residual_output(nullptr), residual_metadata(),
-        release_active(false), in_flight(false) {}
+        input_tensor_scale_device(nullptr), release_active(false),
+        in_flight(false) {}
 
   RmsNormPlan(Context *const context_value, Buffer *const residual_value,
               Buffer *const addend_value, Buffer *const raw_scale_value,
@@ -2302,8 +2349,15 @@ struct RmsNormPlan final : QuarantineNode {
         activation(residual_value), raw_scale(raw_scale_value),
         output(output_value), metadata(), fused(true), addend(addend_value),
         residual_output(residual_output_value),
-        residual_metadata(metadata_value), release_active(false),
-        in_flight(false) {}
+        residual_metadata(metadata_value), input_tensor_scale_device(nullptr),
+        release_active(false), in_flight(false) {}
+
+  ~RmsNormPlan() {
+    if (input_tensor_scale_device != nullptr) {
+      (void)hipFree(input_tensor_scale_device);
+      input_tensor_scale_device = nullptr;
+    }
+  }
 };
 
 struct ElementwisePlan final : QuarantineNode {
@@ -2352,6 +2406,7 @@ struct ElementwisePlan final : QuarantineNode {
   std::optional<sllm_lowp::PreparedProviderPlan> matmul_provider_plan;
   std::optional<lowp_matmul_plan_t> matmul_lowp_c_plan;
   Fp8LtPlan *fp8_lt_plan;
+  void *input_tensor_scale_device;
   bool release_active;
   bool in_flight;
 
@@ -2367,7 +2422,8 @@ struct ElementwisePlan final : QuarantineNode {
         mlp_metadata(), mlp_silu_metadata(), argmax(false),
         matmul_workspace(nullptr), matmul_workspace_bytes(0U),
         matmul_context_workspace_bytes(0U), fp8_lt_plan(nullptr),
-        release_active(false), in_flight(false) {}
+        input_tensor_scale_device(nullptr), release_active(false),
+        in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const weight_value,
                   Buffer *const token_ids_value, Buffer *const output_value,
@@ -2380,7 +2436,8 @@ struct ElementwisePlan final : QuarantineNode {
         mlp_bundle(false), mlp_weights{}, mlp_outputs{}, mlp_metadata(),
         mlp_silu_metadata(), argmax(false), matmul_workspace(nullptr),
         matmul_workspace_bytes(0U), matmul_context_workspace_bytes(0U),
-        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
+        fp8_lt_plan(nullptr), input_tensor_scale_device(nullptr),
+        release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const activation_value,
                   Buffer *const weight_value, Buffer *const output_value,
@@ -2393,7 +2450,8 @@ struct ElementwisePlan final : QuarantineNode {
         mlp_bundle(false), mlp_weights{}, mlp_outputs{}, mlp_metadata(),
         mlp_silu_metadata(), argmax(false), matmul_workspace(nullptr),
         matmul_workspace_bytes(0U), matmul_context_workspace_bytes(0U),
-        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
+        fp8_lt_plan(nullptr), input_tensor_scale_device(nullptr),
+        release_active(false), in_flight(false) {}
 
   ElementwisePlan(
       Context *const context_value, Buffer *const activation_value,
@@ -2410,7 +2468,8 @@ struct ElementwisePlan final : QuarantineNode {
         mlp_outputs{}, mlp_metadata(), mlp_silu_metadata(), argmax(false),
         matmul_workspace(nullptr), matmul_workspace_bytes(0U),
         matmul_context_workspace_bytes(0U), fp8_lt_plan(nullptr),
-        release_active(false), in_flight(false) {}
+        input_tensor_scale_device(nullptr), release_active(false),
+        in_flight(false) {}
 
   ElementwisePlan(
       Context *const context_value, Buffer *const activation_value,
@@ -2427,7 +2486,8 @@ struct ElementwisePlan final : QuarantineNode {
         mlp_outputs(outputs_value), mlp_metadata(metadata_value),
         mlp_silu_metadata(metadata_value[0].output), argmax(false),
         matmul_workspace(nullptr), matmul_workspace_bytes(0U),
-        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
+        fp8_lt_plan(nullptr), input_tensor_scale_device(nullptr),
+        release_active(false), in_flight(false) {}
 
   ElementwisePlan(
       Context *const context_value, Buffer *const activation_value,
@@ -2460,7 +2520,8 @@ struct ElementwisePlan final : QuarantineNode {
         gdn_metadata(), mlp_bundle(false), mlp_weights{}, mlp_outputs{},
         mlp_metadata(), mlp_silu_metadata(), argmax(true),
         matmul_workspace(nullptr), matmul_workspace_bytes(0U),
-        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
+        fp8_lt_plan(nullptr), input_tensor_scale_device(nullptr),
+        release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const logits_value,
                   Buffer *const output_value,
@@ -2472,10 +2533,15 @@ struct ElementwisePlan final : QuarantineNode {
         gdn_bundle(false), gdn_weights{}, gdn_outputs{}, gdn_metadata(),
         mlp_bundle(false), mlp_weights{}, mlp_outputs{}, mlp_metadata(),
         mlp_silu_metadata(), argmax(true), matmul_workspace(nullptr),
-        matmul_workspace_bytes(0U), fp8_lt_plan(nullptr), release_active(false),
+        matmul_workspace_bytes(0U), fp8_lt_plan(nullptr),
+        input_tensor_scale_device(nullptr), release_active(false),
         in_flight(false) {}
 
   ~ElementwisePlan() {
+    if (input_tensor_scale_device != nullptr) {
+      (void)hipFree(input_tensor_scale_device);
+      input_tensor_scale_device = nullptr;
+    }
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
     destroy_fp8_lt_plan(fp8_lt_plan);
     for (Fp8LtPlan *const plan : qwen38_projection_pack2_fp8_lt_plans) {
@@ -3881,11 +3947,10 @@ validate_completion_timing(const sllm_completion_timing_t *const timing,
   return SLLM_STATUS_OK;
 }
 
-void initialize_rmsnorm_dispatch_info(sllm_rmsnorm_dispatch_info_t *const info,
-                                      const uint64_t dispatch_id,
-                                      const uint64_t row_count,
-                                      const uint64_t normalized_size,
-                                      const char *const arch_name) noexcept {
+void initialize_rmsnorm_dispatch_info(
+    sllm_rmsnorm_dispatch_info_t *const info, const uint64_t dispatch_id,
+    const uint64_t row_count, const uint64_t normalized_size,
+    const char *const arch_name, const uint32_t output_prequant = 0U) noexcept {
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
   std::memset(info, 0, sizeof(*info));
@@ -3897,9 +3962,19 @@ void initialize_rmsnorm_dispatch_info(sllm_rmsnorm_dispatch_info_t *const info,
   info->dispatch_count = 1U;
   const bool wave64 =
       arch_name != nullptr && std::strncmp(arch_name, "gfx942", 6U) == 0;
+  const bool prequant =
+      output_prequant !=
+      static_cast<uint32_t>(sllm_public_runtime::PrequantMode::None);
+  const bool nvfp4 =
+      output_prequant ==
+      static_cast<uint32_t>(sllm_public_runtime::PrequantMode::Nvfp4Block16);
   info->kernel_id = wave64 ? SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE64_V1
                            : SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1;
-  info->workgroup_size_x = SLLM_HIP_RMSNORM_WORKGROUP_SIZE;
+  info->workgroup_size_x =
+      output_prequant ==
+              static_cast<uint32_t>(sllm_public_runtime::PrequantMode::None)
+          ? SLLM_HIP_RMSNORM_WORKGROUP_SIZE
+          : 1024U;
   info->grid_size_x = static_cast<uint32_t>(row_count);
   info->row_count = row_count;
   info->normalized_size = normalized_size;
@@ -3907,12 +3982,16 @@ void initialize_rmsnorm_dispatch_info(sllm_rmsnorm_dispatch_info_t *const info,
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_RMSNORM_KERNEL_SYMBOL_MAX,
-      wave64 ? ::sllm_rmsnorm_kernel::kWave64LogicalKernelId
-             : ::sllm_rmsnorm_kernel::kLogicalKernelId);
+      prequant ? (nvfp4 ? ::sllm_rmsnorm_kernel::kPrequantNvfp4LogicalKernelId
+                        : ::sllm_rmsnorm_kernel::kPrequantFp8LogicalKernelId)
+               : (wave64 ? ::sllm_rmsnorm_kernel::kWave64LogicalKernelId
+                         : ::sllm_rmsnorm_kernel::kLogicalKernelId));
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, SLLM_HIP_RMSNORM_DEVICE_SYMBOL_MAX,
-      wave64 ? ::sllm_rmsnorm_kernel::kWave64DeviceSymbol
-             : ::sllm_rmsnorm_kernel::kDeviceSymbol);
+      prequant ? (nvfp4 ? ::sllm_rmsnorm_kernel::kPrequantNvfp4DeviceSymbol
+                        : ::sllm_rmsnorm_kernel::kPrequantFp8DeviceSymbol)
+               : (wave64 ? ::sllm_rmsnorm_kernel::kWave64DeviceSymbol
+                         : ::sllm_rmsnorm_kernel::kDeviceSymbol));
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -3920,7 +3999,8 @@ void initialize_rmsnorm_dispatch_info(sllm_rmsnorm_dispatch_info_t *const info,
 void initialize_residual_rmsnorm_dispatch_info(
     sllm_residual_rmsnorm_dispatch_info_t *const info,
     const uint64_t dispatch_id, const uint64_t row_count,
-    const uint64_t normalized_size, const char *const arch_name) noexcept {
+    const uint64_t normalized_size, const char *const arch_name,
+    const uint32_t output_prequant = 0U) noexcept {
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
   std::memset(info, 0, sizeof(*info));
@@ -3932,9 +4012,22 @@ void initialize_residual_rmsnorm_dispatch_info(
   info->dispatch_count = 1U;
   const bool wave64 =
       arch_name != nullptr && std::strncmp(arch_name, "gfx942", 6U) == 0;
-  info->kernel_id = wave64 ? SLLM_HIP_RESIDUAL_RMSNORM_KERNEL_ID_WAVE64_V1
-                           : SLLM_HIP_RESIDUAL_RMSNORM_KERNEL_ID_WAVE32_V1;
-  info->workgroup_size_x = SLLM_HIP_RMSNORM_WORKGROUP_SIZE;
+  const bool prequant =
+      output_prequant !=
+      static_cast<uint32_t>(sllm_public_runtime::PrequantMode::None);
+  const bool nvfp4 =
+      output_prequant ==
+      static_cast<uint32_t>(sllm_public_runtime::PrequantMode::Nvfp4Block16);
+  info->kernel_id =
+      prequant ? (nvfp4 ? SLLM_HIP_RESIDUAL_RMSNORM_KERNEL_ID_PREQUANT_NVFP4_V1
+                        : SLLM_HIP_RESIDUAL_RMSNORM_KERNEL_ID_PREQUANT_FP8_V1)
+               : (wave64 ? SLLM_HIP_RESIDUAL_RMSNORM_KERNEL_ID_WAVE64_V1
+                         : SLLM_HIP_RESIDUAL_RMSNORM_KERNEL_ID_WAVE32_V1);
+  info->workgroup_size_x =
+      output_prequant ==
+              static_cast<uint32_t>(sllm_public_runtime::PrequantMode::None)
+          ? SLLM_HIP_RMSNORM_WORKGROUP_SIZE
+          : 1024U;
   info->grid_size_x = static_cast<uint32_t>(row_count);
   info->row_count = row_count;
   info->normalized_size = normalized_size;
@@ -3942,12 +4035,16 @@ void initialize_residual_rmsnorm_dispatch_info(
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_RMSNORM_KERNEL_SYMBOL_MAX,
-      wave64 ? ::sllm_rmsnorm_kernel::kResidualWave64LogicalKernelId
-             : ::sllm_rmsnorm_kernel::kResidualLogicalKernelId);
+      prequant ? (nvfp4 ? ::sllm_rmsnorm_kernel::kPrequantNvfp4LogicalKernelId
+                        : ::sllm_rmsnorm_kernel::kPrequantFp8LogicalKernelId)
+               : (wave64 ? ::sllm_rmsnorm_kernel::kResidualWave64LogicalKernelId
+                         : ::sllm_rmsnorm_kernel::kResidualLogicalKernelId));
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, SLLM_HIP_RMSNORM_DEVICE_SYMBOL_MAX,
-      wave64 ? ::sllm_rmsnorm_kernel::kResidualWave64DeviceSymbol
-             : ::sllm_rmsnorm_kernel::kResidualDeviceSymbol);
+      prequant ? (nvfp4 ? ::sllm_rmsnorm_kernel::kPrequantNvfp4DeviceSymbol
+                        : ::sllm_rmsnorm_kernel::kPrequantFp8DeviceSymbol)
+               : (wave64 ? ::sllm_rmsnorm_kernel::kResidualWave64DeviceSymbol
+                         : ::sllm_rmsnorm_kernel::kResidualDeviceSymbol));
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -3955,7 +4052,8 @@ void initialize_residual_rmsnorm_dispatch_info(
 void initialize_elementwise_dispatch_info(
     sllm_elementwise_dispatch_info_t *const info, const uint64_t dispatch_id,
     const sllm_elementwise_operation_t operation, const uint64_t element_count,
-    const char *const arch_name) noexcept {
+    const char *const arch_name, const uint32_t output_prequant = 0U,
+    const uint64_t prequant_rows = 1U) noexcept {
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
   std::memset(info, 0, sizeof(*info));
@@ -4020,19 +4118,64 @@ void initialize_elementwise_dispatch_info(
     device_symbol = "invalid_elementwise";
     break;
   }
+  if (output_prequant ==
+      static_cast<uint32_t>(sllm_public_runtime::PrequantMode::Fp8Outer)) {
+    info->kernel_id =
+        operation == SLLM_ELEMENTWISE_OPERATION_SILU_MUL
+            ? SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_PREQUANT_FP8_V1
+            : SLLM_HIP_ELEMENTWISE_KERNEL_ID_SIGMOID_MUL_PREQUANT_FP8_V1;
+  } else if (output_prequant ==
+             static_cast<uint32_t>(
+                 sllm_public_runtime::PrequantMode::Nvfp4Block16)) {
+    info->kernel_id = SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_PREQUANT_NVFP4_V1;
+  }
   info->workgroup_size_x = SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE;
-  info->grid_size_x = static_cast<uint32_t>(
-      (element_count + SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE - 1U) /
-      SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE);
+  if (output_prequant !=
+          static_cast<uint32_t>(sllm_public_runtime::PrequantMode::None) &&
+      (operation == SLLM_ELEMENTWISE_OPERATION_SILU_MUL ||
+       operation == SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL)) {
+    const uint64_t rows = prequant_rows == 0U ? 1U : prequant_rows;
+    const uint64_t k = element_count / rows;
+    const bool nvfp4 =
+        output_prequant ==
+        static_cast<uint32_t>(sllm_public_runtime::PrequantMode::Nvfp4Block16);
+    info->workgroup_size_x = nvfp4 ? 256U : 1024U;
+    const uint64_t total_blocks = rows * ((k + 15U) / 16U);
+    info->grid_size_x = nvfp4
+                            ? static_cast<uint32_t>((total_blocks + 15U) / 16U)
+                            : static_cast<uint32_t>(rows);
+  } else {
+    info->grid_size_x = static_cast<uint32_t>(
+        (element_count + SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE - 1U) /
+        SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE);
+  }
   info->fallback_allowed = 0U;
   info->fallback_used = 0U;
   info->element_count = element_count;
-  sllm_public_runtime::copy_fixed_string(info->kernel_symbol,
-                                         SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX,
-                                         logical_symbol);
-  sllm_public_runtime::copy_fixed_string(info->device_symbol,
-                                         SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX,
-                                         device_symbol);
+  sllm_public_runtime::copy_fixed_string(
+      info->kernel_symbol, SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX,
+      output_prequant ==
+              static_cast<uint32_t>(sllm_public_runtime::PrequantMode::Fp8Outer)
+          ? (operation == SLLM_ELEMENTWISE_OPERATION_SILU_MUL
+                 ? ::sllm_elementwise_kernel::kPrequantSiluMulFp8LogicalKernelId
+                 : ::sllm_elementwise_kernel::
+                       kPrequantSigmoidMulFp8LogicalKernelId)
+      : output_prequant == static_cast<uint32_t>(
+                               sllm_public_runtime::PrequantMode::Nvfp4Block16)
+          ? ::sllm_elementwise_kernel::kPrequantSiluMulNvfp4LogicalKernelId
+          : logical_symbol);
+  sllm_public_runtime::copy_fixed_string(
+      info->device_symbol, SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX,
+      output_prequant ==
+              static_cast<uint32_t>(sllm_public_runtime::PrequantMode::Fp8Outer)
+          ? (operation == SLLM_ELEMENTWISE_OPERATION_SILU_MUL
+                 ? ::sllm_elementwise_kernel::kPrequantSiluMulFp8DeviceSymbol
+                 : ::sllm_elementwise_kernel::
+                       kPrequantSigmoidMulFp8DeviceSymbol)
+      : output_prequant == static_cast<uint32_t>(
+                               sllm_public_runtime::PrequantMode::Nvfp4Block16)
+          ? ::sllm_elementwise_kernel::kPrequantSiluMulNvfp4DeviceSymbol
+          : device_symbol);
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -4534,14 +4677,11 @@ void initialize_matmul_dispatch_info(
         matches_runtime_gcn_arch(arch_name, "gfx1201") &&
         ::sllm_matmul_kernel::phase78_gfx1201_nvfp4_w4a4_split4_shape(
             metadata.m, metadata.k, metadata.n)));
-  const bool mx_a16 =
-      variant == ::sllm_matmul_kernel::KernelVariant::Mxfp8W8A16M1Col2 ||
-      variant == ::sllm_matmul_kernel::KernelVariant::Mxfp6W6A16M1Col2;
   const bool nvfp4_baseline =
       metadata.nvfp4_w4a4 &&
       variant == ::sllm_matmul_kernel::KernelVariant::Nvfp4W4A4Packed;
   info->dispatch_count =
-      mx_a16 ? 1U
+      metadata.activation_prequant != 0U ? 1U
       : nvfp4_baseline
           ? 1U + ::sllm_matmul_kernel::nvfp4_w4a4_baseline_launch_count(
                      metadata.m, metadata.n)
@@ -4938,6 +5078,50 @@ sllm_status_t select_context_device(const Context *const context,
     return hip_failure(sink, status, "hipSetDevice");
   }
   return SLLM_STATUS_OK;
+}
+
+/* NVFP4 producer kernels consume the input-global scale through a device
+ * pointer.  The public producer ABI carries its immutable FP32 bits in the
+ * descriptor, so materialize one context-independent scalar per prepared
+ * plan.  Keeping it plan-owned makes the pointer stable across HIP Graph
+ * capture and replay. */
+sllm_status_t
+prepare_nvfp4_input_scale(Context *const context, const uint32_t scale_bits,
+                          void **const device_scale,
+                          sllm_error_sink_t *const sink) noexcept {
+  if (context == nullptr || device_scale == nullptr || scale_bits == 0U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "NVFP4 producer input-global scale is invalid");
+  }
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  (void)context;
+  (void)scale_bits;
+  *device_scale = nullptr;
+  return SLLM_STATUS_OK;
+#else
+  const sllm_status_t device_status = select_context_device(context, sink);
+  if (device_status != SLLM_STATUS_OK) {
+    return device_status;
+  }
+  void *allocation = nullptr;
+  const hipError_t allocation_status = hipMalloc(&allocation, sizeof(float));
+  if (allocation_status != hipSuccess) {
+    return hip_failure(sink, allocation_status,
+                       "hipMalloc NVFP4 producer input-global scale");
+  }
+  float scale = 0.0F;
+  std::memcpy(&scale, &scale_bits, sizeof(scale));
+  const hipError_t copy_status =
+      hipMemcpy(allocation, &scale, sizeof(scale), hipMemcpyHostToDevice);
+  if (copy_status != hipSuccess) {
+    (void)hipFree(allocation);
+    return hip_failure(sink, copy_status,
+                       "hipMemcpy NVFP4 producer input-global scale");
+  }
+  *device_scale = allocation;
+  return SLLM_STATUS_OK;
+#endif
 }
 
 sllm_status_t
@@ -9256,6 +9440,12 @@ sllm_rmsnorm_prepare(const sllm_context_t *const raw_context,
     if (descriptor_status != SLLM_STATUS_OK) {
       return descriptor_status;
     }
+    if (metadata.output_prequant !=
+        static_cast<uint32_t>(sllm_public_runtime::PrequantMode::None)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "standalone RMSNorm has no producer prequant kernel");
+    }
 
     std::unique_ptr<RmsNormPlan> candidate;
     uintptr_t token = 0U;
@@ -9841,6 +10031,21 @@ extern "C" sllm_status_t sllm_residual_rmsnorm_prepare(
         candidate =
             std::make_unique<RmsNormPlan>(context, residual, addend, raw_scale,
                                           residual_output, output, metadata);
+        if (metadata.output_prequant ==
+            static_cast<uint32_t>(
+                sllm_public_runtime::PrequantMode::Nvfp4Block16)) {
+          const sllm_status_t scale_status = prepare_nvfp4_input_scale(
+              context, metadata.input_global_scale_f32_bits,
+              &candidate->input_tensor_scale_device, error_sink);
+          if (scale_status != SLLM_STATUS_OK) {
+            (void)sllm_public_runtime::AccountingState::
+                release_five_buffer_prepared_plan(
+                    context->accounting, residual->accounting,
+                    addend->accounting, raw_scale->accounting,
+                    residual_output->accounting, output->accounting);
+            return scale_status;
+          }
+        }
         token = register_handle(candidate.get(), HandleKind::RmsNormPlan);
       } catch (...) {
         (void)sllm_public_runtime::AccountingState::
@@ -10181,24 +10386,52 @@ extern "C" sllm_status_t sllm_residual_rmsnorm_execute(
     float epsilon = 0.0F;
     std::memcpy(&epsilon, &plan->residual_metadata.epsilon_bits,
                 sizeof(epsilon));
-    const hipError_t launch_status =
-        ::sllm_rmsnorm_kernel::launch_residual_fused(
-            static_cast<const uint16_t *>(
-                byte_pointer(plan->activation,
-                             plan->residual_metadata.residual.byte_offset)),
-            static_cast<const uint16_t *>(byte_pointer(
-                plan->addend, plan->residual_metadata.addend.byte_offset)),
-            static_cast<const uint16_t *>(
-                byte_pointer(plan->raw_scale,
-                             plan->residual_metadata.raw_scale.byte_offset)),
-            static_cast<uint16_t *>(byte_pointer(
-                plan->residual_output,
-                plan->residual_metadata.residual_output.byte_offset)),
-            static_cast<uint16_t *>(byte_pointer(
-                plan->output, plan->residual_metadata.output.byte_offset)),
-            static_cast<uint32_t>(normalized_size),
-            static_cast<uint32_t>(row_count), epsilon,
-            plan->residual_metadata.scale_mode, queue->stream);
+    const uint16_t *const residual = static_cast<const uint16_t *>(byte_pointer(
+        plan->activation, plan->residual_metadata.residual.byte_offset));
+    const uint16_t *const addend = static_cast<const uint16_t *>(
+        byte_pointer(plan->addend, plan->residual_metadata.addend.byte_offset));
+    const uint16_t *const raw_scale =
+        static_cast<const uint16_t *>(byte_pointer(
+            plan->raw_scale, plan->residual_metadata.raw_scale.byte_offset));
+    uint16_t *const residual_output = static_cast<uint16_t *>(
+        byte_pointer(plan->residual_output,
+                     plan->residual_metadata.residual_output.byte_offset));
+    uint8_t *const encoded_output = static_cast<uint8_t *>(
+        byte_pointer(plan->output, plan->residual_metadata.output.byte_offset));
+    uint64_t value_bytes = 0U;
+    uint64_t payload_bytes = 0U;
+    const auto prequant_mode = static_cast<sllm_public_runtime::PrequantMode>(
+        plan->residual_metadata.output_prequant);
+    hipError_t launch_status = hipErrorInvalidValue;
+    if (prequant_mode == sllm_public_runtime::PrequantMode::None) {
+      launch_status = ::sllm_rmsnorm_kernel::launch_residual_fused(
+          residual, addend, raw_scale, residual_output,
+          reinterpret_cast<uint16_t *>(encoded_output),
+          static_cast<uint32_t>(normalized_size),
+          static_cast<uint32_t>(row_count), epsilon,
+          plan->residual_metadata.scale_mode, queue->stream);
+    } else if (!sllm_public_runtime::prequant_payload_layout(
+                   prequant_mode, row_count, normalized_size, &value_bytes,
+                   &payload_bytes)) {
+      launch_status = hipErrorInvalidValue;
+    } else if (prequant_mode == sllm_public_runtime::PrequantMode::Fp8Outer) {
+      launch_status = ::sllm_rmsnorm_kernel::launch_residual_prequant_fp8(
+          residual, addend, raw_scale, residual_output, encoded_output,
+          reinterpret_cast<float *>(encoded_output + value_bytes),
+          static_cast<uint32_t>(normalized_size),
+          static_cast<uint32_t>(row_count), epsilon,
+          plan->residual_metadata.scale_mode, 0U, queue->stream);
+    } else if (prequant_mode ==
+                   sllm_public_runtime::PrequantMode::Nvfp4Block16 &&
+               plan->input_tensor_scale_device != nullptr) {
+      launch_status = ::sllm_rmsnorm_kernel::launch_residual_prequant_nvfp4(
+          residual, addend, raw_scale, residual_output, encoded_output,
+          encoded_output + value_bytes,
+          static_cast<const float *>(plan->input_tensor_scale_device),
+          static_cast<uint32_t>(normalized_size),
+          static_cast<uint32_t>(row_count), epsilon,
+          plan->residual_metadata.scale_mode, queue->stream);
+    }
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,
@@ -10215,7 +10448,8 @@ extern "C" sllm_status_t sllm_residual_rmsnorm_execute(
       }
     }
     initialize_residual_rmsnorm_dispatch_info(
-        dispatch_info, dispatch_id, row_count, normalized_size, arch_name);
+        dispatch_info, dispatch_id, row_count, normalized_size, arch_name,
+        plan->residual_metadata.output_prequant);
     *completion_output = reinterpret_cast<sllm_completion_t *>(token);
     (void)candidate.release();
     execute_guard.disarm();
@@ -10342,6 +10576,19 @@ sllm_elementwise_prepare(const sllm_context_t *const raw_context,
       try {
         candidate = std::make_unique<ElementwisePlan>(context, input0, input1,
                                                       output, metadata);
+        if (metadata.output_prequant ==
+            static_cast<uint32_t>(
+                sllm_public_runtime::PrequantMode::Nvfp4Block16)) {
+          const sllm_status_t scale_status = prepare_nvfp4_input_scale(
+              context, metadata.input_global_scale_f32_bits,
+              &candidate->input_tensor_scale_device, error_sink);
+          if (scale_status != SLLM_STATUS_OK) {
+            (void)sllm_public_runtime::AccountingState::release_prepared_plan(
+                context->accounting, input0->accounting, input1->accounting,
+                output->accounting);
+            return scale_status;
+          }
+        }
         token = register_handle(candidate.get(), HandleKind::ElementwisePlan);
       } catch (...) {
         (void)sllm_public_runtime::AccountingState::release_prepared_plan(
@@ -10667,45 +10914,106 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
     };
     const uint16_t *const input0 = static_cast<const uint16_t *>(
         byte_pointer(plan->input0, plan->metadata.input0.byte_offset));
-    uint16_t *const output = static_cast<uint16_t *>(
+    uint8_t *const encoded_output = static_cast<uint8_t *>(
         byte_pointer(plan->output, plan->metadata.output.byte_offset));
     hipError_t launch_status = hipErrorInvalidValue;
-    if (plan->metadata.operation == SLLM_ELEMENTWISE_OPERATION_COPY) {
+    const auto prequant_mode = static_cast<sllm_public_runtime::PrequantMode>(
+        plan->metadata.output_prequant);
+    const uint64_t prequant_rows =
+        plan->metadata.output.rank == 1U ? 1U : plan->metadata.output.shape[0];
+    const uint64_t prequant_k =
+        prequant_rows == 0U ? 0U : plan->metadata.element_count / prequant_rows;
+    if (prequant_mode != sllm_public_runtime::PrequantMode::None) {
+      if (plan->metadata.operation == SLLM_ELEMENTWISE_OPERATION_SILU_MUL) {
+        const uint16_t *const input1 = static_cast<const uint16_t *>(
+            byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+        uint64_t value_bytes = 0U;
+        uint64_t payload_bytes = 0U;
+        if (!sllm_public_runtime::prequant_payload_layout(
+                prequant_mode, prequant_rows, prequant_k, &value_bytes,
+                &payload_bytes)) {
+          launch_status = hipErrorInvalidValue;
+        } else if (prequant_mode ==
+                   sllm_public_runtime::PrequantMode::Fp8Outer) {
+          launch_status =
+              ::sllm_elementwise_kernel::launch_silu_mul_prequant_fp8(
+                  input0, input1, encoded_output,
+                  reinterpret_cast<float *>(encoded_output + value_bytes),
+                  static_cast<uint32_t>(prequant_rows),
+                  static_cast<uint32_t>(prequant_k), queue->stream);
+        } else if (prequant_mode ==
+                       sllm_public_runtime::PrequantMode::Nvfp4Block16 &&
+                   plan->input_tensor_scale_device != nullptr) {
+          launch_status =
+              ::sllm_elementwise_kernel::launch_silu_mul_prequant_nvfp4(
+                  input0, input1, encoded_output, encoded_output + value_bytes,
+                  static_cast<const float *>(plan->input_tensor_scale_device),
+                  static_cast<uint32_t>(prequant_rows),
+                  static_cast<uint32_t>(prequant_k), queue->stream);
+        }
+      } else if (plan->metadata.operation ==
+                     SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL &&
+                 prequant_mode == sllm_public_runtime::PrequantMode::Fp8Outer) {
+        const uint16_t *const input1 = static_cast<const uint16_t *>(
+            byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+        uint64_t value_bytes = 0U;
+        uint64_t payload_bytes = 0U;
+        if (!sllm_public_runtime::prequant_payload_layout(
+                prequant_mode, prequant_rows, prequant_k, &value_bytes,
+                &payload_bytes)) {
+          launch_status = hipErrorInvalidValue;
+        } else {
+          launch_status =
+              ::sllm_elementwise_kernel::launch_sigmoid_mul_prequant_fp8(
+                  input0, input1, encoded_output,
+                  reinterpret_cast<float *>(encoded_output + value_bytes),
+                  static_cast<uint32_t>(prequant_rows),
+                  static_cast<uint32_t>(prequant_k), queue->stream);
+        }
+      }
+    } else if (plan->metadata.operation == SLLM_ELEMENTWISE_OPERATION_COPY) {
+      uint16_t *const output = reinterpret_cast<uint16_t *>(encoded_output);
       launch_status = ::sllm_elementwise_kernel::launch_copy(
           input0, output, plan->metadata.element_count, queue->stream);
     } else if (plan->metadata.operation == SLLM_ELEMENTWISE_OPERATION_ADD) {
       const uint16_t *const input1 = static_cast<const uint16_t *>(
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      uint16_t *const output = reinterpret_cast<uint16_t *>(encoded_output);
       launch_status = ::sllm_elementwise_kernel::launch_add(
           input0, input1, output, plan->metadata.element_count, queue->stream);
     } else if (plan->metadata.operation ==
                SLLM_ELEMENTWISE_OPERATION_SILU_MUL) {
       const uint16_t *const input1 = static_cast<const uint16_t *>(
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      uint16_t *const output = reinterpret_cast<uint16_t *>(encoded_output);
       launch_status = ::sllm_elementwise_kernel::launch_silu_mul(
           input0, input1, output, plan->metadata.element_count, queue->stream);
     } else if (plan->metadata.operation ==
                SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL) {
       const uint16_t *const input1 = static_cast<const uint16_t *>(
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      uint16_t *const output = reinterpret_cast<uint16_t *>(encoded_output);
       launch_status = ::sllm_elementwise_kernel::launch_sigmoid_mul(
           input0, input1, output, plan->metadata.element_count, queue->stream);
     } else if (plan->metadata.operation ==
                SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL) {
       const uint16_t *const input1 = static_cast<const uint16_t *>(
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      uint16_t *const output = reinterpret_cast<uint16_t *>(encoded_output);
       launch_status = ::sllm_elementwise_kernel::launch_scalar_mul(
           input0, input1, output, plan->metadata.element_count, queue->stream);
     } else if (plan->metadata.operation ==
                SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL) {
       const uint16_t *const input1 = static_cast<const uint16_t *>(
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      uint16_t *const output = reinterpret_cast<uint16_t *>(encoded_output);
       launch_status = ::sllm_elementwise_kernel::launch_gelu_tanh_mul(
           input0, input1, output, plan->metadata.element_count, queue->stream);
     } else if (plan->metadata.operation ==
                SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD) {
       const uint16_t *const input1 = static_cast<const uint16_t *>(
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      uint16_t *const output = reinterpret_cast<uint16_t *>(encoded_output);
       launch_status = ::sllm_elementwise_kernel::launch_broadcast_add(
           input0, input1, output, plan->metadata.element_count,
           plan->metadata.input0.shape[1], queue->stream);
@@ -10713,12 +11021,14 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
                SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL) {
       const uint16_t *const input1 = static_cast<const uint16_t *>(
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      uint16_t *const output = reinterpret_cast<uint16_t *>(encoded_output);
       launch_status = ::sllm_elementwise_kernel::launch_broadcast_mul(
           input0, input1, output, plan->metadata.element_count,
           plan->metadata.input0.shape[1], queue->stream);
     } else {
       const uint16_t *const input1 = static_cast<const uint16_t *>(
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      uint16_t *const output = reinterpret_cast<uint16_t *>(encoded_output);
       launch_status = ::sllm_elementwise_kernel::launch_tanh_softcap(
           input0, input1, output, plan->metadata.element_count, queue->stream);
     }
@@ -10739,7 +11049,8 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
     }
     initialize_elementwise_dispatch_info(
         dispatch_info, dispatch_id, plan->metadata.operation,
-        plan->metadata.element_count, arch_name);
+        plan->metadata.element_count, arch_name, plan->metadata.output_prequant,
+        prequant_rows);
     *completion_output = reinterpret_cast<sllm_completion_t *>(token);
     (void)candidate.release();
     execute_guard.disarm();

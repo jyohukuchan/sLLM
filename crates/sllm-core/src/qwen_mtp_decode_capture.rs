@@ -227,6 +227,17 @@ impl QwenExecutionCore {
                 "MTP capture requires the fixed K20 selector".to_owned(),
             ));
         }
+        let draft_selector = match companion.draft_vocab_ids.as_ref() {
+            Some(map) => selector
+                .clone()
+                .with_vocab_map(Arc::clone(map))
+                .map_err(|error| {
+                    QwenExecutionError::InvalidRequest(format!(
+                        "MTP draft vocabulary cannot prepare mapped selector: {error}"
+                    ))
+                })?,
+            None => selector.clone(),
+        };
         initial.validate(selector.vocab_size() as u32)?;
         if initial.status != DecodeControlStatusV1::Ok
             || initial.halted
@@ -523,7 +534,7 @@ impl QwenExecutionCore {
                     AttentionPreprocessPositionMode::DecodeContinuation,
                     TerminalOutputRows::Last,
                     true,
-                    Some(selector),
+                    Some(&draft_selector),
                     false,
                     Some(&mut capture),
                 )?;

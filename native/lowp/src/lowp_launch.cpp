@@ -92,24 +92,6 @@ lowp_status_t launch_internal(const lowp_matmul_plan_t *p,
   const auto weight = static_cast<const uint8_t *>(b->weight);
   const auto weight_scales = static_cast<const uint8_t *>(b->weight_scales);
   const auto bf16 = static_cast<const uint16_t *>(b->activation);
-  if (p->request.format == LOWP_NVFP4_W4A16) {
-    if ((b->flags & LOWP_ACTIVATION_PREQUANTIZED) || !b->weight_tensor_scale)
-      return LOWP_INVALID_ARGUMENT;
-    return launch_nvfp4(bf16, weight, weight_scales, b->weight_tensor_scale,
-                        b->output, m, k, n, variant, stream_handle);
-  }
-  if (p->request.format == LOWP_MXFP8_E4M3_W8A16) {
-    if (b->flags & LOWP_ACTIVATION_PREQUANTIZED)
-      return LOWP_INVALID_ARGUMENT;
-    return launch_mxfp8_w8a16(bf16, weight, weight_scales, b->output, m, k, n,
-                              variant, stream_handle);
-  }
-  if (p->request.format == LOWP_MXFP6_E3M2_W6A16) {
-    if (b->flags & LOWP_ACTIVATION_PREQUANTIZED)
-      return LOWP_INVALID_ARGUMENT;
-    return launch_mxfp6_w6a16(bf16, weight, weight_scales, b->output, m, k, n,
-                              variant, stream_handle);
-  }
   const uint8_t *activation = nullptr, *activation_scales = nullptr;
   if (b->flags & LOWP_ACTIVATION_PREQUANTIZED) {
     if (!b->activation_scales)

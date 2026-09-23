@@ -203,18 +203,6 @@ inline std::optional<sllm_lowp::PreparedProviderPlan> concrete_provider_plan(
     concrete_tile = TilePolicy::DecodeRowReduction;
     concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
     break;
-  case KernelVariant::Mxfp8W8A16M1Col2:
-    if (provider.format != MatmulFormat::Mxfp8E4M3W8A16 ||
-        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
-         provider.target != sllm_lowp::ExactTarget::Gfx1201) ||
-        !::sllm_matmul_kernel::phase85_mxfp_m1_a16_shape(provider.m, provider.k,
-                                                         provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp8A16Block32;
-    concrete_tile = TilePolicy::DecodeRowReduction;
-    concrete_inner_product = InnerProduct::E4M3Bf16Fp32;
-    break;
   case KernelVariant::Mxfp8W8A8Prefill:
     if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
       return std::nullopt;
@@ -329,18 +317,6 @@ inline std::optional<sllm_lowp::PreparedProviderPlan> concrete_provider_plan(
     concrete_tile = TilePolicy::DecodeRowReduction;
     concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
     break;
-  case KernelVariant::Mxfp6W6A16M1Col2:
-    if (provider.format != MatmulFormat::Mxfp6E3M2W6A16 ||
-        (provider.target != sllm_lowp::ExactTarget::Gfx1030 &&
-         provider.target != sllm_lowp::ExactTarget::Gfx1201) ||
-        !::sllm_matmul_kernel::phase85_mxfp_m1_a16_shape(provider.m, provider.k,
-                                                         provider.n)) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Mxfp6A16Block32;
-    concrete_tile = TilePolicy::DecodeRowReduction;
-    concrete_inner_product = InnerProduct::E3M2Bf16Fp32;
-    break;
   case KernelVariant::Mxfp6W6A6Prefill:
     if (provider.format != MatmulFormat::Mxfp6E3M2W6A6) {
       return std::nullopt;
@@ -427,30 +403,6 @@ inline std::optional<sllm_lowp::PreparedProviderPlan> concrete_provider_plan(
     concrete_provider = ProviderKind::Mxfp6Gfx1201WmmaViaE4M3;
     concrete_tile = TilePolicy::Wmma128x64x32;
     concrete_inner_product = InnerProduct::E3M2ViaE4M3WmmaFp32;
-    break;
-  case KernelVariant::Nvfp4DecodePackedDequant:
-    if (provider.format != MatmulFormat::Nvfp4W4A16) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A16Block16;
-    concrete_tile = TilePolicy::DecodeRowReduction;
-    concrete_inner_product = InnerProduct::E2M1Bf16Fp32;
-    break;
-  case KernelVariant::Nvfp4PrefillRow8Tiled256:
-    if (provider.format != MatmulFormat::Nvfp4W4A16) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A16Block16;
-    concrete_tile = TilePolicy::PackedRow8;
-    concrete_inner_product = InnerProduct::E2M1Bf16Fp32;
-    break;
-  case KernelVariant::Nvfp4BaselinePackedDequant:
-    if (provider.format != MatmulFormat::Nvfp4W4A16) {
-      return std::nullopt;
-    }
-    concrete_provider = ProviderKind::Nvfp4W4A16Block16;
-    concrete_tile = TilePolicy::Elementwise;
-    concrete_inner_product = InnerProduct::E2M1Bf16Fp32;
     break;
   case KernelVariant::Nvfp4W4A4Packed:
     if (provider.format != MatmulFormat::Nvfp4W4A4) {

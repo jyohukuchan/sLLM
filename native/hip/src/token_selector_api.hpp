@@ -29,6 +29,10 @@ struct DescriptorMetadata final {
 
 uint64_t workspace_bytes(uint64_t vocab_size, uint32_t top_k) noexcept;
 
+// The mapped fixed-K20 ABI appends one u32 global-vocabulary id for every
+// local logits row after the ordinary fixed-top-k scratch region.
+uint64_t mapped_workspace_bytes(uint64_t vocab_size) noexcept;
+
 sllm_status_t
 validate_descriptor_prefix(const sllm_token_selector_desc_t *descriptor,
                            sllm_error_sink_t *sink) noexcept;

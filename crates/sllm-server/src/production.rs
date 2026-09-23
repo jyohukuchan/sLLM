@@ -29,34 +29,35 @@ use sllm_core::{
     PrefixCacheValueV1, PrefixEntryIdV1, PrefixKvLayoutV1, PrefixLeaseV1, PrefixLookupKind,
     PrefixStateIdentityV1, QWEN35_4B_FINGERPRINT, QWEN35_HIDDEN_SIZE,
     QWEN35_RECOMMENDED_CONTEXT_TOKENS, QWEN38_MTP_DRAFT_WIDTH, QuantizedTensorEncoding,
-    QwenComponentSelection, QwenExecutionRequest, QwenGraph, QwenGraphStateDescriptor,
-    QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenPrefixForkAuditV1, QwenPrefixStateV1,
-    QwenResidentModel, QwenVisionExecutionInput, QwenVisionManifest, QwenVisionResidentModel,
-    ReviewedModelLock, SamplerChainConfigV1, SamplerChainV1, SessionCheckpoint,
-    SpeculativeAccountingV1, VerifiedCache, VerifiedControlVectorPayloadV1, VerifiedFp8Sidecar,
-    VerifiedGgufGemma4Moe, VerifiedGgufGemma4Mtp, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe,
+    Qwen38MtpDraftVocabularyArtifact, QwenComponentSelection, QwenExecutionRequest, QwenGraph,
+    QwenGraphStateDescriptor, QwenMultimodalImageEmbedding, QwenMultimodalPrompt,
+    QwenPrefixForkAuditV1, QwenPrefixStateV1, QwenResidentModel, QwenVisionExecutionInput,
+    QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock, SamplerChainConfigV1,
+    SamplerChainV1, SessionCheckpoint, SpeculativeAccountingV1, VerifiedCache,
+    VerifiedControlVectorPayloadV1, VerifiedFp8Sidecar, VerifiedGgufGemma4Moe,
+    VerifiedGgufGemma4Mtp, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe,
     VerifiedGgufWeightSource, VerifiedLoraPayloadV1, VerifiedMinistral3WeightSource,
-    VerifiedNvfp4Sidecar, VerifiedQwen35Moe, VerifiedQwen38MtpQuantizedSidecar,
-    VerifiedUnslothQwen38Nvfp4, WeightClassification, WeightLoadPlan,
-    XtcSamplingConfigV1 as CoreXtcSamplingConfigV1, assemble_gguf_qwen35_multimodal_prompt,
-    assemble_qwen35_multimodal_prompt, build_gemma4_execution_layout, build_gemma4_graph,
-    build_gemma4_moe_gguf_graph, build_gemma4_moe_resident_weight_load_plan,
-    build_gemma4_mtp_graph, build_gguf_qwen35_moe_weight_load_plan,
-    build_ministral3_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
-    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph,
-    build_qwen35_gguf_mx_weight_activation_graph, build_qwen35_graph_with_kv_cache_encoding,
-    build_qwen35_graph_with_kv_cache_selection, build_qwen35_graph_with_position_payload_mode,
-    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
-    build_qwen35_nvfp4_graph, build_qwen35_unsloth_qwen38_nvfp4_graph,
-    build_qwen38_nvfp4_mtp_graph_with_companion, build_qwen38_nvfp4_mtp_weight_load_plan,
-    build_qwen38_nvfp4_weight_load_plan, build_verified_gemma4_mtp_weight_load_plan,
-    build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
-    build_verified_gguf_qwen35_vision_manifest, builtin_reviewed_model_lock,
-    gemma4_mtp_pair_semantic_id, open_and_verify_official_ministral3_gguf,
-    parse_control_vector_lock_v1, parse_gemma4_mtp_model_lock, parse_lora_lock_v1,
-    parse_ministral3_model_lock, qwen_graph_memory_estimate_with_prepared_workspace,
-    qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy, read_derived_gguf_lock,
-    verify_derived_gguf, verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp, verify_gguf_qwen35_moe,
+    VerifiedQwen35Moe, VerifiedQwen38MtpQuantizedSidecar, VerifiedUnslothQwen38Nvfp4,
+    WeightClassification, WeightLoadPlan, XtcSamplingConfigV1 as CoreXtcSamplingConfigV1,
+    assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
+    build_gemma4_execution_layout, build_gemma4_graph, build_gemma4_moe_gguf_graph,
+    build_gemma4_moe_resident_weight_load_plan, build_gemma4_mtp_graph,
+    build_gguf_qwen35_moe_weight_load_plan, build_ministral3_weight_load_plan,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
+    build_qwen35_gguf_moe_execution_graph, build_qwen35_gguf_mx_weight_activation_graph,
+    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_kv_cache_selection,
+    build_qwen35_graph_with_position_payload_mode, build_qwen35_moe_execution_graph,
+    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_unsloth_qwen38_nvfp4_graph,
+    build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids,
+    build_qwen38_nvfp4_mtp_weight_load_plan, build_qwen38_nvfp4_weight_load_plan,
+    build_verified_gemma4_mtp_weight_load_plan, build_verified_gguf_gemma_weight_load_plan,
+    build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
+    builtin_reviewed_model_lock, gemma4_mtp_pair_semantic_id, load_qwen38_mtp_draft_vocabulary,
+    open_and_verify_official_ministral3_gguf, parse_control_vector_lock_v1,
+    parse_gemma4_mtp_model_lock, parse_lora_lock_v1, parse_ministral3_model_lock,
+    qwen_graph_memory_estimate_with_prepared_workspace, qwen_prefill_chunk_candidates,
+    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, verify_derived_gguf,
+    verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp, verify_gguf_qwen35_moe,
     verify_qwen38_mtp_quantized_sidecar, verify_unsloth_qwen38_nvfp4,
 };
 use sllm_frontend::{
@@ -450,12 +451,6 @@ fn qwen_embedding_graph_for_rows(
             .map_err(|error| BackendErrorV1::new(format!("embedding graph failed: {error}")))
     } else if let Some(source) = &state.gguf_moe {
         build_qwen35_gguf_moe_execution_graph(source, &state.plan, target_rows, state_capacity)
-            .map_err(|error| BackendErrorV1::new(format!("embedding graph failed: {error}")))
-    } else if let Some(sidecar) = &state.nvfp4_sidecar {
-        let lock = state.lock.as_ref().ok_or_else(|| {
-            BackendErrorV1::new("NVFP4 embedding requires the reviewed dense Qwen lock")
-        })?;
-        build_qwen35_nvfp4_graph(lock, &state.plan, sidecar, target_rows, state_capacity)
             .map_err(|error| BackendErrorV1::new(format!("embedding graph failed: {error}")))
     } else if let Some(source) = state
         .gguf_source
@@ -3067,7 +3062,7 @@ struct QwenBackendStateV1 {
     target: String,
     model_ready_current_bytes: u64,
     sidecar: Option<Arc<VerifiedFp8Sidecar>>,
-    nvfp4_sidecar: Option<Arc<VerifiedNvfp4Sidecar>>,
+    mtp_draft_vocabulary: Option<Arc<Qwen38MtpDraftVocabularyArtifact>>,
     fp8_provider: Option<String>,
     mtp_weight_encoding: Option<String>,
     mtp_companion_digest: Option<String>,
@@ -4668,13 +4663,23 @@ impl QwenChatBackendV1 {
         .map_err(|error| {
             BackendErrorV1::new(format!("Qwen3.8 resident model load failed: {error}"))
         })?;
+        let mtp_draft_vocabulary = if matches!(config.phase41.draft, DraftStartupConfigV1::MtpAuto)
+        {
+            load_qwen38_mtp_draft_vocabulary(&config.artifact_root)
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("Qwen3.8 MTP draft vocabulary failed: {error}"))
+                })?
+                .map(Arc::new)
+        } else {
+            None
+        };
         let (mtp_resident, mtp_plan) =
             if matches!(config.phase41.draft, DraftStartupConfigV1::MtpAuto) {
                 let mtp_plan =
                     build_qwen38_nvfp4_mtp_weight_load_plan(&lock, &artifact).map_err(|error| {
                         BackendErrorV1::new(format!("Qwen3.8 MTP load plan failed: {error}"))
                     })?;
-                let mtp_graph = build_qwen38_nvfp4_mtp_graph_with_companion(
+                let mtp_graph = build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
                     &lock,
                     &mtp_plan,
                     &artifact,
@@ -4682,6 +4687,9 @@ impl QwenChatBackendV1 {
                     config.kv_cache_encoding,
                     1_024,
                     mtp_companion.as_deref(),
+                    mtp_draft_vocabulary
+                        .as_deref()
+                        .map_or(&[], Qwen38MtpDraftVocabularyArtifact::ids),
                 )
                 .map_err(|error| {
                     BackendErrorV1::new(format!("Qwen3.8 MTP resident graph failed: {error}"))
@@ -4739,7 +4747,7 @@ impl QwenChatBackendV1 {
                 target: config.target,
                 model_ready_current_bytes,
                 sidecar: None,
-                nvfp4_sidecar: None,
+                mtp_draft_vocabulary,
                 fp8_provider: Some("qwen38-mixed-nvfp4-v1".to_owned()),
                 mtp_weight_encoding: mtp_companion
                     .as_ref()
@@ -5035,7 +5043,7 @@ impl QwenChatBackendV1 {
                 target: config.target,
                 model_ready_current_bytes,
                 sidecar: None,
-                nvfp4_sidecar: None,
+                mtp_draft_vocabulary: None,
                 fp8_provider,
                 mtp_weight_encoding: None,
                 mtp_companion_digest: None,
@@ -5145,7 +5153,7 @@ impl QwenChatBackendV1 {
                 target: config.target,
                 model_ready_current_bytes,
                 sidecar: None,
-                nvfp4_sidecar: None,
+                mtp_draft_vocabulary: None,
                 fp8_provider: Some("ocp-mxfp4-w4a4-mixed".to_owned()),
                 mtp_weight_encoding: None,
                 mtp_companion_digest: None,
@@ -5181,7 +5189,6 @@ impl QwenChatBackendV1 {
             || state.mtp_resident.is_some()
             || state.mtp_plan.is_some()
             || state.sidecar.is_some()
-            || state.nvfp4_sidecar.is_some()
             || state.fp8_provider.is_some()
             || state
                 .gguf_source
@@ -6026,7 +6033,6 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             && (state.moe_artifact.is_some()
                 || state.gguf_moe.is_some()
                 || state.sidecar.is_some()
-                || state.nvfp4_sidecar.is_some()
                 || state
                     .gguf_source
                     .as_ref()
@@ -6079,7 +6085,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     "Qwen3.5 MoE production path is text-only",
                 ));
             }
-            if state.sidecar.is_some() || state.nvfp4_sidecar.is_some() {
+            if state.sidecar.is_some() {
                 return Err(BackendErrorV1::new(
                     "vision requests currently require the BF16 text artifact",
                 ));
@@ -6216,7 +6222,6 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     .as_ref()
                     .is_some_and(|source| source.has_quantized_linear_recipe())
                 || state.sidecar.is_some()
-                || state.nvfp4_sidecar.is_some()
                 || state.kv_cache_encoding != KvCacheEncoding::Fp16
                 || !matches!(
                     state.phase41.prefix_cache,
@@ -6343,14 +6348,6 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     state.lock.as_ref().expect("dense Qwen lock"),
                     &state.plan,
                     prompt_tokens,
-                    state_capacity,
-                )
-            } else if let Some(nvfp4_sidecar) = &state.nvfp4_sidecar {
-                build_qwen35_nvfp4_graph(
-                    state.lock.as_ref().expect("dense Qwen lock"),
-                    &state.plan,
-                    nvfp4_sidecar,
-                    target_rows,
                     state_capacity,
                 )
             } else if let Some(source) = state
@@ -6628,7 +6625,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 (mtp_target, &state.mtp_resident, &state.mtp_plan)
             {
                 let mtp_graph = if let Some(artifact) = &state.qwen38_artifact {
-                    build_qwen38_nvfp4_mtp_graph_with_companion(
+                    build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
                         state.lock.as_ref().expect("MTP requires dense Qwen lock"),
                         mtp_plan,
                         artifact,
@@ -6636,6 +6633,10 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                         state.kv_cache_encoding,
                         1_024,
                         state.mtp_companion.as_deref(),
+                        state
+                            .mtp_draft_vocabulary
+                            .as_deref()
+                            .map_or(&[], Qwen38MtpDraftVocabularyArtifact::ids),
                     )
                 } else {
                     build_qwen35_mtp_graph(

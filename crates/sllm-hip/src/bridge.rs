@@ -1709,6 +1709,13 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                         contract.use_additive(),
                         contract.use_mask(),
                     )
+                    .and_then(|fixed| {
+                        if contract.has_vocab_map() {
+                            fixed.with_vocab_map()
+                        } else {
+                            Ok(fixed)
+                        }
+                    })
                 }
                 .map_err(map_backend_error)?;
                 self.state.ensure_open()?;

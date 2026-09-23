@@ -48,6 +48,7 @@ pub(crate) struct ResidualRmsNormPair {
     add_index: usize,
     norm_index: usize,
     operation: SemanticOpDescriptor,
+    activation_quant_scale_bits: u32,
     fused_inputs: [usize; 3],
     fused_outputs: [usize; 2],
     dependencies: Vec<usize>,
@@ -65,6 +66,14 @@ impl ResidualRmsNormPair {
 
     pub(crate) fn operation(&self) -> &SemanticOpDescriptor {
         &self.operation
+    }
+
+    /// Producer-side activation quantization scale carried from the RMSNorm
+    /// side into the fused descriptor. Kept as an explicit pair field so the
+    /// rewrite's propagation is part of the plan's reviewable state, and
+    /// cross-checked against the fused operation when the plan is applied.
+    pub(crate) const fn activation_quant_scale_bits(&self) -> u32 {
+        self.activation_quant_scale_bits
     }
 
     pub(crate) const fn fused_inputs(&self) -> &[usize; 3] {
@@ -199,25 +208,32 @@ pub(crate) fn plan_residual_rmsnorm_rewrite<N: ResidualRmsNormGraphNode>(
         let Some(rms_contract) = norm_operation.rms_norm_contract() else {
             continue;
         };
+        // A producer-encoded Encoding-B normalized output must keep its raw
+        // FP32 activation scale through the rewrite; legacy and Encoding-A
+        // outputs carry `0`.
+        let activation_quant_scale_bits = norm_operation.activation_quant_scale_bits();
         let Some(&scale) = norm_node.semantic_inputs().get(1) else {
             continue;
         };
         let Some(&normalized_output) = norm_node.semantic_outputs().first() else {
             continue;
         };
-        let Some(operation) = SemanticOpDescriptor::new_residual_rms_norm_with_contract(
-            vec![
-                tensors[add_node.semantic_inputs()[0]].clone(),
-                tensors[add_node.semantic_inputs()[1]].clone(),
-                tensors[scale].clone(),
-            ],
-            vec![
-                tensors[add_output].clone(),
-                tensors[normalized_output].clone(),
-            ],
-            ResidualRmsNormContract::from_rms_norm(rms_contract),
-        )
-        .ok() else {
+        let Some(operation) =
+            SemanticOpDescriptor::new_residual_rms_norm_with_contract_and_quant_scale(
+                vec![
+                    tensors[add_node.semantic_inputs()[0]].clone(),
+                    tensors[add_node.semantic_inputs()[1]].clone(),
+                    tensors[scale].clone(),
+                ],
+                vec![
+                    tensors[add_output].clone(),
+                    tensors[normalized_output].clone(),
+                ],
+                ResidualRmsNormContract::from_rms_norm(rms_contract),
+                activation_quant_scale_bits,
+            )
+            .ok()
+        else {
             continue;
         };
 
@@ -237,6 +253,7 @@ pub(crate) fn plan_residual_rmsnorm_rewrite<N: ResidualRmsNormGraphNode>(
                 add_index,
                 norm_index,
                 operation,
+                activation_quant_scale_bits,
                 fused_inputs: [
                     add_node.semantic_inputs()[0],
                     add_node.semantic_inputs()[1],
@@ -407,5 +424,92 @@ mod tests {
             plan.pair_for_add(0).unwrap().boundary_after(),
             nodes[1].boundary
         );
+    }
+
+    #[test]
+    fn fusion_propagates_the_rmsnorm_activation_quant_scale() {
+        let activation = TensorView::contiguous(crate::DType::Bf16, &[2, 4]).unwrap();
+        let scale = TensorView::contiguous(crate::DType::Bf16, &[4]).unwrap();
+        let normalized_output = TensorView::with_encoding(
+            crate::DType::U8,
+            crate::Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: crate::DType::F8E4M3Fn,
+            },
+            &[2, 4],
+        )
+        .unwrap();
+        let scale_bits = 512.0_f32.to_bits();
+        let tensors = vec![
+            activation.clone(),
+            activation.clone(),
+            activation.clone(),
+            scale.clone(),
+            normalized_output.clone(),
+        ];
+        let add = SemanticOpDescriptor::new(
+            SemanticOpKind::Add,
+            vec![activation.clone(), activation.clone()],
+            vec![activation.clone()],
+        )
+        .unwrap();
+        let norm = SemanticOpDescriptor::new_rms_norm_with_quant_scale(
+            vec![activation.clone(), scale],
+            vec![normalized_output],
+            1.0e-5,
+            crate::RmsNormScaleMode::Direct,
+            scale_bits,
+        )
+        .unwrap();
+        assert_eq!(norm.activation_quant_scale_bits(), scale_bits);
+        let nodes = vec![
+            TestNode {
+                operation: Some(add),
+                inputs: vec![0, 1],
+                outputs: vec![2],
+                dependencies: vec![],
+                boundary: None,
+            },
+            TestNode {
+                operation: None,
+                inputs: vec![],
+                outputs: vec![3],
+                dependencies: vec![],
+                boundary: None,
+            },
+            TestNode {
+                operation: Some(norm),
+                inputs: vec![2, 3],
+                outputs: vec![4],
+                dependencies: vec![0],
+                boundary: None,
+            },
+        ];
+
+        let plan = plan_residual_rmsnorm_rewrite(&nodes, &tensors);
+        // A fused Encoding B descriptor cannot be built without the scale,
+        // so a surviving pair proves the propagation end to end.
+        assert_eq!(plan.pairs().count(), 1);
+        let pair = plan.pair_for_add(0).expect("Encoding B pair fuses");
+        assert_eq!(pair.activation_quant_scale_bits(), scale_bits);
+        assert_eq!(pair.operation().kind(), SemanticOpKind::ResidualRmsNorm);
+        assert_eq!(
+            pair.operation().activation_quant_scale_bits(),
+            scale_bits,
+            "the fused descriptor must carry the RMSNorm side's scale"
+        );
+        assert!(
+            pair.operation().outputs()[0].dtype() == crate::DType::Bf16
+                && pair.operation().outputs()[0].encoding() == crate::Encoding::Unquantized,
+            "the residual intermediate stays legacy BF16"
+        );
+        assert_eq!(
+            pair.operation().outputs()[1].encoding(),
+            crate::Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: crate::DType::F8E4M3Fn,
+            }
+        );
+        assert_eq!(*pair.fused_outputs(), [2, 4]);
     }
 }

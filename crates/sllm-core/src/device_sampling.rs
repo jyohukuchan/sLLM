@@ -25,6 +25,7 @@ pub(crate) struct DeviceSamplingBuffers {
     last_additive: Vec<f32>,
     last_mask: Vec<u8>,
     workspace: Option<(ExecutionBuffer, TensorView)>,
+    staged_vocab_map: Option<Arc<[u32]>>,
     fixed_k20_support_slots: Option<(ExecutionBuffer, usize)>,
 }
 
@@ -65,6 +66,7 @@ impl DeviceSamplingBuffers {
             last_additive: Vec::new(),
             last_mask: Vec::new(),
             workspace: None,
+            staged_vocab_map: None,
             fixed_k20_support_slots: None,
         })
     }
@@ -219,7 +221,14 @@ impl DeviceSamplingBuffers {
         timeout: Duration,
     ) -> Result<PreparedDeviceSampling, ExecutionError> {
         self.update(session, queue, request, timeout)?;
-        let contract = if request.top_k() != 0 || request.top_p() != 1.0 {
+        let contract = if request.vocab_map().is_some() {
+            TokenSelectorContractV1::new_fixed_mapped(
+                self.vocab as u64,
+                request.seed(),
+                request.counter(),
+            )
+            .map_err(invalid)?
+        } else if request.top_k() != 0 || request.top_p() != 1.0 {
             TokenSelectorContractV1::new_fixed(
                 self.vocab as u64,
                 request.top_k() as u32,
@@ -256,6 +265,10 @@ impl DeviceSamplingBuffers {
                 let buffer =
                     session.allocate_with_category(scratch, AllocationCategory::RequestState)?;
                 self.workspace = Some((buffer, view));
+                self.staged_vocab_map = None;
+            }
+            if let Some(map) = request.vocab_map_arc() {
+                self.stage_vocab_map(session, queue, map, contract, timeout)?;
             }
             let (buffer, view) = self
                 .workspace
@@ -282,12 +295,70 @@ impl DeviceSamplingBuffers {
             )?],
         })
     }
+
+    /// Prepares the mapped selector before graph capture. The map occupies a
+    /// disjoint workspace tail and is copied once per request, not per replay.
+    pub(crate) fn stage_vocab_map(
+        &mut self,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        map: &Arc<[u32]>,
+        contract: TokenSelectorContractV1,
+        timeout: Duration,
+    ) -> Result<(), ExecutionError> {
+        if !contract.has_vocab_map() || map.len() != self.vocab {
+            return Err(invalid(
+                "mapped selector vocabulary differs from request storage",
+            ));
+        }
+        let scratch = contract.workspace_bytes();
+        if self
+            .workspace
+            .as_ref()
+            .is_none_or(|(_, view)| view.payload_bytes() != scratch)
+        {
+            let view = TensorView::contiguous(DType::U8, &[scratch as usize]).map_err(invalid)?;
+            let buffer =
+                session.allocate_with_category(scratch, AllocationCategory::RequestState)?;
+            self.workspace = Some((buffer, view));
+            self.staged_vocab_map = None;
+        }
+        if self
+            .staged_vocab_map
+            .as_ref()
+            .is_some_and(|staged| Arc::ptr_eq(staged, map))
+        {
+            return Ok(());
+        }
+        let offset = scratch
+            .checked_sub(u64::try_from(map.len()).map_err(invalid)? * 4)
+            .ok_or_else(|| invalid("mapped selector workspace offset underflowed"))?;
+        let mut bytes = Vec::with_capacity(map.len() * 4);
+        for &id in map.iter() {
+            bytes.extend_from_slice(&id.to_le_bytes());
+        }
+        let (buffer, _) = self.workspace.as_ref().expect("mapped workspace allocated");
+        upload_at(session, queue, buffer, offset, &bytes, timeout)?;
+        self.staged_vocab_map = Some(Arc::clone(map));
+        Ok(())
+    }
 }
 
 fn upload(
     session: &ExecutionSession,
     queue: &ExecutionQueue,
     buffer: &ExecutionBuffer,
+    bytes: &[u8],
+    timeout: Duration,
+) -> Result<(), ExecutionError> {
+    upload_at(session, queue, buffer, 0, bytes, timeout)
+}
+
+fn upload_at(
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    buffer: &ExecutionBuffer,
+    base_offset: u64,
     bytes: &[u8],
     timeout: Duration,
 ) -> Result<(), ExecutionError> {
@@ -299,7 +370,10 @@ fn upload(
         let offset = index
             .checked_mul(maximum)
             .ok_or_else(|| invalid("upload offset overflow"))?;
-        let range = buffer.range(offset as u64, chunk.len() as u64)?;
+        let offset = base_offset
+            .checked_add(offset as u64)
+            .ok_or_else(|| invalid("device sampler transfer offset overflowed"))?;
+        let range = buffer.range(offset, chunk.len() as u64)?;
         let mut transfer = session.upload(queue, range, Arc::from(chunk))?;
         require_terminal_success("device sampler constraint upload", transfer.wait(timeout)?)
             .map_err(invalid)?;

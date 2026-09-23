@@ -275,12 +275,82 @@ validate_and_copy_descriptor_impl(const sllm_matmul_desc_t *const descriptor,
       descriptor->op_version == SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION;
   const bool nvfp4 =
       descriptor->op_version == SLLM_HIP_MATMUL_NVFP4_VERSION || nvfp4_w4a4;
+  /* Phase 87 stage 7: the activation binding may be legacy BF16, a
+   * prequantized FP8 outer payload, or a prequantized NVFP4 block16 payload.
+   * Binding pairs that match neither contract fall back to the legacy BF16
+   * validation below so the historical dtype/encoding diagnostics apply. */
+  const sllm_public_runtime::PrequantMode activation_prequant =
+      sllm_public_runtime::prequant_mode_from_binding(
+          descriptor->activation.dtype, descriptor->activation.encoding);
+  const bool prequant_fp8 =
+      activation_prequant == sllm_public_runtime::PrequantMode::Fp8Outer;
+  const bool prequant_nvfp4 =
+      activation_prequant == sllm_public_runtime::PrequantMode::Nvfp4Block16;
   sllm_status_t status = validate_tensor(
-      descriptor->activation, &metadata->activation, SLLM_TENSOR_DTYPE_BF16,
-      SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2), require_buffers, false,
-      false, false, false, false, false, sink);
+      descriptor->activation, &metadata->activation,
+      prequant_fp8     ? SLLM_TENSOR_DTYPE_F8_E4M3_FN
+      : prequant_nvfp4 ? SLLM_TENSOR_DTYPE_U8
+                       : SLLM_TENSOR_DTYPE_BF16,
+      prequant_fp8     ? SLLM_TENSOR_ENCODING_FP8_OUTER_F32
+      : prequant_nvfp4 ? SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32
+                       : SLLM_TENSOR_ENCODING_UNQUANTIZED,
+      prequant_fp8 || prequant_nvfp4 ? UINT64_C(1) : UINT64_C(2),
+      require_buffers, false, false, false, false, false, false, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
+  }
+  if (prequant_fp8 && !fp8_outer) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_UNSUPPORTED_ENCODING,
+        "matmul FP8 prequantized activation requires the FP8 outer contract");
+  }
+  if (prequant_nvfp4 && !nvfp4_w4a4) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_UNSUPPORTED_ENCODING,
+        "matmul NVFP4 prequantized activation requires the NVFP4 W4A4 "
+        "contract");
+  }
+  metadata->activation_prequant = static_cast<uint32_t>(activation_prequant);
+  metadata->activation_value_bytes = 0U;
+  metadata->activation_scale_offset = 0U;
+  if (prequant_fp8 || prequant_nvfp4) {
+    uint64_t value_bytes = 0U;
+    uint64_t payload_bytes = 0U;
+    if (!sllm_public_runtime::prequant_payload_layout(
+            activation_prequant, descriptor->activation.shape[0],
+            descriptor->activation.shape[1], &value_bytes, &payload_bytes)) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "matmul prequantized activation payload overflowed u64");
+    }
+    if (prequant_fp8) {
+      if (sllm_public_runtime::add_overflows(descriptor->activation.byte_offset,
+                                             value_bytes)) {
+        return sllm_public_runtime::write_error(
+            sink, SLLM_STATUS_METADATA_OVERFLOW,
+            "matmul FP8 activation value/scale interval overflowed u64");
+      }
+      const uint64_t scale_offset =
+          descriptor->activation.byte_offset + value_bytes;
+      if ((scale_offset & UINT64_C(3)) != 0U) {
+        return sllm_public_runtime::write_error(
+            sink, SLLM_STATUS_MISALIGNED_OFFSET,
+            "matmul FP8 activation scales require a four-byte-aligned value "
+            "payload end");
+      }
+    }
+    if (sllm_public_runtime::add_overflows(descriptor->activation.byte_offset,
+                                           payload_bytes)) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "matmul prequantized activation byte interval overflowed u64");
+    }
+    metadata->activation.payload_bytes = payload_bytes;
+    metadata->activation.end_offset =
+        descriptor->activation.byte_offset + payload_bytes;
+    metadata->activation_value_bytes = value_bytes;
+    metadata->activation_scale_offset =
+        descriptor->activation.byte_offset + value_bytes;
   }
   const uint32_t fp8_dtype = descriptor->weight.dtype;
   if (fp8_outer && fp8_dtype != SLLM_TENSOR_DTYPE_F8_E4M3_FN &&

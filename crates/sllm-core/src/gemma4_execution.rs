@@ -1606,17 +1606,13 @@ impl Gemma4ResidentModel {
         lock: crate::Gemma4ModelLock,
         plan: WeightLoadPlan,
         cache: &VerifiedCache,
-        sidecar: Arc<VerifiedNvfp4Sidecar>,
+        _sidecar: Arc<VerifiedNvfp4Sidecar>,
         completion_timeout: Duration,
     ) -> Result<Self, Gemma4ExecutionLayoutError> {
-        Self::new_with_nvfp4(
-            session,
-            lock,
-            plan,
-            cache,
-            Some(sidecar),
-            completion_timeout,
-        )
+        let _ = (session, lock, plan, cache, completion_timeout);
+        Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma NVFP4 W4A16 sidecar execution is retired; use the first-class W4A4 artifact",
+        ))
     }
 
     /// Uploads the provider artifact directly and binds its complete mixed
@@ -4047,18 +4043,14 @@ impl Gemma4ProvisionedBuffers {
         layout: &Gemma4ExecutionLayout,
         plan: &WeightLoadPlan,
         cache: &VerifiedCache,
-        sidecar: &VerifiedNvfp4Sidecar,
+        _sidecar: &VerifiedNvfp4Sidecar,
         queue: &ExecutionQueue,
         completion_timeout: Duration,
     ) -> Result<(), Gemma4ExecutionLayoutError> {
-        self.upload_immutable_source(
-            layout,
-            plan,
-            cache,
-            Some(sidecar),
-            queue,
-            completion_timeout,
-        )
+        let _ = (layout, plan, cache, queue, completion_timeout);
+        Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma NVFP4 W4A16 sidecar upload is retired; use the first-class W4A4 artifact",
+        ))
     }
 
     fn upload_immutable_quantized(
@@ -4129,6 +4121,11 @@ impl Gemma4ProvisionedBuffers {
         {
             return Err(Gemma4ExecutionLayoutError::invalid(
                 "immutable upload identity, queue, or timeout differs",
+            ));
+        }
+        if sidecar.is_some() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma NVFP4 W4A16 sidecar upload is retired; use the first-class W4A4 artifact",
             ));
         }
         for entry in &plan.entries {
@@ -5648,10 +5645,7 @@ fn gemma_is_nvfp4_weight(view: &TensorView) -> bool {
     view.dtype() == DType::U8
         && matches!(
             view.encoding(),
-            Encoding::Nvfp4 {
-                block_size: 16,
-                scale_dtype: DType::F8E4M3Fn,
-            } | Encoding::Nvfp4W4A4 {
+            Encoding::Nvfp4W4A4 {
                 block_size: 16,
                 scale_dtype: DType::F8E4M3Fn,
             }
@@ -5831,40 +5825,14 @@ fn upload_gemma_nvfp4_weight(
     session: &ExecutionSession,
     queue: &ExecutionQueue,
     destination: &crate::BufferRange,
-    sidecar: &VerifiedNvfp4Sidecar,
-    tensor_name: &str,
+    _sidecar: &VerifiedNvfp4Sidecar,
+    _tensor_name: &str,
     completion_timeout: Duration,
 ) -> Result<(), Gemma4ExecutionLayoutError> {
-    let (values, block_scales, tensor_scale) = sidecar
-        .read_tensor_bytes(tensor_name)
-        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-    let unaligned = values
-        .len()
-        .checked_add(block_scales.len())
-        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("NVFP4 upload size overflowed"))?;
-    let tensor_scale_offset = unaligned
-        .checked_add(3)
-        .map(|bytes| bytes & !3)
-        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("NVFP4 scale offset overflowed"))?;
-    let expected = tensor_scale_offset
-        .checked_add(4)
-        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("NVFP4 upload size overflowed"))?;
-    if u64::try_from(expected).ok() != Some(destination.size_bytes()) {
-        return Err(Gemma4ExecutionLayoutError::invalid(
-            "NVFP4 upload bytes differ from the resident allocation",
-        ));
-    }
-    let mut bytes = values;
-    bytes.extend_from_slice(&block_scales);
-    bytes.resize(tensor_scale_offset, 0);
-    bytes.extend_from_slice(&tensor_scale);
-    let mut transfer = session
-        .upload(queue, destination.clone(), Arc::from(bytes))
-        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-    require_transfer_success(
-        transfer.wait(completion_timeout),
-        "Gemma NVFP4 weight upload",
-    )
+    let _ = (session, queue, destination, completion_timeout);
+    Err(Gemma4ExecutionLayoutError::invalid(
+        "Gemma NVFP4 W4A16 sidecar upload is retired; use the first-class W4A4 artifact",
+    ))
 }
 
 fn layout_token_count(layout: &Gemma4ExecutionLayout) -> Result<u64, Gemma4ExecutionLayoutError> {
@@ -6025,9 +5993,12 @@ pub fn build_gemma4_execution_layout(
 pub fn build_gemma4_nvfp4_execution_layout(
     graph: &Gemma4Graph,
     plan: &WeightLoadPlan,
-    sidecar: &VerifiedNvfp4Sidecar,
+    _sidecar: &VerifiedNvfp4Sidecar,
 ) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
-    build_gemma4_execution_layout_source(graph, plan, Some(sidecar), None, false)
+    let _ = (graph, plan);
+    Err(Gemma4ExecutionLayoutError::invalid(
+        "Gemma NVFP4 W4A16 sidecar layout is retired; use the first-class W4A4 artifact",
+    ))
 }
 
 pub fn build_gemma4_quantized_execution_layout(
@@ -6063,16 +6034,13 @@ fn build_gemma4_execution_layout_for_session(
 fn build_gemma4_nvfp4_execution_layout_for_session(
     graph: &Gemma4Graph,
     plan: &WeightLoadPlan,
-    sidecar: &VerifiedNvfp4Sidecar,
+    _sidecar: &VerifiedNvfp4Sidecar,
     session: &ExecutionSession,
 ) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
-    build_gemma4_execution_layout_source(
-        graph,
-        plan,
-        Some(sidecar),
-        None,
-        gemma_projection_pack_session_enabled(session),
-    )
+    let _ = (graph, plan, session);
+    Err(Gemma4ExecutionLayoutError::invalid(
+        "Gemma NVFP4 W4A16 sidecar layout is retired; use the first-class W4A4 artifact",
+    ))
 }
 
 fn build_gemma4_quantized_execution_layout_source_for_session(
@@ -6107,6 +6075,11 @@ fn build_gemma4_execution_layout_source(
     if sidecar.is_some() && artifact.is_some() {
         return Err(Gemma4ExecutionLayoutError::invalid(
             "sidecar and first-class quantized artifact are mutually exclusive",
+        ));
+    }
+    if sidecar.is_some() {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma NVFP4 W4A16 sidecar layout is retired; use the first-class W4A4 artifact",
         ));
     }
     let mut builder = LayoutBuilder::new(graph, plan, sidecar, artifact, allow_projection_pack)?;
@@ -6145,13 +6118,10 @@ impl<'a> LayoutBuilder<'a> {
         allow_projection_pack: bool,
     ) -> Result<Self, Gemma4ExecutionLayoutError> {
         if let Some(sidecar) = nvfp4_sidecar {
-            if sidecar.source_lock_fingerprint() != graph.lock_fingerprint()
-                || sidecar.tensors().len() > 144
-            {
-                return Err(Gemma4ExecutionLayoutError::invalid(
-                    "NVFP4 sidecar source identity or tensor count differs",
-                ));
-            }
+            let _ = sidecar;
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma NVFP4 W4A16 sidecar layout is retired; use the first-class W4A4 artifact",
+            ));
         }
         let mut builder = Self {
             graph,
@@ -7053,23 +7023,10 @@ impl<'a> LayoutBuilder<'a> {
 }
 
 fn nvfp4_tensor_view(shape: &[u64]) -> Result<TensorView, Gemma4ExecutionLayoutError> {
-    let shape = shape
-        .iter()
-        .map(|dimension| {
-            usize::try_from(*dimension).map_err(|_| {
-                Gemma4ExecutionLayoutError::invalid("NVFP4 tensor extent does not fit usize")
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    TensorView::with_encoding(
-        DType::U8,
-        Encoding::Nvfp4 {
-            block_size: 16,
-            scale_dtype: DType::F8E4M3Fn,
-        },
-        &shape,
-    )
-    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
+    let _ = shape;
+    Err(Gemma4ExecutionLayoutError::invalid(
+        "Gemma NVFP4 W4A16 sidecar tensors are retired; use the first-class W4A4 artifact",
+    ))
 }
 
 fn quantized_gemma_tensor_view(

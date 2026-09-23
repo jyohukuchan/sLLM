@@ -22,6 +22,12 @@ struct DescriptorMetadata final {
   TensorMetadata output;
   uint64_t element_count;
   sllm_elementwise_operation_t operation;
+  /* Phase 87 stage 7: sllm_public_runtime::PrequantMode of `output`
+   * (0 = legacy BF16) and descriptor reserved[0] rebuilt as the NVFP4
+   * activation tensor scale bits (0 unless the output is NVFP4 prequantized).
+   */
+  uint32_t output_prequant;
+  uint32_t input_global_scale_f32_bits;
 };
 
 sllm_status_t

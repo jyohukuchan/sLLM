@@ -202,12 +202,23 @@ namespace sllm_token_selector_kernel {
 
 hipError_t launch(const uint16_t *const bf16_logits,
                   const float *const additive_logits,
-                  const uint8_t *const valid_mask, uint8_t *const /*workspace*/,
+                  const uint8_t *const valid_mask, uint8_t *const workspace,
                   const uint64_t vocab_size, const float temperature,
                   const uint32_t top_k, const float top_p, const uint32_t flags,
                   const uint64_t seed, const uint64_t counter,
                   sllm_token_selector_record_t *const output,
                   const hipStream_t /*stream*/) noexcept {
+  const uint32_t *vocab_map = nullptr;
+  if ((flags & SLLM_HIP_TOKEN_SELECTOR_FLAG_VOCAB_MAP_PRESENT) != 0U) {
+    if (workspace == nullptr || top_k != 20U) {
+      return hipErrorInvalidValue;
+    }
+    const uint64_t block_count =
+        (vocab_size + SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE - 1U) /
+        SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE;
+    const uint64_t scratch_bytes = block_count * UINT64_C(20) * UINT64_C(16);
+    vocab_map = reinterpret_cast<const uint32_t *>(workspace + scratch_bytes);
+  }
   if (top_k != 0U || top_p != 1.0F) {
     output->token_id = -1;
     output->status = SLLM_STATUS_OK;
@@ -283,7 +294,9 @@ hipError_t launch(const uint16_t *const bf16_logits,
       selected_weight = std::exp(static_cast<double>(
           candidates[selected].first - candidates.front().first));
     }
-    output->token_id = static_cast<int32_t>(candidates[selected].second);
+    const uint32_t selected_id = candidates[selected].second;
+    output->token_id = static_cast<int32_t>(
+        vocab_map == nullptr ? selected_id : vocab_map[selected_id]);
     output->logprob =
         static_cast<float>(std::log(selected_weight / cumulative));
     return hipSuccess;
@@ -1159,7 +1172,7 @@ __device__ __forceinline__ void token_selector_fixed_topk_final_impl(
     const uint32_t *const input, const uint64_t input_records,
     const uint32_t top_k, const float top_p, const uint64_t seed,
     const uint64_t counter, sllm_token_selector_record_t *const output,
-    uint8_t *const support) {
+    uint8_t *const support, const uint32_t *const vocab_map) {
   __shared__ float scores[SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE];
   __shared__ uint32_t ids[SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE];
   const uint32_t tid = threadIdx.x;
@@ -1213,6 +1226,15 @@ __device__ __forceinline__ void token_selector_fixed_topk_final_impl(
   }
   const uint32_t count =
       static_cast<uint32_t>(input_records < top_k ? input_records : top_k);
+  if (vocab_map != nullptr) {
+    // The logits rows are ordered by the sorted map. Convert local row ids
+    // only after the final sort so tie ordering stays globally ordered.
+    for (uint32_t index = 0U; index != count; ++index) {
+      if (ids[index] != UINT32_MAX) {
+        ids[index] = vocab_map[ids[index]];
+      }
+    }
+  }
   double sum = 0.0;
   for (uint32_t index = 0U; index != count; ++index) {
     sum += exp(static_cast<double>(scores[index] - scores[0]));
@@ -1297,8 +1319,9 @@ extern "C" __global__ __launch_bounds__(
                                                     const uint64_t counter,
                                                     sllm_token_selector_record_t
                                                         *const output) {
-  token_selector_fixed_topk_final_impl<false>(
-      input, input_records, top_k, top_p, seed, counter, output, nullptr);
+  token_selector_fixed_topk_final_impl<false>(input, input_records, top_k,
+                                              top_p, seed, counter, output,
+                                              nullptr, nullptr);
 }
 
 extern "C" __global__ __launch_bounds__(
@@ -1315,10 +1338,14 @@ extern "C" __global__ __launch_bounds__(
                                                                 counter,
                                                             sllm_token_selector_record_t
                                                                 *const output,
-                                                            uint8_t *const
-                                                                support) {
+                                                            uint8_t
+                                                                *const support,
+                                                            const uint32_t
+                                                                *const
+                                                                    vocab_map) {
   token_selector_fixed_topk_final_impl<true>(input, input_records, top_k, top_p,
-                                             seed, counter, output, support);
+                                             seed, counter, output, support,
+                                             vocab_map);
 }
 
 extern "C" __global__ __launch_bounds__(
@@ -1341,8 +1368,9 @@ extern "C" __global__ __launch_bounds__(
   if (!token_selector_graph_rng(control, phase_row, &seed, &counter, output)) {
     return;
   }
-  token_selector_fixed_topk_final_impl<false>(
-      input, input_records, top_k, top_p, seed, counter, output, nullptr);
+  token_selector_fixed_topk_final_impl<false>(input, input_records, top_k,
+                                              top_p, seed, counter, output,
+                                              nullptr, nullptr);
 }
 
 extern "C" __global__ __launch_bounds__(
@@ -1365,14 +1393,17 @@ extern "C" __global__ __launch_bounds__(
                                                                       *const
                                                                           output,
                                                                   uint8_t *const
-                                                                      support) {
+                                                                      support,
+                                                                  const uint32_t *const
+                                                                      vocab_map) {
   uint64_t seed = 0U;
   uint64_t counter = 0U;
   if (!token_selector_graph_rng(control, phase_row, &seed, &counter, output)) {
     return;
   }
   token_selector_fixed_topk_final_impl<true>(input, input_records, top_k, top_p,
-                                             seed, counter, output, support);
+                                             seed, counter, output, support,
+                                             vocab_map);
 }
 
 } // namespace
@@ -1404,6 +1435,10 @@ hipError_t launch_graph_fixed_k20_topp(
       region_bytes * 2U > SLLM_HIP_TOKEN_SELECTOR_K0_WORKSPACE_BYTES) {
     return hipErrorInvalidValue;
   }
+  const uint32_t *const vocab_map =
+      (flags & SLLM_HIP_TOKEN_SELECTOR_FLAG_VOCAB_MAP_PRESENT) != 0U
+          ? reinterpret_cast<const uint32_t *>(workspace + region_bytes * 2U)
+          : nullptr;
   hipError_t status = hipMemsetAsync(output, 0, sizeof(*output), stream);
   if (status != hipSuccess) {
     return status;
@@ -1446,7 +1481,8 @@ hipError_t launch_graph_fixed_k20_topp(
       sllm_token_selector_fixed_topk_final_graph_support_v1, dim3(1U, 1U, 1U),
       block, 0U, stream,
       reinterpret_cast<const uint32_t *>(workspace + input_offset),
-      input_records, kTopK, kTopP, control, phase_row, output, workspace);
+      input_records, kTopK, kTopP, control, phase_row, output, workspace,
+      vocab_map);
   return hipGetLastError();
 }
 
@@ -1465,6 +1501,10 @@ hipError_t launch(const uint16_t *const bf16_logits,
         SLLM_HIP_TOKEN_SELECTOR_TILE_SIZE;
     const uint64_t region_bytes =
         block_count * static_cast<uint64_t>(top_k) * UINT64_C(8);
+    const uint32_t *const vocab_map =
+        (flags & SLLM_HIP_TOKEN_SELECTOR_FLAG_VOCAB_MAP_PRESENT) != 0U
+            ? reinterpret_cast<const uint32_t *>(workspace + region_bytes * 2U)
+            : nullptr;
     const dim3 initial_grid(static_cast<unsigned int>(block_count), 1U, 1U);
     hipError_t launch_status =
         hipMemsetAsync(output, 0, sizeof(*output), stream);
@@ -1507,7 +1547,8 @@ hipError_t launch(const uint16_t *const bf16_logits,
           sllm_token_selector_fixed_topk_final_support_v1, final_grid, block,
           0U, stream,
           reinterpret_cast<const uint32_t *>(workspace + input_offset),
-          input_records, top_k, top_p, seed, counter, output, workspace);
+          input_records, top_k, top_p, seed, counter, output, workspace,
+          vocab_map);
     } else {
       hipLaunchKernelGGL(
           sllm_token_selector_fixed_topk_final_v1, final_grid, block, 0U,

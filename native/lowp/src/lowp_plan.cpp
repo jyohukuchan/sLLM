@@ -27,15 +27,6 @@ SelectorDecision select(const PreparedProviderPlan &p) noexcept {
   case MatmulFormat::Mxfp6E3M2W6A6:
     v = select_mxfp6_variant(p.m, p.k, p.n, t);
     break;
-  case MatmulFormat::Mxfp8E4M3W8A16:
-    v = KernelVariant::Mxfp8W8A16M1Col2;
-    break;
-  case MatmulFormat::Mxfp6E3M2W6A16:
-    v = KernelVariant::Mxfp6W6A16M1Col2;
-    break;
-  case MatmulFormat::Nvfp4W4A16:
-    v = select_nvfp4_variant(p.m);
-    break;
   case MatmulFormat::Nvfp4W4A4:
     return select_nvfp4_w4a4_decision(p.m, p.k, p.n, t);
   case MatmulFormat::Mxfp4W4A4:
@@ -43,6 +34,11 @@ SelectorDecision select(const PreparedProviderPlan &p) noexcept {
     break;
   case MatmulFormat::Fp8OuterE4M3W8A8:
     return select_fp8_software_decision(p.m, p.k, p.n, t, false);
+  case MatmulFormat::Nvfp4W4A16:
+  case MatmulFormat::Mxfp8E4M3W8A16:
+  case MatmulFormat::Mxfp6E3M2W6A16:
+    return make_selector_decision(KernelVariant::Unspecialized, false, false,
+                                  false, kSelectorReasonUnsupported);
   }
   return make_selector_decision(v, true, true, true, kSelectorReasonAdopted);
 }
@@ -69,10 +65,10 @@ extern "C" lowp_status_t lowp_get_format_info(lowp_format_t format,
   if (!info)
     return LOWP_INVALID_ARGUMENT;
   *info = {};
-  if (format == LOWP_MXFP4_W4A8_V1) {
-    *info = {LOWP_MXFP4_W4A8_CONTRACT_VERSION,
+  if (format == LOWP_MXFP4_W4A6_V1) {
+    *info = {LOWP_MXFP4_W4A6_CONTRACT_VERSION,
              4,
-             8,
+             6,
              32,
              32,
              static_cast<uint32_t>(sllm_lowp::BlockScaleType::E8M0),
@@ -81,7 +77,9 @@ extern "C" lowp_status_t lowp_get_format_info(lowp_format_t format,
              0};
     return LOWP_SUCCESS;
   }
-  if (format > 7 || format == 4)
+  if (format > 7 || format == 4 || format == LOWP_RETIRED_NVFP4_W4A16 ||
+      format == LOWP_RETIRED_MXFP8_E4M3_W8A16 ||
+      format == LOWP_RETIRED_MXFP6_E3M2_W6A16)
     return LOWP_NOT_SUPPORTED;
   const auto c =
       sllm_lowp::format_contract(static_cast<sllm_lowp::MatmulFormat>(format));
@@ -112,8 +110,8 @@ lowp_status_t make_plan_impl(const lowp_matmul_request_t *r,
   if (r->format > 7 || (r->format == 4 && !legacy)) {
     p->rejection =
         static_cast<uint32_t>(ProviderRejection::UnsupportedNumerics);
-    p->reason = r->format == LOWP_MXFP4_W4A8_V1
-                    ? "MXFP4 W4A8 v1 is not implemented"
+    p->reason = r->format == LOWP_MXFP4_W4A6_V1
+                    ? "MXFP4 W4A6 v1 is not implemented"
                     : "format is not public/supported";
     return LOWP_NOT_SUPPORTED;
   }
@@ -172,7 +170,7 @@ lowp_status_t make_plan_impl(const lowp_matmul_request_t *r,
   if (!multiply(r->n, r->k, &count) || !multiply(r->m, r->n, &bits) ||
       !multiply(bits, 2, &p->output_bytes))
     return LOWP_INVALID_ARGUMENT;
-  if (r->format == LOWP_NVFP4_W4A16 || r->format == LOWP_NVFP4_W4A4) {
+  if (r->format == LOWP_NVFP4_W4A4) {
     // Historical NVFP4 weights pack the complete logical plane continuously.
     p->weight_value_bytes = count / 2U + (count % 2U != 0U ? 1U : 0U);
   } else {

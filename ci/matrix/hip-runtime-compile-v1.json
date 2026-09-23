@@ -25,7 +25,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "62186430f951bc2d49c74e43ce4e53bd1af6c79a418e2e6fdbb07c0361e129ba"
+        "sha256": "22d7b6ea29bfa8b9ad673a0c57544b502771e2597f101437fc2db448b57e3b90"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -37,10 +37,10 @@
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
-        "sha256": "a705484e1c91bbf21793caa1a661befd00ba7e0ddb2d5cc6a39499521cb8d653"
+        "sha256": "f794cd0df7eb5c7f735d61e5f58b1744fddb391c83174ed891c9760db4399bed"
       }
     ],
-    "source_set_sha256": "89a386a892d8586a1e9055a447783c836ecfadf25d200893bf9278dd46339688"
+    "source_set_sha256": "c741c25fa7cdc0e8cb763c7bf54902d5b8636aeebc8a3bd614a2084a338697fa"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -168,11 +168,11 @@
       "native/lowp/src/nvfp4_prefill_wmma_compensated.inc",
       "native/lowp/src/nvfp4_small_m_vgpr_reuse.inc"
     ],
-    "source_set_sha256": "99ba562da8e38593edfec66026dd28651f3db3ffdd36e942c5e8a73093de7d82",
+    "source_set_sha256": "fcd0ecd7211cd0f97f2e0827b715384a41491ee90cd8ad11a741d6f464a97fee",
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "62186430f951bc2d49c74e43ce4e53bd1af6c79a418e2e6fdbb07c0361e129ba"
+        "sha256": "22d7b6ea29bfa8b9ad673a0c57544b502771e2597f101437fc2db448b57e3b90"
       },
       {
         "path": "native/hip/src/argmax_api.cpp",
@@ -268,19 +268,19 @@
       },
       {
         "path": "native/hip/src/elementwise_api.cpp",
-        "sha256": "83267967e9f3a4f523e588c00bdea2bcf9d50ffb17e4a95b0fbdb32f4ef3d04a"
+        "sha256": "2da63a70deb5562024b214db3efcbbe7d07e75d633ded823ebbf22327ac9f355"
       },
       {
         "path": "native/hip/src/elementwise_api.hpp",
-        "sha256": "c3a7fc170ac04ad85a4b11e4b6b1e0da11a3962256565975a8f6e30417a07d5d"
+        "sha256": "f2eb4254aa599fe669f4367d5b13dbe5900749719ce05faab2ca366f31fa4368"
       },
       {
         "path": "native/hip/src/elementwise_kernel.hip.cpp",
-        "sha256": "a1b9cdcc9af9388a8c3ac54eb8a3f63ea70dccaef89f2351615747cbcecae8bd"
+        "sha256": "57f85c3f7e4c8a86a84beeacb96c3ebddae362803f62b8fc939eda1822bd3f35"
       },
       {
         "path": "native/hip/src/elementwise_kernel_internal.hpp",
-        "sha256": "26f75e6572d23a2489cc537b0721de1d8cd7e24e18843f57f87e92f4b990f05e"
+        "sha256": "d2ca2c427a04617a150a3ba96d860f1c8a685aacf757b8d6e9bccf1a6b1a7c4d"
       },
       {
         "path": "native/hip/src/embedding_api.cpp",
@@ -328,7 +328,7 @@
       },
       {
         "path": "native/hip/src/graph_span_runtime.inc",
-        "sha256": "0ba201eec81cd1c213ee4a6f33ec639ca052889f048576f91e1ec292f0cb17d3"
+        "sha256": "24707da954e3a9c1da67e6fe3ff87324a2d7cc39b75962674f35aa22281e04ee"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -372,11 +372,11 @@
       },
       {
         "path": "native/hip/src/matmul_api.cpp",
-        "sha256": "65b1e65cde586fb9f660c5d16c597946472b3e5a9b13211d5d4fd5df132b0955"
+        "sha256": "6e798dd756125f401b7a7f55b25f94ae014aadfb48068bb9372a7db3baa07ca0"
       },
       {
         "path": "native/hip/src/matmul_api.hpp",
-        "sha256": "adcbb960f98ab9ee9ef41ee168477992a87921f40f2877b700d4bfe0504b4edb"
+        "sha256": "5071322c3afa6d235e99f04e49e655be3427365f5b7bd2d342672c1dee6398b7"
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
@@ -384,11 +384,11 @@
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "17f93b497e8476d2e39dd041c0c6eab3cd326a6d1f7308689fdd250268592d29"
+        "sha256": "15aac9e8264aaf80ebe263f209259a26f236eec5fdcaea03290893dbe78b6977"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
-        "sha256": "a45f46a28726d58e15b7ebefc079e3707deca021d1b550594aac049ecf698472"
+        "sha256": "4ad0bab85051b485ea2dec7a59651925a6af6eca68f8d687c7d515950918eb27"
       },
       {
         "path": "native/hip/src/minimax_m3_moe_route_api.cpp",
@@ -488,39 +488,39 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "d0072e491d0effa6ebde7279bbb4781efbd5fa93801d05df96bffc6cf94fab1e"
+        "sha256": "79651d77a0de6dddcf4c1868f676198f662657da6cf0d7a536046ba0b7bfd64b"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
-        "sha256": "a705484e1c91bbf21793caa1a661befd00ba7e0ddb2d5cc6a39499521cb8d653"
+        "sha256": "f794cd0df7eb5c7f735d61e5f58b1744fddb391c83174ed891c9760db4399bed"
       },
       {
         "path": "native/hip/src/qwen38_projection_pack_runtime.inc",
-        "sha256": "7cb87884b44959f815934e6f1fbf4552988af645fb26a4157ba554a1022b6180"
+        "sha256": "7506ff6777e826392ca2e1d9e3a5ce0b5161159589d21e98d689e794cea214c7"
       },
       {
         "path": "native/hip/src/residual_rmsnorm_api.cpp",
-        "sha256": "7d7fc5770c0169fcceabc3bb04365ed3e74d47d17658617c64ae7f2de17759c8"
+        "sha256": "51ff0cb8fb1e96305a539526f9743661ae4a36a730e94af6a3104c4ea034a462"
       },
       {
         "path": "native/hip/src/residual_rmsnorm_api.hpp",
-        "sha256": "9e209cb0d7678dfeaeb72e2d3bcf86473ccce252884db9b1e0863d5a9fec4886"
+        "sha256": "e4e88066ef0c9b21b59cc1f04a1f453b4712bf3fee8dac7545e7965a6ae86206"
       },
       {
         "path": "native/hip/src/rmsnorm_api.cpp",
-        "sha256": "c7c4d7e0141d5a7587ae9e4d8c4ae51abbb76694004b839cdd900e3d3f69e911"
+        "sha256": "688796fa9a347d2675ee5cdf6e99cfeb41b8dee3ee8559545f4ce9f3f4c5e741"
       },
       {
         "path": "native/hip/src/rmsnorm_api.hpp",
-        "sha256": "62675cd693719f711541768a2f52182fdc22a98fc70d21fe66f6ea041df4be19"
+        "sha256": "06adae33d8f974a243f68588404f15af40130442d1e6863180a9ec0b42aad284"
       },
       {
         "path": "native/hip/src/rmsnorm_kernel.hip.cpp",
-        "sha256": "2f8d78823d727b42f5dfe7fe79bfcb28ccdbcf7494201f7d4403a7d748a651bd"
+        "sha256": "adea250f5acb34110d8b933b9fc1d17c719e428e7886903933eceb8b6b8a91a6"
       },
       {
         "path": "native/hip/src/rmsnorm_kernel_internal.hpp",
-        "sha256": "dc9d910305791097ae32463ba134da4c4aa398fdc55d40e59e4eb2b70f0c84d6"
+        "sha256": "1375accb490c4bf6af37dac7e1ccbe92caa5215a237e700b73d5f62a2aa7cc54"
       },
       {
         "path": "native/hip/src/rotary_api.cpp",
@@ -556,15 +556,15 @@
       },
       {
         "path": "native/hip/src/token_selector_api.cpp",
-        "sha256": "5a5b81509652ae70e42f1b5cf8433229740adfff174c84f7f966888115a1c2f9"
+        "sha256": "bd7be09bc0ea2202b156ebfcf4942bf35c64176ad01ce9e52bf8b47275065dad"
       },
       {
         "path": "native/hip/src/token_selector_api.hpp",
-        "sha256": "820d998d597c123f61a5418e61d28b47c262920b587085c66a779d313c5be486"
+        "sha256": "8a406497d7947904e3034a8f6796b94dc84c035cbfaab534d89a3bb51c348d62"
       },
       {
         "path": "native/hip/src/token_selector_kernel.hip.cpp",
-        "sha256": "df866f119733a518a9d9c72cccc68977e69b55467a63d9f7c5403a7f6b241c5e"
+        "sha256": "798ce7082e1e657f4f906812a075830c3ddfc33acb884f05db0b89e354b355f4"
       },
       {
         "path": "native/hip/src/token_selector_kernel_internal.hpp",
@@ -588,7 +588,7 @@
       },
       {
         "path": "native/hip/src/token_selector_runtime.inc",
-        "sha256": "7d68b1981723c494ac76709d32932ea3e2485b58ec9ae3c40b1caa784dc27e3a"
+        "sha256": "d791aed23f4f26fce83482b4ac59dc3857f521e3a1b88b7dc80d92e77560453f"
       },
       {
         "path": "native/hip/src/token_selector_support_internal.hpp",
@@ -616,7 +616,7 @@
       },
       {
         "path": "native/lowp/include/lowp/detail/low_precision_matmul_provider.hpp",
-        "sha256": "0631a0db7b44c2cea99e8bcf19c9d18ec8cbffdd1ad0f3dbd6caf3d2d0183ddb"
+        "sha256": "931901e8a7e9c3ffbb97f3a24ccf315cbedbe32b8e183939e7c030fbf5604466"
       },
       {
         "path": "native/lowp/include/lowp/detail/lowp_api_internal.hpp",
@@ -624,15 +624,15 @@
       },
       {
         "path": "native/lowp/include/lowp/detail/lowp_kernel_internal.hpp",
-        "sha256": "4a666efe198896908e012a39107d7a415ec0e58033dd531a5f8a16fe42030dbf"
+        "sha256": "db5ad6ac4b7aaa74d3d5a756d41a518b82cfc9eeea575bf6ab53c84edcf95426"
       },
       {
         "path": "native/lowp/include/lowp/detail/lowp_provider_plan.hpp",
-        "sha256": "d0f4ad27584bb610ad083d2b8d4b9cc640ec47329f05a21d880db29f6a9cbc4d"
+        "sha256": "66ec3929fa04ad6056da382458edabc83a32468ddbc8b3568ad0f8b9fc6bbe00"
       },
       {
         "path": "native/lowp/include/lowp/lowp.h",
-        "sha256": "e3b875b14b384302d01679c3c6b27ce6374ff2cd627ceb11afd83d81e03df20a"
+        "sha256": "86aa9a2885cc0858f1a3fbd0872d2affd5948df0c0492ec075fc45b5ef1bc4e8"
       },
       {
         "path": "native/lowp/src/fp8_prefill_short_m32.inc",
@@ -640,15 +640,15 @@
       },
       {
         "path": "native/lowp/src/lowp_kernel.hip.cpp",
-        "sha256": "34cf81e77d8fb04e3cc7d2799fa6d0f7c74fbc493f5ddbfba7899e53c9a21043"
+        "sha256": "bf7cbe2be211e866357622ad9276ce10d49bfab45dc684e54cf6a617d9d23dde"
       },
       {
         "path": "native/lowp/src/lowp_launch.cpp",
-        "sha256": "d91c876c49d708b91829b7899aa5216e62c2d79fb4a50da6c2c8de9c97105752"
+        "sha256": "1b503b647d83b4d928c143e43f3203771d6a61db977c664003655a56fe3116ab"
       },
       {
         "path": "native/lowp/src/lowp_plan.cpp",
-        "sha256": "d4d1d7cb83ef59f8a78e59dec27d96938089917513c9f86a70915cb327ffaf14"
+        "sha256": "7ffc1392f2358e2ee1c25e07f6218c7360a30e3f435367a64d91e504cbdeaa6d"
       },
       {
         "path": "native/lowp/src/nvfp4_decode_scale_lut.inc",

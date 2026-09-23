@@ -1,5 +1,13 @@
 namespace {
 
+bool token_selector_uses_workspace(
+    const sllm_token_selector::DescriptorMetadata &metadata) noexcept {
+  return metadata.op_version ==
+             SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP ||
+         metadata.op_version ==
+             SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP_MAPPED;
+}
+
 sllm_status_t validate_token_selector_dispatch_info(
     const sllm_token_selector_dispatch_info_t *const info,
     sllm_error_sink_t *const sink) noexcept {
@@ -145,7 +153,7 @@ sllm_token_selector_prepare(const sllm_context_t *const raw_context,
       Buffer *const output =
           lookup<Buffer>(descriptor->output.buffer, HandleKind::Buffer);
       Buffer *const workspace =
-          metadata.op_version == SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP
+          token_selector_uses_workspace(metadata)
               ? lookup<Buffer>(descriptor->workspace.buffer, HandleKind::Buffer)
               : output;
       if (context == nullptr || logits == nullptr || additive == nullptr ||
@@ -185,9 +193,7 @@ sllm_token_selector_prepare(const sllm_context_t *const raw_context,
           metadata.logits, metadata.additive_logits, metadata.valid_mask,
           metadata.output, metadata.workspace};
       const std::size_t buffer_count =
-          metadata.op_version == SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP
-              ? 5U
-              : 4U;
+          token_selector_uses_workspace(metadata) ? 5U : 4U;
       for (std::size_t index = 0U; index != buffer_count; ++index) {
         for (std::size_t prior = 0U; prior != index; ++prior) {
           if (token_selector_intervals_overlap(

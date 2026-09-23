@@ -95,6 +95,25 @@ _EXPECTED_SOURCE_SETS = {
     ),
 }
 PUBLIC_ABI_SYMBOLS = public_h3.PUBLIC_SYMBOLS
+# Stage 7 producer fusion adds these device kernels to the host bundle.  They
+# are intentionally listed here as a finite H3 allowance rather than folding
+# them into a wildcard or broad symbol prefix.
+STAGE7_PRODUCER_KERNEL_SYMBOLS = (
+    "sllm_elementwise_sigmoid_mul_prequant_fp8_v1",
+    "sllm_elementwise_silu_mul_prequant_fp8_v1",
+    "sllm_elementwise_silu_mul_prequant_nvfp4_v1",
+    "sllm_rmsnorm_residual_prequant_fp8_v1",
+    "sllm_rmsnorm_residual_prequant_nvfp4_v1",
+)
+STAGE7_PRODUCER_DEVICE_KERNEL_SYMBOLS = (
+    "sllm_rmsnorm_residual_prequant_fp8_v1",
+    "sllm_rmsnorm_residual_prequant_nvfp4_v1",
+)
+KNOWN_RMSNORM_EXTRA_DEVICE_SYMBOLS = (
+    "sllm_rmsnorm_residual_fused_wave32_v1",
+    "sllm_rmsnorm_residual_fused_wave64_v1",
+    *STAGE7_PRODUCER_DEVICE_KERNEL_SYMBOLS,
+)
 SOURCE_SYMBOL_MAP = [
     {"path": "include/sllm/hip.h", "symbol": "sllm_rmsnorm_execute", "role": "declaration"},
     {"path": "native/hip/src/public_runtime.hip.cpp", "symbol": "sllm_rmsnorm_execute", "role": "definition"},
@@ -506,6 +525,7 @@ def inspect_host(path: Path, output: str, row: dict[str, Any], bundles: list[str
         set(PUBLIC_ABI_SYMBOLS)
         | set(public_h3.KERNEL_SYMBOLS)
         | set(public_h3.INTERNAL_RUNTIME_SYMBOLS)
+        | set(STAGE7_PRODUCER_KERNEL_SYMBOLS)
         | {"sllm_hip_compile_probe"}
     )
     if any(name not in allowed for name in sllm_names):
@@ -524,7 +544,8 @@ def inspect_device(path: Path, output: str, row: dict[str, Any]) -> dict[str, An
     flags = re.findall(r"(?m)^\s*Flags\s+\[\s*\(0x([0-9a-fA-F]+)\)", header)
     targets = re.findall(r"(?m)^\s*amdhsa\.target:\s*(\S+)\s*$", output)
     waves = re.findall(r"(?m)^\s*\.wavefront_size:\s*(\d+)\s*$", output)
-    if len(abi) != 1 or len(flags) != 1 or len(targets) != 1 or len(waves) != 2:
+    expected_wavefronts = 2 + len(KNOWN_RMSNORM_EXTRA_DEVICE_SYMBOLS)
+    if len(abi) != 1 or len(flags) != 1 or len(targets) != 1 or len(waves) != expected_wavefronts:
         raise ContractError("device ELF does not prove one ABI/e_flags/target and two RMSNorm kernels")
     observed_flags = f"0x{int(flags[0], 16):08x}"
     if abi[0] != "4" or observed_flags != E_FLAGS[row["target"]] or targets[0] != f"amdgcn-amd-amdhsa--{row['target']}" or set(waves) != {"32"}:
@@ -546,7 +567,19 @@ def inspect_device(path: Path, output: str, row: dict[str, Any]) -> dict[str, An
         SECONDARY_DEVICE_SYMBOL + ".kd",
     }
     relevant = [name for name in names if name.startswith("sllm_")]
-    if set(relevant) != expected_symbols or any(relevant.count(name) != 1 for name in expected_symbols):
+    extra_symbols = {
+        symbol
+        for kernel_symbol in KNOWN_RMSNORM_EXTRA_DEVICE_SYMBOLS
+        for symbol in (kernel_symbol, kernel_symbol + ".kd")
+    }
+    if (
+        set(relevant) - expected_symbols - extra_symbols
+        or any(relevant.count(name) != 1 for name in expected_symbols)
+        or any(
+            relevant.count(name) != 1 or relevant.count(name + ".kd") != 1
+            for name in KNOWN_RMSNORM_EXTRA_DEVICE_SYMBOLS
+        )
+    ):
         raise ContractError("device ELF does not contain exactly both RMSNorm kernels and .kd symbols")
     return {"format": "ELF64", "machine": "AMDGPU", "target": row["target"], "ei_abiversion": 4, "e_flags": observed_flags, "code_object_version": "V6", "wavefront_size": 32, "features": features, "sections": {".text": sections[".text"], ".kd": 2}, "symbols": [{"name": name, "defined": True} for name in sorted(expected_symbols)], "source_attribution": "rmsnorm_kernel.hip.cpp"}
 

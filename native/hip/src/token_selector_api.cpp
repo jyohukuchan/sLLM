@@ -157,8 +157,12 @@ validate_and_copy_descriptor(const sllm_token_selector_desc_t *const descriptor,
     return prefix_status;
   }
   const bool legacy = descriptor->op_version == SLLM_HIP_TOKEN_SELECTOR_VERSION;
-  const bool fixed =
-      descriptor->op_version == SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP;
+  const bool fixed = descriptor->op_version ==
+                         SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP ||
+                     descriptor->op_version ==
+                         SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP_MAPPED;
+  const bool mapped = descriptor->op_version ==
+                      SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP_MAPPED;
   if ((!legacy && !fixed) ||
       !all_zero(descriptor->reserved, sizeof(descriptor->reserved)) ||
       (fixed &&
@@ -191,14 +195,22 @@ validate_and_copy_descriptor(const sllm_token_selector_desc_t *const descriptor,
     top_k = descriptor->top_k;
     flags = descriptor->flags;
     top_p = descriptor->top_p;
-    if (top_k != 0U && top_k != 20U && top_k != 64U) {
+    if ((mapped && top_k != 20U) ||
+        (!mapped && top_k != 0U && top_k != 20U && top_k != 64U)) {
       return sllm_public_runtime::write_error(
           sink, SLLM_STATUS_INVALID_TOKEN_SELECTOR_DESCRIPTOR,
-          "fixed token selector top-k must be 0, 20, or 64");
+          mapped ? "mapped token selector top-k must be 20"
+                 : "fixed token selector top-k must be 0, 20, or 64");
     }
     if (!std::isfinite(top_p) || top_p != 0.95F ||
         (flags & ~(SLLM_HIP_TOKEN_SELECTOR_FLAG_ADDITIVE_PRESENT |
-                   SLLM_HIP_TOKEN_SELECTOR_FLAG_MASK_PRESENT)) != 0U ||
+                   SLLM_HIP_TOKEN_SELECTOR_FLAG_MASK_PRESENT |
+                   (mapped ? SLLM_HIP_TOKEN_SELECTOR_FLAG_VOCAB_MAP_PRESENT
+                           : 0U))) != 0U ||
+        (mapped &&
+         (flags & SLLM_HIP_TOKEN_SELECTOR_FLAG_VOCAB_MAP_PRESENT) == 0U) ||
+        (!mapped &&
+         (flags & SLLM_HIP_TOKEN_SELECTOR_FLAG_VOCAB_MAP_PRESENT) != 0U) ||
         descriptor->temperature != 1.0F ||
         (top_k == 0U &&
          (flags & SLLM_HIP_TOKEN_SELECTOR_FLAG_ADDITIVE_PRESENT) != 0U)) {
@@ -247,7 +259,8 @@ validate_and_copy_descriptor(const sllm_token_selector_desc_t *const descriptor,
   metadata->counter = descriptor->counter;
   metadata->workspace = {};
   if (fixed) {
-    const uint64_t bytes = workspace_bytes(vocab_size, top_k);
+    const uint64_t bytes = mapped ? mapped_workspace_bytes(vocab_size)
+                                  : workspace_bytes(vocab_size, top_k);
     status = validate_tensor(descriptor->workspace, SLLM_TENSOR_DTYPE_U8,
                              UINT64_C(1), bytes, false, true,
                              &metadata->workspace, sink);
@@ -272,6 +285,15 @@ uint64_t workspace_bytes(const uint64_t vocab_size,
     return 0U;
   }
   return blocks * static_cast<uint64_t>(top_k) * UINT64_C(16);
+}
+
+uint64_t mapped_workspace_bytes(const uint64_t vocab_size) noexcept {
+  const uint64_t scratch = workspace_bytes(vocab_size, 20U);
+  if (scratch == 0U || vocab_size > std::numeric_limits<uint64_t>::max() / 4U ||
+      scratch > std::numeric_limits<uint64_t>::max() - vocab_size * 4U) {
+    return 0U;
+  }
+  return scratch + vocab_size * 4U;
 }
 
 bool intervals_overlap(const TensorMetadata &left,

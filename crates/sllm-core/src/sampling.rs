@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -109,6 +110,7 @@ pub enum SamplingError {
     InvalidTopLogprobs,
     TokenIdOutOfRange { token_id: u32 },
     InvalidMaskLength,
+    InvalidVocabularyMap,
     UnsupportedDeviceSelector,
     RuntimeStateTooLarge,
     RuntimeStateMalformed,
@@ -187,6 +189,9 @@ impl fmt::Display for SamplingError {
             }
             Self::InvalidMaskLength => {
                 formatter.write_str("sampling mask length must equal the logits vocabulary")
+            }
+            Self::InvalidVocabularyMap => {
+                formatter.write_str("mapped device vocabulary must be sorted, unique, and in range")
             }
             Self::UnsupportedDeviceSelector => {
                 formatter.write_str("sampler chain cannot use the prepared device selector subset")
@@ -1038,6 +1043,7 @@ pub struct SamplingSelectionV1 {
 #[derive(Clone, PartialEq)]
 pub struct DeviceTokenSelectorRequestV1 {
     vocab_size: usize,
+    vocab_map: Option<Arc<[u32]>>,
     additive_logits: Vec<f32>,
     valid_mask: Vec<u8>,
     temperature: f32,
@@ -1053,6 +1059,10 @@ impl fmt::Debug for DeviceTokenSelectorRequestV1 {
         formatter
             .debug_struct("DeviceTokenSelectorRequestV1")
             .field("vocab_size", &self.vocab_size)
+            .field(
+                "vocab_map_len",
+                &self.vocab_map.as_ref().map(|map| map.len()),
+            )
             .field("additive_logits_len", &self.additive_logits.len())
             .field("valid_mask_len", &self.valid_mask.len())
             .field("temperature", &self.temperature)
@@ -1077,7 +1087,43 @@ impl DeviceTokenSelectorRequestV1 {
     }
 
     pub fn is_token_valid(&self, token: usize) -> bool {
+        if let Some(map) = &self.vocab_map {
+            return u32::try_from(token)
+                .ok()
+                .is_some_and(|token| map.binary_search(&token).is_ok());
+        }
         token < self.vocab_size && (self.valid_mask.is_empty() || self.valid_mask[token] != 0)
+    }
+
+    pub fn vocab_map(&self) -> Option<&[u32]> {
+        self.vocab_map.as_deref()
+    }
+
+    pub(crate) fn vocab_map_arc(&self) -> Option<&Arc<[u32]>> {
+        self.vocab_map.as_ref()
+    }
+
+    /// Reuse a fixed K20 request for a draft head whose rows are sorted by
+    /// global vocabulary ID. The selector publishes mapped global IDs.
+    pub fn with_vocab_map(mut self, map: Arc<[u32]>) -> Result<Self, SamplingError> {
+        let full_vocab = self.vocab_size;
+        if self.temperature != 1.0
+            || self.top_k != 20
+            || self.top_p.to_bits() != 0.95_f32.to_bits()
+            || !self.additive_logits.is_empty()
+            || !self.valid_mask.is_empty()
+            || map.is_empty()
+            || map.len() >= full_vocab
+            || map.iter().enumerate().any(|(index, &id)| {
+                usize::try_from(id).ok().is_none_or(|id| id >= full_vocab)
+                    || (index != 0 && map[index - 1] >= map[index])
+            })
+        {
+            return Err(SamplingError::InvalidVocabularyMap);
+        }
+        self.vocab_size = map.len();
+        self.vocab_map = Some(map);
+        Ok(self)
     }
 
     pub fn additive_logits(&self) -> &[f32] {
@@ -1372,6 +1418,7 @@ impl SamplerChainV1 {
             }
             return Ok(DeviceTokenSelectorRequestV1 {
                 vocab_size,
+                vocab_map: None,
                 additive_logits: Vec::new(),
                 valid_mask: mask,
                 temperature: 1.0,
@@ -1433,6 +1480,7 @@ impl SamplerChainV1 {
         }
         Ok(DeviceTokenSelectorRequestV1 {
             vocab_size,
+            vocab_map: None,
             additive_logits,
             valid_mask: output_mask,
             temperature: self.config.parameters.temperature(),
@@ -2611,6 +2659,37 @@ mod tests {
                 Err(SamplingError::InvalidMaskLength)
             );
         }
+    }
+
+    #[test]
+    fn mapped_fixed_selector_publishes_only_global_ids_in_sorted_subset() {
+        let config = SamplerChainConfigV1::new(params(1.0, 0.95, 0.0, 0.0))
+            .with_top_k(20)
+            .unwrap();
+        let chain = SamplerChainV1::new(config, &[]).unwrap();
+        let full = chain.prepare_device_selector(128, None, 7, 9).unwrap();
+        let mapped = full
+            .clone()
+            .with_vocab_map(Arc::from([1_u32, 7, 64, 127]))
+            .unwrap();
+        assert_eq!(mapped.vocab_size(), 4);
+        assert_eq!(mapped.vocab_map(), Some(&[1, 7, 64, 127][..]));
+        for token in [1, 7, 64, 127] {
+            assert!(mapped.is_token_valid(token));
+        }
+        for token in [0, 2, 128] {
+            assert!(!mapped.is_token_valid(token));
+        }
+        assert_eq!(mapped.seed(), full.seed());
+        assert_eq!(mapped.counter(), full.counter());
+        assert_eq!(
+            full.clone().with_vocab_map(Arc::from([7_u32, 7])),
+            Err(SamplingError::InvalidVocabularyMap)
+        );
+        assert_eq!(
+            full.with_vocab_map(Arc::from([1_u32, 128])),
+            Err(SamplingError::InvalidVocabularyMap)
+        );
     }
 
     #[test]

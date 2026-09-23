@@ -247,8 +247,19 @@ impl TokenSelectorContractV1 {
         })
     }
 
+    /// Fixed K20 selection over a sorted subset of the global vocabulary.
+    /// The workspace stores the local-row to global-ID map after the ordinary
+    /// fixed selector scratch region. The final selector maps both the chosen
+    /// token and support IDs before publishing them.
+    pub fn new_fixed_mapped(vocab_size: u64, seed: u64, counter: u64) -> Result<Self, OpError> {
+        let mut contract = Self::new_fixed(vocab_size, 20, 0.95, seed, counter, false, false)?;
+        contract.flags |= Self::FLAG_VOCAB_MAP_PRESENT;
+        Ok(contract)
+    }
+
     pub const FLAG_ADDITIVE_PRESENT: u32 = 1 << 0;
     pub const FLAG_MASK_PRESENT: u32 = 1 << 1;
+    pub const FLAG_VOCAB_MAP_PRESENT: u32 = 1 << 2;
 
     pub const fn vocab_size(self) -> u64 {
         self.vocab_size
@@ -294,6 +305,10 @@ impl TokenSelectorContractV1 {
         self.flags & Self::FLAG_MASK_PRESENT != 0
     }
 
+    pub const fn has_vocab_map(self) -> bool {
+        self.flags & Self::FLAG_VOCAB_MAP_PRESENT != 0
+    }
+
     pub const fn is_fixed(self) -> bool {
         self.top_p_bits != 1.0_f32.to_bits()
     }
@@ -309,7 +324,12 @@ impl TokenSelectorContractV1 {
             return 532_504;
         }
         let blocks = self.vocab_size.div_ceil(1024);
-        blocks * (self.top_k as u64) * 8 * 2
+        let base = blocks * (self.top_k as u64) * 8 * 2;
+        if self.has_vocab_map() {
+            base + self.vocab_size * 4
+        } else {
+            base
+        }
     }
 }
 
@@ -1601,6 +1621,11 @@ pub struct SemanticOpDescriptor {
     gdn_projection_bundle_contract: Option<GdnProjectionBundleContractV1>,
     mlp_gate_up_silu_bundle_contract: Option<MlpGateUpSiluBundleContractV1>,
     qwen38_projection_pack_contract: Option<Qwen38ProjectionPackContractV1>,
+    /// Raw FP32 bits of the per-weight activation tensor scale a producer
+    /// carries into an Encoding-B (NVFP4 block16) output. `0` means no scale:
+    /// [`Self::validate`] requires a finite positive value iff the producer
+    /// output is Encoding B and `0` otherwise.
+    activation_quant_scale_bits: u32,
 }
 
 /// Short name for the semantic operation descriptor used by backend traits.
@@ -1611,6 +1636,20 @@ impl SemanticOpDescriptor {
         kind: SemanticOpKind,
         inputs: Vec<TensorView>,
         outputs: Vec<TensorView>,
+    ) -> Result<Self, OpError> {
+        Self::new_with_quant_scale(kind, inputs, outputs, 0)
+    }
+
+    /// Builder the graph uses for contract-less producers that carry a
+    /// producer-side activation quantization scale: it attaches the raw FP32
+    /// bits before validation so an Encoding-B output can never be built
+    /// without its scale. Every producer that does not emit Encoding B must
+    /// pass `0`.
+    pub fn new_with_quant_scale(
+        kind: SemanticOpKind,
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        activation_quant_scale_bits: u32,
     ) -> Result<Self, OpError> {
         let descriptor = Self {
             kind,
@@ -1628,6 +1667,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
             qwen38_projection_pack_contract: None,
+            activation_quant_scale_bits,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1641,14 +1681,40 @@ impl SemanticOpDescriptor {
         epsilon: f32,
         scale_mode: RmsNormScaleMode,
     ) -> Result<Self, OpError> {
+        Self::new_rms_norm_with_quant_scale(inputs, outputs, epsilon, scale_mode, 0)
+    }
+
+    /// RMSNorm builder carrying the producer-side activation quantization
+    /// scale bits. Encoding-B outputs require a finite positive scale here.
+    pub fn new_rms_norm_with_quant_scale(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        epsilon: f32,
+        scale_mode: RmsNormScaleMode,
+        activation_quant_scale_bits: u32,
+    ) -> Result<Self, OpError> {
         let contract = RmsNormContract::new(epsilon, scale_mode)?;
-        Self::new_rms_norm_with_contract(inputs, outputs, contract)
+        Self::new_rms_norm_with_contract_and_quant_scale(
+            inputs,
+            outputs,
+            contract,
+            activation_quant_scale_bits,
+        )
     }
 
     pub fn new_rms_norm_with_contract(
         inputs: Vec<TensorView>,
         outputs: Vec<TensorView>,
         contract: RmsNormContract,
+    ) -> Result<Self, OpError> {
+        Self::new_rms_norm_with_contract_and_quant_scale(inputs, outputs, contract, 0)
+    }
+
+    pub fn new_rms_norm_with_contract_and_quant_scale(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: RmsNormContract,
+        activation_quant_scale_bits: u32,
     ) -> Result<Self, OpError> {
         let descriptor = Self {
             kind: SemanticOpKind::RmsNorm,
@@ -1666,6 +1732,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
             qwen38_projection_pack_contract: None,
+            activation_quant_scale_bits,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1690,6 +1757,18 @@ impl SemanticOpDescriptor {
         outputs: Vec<TensorView>,
         contract: ResidualRmsNormContract,
     ) -> Result<Self, OpError> {
+        Self::new_residual_rms_norm_with_contract_and_quant_scale(inputs, outputs, contract, 0)
+    }
+
+    /// Fused residual/RMSNorm builder carrying the RMSNorm side's
+    /// producer-side activation quantization scale bits so a fused Encoding-B
+    /// normalized output keeps its scale through the rewrite.
+    pub fn new_residual_rms_norm_with_contract_and_quant_scale(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: ResidualRmsNormContract,
+        activation_quant_scale_bits: u32,
+    ) -> Result<Self, OpError> {
         let descriptor = Self {
             kind: SemanticOpKind::ResidualRmsNorm,
             inputs,
@@ -1706,6 +1785,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
             qwen38_projection_pack_contract: None,
+            activation_quant_scale_bits,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1732,6 +1812,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
             qwen38_projection_pack_contract: None,
+            activation_quant_scale_bits: 0,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1758,6 +1839,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
             qwen38_projection_pack_contract: None,
+            activation_quant_scale_bits: 0,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1784,6 +1866,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
             qwen38_projection_pack_contract: None,
+            activation_quant_scale_bits: 0,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1812,6 +1895,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
             qwen38_projection_pack_contract: None,
+            activation_quant_scale_bits: 0,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1847,6 +1931,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
             qwen38_projection_pack_contract: None,
+            activation_quant_scale_bits: 0,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1880,6 +1965,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
             qwen38_projection_pack_contract: None,
+            activation_quant_scale_bits: 0,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1907,6 +1993,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
             qwen38_projection_pack_contract: None,
+            activation_quant_scale_bits: 0,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1933,6 +2020,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: Some(contract),
             mlp_gate_up_silu_bundle_contract: None,
             qwen38_projection_pack_contract: None,
+            activation_quant_scale_bits: 0,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1959,6 +2047,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: Some(contract),
             qwen38_projection_pack_contract: None,
+            activation_quant_scale_bits: 0,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1985,6 +2074,7 @@ impl SemanticOpDescriptor {
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
             qwen38_projection_pack_contract: Some(contract),
+            activation_quant_scale_bits: 0,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -2054,9 +2144,17 @@ impl SemanticOpDescriptor {
         self.qwen38_projection_pack_contract
     }
 
+    /// Raw FP32 bits of the producer-side activation quantization scale.
+    /// `0` means the producer emits no scale (legacy BF16 or Encoding A).
+    pub const fn activation_quant_scale_bits(&self) -> u32 {
+        self.activation_quant_scale_bits
+    }
+
     /// Returns the zero-copy rank-2 view consumed by the existing `o_proj`
     /// matmul path. Only the validated C3c sigmoid output gate has this
-    /// handoff: `[M, H, 256]` is the same contiguous storage as `[M, H * 256]`.
+    /// handoff: `[M, H, 256]` is the same contiguous storage as
+    /// `[M, H * 256]`, and a producer-encoded output keeps its dtype and
+    /// encoding so the consumer can read it prequantized.
     pub fn sigmoid_mul_o_proj_input_view(&self) -> Option<TensorView> {
         if self.kind != SemanticOpKind::SigmoidMul {
             return None;
@@ -2066,8 +2164,8 @@ impl SemanticOpDescriptor {
         let width = output.shape()[1].checked_mul(output.shape()[2])?;
         Some(
             TensorView::new(
-                DType::Bf16,
-                Encoding::Unquantized,
+                output.dtype(),
+                output.encoding(),
                 &[m, width],
                 &[width, 1],
                 output.byte_offset(),
@@ -2094,6 +2192,8 @@ impl SemanticOpDescriptor {
                 actual_outputs: self.outputs.len(),
             });
         }
+
+        self.validate_activation_quant_scale()?;
 
         match self.kind {
             SemanticOpKind::Copy => {
@@ -2211,6 +2311,32 @@ impl SemanticOpDescriptor {
             }
         }
         Ok(())
+    }
+
+    /// The producer scale must be a finite positive FP32 value iff the
+    /// producer output is Encoding B (NVFP4 block16), and raw `0` otherwise.
+    fn validate_activation_quant_scale(&self) -> Result<(), OpError> {
+        let producer_output = match self.kind {
+            SemanticOpKind::RmsNorm | SemanticOpKind::SiluMul => self.outputs.first(),
+            SemanticOpKind::ResidualRmsNorm => self.outputs.get(1),
+            _ => None,
+        };
+        let encoding_b = producer_output.and_then(activation_quant_format)
+            == Some(ActivationQuantFormat::Nvfp4Block16);
+        let bits = self.activation_quant_scale_bits;
+        let scale = f32::from_bits(bits);
+        let contract_met = if encoding_b {
+            scale.is_finite() && scale > 0.0
+        } else {
+            bits == 0
+        };
+        if contract_met {
+            return Ok(());
+        }
+        Err(OpError::ActivationQuantScaleContract {
+            kind: self.kind,
+            bits,
+        })
     }
 }
 
@@ -2539,8 +2665,17 @@ fn validate_qwen38_projection_pack2(
     {
         return Err(OpError::Qwen38ProjectionPackNonContiguous);
     }
-    if activation.dtype() != DType::Bf16
-        || activation.encoding() != Encoding::Unquantized
+    let activation_contract_matches = match contract.role() {
+        Qwen38ProjectionPackRoleV1::Nvfp4MlpGateUp => {
+            is_legacy_bf16(activation)
+                || activation_quant_format(activation) == Some(ActivationQuantFormat::Nvfp4Block16)
+        }
+        Qwen38ProjectionPackRoleV1::Fp8MlpGateUp | Qwen38ProjectionPackRoleV1::Fp8GdnQkvZ => {
+            is_legacy_bf16(activation)
+        }
+        Qwen38ProjectionPackRoleV1::Fp8FullAttentionQkv => false,
+    };
+    if !activation_contract_matches
         || outputs
             .iter()
             .any(|view| view.dtype() != DType::Bf16 || view.encoding() != Encoding::Unquantized)
@@ -2971,9 +3106,19 @@ fn validate_matmul(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), 
             return Err(OpError::MatmulNonContiguous);
         }
     }
-    for tensor in [activation, output] {
-        if tensor.encoding() != Encoding::Unquantized || tensor.dtype() != DType::Bf16 {
-            return Err(OpError::MatmulActivationOutputContract);
+    if !is_producer_activation(activation)
+        || output.encoding() != Encoding::Unquantized
+        || output.dtype() != DType::Bf16
+    {
+        return Err(OpError::MatmulActivationOutputContract);
+    }
+    if activation_quant_format(activation) == Some(ActivationQuantFormat::Fp8PerRow) {
+        // Encoding A stores M*K value bytes followed by M FP32 per-row
+        // scales; the native prepare path fails closed on an unaligned
+        // scale region, so the host contract rejects it first.
+        let values_bytes = activation_shape[0] as u64 * activation_shape[1] as u64;
+        if (activation.byte_offset() + values_bytes) % 4 != 0 {
+            return Err(OpError::MatmulActivationScaleAlignment);
         }
     }
     let bf16_weight = weight.encoding() == Encoding::Unquantized && weight.dtype() == DType::Bf16;
@@ -3014,6 +3159,26 @@ fn validate_matmul(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), 
     }
     if !bf16_weight && !fp8_weight && !low_bit_weight && !mxfp8_weight {
         return Err(OpError::MatmulWeightContract);
+    }
+    // A producer-encoded activation may only feed the weight family it was
+    // encoded for; legacy BF16 activation quantization stays the backend's
+    // choice for every supported weight.
+    let pairing_matches = match activation_quant_format(activation) {
+        None => true,
+        Some(ActivationQuantFormat::Fp8PerRow) => fp8_weight,
+        Some(ActivationQuantFormat::Nvfp4Block16) => {
+            low_bit_weight
+                && matches!(
+                    weight.encoding(),
+                    Encoding::Nvfp4W4A4 {
+                        block_size: 16,
+                        scale_dtype: DType::F8E4M3Fn,
+                    }
+                )
+        }
+    };
+    if !pairing_matches {
+        return Err(OpError::MatmulActivationWeightPairing);
     }
     Ok(())
 }
@@ -3141,6 +3306,23 @@ mod qwen38_projection_pack_tests {
     }
 
     #[test]
+    fn nvfp4_pair_contract_accepts_producer_encoded_activation() {
+        let legacy = descriptor(3).expect("legacy Qwen3.8 NVFP4 pair");
+        let mut inputs = legacy.inputs().to_vec();
+        inputs[0] = nvfp4_view(&[3, Qwen38ProjectionPackContractV1::HIDDEN_SIZE as usize]);
+        let encoded = SemanticOpDescriptor::new_qwen38_projection_pack2(
+            inputs,
+            legacy.outputs().to_vec(),
+            legacy.qwen38_projection_pack_contract().unwrap(),
+        )
+        .expect("producer-encoded NVFP4 activation is a valid pack input");
+        assert_eq!(
+            activation_quant_format(&encoded.inputs()[0]),
+            Some(ActivationQuantFormat::Nvfp4Block16)
+        );
+    }
+
+    #[test]
     fn nvfp4_pair_contract_accepts_generic_aligned_hidden_and_intermediate() {
         let hidden = 3_840;
         let intermediate = 15_360;
@@ -3204,13 +3386,25 @@ fn validate_baseline_elementwise(
     inputs: &[TensorView],
     outputs: &[TensorView],
 ) -> Result<(), OpError> {
+    let encoded_output_kind = matches!(
+        kind,
+        SemanticOpKind::Add
+            | SemanticOpKind::SiluMul
+            | SemanticOpKind::GeluTanhMul
+            | SemanticOpKind::SigmoidMul
+    );
     let metadata_matches = match kind {
         SemanticOpKind::Copy => same_metadata(&inputs[0], &outputs[0]),
         SemanticOpKind::Add
         | SemanticOpKind::SiluMul
         | SemanticOpKind::GeluTanhMul
         | SemanticOpKind::SigmoidMul => {
-            same_metadata(&inputs[0], &inputs[1]) && same_metadata(&inputs[0], &outputs[0])
+            // The two operands must remain identical legacy BF16 values. The
+            // output either matches them exactly or carries a
+            // producer-encoded activation over the same shape and strides so
+            // the consumer matmul can read it prequantized.
+            same_metadata(&inputs[0], &inputs[1])
+                && encoded_elementwise_output_matches(&inputs[0], &outputs[0])
         }
         SemanticOpKind::ScalarMul | SemanticOpKind::TanhSoftcap => {
             same_metadata(&inputs[0], &outputs[0])
@@ -3258,6 +3452,10 @@ fn validate_baseline_elementwise(
         if !tensor.is_contiguous() {
             return Err(OpError::ElementwiseNonContiguous { kind, tensor: role });
         }
+        let encoded_output = role == ElementwiseTensor::Output && encoded_output_kind;
+        if encoded_output && is_producer_activation(tensor) {
+            continue;
+        }
         if tensor.encoding() != Encoding::Unquantized {
             return Err(OpError::ElementwiseUnsupportedEncoding {
                 kind,
@@ -3294,7 +3492,6 @@ mod qwen35_sigmoid_mul_tests {
             vec![view],
         )
     }
-
     #[test]
     fn reviewed_qwen35_head_counts_include_27b() {
         for heads in [8, 16, 24] {
@@ -3306,6 +3503,365 @@ mod qwen35_sigmoid_mul_tests {
                 Err(OpError::SigmoidMulShapeMismatch)
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod producer_quantized_activation_tests {
+    use super::*;
+
+    const SCALE_BITS: u32 = 512.0_f32.to_bits();
+
+    fn bf16(shape: &[usize]) -> TensorView {
+        TensorView::contiguous(DType::Bf16, shape).unwrap()
+    }
+
+    fn fp8_per_row(shape: &[usize]) -> TensorView {
+        TensorView::with_encoding(
+            DType::F8E4M3Fn,
+            Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: DType::F32,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            },
+            shape,
+        )
+        .unwrap()
+    }
+
+    fn nvfp4_block16(shape: &[usize]) -> TensorView {
+        TensorView::with_encoding(
+            DType::U8,
+            Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            },
+            shape,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn activation_quant_format_recognizes_only_the_two_producer_encodings() {
+        assert_eq!(
+            activation_quant_format(&fp8_per_row(&[3, 5])),
+            Some(ActivationQuantFormat::Fp8PerRow)
+        );
+        assert_eq!(
+            activation_quant_format(&nvfp4_block16(&[3, 5])),
+            Some(ActivationQuantFormat::Nvfp4Block16)
+        );
+        assert_eq!(activation_quant_format(&bf16(&[3, 5])), None);
+        let fnuz = TensorView::with_encoding(
+            DType::F8E4M3FnuZ,
+            Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: DType::F32,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            },
+            &[3, 5],
+        )
+        .unwrap();
+        assert_eq!(activation_quant_format(&fnuz), None);
+        let weight_only = TensorView::with_encoding(
+            DType::U8,
+            Encoding::Nvfp4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            },
+            &[3, 5],
+        )
+        .unwrap();
+        assert_eq!(activation_quant_format(&weight_only), None);
+        assert!(is_legacy_bf16(&bf16(&[3, 5])));
+        assert!(!is_legacy_bf16(&fp8_per_row(&[3, 5])));
+        assert!(is_producer_activation(&bf16(&[3, 5])));
+        assert!(is_producer_activation(&nvfp4_block16(&[3, 5])));
+    }
+
+    #[test]
+    fn encoded_span_end_covers_values_and_scale_regions() {
+        // Encoding A: 2x8 value bytes plus 2 FP32 per-row scales.
+        assert_eq!(encoded_span_end(&fp8_per_row(&[2, 8])), 16 + 8);
+        // Encoding B: 16 packed value bytes plus 2 block-16 E4M3 scales.
+        assert_eq!(encoded_span_end(&nvfp4_block16(&[2, 8])), 8 + 2);
+        // Rank-3 Encoding A still scales per leading row.
+        assert_eq!(encoded_span_end(&fp8_per_row(&[2, 4, 8])), 64 + 8);
+        // Legacy views end at their payload.
+        let legacy =
+            TensorView::new(DType::Bf16, Encoding::Unquantized, &[2, 8], &[8, 1], 4).unwrap();
+        assert_eq!(encoded_span_end(&legacy), legacy.end_offset());
+    }
+
+    #[test]
+    fn rms_norm_output_may_be_producer_encoded_but_inputs_may_not() {
+        let activation = bf16(&[3, 8]);
+        let raw_scale = bf16(&[8]);
+
+        // Encoding A output needs no scale.
+        let fp8_descriptor = SemanticOpDescriptor::new_rms_norm(
+            vec![activation.clone(), raw_scale.clone()],
+            vec![fp8_per_row(&[3, 8])],
+            1.0e-6,
+            RmsNormScaleMode::OffsetOne,
+        )
+        .expect("Encoding A RMSNorm output");
+        assert_eq!(fp8_descriptor.activation_quant_scale_bits(), 0);
+
+        // Encoding B output requires a finite positive scale.
+        assert!(matches!(
+            SemanticOpDescriptor::new_rms_norm(
+                vec![activation.clone(), raw_scale.clone()],
+                vec![nvfp4_block16(&[3, 8])],
+                1.0e-6,
+                RmsNormScaleMode::OffsetOne,
+            ),
+            Err(OpError::ActivationQuantScaleContract { .. })
+        ));
+        for bits in [
+            0_u32,
+            (-1.0_f32).to_bits(),
+            f32::INFINITY.to_bits(),
+            f32::NAN.to_bits(),
+        ] {
+            assert!(matches!(
+                SemanticOpDescriptor::new_rms_norm_with_quant_scale(
+                    vec![activation.clone(), raw_scale.clone()],
+                    vec![nvfp4_block16(&[3, 8])],
+                    1.0e-6,
+                    RmsNormScaleMode::OffsetOne,
+                    bits,
+                ),
+                Err(OpError::ActivationQuantScaleContract { .. })
+            ));
+        }
+        let encoded_b = SemanticOpDescriptor::new_rms_norm_with_quant_scale(
+            vec![activation.clone(), raw_scale.clone()],
+            vec![nvfp4_block16(&[3, 8])],
+            1.0e-6,
+            RmsNormScaleMode::OffsetOne,
+            SCALE_BITS,
+        )
+        .expect("Encoding B RMSNorm output with its scale");
+        assert_eq!(encoded_b.activation_quant_scale_bits(), SCALE_BITS);
+
+        // A legacy BF16 output must not carry a scale.
+        assert!(matches!(
+            SemanticOpDescriptor::new_rms_norm_with_quant_scale(
+                vec![activation.clone(), raw_scale.clone()],
+                vec![bf16(&[3, 8])],
+                1.0e-6,
+                RmsNormScaleMode::OffsetOne,
+                SCALE_BITS,
+            ),
+            Err(OpError::ActivationQuantScaleContract { .. })
+        ));
+
+        // The activation and raw scale inputs stay legacy BF16.
+        assert!(matches!(
+            SemanticOpDescriptor::new_rms_norm(
+                vec![fp8_per_row(&[3, 8]), raw_scale],
+                vec![bf16(&[3, 8])],
+                1.0e-6,
+                RmsNormScaleMode::OffsetOne,
+            ),
+            Err(OpError::RmsNormUnsupportedEncoding { .. })
+        ));
+    }
+
+    #[test]
+    fn residual_rewrite_propagates_the_scale_and_keeps_the_residual_bf16() {
+        let residual = bf16(&[3, 8]);
+        let addend = bf16(&[3, 8]);
+        let raw_scale = bf16(&[8]);
+
+        let fused = SemanticOpDescriptor::new_residual_rms_norm_with_contract_and_quant_scale(
+            vec![residual.clone(), addend.clone(), raw_scale.clone()],
+            vec![bf16(&[3, 8]), nvfp4_block16(&[3, 8])],
+            ResidualRmsNormContract::new(1.0e-6, RmsNormScaleMode::OffsetOne).unwrap(),
+            SCALE_BITS,
+        )
+        .expect("fused Encoding B normalized output");
+        assert_eq!(fused.activation_quant_scale_bits(), SCALE_BITS);
+        assert!(is_legacy_bf16(&fused.outputs()[0]));
+        assert_eq!(
+            activation_quant_format(&fused.outputs()[1]),
+            Some(ActivationQuantFormat::Nvfp4Block16)
+        );
+
+        // Without the propagated scale the fused Encoding B descriptor fails
+        // closed instead of silently reaching native without a scale.
+        assert!(matches!(
+            SemanticOpDescriptor::new_residual_rms_norm_with_contract(
+                vec![residual.clone(), addend.clone(), raw_scale.clone()],
+                vec![bf16(&[3, 8]), nvfp4_block16(&[3, 8])],
+                ResidualRmsNormContract::new(1.0e-6, RmsNormScaleMode::OffsetOne).unwrap(),
+            ),
+            Err(OpError::ActivationQuantScaleContract { .. })
+        ));
+
+        // The residual intermediate output itself may not be retyped.
+        assert!(matches!(
+            SemanticOpDescriptor::new_residual_rms_norm_with_contract_and_quant_scale(
+                vec![residual, addend, raw_scale],
+                vec![fp8_per_row(&[3, 8]), bf16(&[3, 8])],
+                ResidualRmsNormContract::new(1.0e-6, RmsNormScaleMode::OffsetOne).unwrap(),
+                0,
+            ),
+            Err(OpError::ResidualRmsNormUnsupportedEncoding { .. })
+        ));
+    }
+
+    #[test]
+    fn elementwise_operands_stay_bf16_while_outputs_may_be_producer_encoded() {
+        let gate = bf16(&[3, 8]);
+        let up = bf16(&[3, 8]);
+
+        // Encoding A output with the legacy operands.
+        SemanticOpDescriptor::new(
+            SemanticOpKind::SiluMul,
+            vec![gate.clone(), up.clone()],
+            vec![fp8_per_row(&[3, 8])],
+        )
+        .expect("Encoding A SiluMul output");
+
+        // Encoding B output requires its scale.
+        assert!(matches!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::SiluMul,
+                vec![gate.clone(), up.clone()],
+                vec![nvfp4_block16(&[3, 8])],
+            ),
+            Err(OpError::ActivationQuantScaleContract { .. })
+        ));
+        let silu = SemanticOpDescriptor::new_with_quant_scale(
+            SemanticOpKind::SiluMul,
+            vec![gate.clone(), up.clone()],
+            vec![nvfp4_block16(&[3, 8])],
+            SCALE_BITS,
+        )
+        .expect("Encoding B SiluMul output with its scale");
+        assert_eq!(silu.activation_quant_scale_bits(), SCALE_BITS);
+
+        // The two operands must still match each other exactly.
+        assert!(matches!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::SiluMul,
+                vec![gate.clone(), fp8_per_row(&[3, 8])],
+                vec![fp8_per_row(&[3, 8])],
+            ),
+            Err(OpError::ElementwiseMetadataMismatch)
+        ));
+        // The encoded output must keep the operand shape and strides.
+        assert!(matches!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::SiluMul,
+                vec![gate.clone(), up.clone()],
+                vec![fp8_per_row(&[8, 3])],
+            ),
+            Err(OpError::ElementwiseMetadataMismatch)
+        ));
+
+        // SigmoidMul keeps its rank-3 gate contract and hands the encoded
+        // output to o_proj with dtype, encoding, and payload preserved.
+        let sig_gate = bf16(&[3, 8, 256]);
+        let value = bf16(&[3, 8, 256]);
+        let sigmoid_output = fp8_per_row(&[3, 8, 256]);
+        let payload = sigmoid_output.payload_bytes();
+        let sigmoid = SemanticOpDescriptor::new(
+            SemanticOpKind::SigmoidMul,
+            vec![sig_gate, value],
+            vec![sigmoid_output],
+        )
+        .expect("Encoding A SigmoidMul output");
+        assert_eq!(sigmoid.activation_quant_scale_bits(), 0);
+        let handoff = sigmoid
+            .sigmoid_mul_o_proj_input_view()
+            .expect("o_proj handoff");
+        assert_eq!(handoff.shape(), &[3, 2048]);
+        assert_eq!(handoff.dtype(), DType::F8E4M3Fn);
+        assert_eq!(
+            activation_quant_format(&handoff),
+            Some(ActivationQuantFormat::Fp8PerRow)
+        );
+        assert_eq!(handoff.payload_bytes(), payload);
+    }
+
+    #[test]
+    fn matmul_accepts_producer_encoded_activations_that_pair_with_their_weight() {
+        let weight = bf16(&[7, 8]);
+        let output = bf16(&[3, 7]);
+
+        // Encoding A activation over an aligned M*K with an FP8 weight.
+        SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            vec![fp8_per_row(&[3, 8]), fp8_per_row(&[7, 8])],
+            vec![output.clone()],
+        )
+        .expect("Encoding A activation with an FP8 weight");
+
+        // Non-aligned M*K fails closed exactly like the native prepare path.
+        assert!(matches!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![fp8_per_row(&[3, 5]), fp8_per_row(&[7, 5])],
+                vec![TensorView::contiguous(DType::Bf16, &[3, 7]).unwrap()],
+            ),
+            Err(OpError::MatmulActivationScaleAlignment)
+        ));
+        // A misaligned byte offset fails closed too.
+        let offset_activation = TensorView::new(
+            DType::F8E4M3Fn,
+            fp8_per_row(&[3, 8]).encoding(),
+            &[3, 8],
+            &[8, 1],
+            1,
+        )
+        .unwrap();
+        assert!(matches!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![offset_activation, fp8_per_row(&[7, 8])],
+                vec![output.clone()],
+            ),
+            Err(OpError::MatmulActivationScaleAlignment)
+        ));
+
+        // Encoding A activation requires the FP8 weight family.
+        assert!(matches!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![fp8_per_row(&[3, 8]), weight.clone()],
+                vec![output.clone()],
+            ),
+            Err(OpError::MatmulActivationWeightPairing)
+        ));
+
+        // Encoding B activation pairs with an NVFP4 W4A4 weight only.
+        SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            vec![nvfp4_block16(&[3, 8]), nvfp4_block16(&[7, 8])],
+            vec![output.clone()],
+        )
+        .expect("Encoding B activation with an NVFP4 W4A4 weight");
+        assert!(matches!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![nvfp4_block16(&[3, 8]), weight.clone()],
+                vec![output.clone()],
+            ),
+            Err(OpError::MatmulActivationWeightPairing)
+        ));
+
+        // The matmul output itself stays legacy BF16.
+        assert!(matches!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![bf16(&[3, 8]), weight],
+                vec![fp8_per_row(&[3, 7])],
+            ),
+            Err(OpError::MatmulActivationOutputContract)
+        ));
     }
 }
 
@@ -3422,13 +3978,17 @@ fn validate_rms_norm(
         if !tensor.is_contiguous() {
             return Err(OpError::RmsNormNonContiguous { tensor: role });
         }
-        if tensor.encoding() != Encoding::Unquantized {
+        // The activation and raw scale stay legacy BF16. The output may be
+        // legacy BF16 or a producer-encoded activation (Encoding A or B)
+        // whose consumer matmul reads it prequantized.
+        let encoded_output = role == RmsNormTensor::Output && is_producer_activation(tensor);
+        if !encoded_output && tensor.encoding() != Encoding::Unquantized {
             return Err(OpError::RmsNormUnsupportedEncoding {
                 tensor: role,
                 actual: tensor.encoding(),
             });
         }
-        if tensor.dtype() != DType::Bf16 {
+        if !encoded_output && tensor.dtype() != DType::Bf16 {
             return Err(OpError::RmsNormUnsupportedDType {
                 tensor: role,
                 actual: tensor.dtype(),
@@ -3474,13 +4034,18 @@ fn validate_residual_rms_norm(
         if !tensor.is_contiguous() {
             return Err(OpError::ResidualRmsNormNonContiguous { tensor: role });
         }
-        if tensor.encoding() != Encoding::Unquantized {
+        // Residual, addend, raw scale, and the residual intermediate stay
+        // legacy BF16. Only the normalized output may be a producer-encoded
+        // activation (Encoding A or B).
+        let encoded_output =
+            role == ResidualRmsNormTensor::NormalizedOutput && is_producer_activation(tensor);
+        if !encoded_output && tensor.encoding() != Encoding::Unquantized {
             return Err(OpError::ResidualRmsNormUnsupportedEncoding {
                 tensor: role,
                 actual: tensor.encoding(),
             });
         }
-        if tensor.dtype() != DType::Bf16 {
+        if !encoded_output && tensor.dtype() != DType::Bf16 {
             return Err(OpError::ResidualRmsNormUnsupportedDType {
                 tensor: role,
                 actual: tensor.dtype(),
@@ -3606,6 +4171,81 @@ fn same_metadata(left: &TensorView, right: &TensorView) -> bool {
         && left.shape() == right.shape()
 }
 
+/// The elementwise output either matches the legacy operand metadata exactly
+/// or carries a producer-encoded activation over the same shape and strides
+/// so its consumer can read it prequantized.
+fn encoded_elementwise_output_matches(operand: &TensorView, output: &TensorView) -> bool {
+    output.shape() == operand.shape()
+        && output.strides() == operand.strides()
+        && (same_metadata(operand, output) || activation_quant_format(output).is_some())
+}
+
+/// Producer-encoded activation format recognized by the stage-7
+/// producer/consumer contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActivationQuantFormat {
+    /// Encoding A: OCP E4M3FN values with FP32 outer-dimension scales
+    /// resident directly after the value payload.
+    Fp8PerRow,
+    /// Encoding B: packed E2M1 values with block-16 E4M3FN scales resident
+    /// directly after the value payload and no padding.
+    Nvfp4Block16,
+}
+
+/// Returns the producer-encoded activation format of `view`, if any. Legacy
+/// BF16 views return `None`.
+pub fn activation_quant_format(view: &TensorView) -> Option<ActivationQuantFormat> {
+    match (view.dtype(), view.encoding()) {
+        (
+            DType::F8E4M3Fn,
+            Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: DType::F32,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            },
+        ) => Some(ActivationQuantFormat::Fp8PerRow),
+        (
+            DType::U8,
+            Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            },
+        ) => Some(ActivationQuantFormat::Nvfp4Block16),
+        _ => None,
+    }
+}
+
+/// True when `view` is the legacy unquantized BF16 activation representation.
+pub fn is_legacy_bf16(view: &TensorView) -> bool {
+    view.dtype() == DType::Bf16 && view.encoding() == Encoding::Unquantized
+}
+
+/// True when `view` is legacy BF16 or one of the stage-7 producer-encoded
+/// activation formats a consumer may read prequantized.
+pub fn is_producer_activation(view: &TensorView) -> bool {
+    is_legacy_bf16(view) || activation_quant_format(view).is_some()
+}
+
+/// Exclusive byte end of everything a kernel reads or writes through `view`:
+/// the value payload plus the separately resident scale bytes of a
+/// producer-encoded activation. Unencoded views end at [`TensorView::end_offset`].
+pub fn encoded_span_end(view: &TensorView) -> u64 {
+    let values_end = view.byte_offset().saturating_add(view.payload_bytes());
+    let rows = match view.shape().first().copied() {
+        Some(rows) if rows > 0 => rows as u64,
+        _ => return values_end,
+    };
+    let scale_bytes = match activation_quant_format(view) {
+        Some(ActivationQuantFormat::Fp8PerRow) => rows.saturating_mul(4),
+        Some(ActivationQuantFormat::Nvfp4Block16) => {
+            let row_elements = view.element_count() / rows;
+            rows.saturating_mul(row_elements.div_ceil(16))
+        }
+        None => 0,
+    };
+    values_end.saturating_add(scale_bytes)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OpError {
     Arity {
@@ -3686,6 +4326,8 @@ pub enum OpError {
         actual: DType,
     },
     MatmulActivationOutputContract,
+    MatmulActivationScaleAlignment,
+    MatmulActivationWeightPairing,
     MatmulWeightContract,
     Qwen38ProjectionPackContractRequired,
     Qwen38ProjectionPackInvalidInputGlobalScale {
@@ -3741,6 +4383,10 @@ pub enum OpError {
     },
     ResidualRmsNormShapeMismatch,
     ResidualRmsNormScaleShapeMismatch,
+    ActivationQuantScaleContract {
+        kind: SemanticOpKind,
+        bits: u32,
+    },
     RotaryContractRequired,
     RotaryInvalidConfig {
         field: &'static str,
@@ -4055,7 +4701,13 @@ impl fmt::Display for OpError {
                 write!(formatter, "matmul tensors must be bf16, got {actual}")
             }
             Self::MatmulActivationOutputContract => formatter.write_str(
-                "matmul activation and output must be contiguous unquantized BF16",
+                "matmul activation must be legacy BF16 or a producer-encoded activation, and the output must be contiguous unquantized BF16",
+            ),
+            Self::MatmulActivationScaleAlignment => formatter.write_str(
+                "matmul Encoding-A activation scales must start at a 4-byte-aligned offset",
+            ),
+            Self::MatmulActivationWeightPairing => formatter.write_str(
+                "matmul producer-encoded activation format must match its weight encoding",
             ),
             Self::MatmulWeightContract => formatter.write_str(
                 "matmul weight must use a supported BF16, FP8, NVFP4, MXFP4, MXFP6, or MXFP8 resident contract",
@@ -4144,6 +4796,11 @@ impl fmt::Display for OpError {
             ),
             Self::ResidualRmsNormScaleShapeMismatch => formatter.write_str(
                 "residual_rms_norm raw scale must be rank one and match the final dimension",
+            ),
+            Self::ActivationQuantScaleContract { kind, bits } => write!(
+                formatter,
+                "{} must carry a finite positive activation quantization scale iff its producer output is Encoding B, got raw bits 0x{bits:08x}",
+                kind.name()
             ),
             Self::RotaryContractRequired => {
                 formatter.write_str("rotary requires an explicit split-half contract")

@@ -31,18 +31,18 @@
       "files": [
         {
           "path": "include/sllm/hip.h",
-          "sha256": "62186430f951bc2d49c74e43ce4e53bd1af6c79a418e2e6fdbb07c0361e129ba"
+          "sha256": "22d7b6ea29bfa8b9ad673a0c57544b502771e2597f101437fc2db448b57e3b90"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel.hip.cpp",
-          "sha256": "2f8d78823d727b42f5dfe7fe79bfcb28ccdbcf7494201f7d4403a7d748a651bd"
+          "sha256": "adea250f5acb34110d8b933b9fc1d17c719e428e7886903933eceb8b6b8a91a6"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel_internal.hpp",
-          "sha256": "dc9d910305791097ae32463ba134da4c4aa398fdc55d40e59e4eb2b70f0c84d6"
+          "sha256": "1375accb490c4bf6af37dac7e1ccbe92caa5215a237e700b73d5f62a2aa7cc54"
         }
       ],
-      "source_set_sha256": "250017720c0ba21390023134840a013eb48055bf4d6326b8c694b8783389b1f3"
+      "source_set_sha256": "900fa59c0e33486aac63f4503fba124500396c4ecf99a661bef815fc86e1b7d5"
     },
     "host_abi": {
       "canonical_order": [
@@ -59,22 +59,22 @@
         },
         {
           "path": "native/hip/src/public_runtime.hip.cpp",
-          "sha256": "d0072e491d0effa6ebde7279bbb4781efbd5fa93801d05df96bffc6cf94fab1e"
+          "sha256": "79651d77a0de6dddcf4c1868f676198f662657da6cf0d7a536046ba0b7bfd64b"
         },
         {
           "path": "native/hip/src/public_runtime_internal.hpp",
-          "sha256": "a705484e1c91bbf21793caa1a661befd00ba7e0ddb2d5cc6a39499521cb8d653"
+          "sha256": "f794cd0df7eb5c7f735d61e5f58b1744fddb391c83174ed891c9760db4399bed"
         },
         {
           "path": "native/hip/src/rmsnorm_api.cpp",
-          "sha256": "c7c4d7e0141d5a7587ae9e4d8c4ae51abbb76694004b839cdd900e3d3f69e911"
+          "sha256": "688796fa9a347d2675ee5cdf6e99cfeb41b8dee3ee8559545f4ce9f3f4c5e741"
         },
         {
           "path": "native/hip/src/rmsnorm_api.hpp",
-          "sha256": "62675cd693719f711541768a2f52182fdc22a98fc70d21fe66f6ea041df4be19"
+          "sha256": "06adae33d8f974a243f68588404f15af40130442d1e6863180a9ec0b42aad284"
         }
       ],
-      "source_set_sha256": "492aa16e15eb562c1f379e30a9d1ab8a6cf1a022e35f0ba39954e7a768971336"
+      "source_set_sha256": "34d90144706a22f745d45df2e8f81ecc2ed20ad8d617f02c6f4dd21ebda95e2c"
     },
     "binding_build": {
       "canonical_order": [
@@ -91,22 +91,22 @@
         },
         {
           "path": "crates/sllm-hip-sys/src/bindings.rs",
-          "sha256": "ebcdb68f1c125daed6fe429571e7af15b314bf5de967001f3a97d400975f2b51"
+          "sha256": "8d2e06f650c198eb25ea3c8a3383d6fa41c72854fc8781c782d67d8e7f14878b"
         },
         {
           "path": "crates/sllm-hip/src/rmsnorm.rs",
-          "sha256": "b751edab7095e7e3160b96c8b3da4bc2d6cd3b5976f8b12e8e6f2b52db9fd06b"
+          "sha256": "05e4f5ba3308de4b523850566af438875c49e57f5892be25895a6037fb7ef117"
         },
         {
           "path": "crates/sllm-core/src/op.rs",
-          "sha256": "1d50833189b7fa545d3e7eea8921c38036d6e8141c11b5faba1eb9cf254debb0"
+          "sha256": "9112ea2ee3e2931f4dfe0f0a60b99b1796ebc0111630f447b3a902e4e3b8b56c"
         },
         {
           "path": "native/hip/CMakeLists.txt",
           "sha256": "572132f75233670f12d87185000a9d762f0cd2da24ab9f18bc4f69135308c221"
         }
       ],
-      "source_set_sha256": "00034ed9823db38d4fdda94f25dcdf859acad460560c7623539361bd37dc961b"
+      "source_set_sha256": "5b8c3db4d3d4377907011431f330151ed7ec8105620e0d63d707cfbb64660143"
     },
     "ci_contract": {
       "canonical_order": [
@@ -148,15 +148,15 @@
         },
         {
           "path": "ci/tools/run_rmsnorm_h3_compile.py",
-          "sha256": "572766f259e5c5f5ba6e51066a349384e34a72dec652e6ab8e4d55be99fe6768"
+          "sha256": "de2726b77ae22299eb34450936b751a76411c17783e99b342e997e69c986ccdb"
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "4c2e9d9bef662e666203d28e4e3bd848156496ada22d4379360fc1aa22a3ceca"
+          "sha256": "4f21bbf70f6342293a3a052d8184a2cd61fab1771528ba484fb32843551e9961"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "6330bbf68876b3ab7d14fe523c67c22fd4ef80664b90d7cc9345b977d7c4df15"
+          "sha256": "b6c37fb1361ab1af94dd4a8445e53a135ba3770d2355ada79fc098a5c29bb2ae"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -183,7 +183,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "6f8782724bf069d2eb430981ee89e3750f82c01b61236069c56a25fc49da925a"
+      "source_set_sha256": "355b38a9eb3d69ef86e2ed8e9d78fc167bcd8015510a2b8e1b847fb5c9afac0b"
     }
   },
   "source_symbol_map": [

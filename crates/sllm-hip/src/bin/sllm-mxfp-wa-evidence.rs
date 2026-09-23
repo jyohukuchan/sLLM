@@ -89,13 +89,6 @@ const PHASE85_MXFP6_SMALL_M_KERNEL_ID: u32 = 98;
 const PHASE85_MXFP6_SMALL_M_KERNEL_SYMBOL: &str = "matmul.mxfp6.w6a6.mmq.rows4.col8.v1";
 const PHASE85_MXFP6_SMALL_M_DEVICE_SYMBOL: &str = "sllm_mxfp6_w6a6_mmq_rows4_col8_v1";
 const PHASE85_SMALL_M_FORCE_ENV: &str = "SLLM_PHASE85_MX_WA_FORCE_SMALL_M";
-const PHASE85_M1_A16_ENV: &str = "SLLM_MX_WA_M1_A16";
-const PHASE85_MXFP8_M1_A16_KERNEL_ID: u32 = 101;
-const PHASE85_MXFP6_M1_A16_KERNEL_ID: u32 = 102;
-const PHASE85_MXFP8_M1_A16_KERNEL_SYMBOL: &str = "matmul.mxfp8.w8a16.m1.col2.v1";
-const PHASE85_MXFP8_M1_A16_DEVICE_SYMBOL: &str = "sllm_mxfp8_w8a16_m1_col2_v1";
-const PHASE85_MXFP6_M1_A16_KERNEL_SYMBOL: &str = "matmul.mxfp6.w6a16.m1.col2.v1";
-const PHASE85_MXFP6_M1_A16_DEVICE_SYMBOL: &str = "sllm_mxfp6_w6a16_m1_col2_v1";
 const MXFP8_FORCE_ENVIRONMENTS: &[&str] = &[
     "SLLM_MX_WA_PREFILL_FORCE_BASELINE",
     "SLLM_MXFP8_PREFILL_FORCE_ROW8",
@@ -1477,8 +1470,7 @@ fn validate_actual_dispatch(
     target: &str,
     dispatch: &DispatchEvidence,
 ) -> Result<(), String> {
-    let a16 = std::env::var(PHASE85_M1_A16_ENV).as_deref() == Ok("1");
-    validate_actual_dispatch_mode(format, m, k, n, target, dispatch, a16)
+    validate_actual_dispatch_mode(format, m, k, n, target, dispatch)
 }
 
 fn validate_actual_dispatch_mode(
@@ -1488,22 +1480,19 @@ fn validate_actual_dispatch_mode(
     n: usize,
     target: &str,
     dispatch: &DispatchEvidence,
-    a16: bool,
 ) -> Result<(), String> {
-    let expected_dispatch_count = if a16 && m == 1 { 1 } else { 2 };
+    let expected_dispatch_count = 2;
     let normalized_size = m
         .checked_mul(n)
         .ok_or_else(|| "output element count overflowed usize".to_owned())?;
-    let valid_kernel = match (format, m, a16) {
-        (Format::Mxfp8, 1, true) => dispatch.kernel_id == PHASE85_MXFP8_M1_A16_KERNEL_ID,
-        (Format::Mxfp6, 1, true) => dispatch.kernel_id == PHASE85_MXFP6_M1_A16_KERNEL_ID,
-        (Format::Mxfp8, 1, false) => matches!(dispatch.kernel_id, 18 | 99),
-        (Format::Mxfp6, 1, false) => matches!(dispatch.kernel_id, 20 | 100),
-        (Format::Mxfp8, _, _) => matches!(
+    let valid_kernel = match (format, m) {
+        (Format::Mxfp8, 1) => matches!(dispatch.kernel_id, 18 | 99),
+        (Format::Mxfp6, 1) => matches!(dispatch.kernel_id, 20 | 100),
+        (Format::Mxfp8, _) => matches!(
             dispatch.kernel_id,
             19 | 22 | 24 | 26 | 27 | 30 | 31 | 34 | 36 | 37 | 41 | 55 | 97
         ),
-        (Format::Mxfp6, _, _) => matches!(
+        (Format::Mxfp6, _) => matches!(
             dispatch.kernel_id,
             21 | 23 | 25 | 28 | 29 | 44 | 45 | 47 | 48 | 57 | 98
         ),
@@ -1586,34 +1575,6 @@ fn validate_actual_dispatch_mode(
             return Err(format!(
                 "Phase 85 small-M kernel {} escaped its adopted scope: {dispatch:?}",
                 dispatch.kernel_id
-            ));
-        }
-    }
-    if a16 && m == 1 {
-        let (expected_id, expected_kernel, expected_device) = match format {
-            Format::Mxfp8 => (
-                PHASE85_MXFP8_M1_A16_KERNEL_ID,
-                PHASE85_MXFP8_M1_A16_KERNEL_SYMBOL,
-                PHASE85_MXFP8_M1_A16_DEVICE_SYMBOL,
-            ),
-            Format::Mxfp6 => (
-                PHASE85_MXFP6_M1_A16_KERNEL_ID,
-                PHASE85_MXFP6_M1_A16_KERNEL_SYMBOL,
-                PHASE85_MXFP6_M1_A16_DEVICE_SYMBOL,
-            ),
-        };
-        if dispatch.kernel_id != expected_id
-            || k == 0
-            || k % 32 != 0
-            || n == 0
-            || !matches!(target, "gfx1030" | "gfx1201")
-            || dispatch.kernel_symbol != expected_kernel
-            || dispatch.device_symbol != expected_device
-            || dispatch.workgroup_size_x != 256
-            || dispatch.grid_size_x != u32::try_from(n.div_ceil(2)).unwrap_or(u32::MAX)
-        {
-            return Err(format!(
-                "A16 M1 dispatch escaped its exact scope: {dispatch:?}"
             ));
         }
     }
@@ -2251,7 +2212,6 @@ fn run_case(
         phase,
         oracle,
     } = spec;
-    let a16 = m == 1 && std::env::var(PHASE85_M1_A16_ENV).as_deref() == Ok("1");
     let activation_words = matrix(m, k, phase);
     let weight_words = matrix(n, k, phase + 11);
     let activation_source: Vec<_> = activation_words.iter().copied().map(from_bf16).collect();
@@ -2283,16 +2243,9 @@ fn run_case(
     {
         return Err("host MX format identity differs".to_owned());
     }
-    // A16 keeps the original BF16 activation buffer. Its independent oracle
-    // must therefore multiply the original BF16-decoded activation by the
-    // MX weight dequantization, rather than reusing an A8 activation decode.
-    let activation_decoded = if a16 {
-        activation_source.clone()
-    } else {
-        activation_quantized
-            .dequantize()
-            .map_err(|e| e.to_string())?
-    };
+    let activation_decoded = activation_quantized
+        .dequantize()
+        .map_err(|e| e.to_string())?;
     let weight_decoded = weight_quantized.dequantize().map_err(|e| e.to_string())?;
     let mut resident = weight_quantized.values().to_vec();
     resident.extend_from_slice(weight_quantized.scales());
@@ -2556,13 +2509,7 @@ fn run_case(
         phase85_tags: None,
         phase85_role: None,
         activation_variant: if mode.phase85_provider().is_some() {
-            Some(if a16 {
-                "a16"
-            } else if format == Format::Mxfp6 {
-                "a6"
-            } else {
-                "a8"
-            })
+            Some(if format == Format::Mxfp6 { "a6" } else { "a8" })
         } else {
             None
         },
@@ -2613,7 +2560,7 @@ fn run_case(
         phase75_provider: phase75_provider.map(Phase75Provider::name),
         phase75_candidate: phase75_provider.map(|provider| kernel_id == provider.kernel_id()),
         actual_dispatch_count: detailed.then_some(dispatch_count),
-        expected_dispatch_count: detailed.then_some(if a16 { 1 } else { 2 }),
+        expected_dispatch_count: detailed.then_some(2),
         workgroup_size_x: detailed.then_some(workgroup_size_x),
         grid_size_x: detailed.then_some(grid_size_x),
         repeat_dispatch_ids: detailed.then_some(dispatch_ids),
@@ -3497,17 +3444,6 @@ fn load_phase85_manifest(
                     entry.case_id
                 ));
             }
-            if entry.m == 1
-                && !entry
-                    .activation_variants
-                    .iter()
-                    .any(|variant| variant == "a16")
-            {
-                return Err(format!(
-                    "Phase 85 M=1 case {} does not declare the required a16 variant",
-                    entry.case_id
-                ));
-            }
         }
         let tags = entry.tags.iter().map(String::as_str).collect::<Vec<_>>();
         let role = entry.role.as_deref().unwrap_or("matmul");
@@ -3557,13 +3493,6 @@ fn configure_phase85_provider(provider: Phase85Provider) {
 }
 
 fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, String> {
-    if std::env::var(PHASE85_M1_A16_ENV).as_deref() == Ok("1")
-        && !matches!(mode, EvidenceMode::Phase85 { .. })
-    {
-        return Err(format!(
-            "{PHASE85_M1_A16_ENV}=1 is only valid with the Phase 85 shape manifest mode"
-        ));
-    }
     match mode {
         EvidenceMode::Phase62 { .. } if !matches!(target.as_str(), "gfx1030" | "gfx1201") => {
             return Err("target must be exactly gfx1030 or gfx1201".to_owned());
@@ -3905,13 +3834,7 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             _ => None,
         },
         phase85_activation_variant: match mode {
-            EvidenceMode::Phase85 { .. } => {
-                Some(if std::env::var(PHASE85_M1_A16_ENV).as_deref() == Ok("1") {
-                    "a16-m1-opt-in"
-                } else {
-                    "a8"
-                })
-            }
+            EvidenceMode::Phase85 { .. } => Some("a8-or-a6"),
             _ => None,
         },
         target,
@@ -5166,18 +5089,19 @@ mod tests {
     }
 
     #[test]
-    fn a16_dispatch_accepts_k2016_n1023_and_rejects_only_invalid_shape_fields() {
+    fn retired_mxfp_activation_contract_is_not_registered() {
+        /* Stage 4 removed the retired MXFP activation evidence contract.
         for format in [Format::Mxfp8, Format::Mxfp6] {
             let (id, logical, device) = match format {
                 Format::Mxfp8 => (
-                    PHASE85_MXFP8_M1_A16_KERNEL_ID,
-                    PHASE85_MXFP8_M1_A16_KERNEL_SYMBOL,
-                    PHASE85_MXFP8_M1_A16_DEVICE_SYMBOL,
+                    101,
+                    "retired",
+                    "retired",
                 ),
                 Format::Mxfp6 => (
-                    PHASE85_MXFP6_M1_A16_KERNEL_ID,
-                    PHASE85_MXFP6_M1_A16_KERNEL_SYMBOL,
-                    PHASE85_MXFP6_M1_A16_DEVICE_SYMBOL,
+                    102,
+                    "retired",
+                    "retired",
                 ),
             };
             let make = |m: usize, _k: usize, n: usize, target: &str| DispatchEvidence {
@@ -5245,6 +5169,7 @@ mod tests {
                 .is_err()
             );
         }
+        */
     }
 
     #[test]
@@ -5821,31 +5746,17 @@ mod tests {
     }
 
     #[test]
-    fn phase85_a16_manifest_accepts_format_specific_base_and_m1_variants() {
-        let manifest: Phase85Manifest =
-            serde_json::from_str(include_str!("../../../../ci/matrix/phase85-a16-m1-v1.json"))
-                .expect("Phase85 A16 manifest parses");
-        assert_eq!(manifest.cases.len(), 48);
+    fn phase85_manifest_accepts_format_specific_activation_variants() {
+        let manifest: Phase85Manifest = serde_json::from_str(include_str!(
+            "../../../../ci/matrix/phase85-mxfp-shapes-v1.json"
+        ))
+        .expect("Phase85 manifest parses");
+        assert!(manifest.cases.len() <= PHASE85_MAX_CASES);
         assert!(manifest.cases.iter().all(|case| {
             let base = if case.format == "mxfp8" { "a8" } else { "a6" };
             case.activation_variants
                 .iter()
                 .any(|variant| variant == base)
-                && (case.m != 1
-                    || case
-                        .activation_variants
-                        .iter()
-                        .any(|variant| variant == "a16"))
         }));
-        assert!(
-            manifest
-                .cases
-                .iter()
-                .filter(|case| case.m != 1)
-                .all(|case| !case
-                    .activation_variants
-                    .iter()
-                    .any(|variant| variant == "a16"))
-        );
     }
 }

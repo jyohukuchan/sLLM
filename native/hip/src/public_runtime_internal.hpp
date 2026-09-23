@@ -1747,6 +1747,82 @@ inline bool add_overflows(const uint64_t left, const uint64_t right) noexcept {
   return right > std::numeric_limits<uint64_t>::max() - left;
 }
 
+/* Phase 87 stage 7: producer-side activation quantization. A prequantized
+ * activation carries its own (values, scales) payload so the consumer matmul
+ * skips its quantize launch. The mode is derived only from one tensor
+ * binding's dtype/encoding pair; any other pair stays on the legacy
+ * unquantized path and is rejected by the per-operation validators. */
+enum class PrequantMode : uint32_t {
+  None = 0U,
+  Fp8Outer = 1U,
+  Nvfp4Block16 = 2U,
+};
+
+inline PrequantMode
+prequant_mode_from_binding(const uint32_t dtype,
+                           const uint32_t encoding) noexcept {
+  if (dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
+      encoding == SLLM_TENSOR_ENCODING_FP8_OUTER_F32) {
+    return PrequantMode::Fp8Outer;
+  }
+  if (dtype == SLLM_TENSOR_DTYPE_U8 &&
+      encoding == SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32) {
+    return PrequantMode::Nvfp4Block16;
+  }
+  return PrequantMode::None;
+}
+
+/* Payload layout of a prequantized m x k binding, mirroring what the fused
+ * producers write and what native/lowp consumes:
+ *   FP8 outer: m*k value bytes, then m FP32 row scales. The scale plane starts
+ *     at value_bytes, so callers must additionally require
+ *     (byte_offset + value_bytes) % 4 == 0.
+ *   NVFP4 block16: m*((k+1)/2) packed E2M1 value bytes, then m*((k+15)/16)
+ *     E4M3 block scales, with no padding between the two regions (identical to
+ *     qwen38_projection_pack_nvfp4_workspace_bytes). The FP32 activation
+ *     tensor scale is not part of this payload.
+ * Returns false on a zero extent or a u64 overflow; callers map that to
+ * SLLM_STATUS_METADATA_OVERFLOW. PrequantMode::None has no layout here. */
+inline bool prequant_payload_layout(const PrequantMode mode, const uint64_t m,
+                                    const uint64_t k,
+                                    uint64_t *const value_bytes,
+                                    uint64_t *const payload_bytes) noexcept {
+  constexpr uint64_t kMax = std::numeric_limits<uint64_t>::max();
+  if (value_bytes == nullptr || payload_bytes == nullptr || m == 0U ||
+      k == 0U || k == kMax || m > kMax / k) {
+    return false;
+  }
+  const uint64_t elements = m * k;
+  if (mode == PrequantMode::Fp8Outer) {
+    if (m > kMax / UINT64_C(4) || elements > kMax - m * UINT64_C(4)) {
+      return false;
+    }
+    *value_bytes = elements;
+    *payload_bytes = elements + m * UINT64_C(4);
+    return true;
+  }
+  if (mode == PrequantMode::Nvfp4Block16) {
+    if (k > kMax - UINT64_C(15)) {
+      return false;
+    }
+    const uint64_t packed_row_bytes = (k + UINT64_C(1)) / UINT64_C(2);
+    const uint64_t blocks_per_row = (k + UINT64_C(15)) / UINT64_C(16);
+    if (packed_row_bytes == 0U || blocks_per_row == 0U ||
+        m > kMax / packed_row_bytes || m > kMax / blocks_per_row) {
+      return false;
+    }
+    const uint64_t packed_bytes = m * packed_row_bytes;
+    const uint64_t scale_bytes = m * blocks_per_row;
+    if (packed_bytes > kMax - scale_bytes) {
+      return false;
+    }
+    *value_bytes = packed_bytes;
+    *payload_bytes = packed_bytes + scale_bytes;
+    return true;
+  }
+  return false;
+}
+
 inline bool valid_arch_name(const char *const value, const std::size_t capacity,
                             std::size_t *const length) noexcept {
   if (value == nullptr || length == nullptr) {

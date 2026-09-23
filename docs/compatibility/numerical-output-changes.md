@@ -61,6 +61,84 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### 2026-09-24 Phase87 段階9 MTP draft縮小語彙head
+
+- scope: Qwen3.8 NVFP4 MTP draftのみ、exact `gfx1030`／`gfx1201`、固定sampling K20／top-p 0.95。
+  baselineのdraft qは全248,320語のFP8 head、candidateのqはID昇順S=98,304語の同じhead行とrow scaleを使う。
+  targetの全語彙head、target p、p/q受理・残差規則、BF16 graph境界の丸めは変えない。
+- **N1（target分布）**: qのsupportと正規化は変わるが、target pに対するp/q補正が同じため、実数上の確定token分布はpのまま。
+  draft内の保持行は同じFP8 code／BF16 scaleで、両GPUともTier A 26条件の最初の行でAのS行とBが26/26 bitwise一致した。
+  block進行が変わらない17条件のtarget logits SHAも両GPUで17/17一致した。qの変更により固定seedのtoken列は変わりうるが、
+  通常8192/128のAB/BAでは両GPUの全runでA/B token列が一致した。最初の分岐位置はこの条件では該当なし。
+- mapped selectorはvocab数98,303／98,304／98,305、tie、selected/support IDのlocal→global変換と無効descriptorを
+  両GPUの公開ABI probeでPASS。MTPなしの生成token SHAは段階7と両GPUで一致し、fallbackなし、HIP-only、cleanup zero。
+- Tier A 26条件のM1はV620 0.7770→0.7745（−0.254 pt）、R9700 0.7761→0.7733（−0.279 pt）。
+  両GPUとも9条件でblock進行が変わり、探索との差が0.03 ptを超えた条件はすべてその中だった。
+  同一process AB/BAのTPOTはV620 3.73%／3.83%、R9700 3.72%／3.61%短縮し、全roundで1%基準を超えた。
+  MTP有効時の追加resident memoryは504,102,912 byte。採用語彙payload SHA-256は
+  `24bff6b41785a7729bff183dfea7997e6446173e0df7254cc5761a7519fdebd0`。
+- source/provider: Qwen MTP draft graphの別resident FP8 head、mapped token selector v3、model側artifact loader。
+  詳細とraw証拠は[段階9履歴](../history/2026/09/21-30/phase87-stage9.md)。rollbackは本作業単位のGit差分を戻す。
+  未コミット変更に架空のcommit IDを割り当てない。
+
+### 2026-09-24 Phase87 段階4 W×A16経路の廃止
+
+- scope: NVFP4 W4A16、MXFP8 W8A16、MXFP6 W6A16の旧Qwen／Gemma sidecar経路、lowp公開ABI、provider／selector、
+  Phase 85のM=1 A16 opt-in。直接artifactのQwen3.8 NVFP4 W4A4、Gemma 4 W4A4、MXFP8 W8A8／MXFP6 W6A6は対象外で、
+  数値式、量子化recipe、accumulator、graph境界の丸めを変更しない。
+- **N0（現行直接artifactの数値経路）**: A16のABI数値（2、6、7）、provider／selectorの過去IDは履歴監査用tombstoneとして保持するが、
+  lowpのprepare／planはunsupportedを返す。WU-4Rで残存NVFP4 W4A16のkernel 2本・launcher・variant選択を削除し、
+  variant数値8／9／10も監査用tombstoneとして残した。旧Qwen／Gemma W4A16 sidecarのgraph／upload入口は
+  fail-closedで拒否する。公開MXFP4 `LOWP_MXFP4_W4A6_V1` はformat情報だけのversioned placeholderであり、planは
+  未実装として拒否する。W4A4をW4A6へ暗黙変換しない。旧sidecarの実行可能性は意図して廃止したため、
+  N0の主張はQwen3.8／Gemma 4の現行直接artifact経路だけに限定する。
+- source/host contractで確認できる範囲: 直接Qwen3.8 artifactは168件、第一級Gemma 4 12Bは144件のinput-global scaleを持つ
+  W4A4 bindingであり、Gemma 4 26B-A4Bはcustom W4A4相当の11,520 projection scaleを持つ。NVIDIA Gemma 4 31Bは
+  locked metadata／index上のscaleだけを確認した参照対象で、ローカルpayloadがないため実行対象に含めない。
+  詳細は[段階0の棚卸し](../history/2026/09/11-20/phase87-a16-inventory.md)を参照する。
+- GPU model check: `gfx1030`／`gfx1201`で直接Qwen3.8 W4A4、Gemma 4 12B W4A4、Gemma 4 26B custom W4A4の
+  各1件ずつ、計6件がPASS。Qwen3.8はW4A4 prefill 168／decode ID84 224 dispatch、HIP-only、fallbackなし、
+  token再現、cleanup zeroを確認した。Gemma 12Bは直接artifact W4A4 planと固定sampling再現、Gemma 26Bは
+  custom NVFP4 MoEのactive expert、cancel復旧、cleanup zeroを確認した。Gemma 12Bのkernel ID別集計は未実施。
+  原票と旧A16 fail-closedのhost結果は[段階4履歴](../history/2026/09/21-30/phase87-stage4.md)を参照する。
+- WU-4R後、両GPUのlowp archive／HIP runtime binaryに旧W4A16 kernel symbolはなく、W4A4 symbolは残る。
+  Qwen3.8 MTPなし8192/128は両GPUで段階9の生成token SHAと一致し、HIP-only、fallbackなし、cleanup zero。
+  数値・丸め経路は変更しない（N0）。
+- rollback: 本作業単位のGit差分を戻す。未コミット変更に架空のcommit IDを割り当てない。過去のA16 evidenceは削除せず、
+  retired identityとして参照可能な履歴に残す。
+
+### 2026-09-24 Phase87 段階7 FP8 producer融合
+
+- scope: Qwen3.8 NVFP4、exact gfx1030／gfx1201、FullAttention `input_rmsnorm`のq/k/v、
+  FP8-MLPの`post_attention_rmsnorm`と`mlp_silu_mul`、FullAttentionの`sigmoid_mul`。
+  1 decode replayあたりFP8 per-row量子化88 nodeをproducer内へ移す。GDN out 48 node、
+  final norm 1 node、LinearAttention input norm 48 nodeは対象外。C2のNVFP4 block16融合（NVFP4-MLPの`post_attention_rmsnorm`と`mlp_silu_mul`、112 node）も2026-09-24に採用した。
+  lowp量子化器と同じE4M3 block scale・E2M1 code・input-global scaleを使い、両GPUでbitwise一致（N0）。
+- **N0**: 対照と候補は同じBF16 producer値から、同じFP8 E4M3FN codeとFP32行scaleを作り、
+  同じ既定matmulへ渡す。RMSNormのFP32 reduction、residualのBF16中間丸め、SiLU／sigmoidの
+  BF16丸め、`amax/448`とFP8 codeの丸めstageを共有`__device__` helperで維持する。
+  consumerの重み、accumulator、加算順、最終BF16丸め、sampling／stateは変更しない。
+- C2も**N0**: 同じBF16 producer値を現行lowp量子化器と同じblock16のE2M1 code、E4M3 scale、
+  FP32 input-global scaleで符号化する。code／scaleは両GPUの分解版とbitwise一致し、
+  C1+C2のMTPなし実モデルで段階6と生成token列が一致した。
+- 独立FP32 oracleと分解版対照のproducer code／scale／residual bitwise probeは両GPUでPASS。
+  M=1/17、K=17/31/33/5119/5120/5121/17408、非整数を含むscaleを確認。
+  C1単独ではcore 672件、HIP 163件のhost test、両gfxのtarget専用release build、実モデル4条件の
+  HIP-only／fallbackなし／cleanup zeroがPASS。repeatの生成token SHA-256は段階6と4条件すべて一致。
+- C1単独の8192/128固定sampling、1 warmup＋3 measuredではV620 MTPなし／ありが段階6比+1.616%／+1.034%、
+  R9700が+1.406%／+1.253%。graph kernel nodeはMTPなし1170→1082、あり1308→1220。
+  88 node構成の同一process graph AB/BAは両GPUで7 roundすべて短縮し、
+  V620 0.842541、R9700 0.704588 ms/replay（通常TPOT 1%基準は0.5948／0.4662）。
+  C1単独の固定128位置whole-graph forced-token全語彙logit dumpは両GPUとも段階6相当保存値とSHA-256一致。
+  BF16比mean KLDはV620 `0.026570786734159246`、R9700 `0.023446019680224913`で各差0。
+- C2は同一processの112 node graph AB/BA全7 roundで両GPUとも短縮したが、
+  短縮はV620 0.263、R9700 0.325 ms/replay（通常TPOT比0.45%／0.71%）で1%基準未満。
+  ユーザー決定により採用。C1+C2のMTPなし実モデルはV620 17.2036、R9700 21.9810 tok/s。
+  MTPありのC2有効実行とC2有効時の全語彙KLDは未測定であり、上記のC1単独結果と区別する。
+- source/provider: producer FP8融合のnative kernelとRust graphのexact Qwen3.8 retype。
+  詳細な候補採否、binary SHA、raw証拠は[段階7履歴](../history/2026/09/21-30/phase87-stage7-c1.md)。
+  rollbackは本作業単位のGit差分を戻す。未コミット変更に架空のcommit IDを割り当てない。
+
 
 ### 2026-09-20 Phase87 WU2 R9700 FP8 W8A8 decode projection
 
@@ -1673,6 +1751,7 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
   後続batch合計+0.0010%で測定上ほぼ同等となり、非退行確認を完了した。全測定を保持する。
   [計画](../plans/archive/2026/09/11-20/phase85-m1-a16-mtp.md)、
   [集約結果](../../ci/matrix/phase85-a16-mtp-results-v1.json)。
+  このopt-in実行経路は2026-09-24の[Phase 87段階4](../history/2026/09/21-30/phase87-stage4.md)で退役した。
 
 ## 2026-09-17 FORCE_BASELINE のrollback分類訂正
 

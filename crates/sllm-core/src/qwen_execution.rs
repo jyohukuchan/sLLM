@@ -43,7 +43,7 @@ use crate::linear_attention::{LinearAttentionDescriptor, LinearAttentionStateDes
 use crate::model::{QWEN35_4B_FINGERPRINT, TensorDType, VerifiedCache};
 use crate::op::{
     AttentionPreprocessContract, AttentionPreprocessPositionMode, OpError,
-    Qwen38ProjectionPackContractV1, SemanticOpDescriptor, SemanticOpKind,
+    Qwen38ProjectionPackContractV1, SemanticOpDescriptor, SemanticOpKind, TokenSelectorContractV1,
 };
 #[cfg(feature = "phase54-research")]
 use crate::phase54_kq_transform::{
@@ -2318,6 +2318,7 @@ impl QwenResidentModel {
         let source = Qwen38Nvfp4ProvisionSource {
             artifact,
             companion: None,
+            draft_vocab_ids: None,
         };
         let inner =
             QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
@@ -2354,18 +2355,32 @@ impl QwenResidentModel {
                     binding.tensor_name()
                 ))
             })?;
-            if descriptor.logical_shape.as_slice() != binding.shape()
+            let reduced_head = graph.draft_vocab_ids().is_some()
+                && binding.consumer().layer.is_none()
+                && binding.consumer().role == crate::WeightConsumer::OutputProjection
+                && binding.shape().len() == 2
+                && descriptor.logical_shape.len() == 2
+                && binding.shape()[0] == graph.draft_vocab_size() as u64
+                && binding.shape()[1] == descriptor.logical_shape[1]
+                && descriptor.logical_shape[0] == QWEN35_VOCAB_SIZE as u64;
+            if (!reduced_head && descriptor.logical_shape.as_slice() != binding.shape())
                 || descriptor.value_range != binding.source_range()
             {
                 return Err(QwenExecutionError::InvalidRequest(format!(
-                    "Qwen3.8 MTP artifact and graph source binding differ: {}",
-                    binding.tensor_name()
+                    "Qwen3.8 MTP artifact and graph source binding differ: {} reduced_head={} artifact_shape={:?} graph_shape={:?} artifact_range={:?} graph_range={:?}",
+                    binding.tensor_name(),
+                    reduced_head,
+                    descriptor.logical_shape,
+                    binding.shape(),
+                    descriptor.value_range,
+                    binding.source_range()
                 )));
             }
         }
         let source = Qwen38Nvfp4ProvisionSource {
             artifact,
             companion: None,
+            draft_vocab_ids: graph.draft_vocab_ids().map(Arc::<[u32]>::from),
         };
         let inner =
             QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
@@ -2442,18 +2457,32 @@ impl QwenResidentModel {
                     binding.tensor_name()
                 ))
             })?;
-            if descriptor.logical_shape.as_slice() != binding.shape()
+            let reduced_head = graph.draft_vocab_ids().is_some()
+                && binding.consumer().layer.is_none()
+                && binding.consumer().role == crate::WeightConsumer::OutputProjection
+                && binding.shape().len() == 2
+                && descriptor.logical_shape.len() == 2
+                && binding.shape()[0] == graph.draft_vocab_size() as u64
+                && binding.shape()[1] == descriptor.logical_shape[1]
+                && descriptor.logical_shape[0] == QWEN35_VOCAB_SIZE as u64;
+            if (!reduced_head && descriptor.logical_shape.as_slice() != binding.shape())
                 || descriptor.value_range != binding.source_range()
             {
                 return Err(QwenExecutionError::InvalidRequest(format!(
-                    "Qwen3.8 MTP artifact and graph source binding differ: {}",
-                    binding.tensor_name()
+                    "Qwen3.8 MTP artifact and graph source binding differ: {} reduced_head={} artifact_shape={:?} graph_shape={:?} artifact_range={:?} graph_range={:?}",
+                    binding.tensor_name(),
+                    reduced_head,
+                    descriptor.logical_shape,
+                    binding.shape(),
+                    descriptor.value_range,
+                    binding.source_range()
                 )));
             }
         }
         let source = Qwen38Nvfp4ProvisionSource {
             artifact: Arc::clone(&artifact),
             companion,
+            draft_vocab_ids: graph.draft_vocab_ids().map(Arc::<[u32]>::from),
         };
         let inner = QwenResidentInner::provision_shared(
             Arc::clone(&target.inner.session),
@@ -2537,6 +2566,36 @@ impl QwenResidentModel {
         graph: QwenGraph,
     ) -> Result<QwenExecutionRequest, QwenExecutionError> {
         self.new_request_with_adapters(graph, AdapterRequestSetV1::disabled())
+    }
+
+    /// Returns the verified source IDs used by this resident's reduced MTP
+    /// draft head, if one was configured. The target/full-vocabulary resident
+    /// and all non-MTP residents return `None`.
+    pub fn draft_vocab_ids(&self) -> Option<&[u32]> {
+        self.inner.draft_vocab_ids.as_deref()
+    }
+
+    pub fn draft_vocab_ids_arc(&self) -> Option<Arc<[u32]>> {
+        self.inner.draft_vocab_ids.clone()
+    }
+
+    /// Returns the immutable device buffer containing the reduced-head source
+    /// IDs as little-endian u32 words. The selector lowering may bind this
+    /// buffer as an optional mapping input for MTP draft logits.
+    pub fn draft_vocab_map_buffer(&self) -> Option<ExecutionBuffer> {
+        self.inner.draft_vocab_map.clone()
+    }
+
+    /// Returns the reduced-head map as a read-only contiguous I32 tensor
+    /// binding, suitable for a backend selector descriptor.
+    pub fn draft_vocab_map_binding(
+        &self,
+    ) -> Result<Option<OwnedTensorBinding>, QwenExecutionError> {
+        bind_draft_vocab_map(
+            self.inner.session.as_ref(),
+            self.inner.draft_vocab_map.as_ref(),
+            self.inner.draft_vocab_ids.as_deref(),
+        )
     }
 
     /// Creates a request-local owner with verified dense-BF16 adapter effects.
@@ -3423,6 +3482,22 @@ impl QwenExecutionRequest {
         self.core.graph.model_fingerprint()
     }
 
+    /// Source IDs backing this request's optional reduced MTP draft head.
+    pub fn draft_vocab_ids(&self) -> Option<&[u32]> {
+        self.core.resident_draft_vocab_ids()
+    }
+
+    pub fn draft_vocab_ids_arc(&self) -> Option<Arc<[u32]>> {
+        self.core.draft_vocab_ids.clone()
+    }
+
+    /// Read-only device binding for the optional reduced-head source-ID map.
+    pub fn draft_vocab_map_binding(
+        &self,
+    ) -> Result<Option<OwnedTensorBinding>, QwenExecutionError> {
+        self.core.draft_vocab_map_binding()
+    }
+
     /// Returns the BF16 hidden width exposed by this graph's MTP input or
     /// embedding row. Frontends use this instead of assuming the Qwen3.5-4B
     /// width when attaching a Qwen3.8 companion graph.
@@ -3476,6 +3551,13 @@ impl QwenExecutionRequest {
     ) -> Result<(), QwenExecutionError> {
         self.core
             .begin_fixed_k20_support_capture(rows, FixedK20SupportCaptureRole::CompanionDraft)
+    }
+
+    /// Stages the resident reduced-head ID map into the selector workspace
+    /// before a graph capture begins. This is a no-op for full-vocabulary
+    /// requests and may be called repeatedly on a fresh request.
+    pub fn stage_draft_vocab_map_for_selector(&mut self) -> Result<(), QwenExecutionError> {
+        self.core.stage_draft_vocab_map_for_selector()
     }
 
     /// Arms target-side fixed-K20 support capture for the private p/q route.
@@ -3659,6 +3741,8 @@ struct QwenResidentInner {
     static_tensors: BTreeMap<String, TensorAllocation>,
     scales: BTreeMap<String, CachedScale>,
     qwen38_artifact: Option<Arc<crate::VerifiedUnslothQwen38Nvfp4>>,
+    draft_vocab_ids: Option<Arc<[u32]>>,
+    draft_vocab_map: Option<ExecutionBuffer>,
     /// Keeps the target resident alive when a Qwen3.8 MTP companion borrows
     /// its embedding and untied output-projection buffers.
     _shared_target: Option<Arc<QwenResidentInner>>,
@@ -3705,6 +3789,8 @@ struct QwenExecutionCore {
     qwen38_graph_spans_enabled: bool,
     session: Arc<ExecutionSession>,
     qwen38_artifact: Option<Arc<crate::VerifiedUnslothQwen38Nvfp4>>,
+    draft_vocab_ids: Option<Arc<[u32]>>,
+    draft_vocab_map: Option<ExecutionBuffer>,
     graph: QwenGraph,
     execution_plan: PreparedExecutionPlan<QwenGraphNode>,
     plan: Arc<WeightLoadPlan>,
@@ -4252,6 +4338,7 @@ struct Nvfp4ProvisionSource {
 struct Qwen38Nvfp4ProvisionSource {
     companion: Option<Arc<crate::VerifiedQwen38MtpQuantizedSidecar>>,
     artifact: Arc<crate::VerifiedUnslothQwen38Nvfp4>,
+    draft_vocab_ids: Option<Arc<[u32]>>,
 }
 
 struct Qwen35MoeProvisionSource {
@@ -5498,7 +5585,18 @@ impl QwenProvisionSource for Qwen38Nvfp4ProvisionSource {
                 binding.tensor_name()
             ))
         })?;
-        if descriptor.logical_shape.as_slice() != binding.shape() {
+        let reduced_output = self.draft_vocab_ids.is_some()
+            && binding.consumer().layer.is_none()
+            && binding.consumer().role == crate::WeightConsumer::OutputProjection;
+        if (!reduced_output && descriptor.logical_shape.as_slice() != binding.shape())
+            || (reduced_output
+                && (descriptor.logical_shape.len() != 2
+                    || binding.shape().len() != 2
+                    || descriptor.logical_shape[1] != binding.shape()[1]
+                    || binding.shape()[0]
+                        != u64::try_from(self.draft_vocab_ids.as_ref().map_or(0, |ids| ids.len()))
+                            .unwrap_or(0)))
+        {
             return Err(QwenExecutionError::InvalidRequest(format!(
                 "Qwen3.8 tensor shape differs: {}",
                 binding.tensor_name()
@@ -5576,7 +5674,30 @@ impl QwenProvisionSource for Qwen38Nvfp4ProvisionSource {
                         "Qwen3.8 FP8 channel scale is not BF16-aligned".to_owned(),
                     ));
                 }
-                gguf_fp8_resident_payload(&values, &normalized, resident_dtype)?
+                if let Some(ids) = self.draft_vocab_ids.as_deref() {
+                    if !reduced_output {
+                        return Err(QwenExecutionError::InvalidRequest(
+                            "reduced Qwen3.8 vocabulary map may only bind lm_head.weight"
+                                .to_owned(),
+                        ));
+                    }
+                    let (values, scales) = gather_qwen38_fp8_rows(
+                        &values,
+                        &scale_bytes,
+                        descriptor.logical_shape.as_slice(),
+                        ids,
+                    )?;
+                    let mut normalized = Vec::with_capacity(scales.len() * 2);
+                    for scale in scales.chunks_exact(2) {
+                        let bf16 = u16::from_le_bytes([scale[0], scale[1]]);
+                        normalized.extend_from_slice(
+                            &f32::from_bits(u32::from(bf16) << 16).to_le_bytes(),
+                        );
+                    }
+                    gguf_fp8_resident_payload(&values, &normalized, resident_dtype)?
+                } else {
+                    gguf_fp8_resident_payload(&values, &normalized, resident_dtype)?
+                }
             }
             crate::QuantizedTensorEncoding::Nvfp4E2M1Block16E4M3FnF32Outer => {
                 if resident_dtype != DType::U8 {
@@ -5857,6 +5978,13 @@ impl QwenResidentInner {
         preflight_device_memory(session.as_ref(), &graph, &layout, false)?;
         let queue = session.create_queue()?;
         let static_tensors = allocate_resident_tensors(&session, &graph, &layout)?;
+        let draft_vocab_ids = graph.draft_vocab_ids().map(Arc::<[u32]>::from);
+        let draft_vocab_map = provision_draft_vocab_map(
+            session.as_ref(),
+            &queue,
+            draft_vocab_ids.as_deref(),
+            completion_timeout,
+        )?;
 
         let mut uploaded = BTreeSet::new();
         for binding in graph.weight_bindings() {
@@ -5912,6 +6040,8 @@ impl QwenResidentInner {
             static_tensors,
             scales,
             qwen38_artifact,
+            draft_vocab_ids,
+            draft_vocab_map,
             _shared_target: None,
             completion_timeout,
         })
@@ -5985,6 +6115,13 @@ impl QwenResidentInner {
             }
         }
         let queue = session.create_queue()?;
+        let draft_vocab_ids = graph.draft_vocab_ids().map(Arc::<[u32]>::from);
+        let draft_vocab_map = provision_draft_vocab_map(
+            session.as_ref(),
+            &queue,
+            draft_vocab_ids.as_deref(),
+            completion_timeout,
+        )?;
         // Borrow matching target allocations from the start.  Allocating a
         // complete companion first would temporarily duplicate the large
         // embedding/output tensors and can fail before the replacement below
@@ -6002,17 +6139,21 @@ impl QwenResidentInner {
                 QwenExecutionError::InvalidGraph("resident weight allocation is absent".to_owned())
             })?;
             if let Some(shared) = shared_target.static_tensors.get(name) {
-                if allocation.graph_view.dtype() != shared.graph_view.dtype()
+                let shape_differs = allocation.graph_view.dtype() != shared.graph_view.dtype()
                     || allocation.graph_view.encoding() != shared.graph_view.encoding()
                     || allocation.graph_view.shape() != shared.graph_view.shape()
                     || allocation.graph_view.strides() != shared.graph_view.strides()
-                    || allocation.graph_view.byte_offset() != shared.graph_view.byte_offset()
-                {
+                    || allocation.graph_view.byte_offset() != shared.graph_view.byte_offset();
+                let reduced_mtp_output =
+                    graph.draft_vocab_ids().is_some() && name == "lm_head.weight";
+                if shape_differs && !reduced_mtp_output {
                     return Err(QwenExecutionError::InvalidGraph(format!(
                         "shared target tensor view differs from MTP graph: {name}"
                     )));
                 }
-                continue;
+                if !shape_differs {
+                    continue;
+                }
             }
             if !uploaded.insert(name.to_owned()) {
                 return Err(QwenExecutionError::InvalidGraph(format!(
@@ -6061,6 +6202,8 @@ impl QwenResidentInner {
             static_tensors,
             scales,
             qwen38_artifact,
+            draft_vocab_ids,
+            draft_vocab_map,
             _shared_target: Some(shared_target),
             completion_timeout,
         })
@@ -6068,6 +6211,54 @@ impl QwenResidentInner {
 }
 
 impl QwenExecutionCore {
+    fn resident_draft_vocab_ids(&self) -> Option<&[u32]> {
+        self.draft_vocab_ids.as_deref()
+    }
+
+    fn draft_vocab_map_binding(&self) -> Result<Option<OwnedTensorBinding>, QwenExecutionError> {
+        bind_draft_vocab_map(
+            self.session.as_ref(),
+            self.draft_vocab_map.as_ref(),
+            self.draft_vocab_ids.as_deref(),
+        )
+    }
+
+    fn stage_draft_vocab_map_for_selector(&self) -> Result<(), QwenExecutionError> {
+        let Some(map) = self.draft_vocab_ids.as_ref() else {
+            return Ok(());
+        };
+        let mut storage = self
+            .device_sampling
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        if storage.is_none() {
+            *storage = Some(DeviceSamplingBuffers::new(
+                self.session.as_ref(),
+                self.graph.draft_vocab_size(),
+            )?);
+        }
+        let contract = TokenSelectorContractV1::new_fixed_mapped(
+            u64::try_from(self.graph.draft_vocab_size()).map_err(|_| {
+                QwenExecutionError::InvalidRequest(
+                    "MTP draft vocabulary size does not fit u64".to_owned(),
+                )
+            })?,
+            0,
+            0,
+        )?;
+        storage
+            .as_mut()
+            .expect("device sampling storage initialized")
+            .stage_vocab_map(
+                self.session.as_ref(),
+                &self.queue,
+                map,
+                contract,
+                self.completion_timeout,
+            )?;
+        Ok(())
+    }
+
     fn cancel(&mut self) {
         if let Some(pending) = self.pending_speculative.take() {
             if pending.prefix_checkpoint_armed {
@@ -6107,9 +6298,15 @@ impl QwenExecutionCore {
         if storage.is_none() {
             *storage = Some(DeviceSamplingBuffers::new(
                 self.session.as_ref(),
-                QWEN35_VOCAB_SIZE,
+                self.graph.draft_vocab_size(),
             )?);
         }
+        drop(storage);
+        self.stage_draft_vocab_map_for_selector()?;
+        let mut storage = self
+            .device_sampling
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
         storage
             .as_mut()
             .expect("device sampling storage initialized")
@@ -6826,6 +7023,8 @@ impl QwenExecutionCore {
             qwen38_graph_spans_enabled,
             session: Arc::clone(&resident.session),
             qwen38_artifact: resident.qwen38_artifact.clone(),
+            draft_vocab_ids: resident.draft_vocab_ids.clone(),
+            draft_vocab_map: resident.draft_vocab_map.clone(),
             graph,
             execution_plan,
             plan: Arc::clone(&resident.plan),
@@ -7544,6 +7743,13 @@ impl QwenExecutionCore {
         let layout = validate_graph_plan(&graph, &plan)?;
         preflight_device_memory(session.as_ref(), &graph, &layout, false)?;
         let queue = session.create_queue()?;
+        let draft_vocab_ids = graph.draft_vocab_ids().map(Arc::<[u32]>::from);
+        let draft_vocab_map = provision_draft_vocab_map(
+            session.as_ref(),
+            &queue,
+            draft_vocab_ids.as_deref(),
+            completion_timeout,
+        )?;
         let tensors = allocate_tensors(&session, &graph)?;
 
         let mut uploaded = BTreeSet::new();
@@ -7672,6 +7878,8 @@ impl QwenExecutionCore {
             graph_collect_node: AtomicBool::new(false),
             qwen38_graph_spans_enabled: false,
             qwen38_artifact: None,
+            draft_vocab_ids,
+            draft_vocab_map,
             qwen38_deferred_completion: false,
             qwen38_kv_append_attention_chain: false,
             chain_active: AtomicBool::new(false),
@@ -8557,13 +8765,27 @@ impl QwenExecutionCore {
         target_hidden_bf16: &[u16],
         selector: &DeviceTokenSelectorRequestV1,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        let mapped_selector = self
+            .draft_vocab_ids
+            .as_ref()
+            .map(|ids| {
+                selector
+                    .clone()
+                    .with_vocab_map(Arc::clone(ids))
+                    .map_err(|error| {
+                        QwenExecutionError::InvalidRequest(format!(
+                            "MTP draft vocabulary cannot prepare mapped selector: {error}"
+                        ))
+                    })
+            })
+            .transpose()?;
         self.decode_impl(
             token_id,
             false,
             false,
             true,
             Some(target_hidden_bf16),
-            Some(selector),
+            Some(mapped_selector.as_ref().unwrap_or(selector)),
         )
     }
 
@@ -9316,6 +9538,7 @@ impl QwenExecutionCore {
             ));
         }
         let logits_id = argmax.inputs()[0];
+        let vocab = self.graph.draft_vocab_size();
         let full_view = self.view(logits_id, token_count)?;
         let view = match terminal_rows {
             TerminalOutputRows::Last => first_row_view(&full_view)?,
@@ -9333,14 +9556,14 @@ impl QwenExecutionCore {
                             )
                         })?
                     },
-                    QWEN35_VOCAB_SIZE,
+                    vocab,
                 ]
         {
             return Err(QwenExecutionError::InvalidGraph(
                 "terminal logits do not have the fixed BF16 [tokens,vocab] shape".to_owned(),
             ));
         }
-        let row_bytes = u64::try_from(QWEN35_VOCAB_SIZE)
+        let row_bytes = u64::try_from(vocab)
             .expect("fixed vocabulary fits u64")
             .checked_mul(2)
             .ok_or_else(|| {
@@ -9393,7 +9616,7 @@ impl QwenExecutionCore {
                 QwenExecutionError::InvalidGraph("logits chunk progress overflowed".to_owned())
             })?;
         }
-        decode_bf16_logits(&bytes)
+        decode_bf16_logits(&bytes, vocab)
     }
 
     fn read_logits_bf16(&self, token_count: u64) -> Result<Vec<u16>, QwenExecutionError> {
@@ -9410,16 +9633,17 @@ impl QwenExecutionCore {
             ));
         }
         let logits_id = argmax.inputs()[0];
+        let vocab = self.graph.draft_vocab_size();
         let view = self.view(logits_id, token_count)?;
         let rows = usize::try_from(token_count).map_err(|_| {
             QwenExecutionError::InvalidRequest("token count does not fit usize".to_owned())
         })?;
-        if view.dtype() != DType::Bf16 || view.shape() != [rows, QWEN35_VOCAB_SIZE] {
+        if view.dtype() != DType::Bf16 || view.shape() != [rows, vocab] {
             return Err(QwenExecutionError::InvalidGraph(
                 "terminal logits do not have the fixed BF16 [tokens,vocab] shape".to_owned(),
             ));
         }
-        let word_count = rows.checked_mul(QWEN35_VOCAB_SIZE).ok_or_else(|| {
+        let word_count = rows.checked_mul(vocab).ok_or_else(|| {
             QwenExecutionError::InvalidGraph("logits word count overflowed".to_owned())
         })?;
         let total_bytes = u64::try_from(word_count)
@@ -9988,18 +10212,21 @@ impl QwenExecutionCore {
             );
         }
         let descriptor = match operation.kind() {
-            SemanticOpKind::RmsNorm => SemanticOpDescriptor::new_rms_norm_with_contract(
-                inputs,
-                outputs,
-                operation.rms_norm_contract().ok_or_else(|| {
-                    QwenExecutionError::InvalidGraph(format!(
-                        "RMSNorm node {} has no contract",
-                        node.label()
-                    ))
-                })?,
-            )?,
+            SemanticOpKind::RmsNorm => {
+                SemanticOpDescriptor::new_rms_norm_with_contract_and_quant_scale(
+                    inputs,
+                    outputs,
+                    operation.rms_norm_contract().ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(format!(
+                            "RMSNorm node {} has no contract",
+                            node.label()
+                        ))
+                    })?,
+                    operation.activation_quant_scale_bits(),
+                )?
+            }
             SemanticOpKind::ResidualRmsNorm => {
-                SemanticOpDescriptor::new_residual_rms_norm_with_contract(
+                SemanticOpDescriptor::new_residual_rms_norm_with_contract_and_quant_scale(
                     inputs,
                     outputs,
                     operation.residual_rms_norm_contract().ok_or_else(|| {
@@ -10008,6 +10235,7 @@ impl QwenExecutionCore {
                             node.label()
                         ))
                     })?,
+                    operation.activation_quant_scale_bits(),
                 )?
             }
             SemanticOpKind::SparseMoe => SemanticOpDescriptor::new_sparse_moe(
@@ -10056,7 +10284,12 @@ impl QwenExecutionCore {
                     })?,
                 )?
             }
-            kind => SemanticOpDescriptor::new(kind, inputs, outputs)?,
+            kind => SemanticOpDescriptor::new_with_quant_scale(
+                kind,
+                inputs,
+                outputs,
+                operation.activation_quant_scale_bits(),
+            )?,
         };
         let kind = descriptor.kind();
         let mut submission = self.submit_semantic(
@@ -10113,8 +10346,28 @@ impl QwenExecutionCore {
                 node.label()
             )));
         }
+        let mut token_ids = decode_argmax_bytes(&bytes)?;
+        if let Some(map) = self.draft_vocab_ids.as_deref() {
+            for token in &mut token_ids {
+                let local = usize::try_from(*token).map_err(|_| {
+                    QwenExecutionError::InvalidRequest(
+                        "reduced MTP Argmax returned a negative row".to_owned(),
+                    )
+                })?;
+                *token = i32::try_from(*map.get(local).ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "reduced MTP Argmax returned an out-of-range row".to_owned(),
+                    )
+                })?)
+                .map_err(|_| {
+                    QwenExecutionError::InvalidRequest(
+                        "reduced MTP vocabulary ID does not fit i32".to_owned(),
+                    )
+                })?;
+            }
+        }
         Ok(Some(TerminalSelection {
-            token_ids: decode_argmax_bytes(&bytes)?,
+            token_ids,
             selection: None,
             selections: None,
         }))
@@ -10829,18 +11082,21 @@ impl QwenExecutionCore {
         let inputs = self.views(node.inputs(), token_count)?;
         let outputs = self.views(node.outputs(), token_count)?;
         let descriptor = match operation.kind() {
-            SemanticOpKind::RmsNorm => SemanticOpDescriptor::new_rms_norm_with_contract(
-                inputs,
-                outputs,
-                operation.rms_norm_contract().ok_or_else(|| {
-                    QwenExecutionError::InvalidGraph(format!(
-                        "RMSNorm node {} has no contract",
-                        node.label()
-                    ))
-                })?,
-            )?,
+            SemanticOpKind::RmsNorm => {
+                SemanticOpDescriptor::new_rms_norm_with_contract_and_quant_scale(
+                    inputs,
+                    outputs,
+                    operation.rms_norm_contract().ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(format!(
+                            "RMSNorm node {} has no contract",
+                            node.label()
+                        ))
+                    })?,
+                    operation.activation_quant_scale_bits(),
+                )?
+            }
             SemanticOpKind::ResidualRmsNorm => {
-                SemanticOpDescriptor::new_residual_rms_norm_with_contract(
+                SemanticOpDescriptor::new_residual_rms_norm_with_contract_and_quant_scale(
                     inputs,
                     outputs,
                     operation.residual_rms_norm_contract().ok_or_else(|| {
@@ -10849,6 +11105,7 @@ impl QwenExecutionCore {
                             node.label()
                         ))
                     })?,
+                    operation.activation_quant_scale_bits(),
                 )?
             }
             SemanticOpKind::SparseMoe => SemanticOpDescriptor::new_sparse_moe(
@@ -10897,7 +11154,12 @@ impl QwenExecutionCore {
                     })?,
                 )?
             }
-            kind => SemanticOpDescriptor::new(kind, inputs, outputs)?,
+            kind => SemanticOpDescriptor::new_with_quant_scale(
+                kind,
+                inputs,
+                outputs,
+                operation.activation_quant_scale_bits(),
+            )?,
         };
         let input_bindings = self.bind_many(node.inputs(), token_count, AccessMode::Read)?;
         let output_bindings = self.bind_many(node.outputs(), token_count, AccessMode::Write)?;
@@ -12257,15 +12519,26 @@ fn workspace_allocation_bytes_with_terminal_mode(
     let tensor = graph.tensor_metadata().get(tensor_id).ok_or_else(|| {
         QwenExecutionError::InvalidGraph("workspace tensor ID is out of range".to_owned())
     })?;
-    compact_terminal_allocation_end_with_terminal_mode(
+    if let Some(end) = compact_terminal_allocation_end_with_terminal_mode(
         graph.token_count(),
         graph.is_mtp(),
         tensor_id,
         terminal_outputs,
         tensor.view(),
         short_terminal_last_row,
-    )
-    .map(|value| value.unwrap_or_else(|| tensor.view().end_offset()))
+    )? {
+        return Ok(end);
+    }
+    // `resident_weight_bytes` covers the value payload plus every separately
+    // resident scale region, so a stage-7 producer-encoded activation's
+    // per-row or per-block scales stay inside its workspace slot.
+    tensor
+        .view()
+        .byte_offset()
+        .checked_add(resident_weight_bytes(tensor.view())?)
+        .ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("workspace allocation size overflowed".to_owned())
+        })
 }
 
 type WorkspaceAllocationPlan = (BTreeMap<usize, u64>, BTreeMap<u64, u64>, u64);
@@ -12513,10 +12786,18 @@ fn validate_graph_plan_with_terminal_mode(
                 binding.tensor_name()
             ))
         })?;
+        let reduced_draft_output = graph.draft_vocab_ids().is_some()
+            && binding.consumer().layer.is_none()
+            && binding.consumer().role == crate::WeightConsumer::OutputProjection
+            && entry.shape.len() == 2
+            && binding.shape().len() == 2
+            && entry.shape[1] == binding.shape()[1]
+            && entry.shape[0] > binding.shape()[0]
+            && binding.shape()[0] == u64::try_from(graph.draft_vocab_size()).unwrap_or(u64::MAX);
         if entry.classification != WeightClassification::Required
             || entry.consumer != Some(binding.consumer())
             || entry.dtype != binding.dtype()
-            || entry.shape != binding.shape()
+            || (!reduced_draft_output && entry.shape != binding.shape())
             || entry.source_range != binding.source_range()
             || entry.destination_start != Some(binding.destination_start())
         {
@@ -12846,7 +13127,10 @@ fn is_fp8_weight_view(view: &TensorView) -> bool {
                 scale_dtype: DType::F32,
                 resident: Fp8ResidentRepresentation::PackedBytes,
             }
-        && view.shape().len() == 2
+        // Row-major rank ≥ 2 keeps the row axis at shape[0], so a rank-3
+        // producer-encoded activation (the SigmoidMul output) allocates the
+        // same per-row FP32 scale region as a rank-2 weight or activation.
+        && view.shape().len() >= 2
 }
 
 fn is_nvfp4_weight_view(view: &TensorView) -> bool {
@@ -12969,19 +13253,23 @@ fn allocate_resident_tensors_with_shared(
         if !layout.dynamic_tensors[tensor.id()] && tensor.backing() == QwenGraphTensorBacking::Owned
         {
             if let Some(existing) = shared.and_then(|values| values.get(tensor.name())) {
-                if existing.graph_view.dtype() != tensor.view().dtype()
+                let shape_differs = existing.graph_view.dtype() != tensor.view().dtype()
                     || existing.graph_view.encoding() != tensor.view().encoding()
                     || existing.graph_view.shape() != tensor.view().shape()
                     || existing.graph_view.strides() != tensor.view().strides()
-                    || existing.graph_view.byte_offset() != tensor.view().byte_offset()
-                {
+                    || existing.graph_view.byte_offset() != tensor.view().byte_offset();
+                let reduced_mtp_output =
+                    graph.draft_vocab_ids().is_some() && tensor.name() == "lm_head.weight";
+                if shape_differs && !reduced_mtp_output {
                     return Err(QwenExecutionError::InvalidGraph(format!(
                         "shared target tensor view differs from MTP graph: {}",
                         tensor.name()
                     )));
                 }
-                allocations.insert(tensor.name().to_owned(), existing.clone());
-                continue;
+                if !shape_differs {
+                    allocations.insert(tensor.name().to_owned(), existing.clone());
+                    continue;
+                }
             }
             let buffer = session.allocate_with_category(
                 tensor
@@ -13802,6 +14090,102 @@ fn upload_buffer_bytes(
     Ok(())
 }
 
+fn bind_draft_vocab_map(
+    session: &ExecutionSession,
+    buffer: Option<&ExecutionBuffer>,
+    ids: Option<&[u32]>,
+) -> Result<Option<OwnedTensorBinding>, QwenExecutionError> {
+    let (Some(buffer), Some(ids)) = (buffer, ids) else {
+        return Ok(None);
+    };
+    let view = TensorView::contiguous(DType::I32, &[ids.len()])?;
+    Ok(Some(session.bind(buffer, view, AccessMode::Read)?))
+}
+
+fn provision_draft_vocab_map(
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    ids: Option<&[u32]>,
+    completion_timeout: Duration,
+) -> Result<Option<ExecutionBuffer>, QwenExecutionError> {
+    let Some(ids) = ids else {
+        return Ok(None);
+    };
+    let bytes = ids
+        .iter()
+        .flat_map(|id| id.to_le_bytes())
+        .collect::<Vec<_>>();
+    let buffer = session.allocate_with_category(
+        u64::try_from(bytes.len()).map_err(|_| {
+            QwenExecutionError::InvalidRequest(
+                "MTP draft vocabulary map length does not fit u64".to_owned(),
+            )
+        })?,
+        crate::AllocationCategory::ModelResident,
+    )?;
+    let destination = buffer.range(0, buffer.size_bytes())?;
+    upload_buffer_bytes(
+        session,
+        queue,
+        &destination,
+        &bytes,
+        completion_timeout,
+        "Qwen3.8 MTP draft vocabulary map upload",
+    )?;
+    Ok(Some(buffer))
+}
+
+fn gather_qwen38_fp8_rows(
+    values: &[u8],
+    row_scales_bf16: &[u8],
+    source_shape: &[u64],
+    ids: &[u32],
+) -> Result<(Vec<u8>, Vec<u8>), QwenExecutionError> {
+    if source_shape.len() != 2 {
+        return Err(QwenExecutionError::InvalidRequest(
+            "Qwen3.8 FP8 output projection must be rank two".to_owned(),
+        ));
+    }
+    let rows = usize::try_from(source_shape[0]).map_err(|_| {
+        QwenExecutionError::InvalidRequest(
+            "Qwen3.8 FP8 output row count overflows usize".to_owned(),
+        )
+    })?;
+    let columns = usize::try_from(source_shape[1]).map_err(|_| {
+        QwenExecutionError::InvalidRequest(
+            "Qwen3.8 FP8 output hidden width overflows usize".to_owned(),
+        )
+    })?;
+    if values.len()
+        != rows.checked_mul(columns).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("Qwen3.8 FP8 output value size overflows".to_owned())
+        })?
+        || row_scales_bf16.len() != rows.saturating_mul(2)
+    {
+        return Err(QwenExecutionError::InvalidRequest(
+            "Qwen3.8 FP8 output values and row scales have inconsistent sizes".to_owned(),
+        ));
+    }
+    if ids
+        .iter()
+        .any(|&id| usize::try_from(id).map_or(true, |id| id >= rows))
+    {
+        return Err(QwenExecutionError::InvalidRequest(
+            "Qwen3.8 reduced output row ID is out of source range".to_owned(),
+        ));
+    }
+    let mut gathered_values = Vec::with_capacity(ids.len().saturating_mul(columns));
+    let mut gathered_scales = Vec::with_capacity(ids.len().saturating_mul(2));
+    for &id in ids {
+        let row = usize::try_from(id).expect("validated u32 row ID fits usize");
+        let start = row * columns;
+        gathered_values.extend_from_slice(&values[start..start + columns]);
+        let scale_start = row * 2;
+        gathered_scales.extend_from_slice(&row_scales_bf16[scale_start..scale_start + 2]);
+    }
+    Ok((gathered_values, gathered_scales))
+}
+
 fn i32_bytes(values: &[i32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len().saturating_mul(std::mem::size_of::<i32>()));
     for value in values {
@@ -14175,8 +14559,8 @@ fn decode_argmax_bytes(bytes: &[u8]) -> Result<Vec<i32>, QwenExecutionError> {
     Ok(token_ids)
 }
 
-fn decode_bf16_logits(bytes: &[u8]) -> Result<Vec<f32>, QwenExecutionError> {
-    if bytes.len() != QWEN35_VOCAB_SIZE * std::mem::size_of::<u16>() {
+fn decode_bf16_logits(bytes: &[u8], vocab: usize) -> Result<Vec<f32>, QwenExecutionError> {
+    if bytes.len() != vocab * std::mem::size_of::<u16>() {
         return Err(QwenExecutionError::InvalidRequest(
             "last-logits readback is not exactly one BF16 vocabulary row".to_owned(),
         ));
@@ -17100,6 +17484,83 @@ mod tests {
         assert_eq!(snapshot.projection_pack_member_count(), 2);
         assert_eq!(snapshot.projection_pack_activation_quantize_count(), 1);
         assert_eq!(snapshot.kernel_dispatch_count(), 3);
+    }
+
+    #[test]
+    fn stage7_producer_encoded_graph_allocates_and_provisions_full_scale_regions() {
+        let (graph, plan) = crate::qwen_graph::qwen38_stage7_execution_fixture(64);
+        let layout = validate_graph_plan(&graph, &plan).expect("stage-7 graph plan validates");
+        let terminal_outputs = terminal_output_tensor_ids(&graph).expect("terminal outputs");
+        let tensor_id = |name: &str| {
+            graph
+                .tensor_metadata()
+                .iter()
+                .find(|tensor| tensor.name() == name)
+                .map(|tensor| tensor.id())
+                .unwrap_or_else(|| panic!("missing tensor {name}"))
+        };
+        let allocation_bytes = |name: &str| {
+            let id = tensor_id(name);
+            assert!(
+                layout.dynamic_tensors[id],
+                "{name} must be a dynamic workspace tensor"
+            );
+            workspace_allocation_bytes(&graph, id, terminal_outputs).expect("workspace bytes")
+        };
+
+        // Encoding A activations allocate their values plus M FP32 row
+        // scales, which lies strictly beyond the values-only end offset.
+        let rows = graph.token_count();
+        for name in [
+            "layer.3.input_rmsnorm.output",
+            "layer.3.full.sigmoid_mul.output",
+            "layer.56.post_attention_rmsnorm.output",
+        ] {
+            let view = &graph.tensor_metadata()[tensor_id(name)].view();
+            assert_eq!(
+                allocation_bytes(name),
+                view.end_offset() + rows * 4,
+                "{name} must allocate its per-row scale region"
+            );
+        }
+
+        // Encoding-B NVFP4-MLP producers allocate their packed values, one
+        // E4M3 scale per 16-column block, and the 8-byte global-scale region
+        // that follows the 4-byte-aligned block plane.
+        for name in [
+            "layer.0.post_attention_rmsnorm.output",
+            "layer.0.mlp.silu_mul.output",
+        ] {
+            let view = &graph.tensor_metadata()[tensor_id(name)].view();
+            let columns = view.shape()[1] as u64;
+            assert_eq!(
+                allocation_bytes(name),
+                view.end_offset() + rows * columns.div_ceil(16) + 8,
+                "{name} must allocate its block-scale plane"
+            );
+        }
+
+        // Legacy dynamic tensors keep exactly their values-only span.
+        let gate = &graph.tensor_metadata()[tensor_id("layer.0.mlp.gate.output")];
+        assert_eq!(
+            allocation_bytes("layer.0.mlp.gate.output"),
+            gate.view().end_offset()
+        );
+
+        // The retyped graph provisions end to end: admission, resident
+        // weight upload ranges, workspace arena, and allocation all accept
+        // the encoded producer outputs.
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        let adapter: Arc<dyn ExecutionSessionAdapter> = recorder.clone();
+        let session = Arc::new(ExecutionSession::new("hip", adapter));
+        QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &ProjectionPackTestProvisionSource,
+        )
+        .expect("stage-7 producer-quantized graph provisions");
     }
 
     fn qwen38_shared_projection_pack_core(recorder: Arc<ExecutionRecorder>) -> QwenExecutionCore {
@@ -20339,5 +20800,27 @@ mod tests {
         put_u32(&mut bytes, 6 * 4, 3);
         put_u32(&mut bytes, 8 * 4, 13);
         assert!(parse_fixed_k20_decision(&bytes, 2, &[7, 11]).is_err());
+    }
+
+    #[test]
+    fn stage9_gathers_fp8_output_rows_and_bf16_row_scales_in_id_order() {
+        let values = (0_u8..12).collect::<Vec<_>>();
+        let scales = [
+            0x00_u16.to_le_bytes(),
+            0x3f80_u16.to_le_bytes(),
+            0x4000_u16.to_le_bytes(),
+            0x4040_u16.to_le_bytes(),
+        ]
+        .concat();
+        let (rows, gathered_scales) =
+            gather_qwen38_fp8_rows(&values, &scales, &[4, 3], &[3, 1]).expect("source rows gather");
+        assert_eq!(rows, [9, 10, 11, 3, 4, 5]);
+        assert_eq!(
+            gathered_scales,
+            [0x40_u8, 0x40, 0x80, 0x3f],
+            "row scales remain BF16 and follow the same source IDs"
+        );
+        assert!(gather_qwen38_fp8_rows(&values, &scales, &[4, 3], &[4]).is_err());
+        assert!(gather_qwen38_fp8_rows(&values[..11], &scales, &[4, 3], &[1]).is_err());
     }
 }

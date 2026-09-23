@@ -30,13 +30,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sllm_core::{
     AllocationSnapshot, Backend, ExecutionSessionRequest, KvCacheEncoding, OsSamplingRandom,
-    QWEN35_VOCAB_SIZE, QwenExecutionAudit, QwenExecutionRequest, QwenRequestMemoryAudit,
-    QwenResidentModel, SamplerChainConfigV1, SamplerChainV1, SamplingParametersV1,
-    UNSLOTH_QWEN38_NVFP4_MODEL_SHA256, UNSLOTH_QWEN38_NVFP4_MODEL_SIZE,
+    QWEN35_VOCAB_SIZE, Qwen38MtpDraftVocabularyArtifact, QwenExecutionAudit, QwenExecutionRequest,
+    QwenRequestMemoryAudit, QwenResidentModel, SamplerChainConfigV1, SamplerChainV1,
+    SamplingParametersV1, UNSLOTH_QWEN38_NVFP4_MODEL_SHA256, UNSLOTH_QWEN38_NVFP4_MODEL_SIZE,
     UNSLOTH_QWEN38_NVFP4_REPOSITORY, UNSLOTH_QWEN38_NVFP4_REVISION,
     VerifiedQwen38MtpQuantizedSidecar, build_qwen35_unsloth_qwen38_nvfp4_graph,
-    build_qwen38_nvfp4_mtp_graph_with_companion, build_qwen38_nvfp4_mtp_weight_load_plan,
-    build_qwen38_nvfp4_weight_load_plan, read_model_lock, verify_qwen38_mtp_quantized_sidecar,
+    build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids,
+    build_qwen38_nvfp4_mtp_weight_load_plan, build_qwen38_nvfp4_weight_load_plan,
+    load_qwen38_mtp_draft_vocabulary, read_model_lock, verify_qwen38_mtp_quantized_sidecar,
     verify_unsloth_qwen38_nvfp4,
 };
 use sllm_frontend::{
@@ -81,6 +82,8 @@ const PHASE85_A16_SECONDARY_CASES_ENV: &str = "SLLM_PHASE85_A16_SECONDARY_CASES"
 const PHASE85_A16_SECONDARY_SEED_ENV: &str = "SLLM_PHASE85_A16_SECONDARY_SEED";
 const PHASE85_A16_SECONDARY_OUTPUT_TOKENS_ENV: &str = "SLLM_PHASE85_A16_SECONDARY_OUTPUT_TOKENS";
 const PHASE87_PROFILE_ENV: &str = "SLLM_PHASE87_PROFILE";
+const PHASE87_STAGE9_ABBA_ENV: &str = "SLLM_PHASE87_STAGE9_ABBA";
+const PHASE87_STAGE9_M1_FULL_ENV: &str = "SLLM_PHASE87_STAGE9_M1_FULL";
 
 const DEFAULT_WARMUPS: usize = 3;
 const DEFAULT_MEASURED: usize = 10;
@@ -554,6 +557,88 @@ struct Report {
     resident_ready_memory: AllocationReport,
     rows: Vec<RowReport>,
     cleanup: CleanupReport,
+}
+
+#[derive(Serialize)]
+struct Stage9AbbaReport {
+    schema_version: &'static str,
+    state: &'static str,
+    benchmark_mode: &'static str,
+    target: String,
+    device_index: u32,
+    model: ModelReport,
+    binary: Stage9BinaryIdentity,
+    fixture: FixtureReport,
+    draft_width: usize,
+    warmups_per_variant: usize,
+    measured_per_variant: usize,
+    draft_vocabulary: Stage9DraftVocabularyReport,
+    rounds: Vec<Stage9AbbaRoundReport>,
+    all_rounds_reduced_faster: bool,
+    all_rounds_meet_one_percent: bool,
+    all_rounds_hip_only: bool,
+    all_rounds_request_cleanup_zero: bool,
+    cleanup: CleanupReport,
+}
+
+#[derive(Serialize)]
+struct Stage9BinaryIdentity {
+    executable: String,
+    sha256: String,
+    target: String,
+}
+
+#[derive(Serialize)]
+struct Stage9DraftVocabularyReport {
+    variant_a: &'static str,
+    variant_b: &'static str,
+    reduced_count: usize,
+    vocab_sha256: String,
+    manifest_sha256: String,
+    tokenizer_sha256: String,
+    special_token_ids: Vec<u32>,
+}
+
+#[derive(Serialize)]
+struct Stage9AbbaRoundReport {
+    round: usize,
+    order: &'static str,
+    full_vocabulary: Stage9VariantReport,
+    reduced_vocabulary: Stage9VariantReport,
+    reduced_tpot_shortening_percent: f64,
+    reduced_faster: bool,
+    reduced_meets_one_percent: bool,
+    generated_tokens_equal: bool,
+}
+
+#[derive(Serialize)]
+struct Stage9VariantReport {
+    variant: &'static str,
+    warmups: Vec<Stage9RunReport>,
+    measured: Vec<Stage9RunReport>,
+    measured_tpot_ms: MedianMad,
+    measured_decode_ms: MedianMad,
+    fallback_used: bool,
+    all_dispatches_hip: bool,
+    request_cleanup_zero: bool,
+}
+
+#[derive(Serialize)]
+struct Stage9RunReport {
+    sample_kind: &'static str,
+    sample_index: usize,
+    tpot_ms: f64,
+    decode_ms: f64,
+    generated_tokens: Vec<i32>,
+    generated_tokens_sha256: String,
+    proposed_draft_tokens: u64,
+    accepted_draft_tokens: u64,
+    rejected_draft_tokens: u64,
+    target_fallback_used: bool,
+    draft_fallback_used: bool,
+    all_dispatches_hip: bool,
+    request_cleanup_current_bytes: u64,
+    request_cleanup_poisoned: bool,
 }
 
 #[derive(Serialize)]
@@ -1074,6 +1159,23 @@ fn main() -> ExitCode {
     if env::var(PHASE83_FIXTURE_ONLY).as_deref() == Ok("1") {
         return emit_fixture_only();
     }
+    if env::var(PHASE87_STAGE9_ABBA_ENV).as_deref() == Ok("1") {
+        match Config::from_env().and_then(run_stage9_abba) {
+            Ok(report) => {
+                let passed = report.state == "PASS";
+                if let Err(error) = emit_json(io::stdout().lock(), &report) {
+                    eprintln!("Stage9 AB/BA report serialization failed: {error}");
+                    return ExitCode::from(2);
+                }
+                return if passed {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                };
+            }
+            Err(error) => return emit_failure(error),
+        }
+    }
     match Config::from_env().and_then(run) {
         Ok(report) => {
             let passed = report.state == "PASS";
@@ -1343,9 +1445,22 @@ fn run(config: Config) -> Result<Report, String> {
     } else {
         None
     };
+    let full_m1_control = env::var(PHASE87_STAGE9_M1_FULL_ENV).as_deref() == Ok("1");
+    if full_m1_control && env::var(phase86_mtp_catch_up::MODE_ENV).as_deref() != Ok("P") {
+        return Err(format!(
+            "{PHASE87_STAGE9_M1_FULL_ENV}=1 is limited to the Phase86 P diagnostic"
+        ));
+    }
+    let mtp_draft_vocabulary = if config.mtp.enabled && !full_m1_control {
+        load_qwen38_mtp_draft_vocabulary(&config.model_root)
+            .map_err(|error| format!("Qwen3.8 MTP draft vocabulary failed: {error}"))?
+            .map(Arc::new)
+    } else {
+        None
+    };
     let mtp_graph = if let Some(plan) = mtp_plan.as_ref() {
         Some(
-            build_qwen38_nvfp4_mtp_graph_with_companion(
+            build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
                 &lock,
                 plan,
                 &artifact,
@@ -1353,6 +1468,9 @@ fn run(config: Config) -> Result<Report, String> {
                 config.kv_cache,
                 mtp_priming_chunk_capacity.expect("enabled MTP has a priming capacity"),
                 mtp_companion.as_deref(),
+                mtp_draft_vocabulary
+                    .as_deref()
+                    .map_or(&[], Qwen38MtpDraftVocabularyArtifact::ids),
             )
             .map_err(|error| format!("Qwen3.8 MTP companion graph failed: {error}"))?,
         )
@@ -1561,6 +1679,435 @@ fn run(config: Config) -> Result<Report, String> {
             durable_quarantine: shutdown.durable_quarantine,
             zero: cleanup_zero,
         },
+    })
+}
+
+fn run_stage9_abba(config: Config) -> Result<Stage9AbbaReport, String> {
+    const REQUIRED_WARMUPS: usize = 1;
+    const REQUIRED_MEASURED: usize = 3;
+    let expected_row = RowSpec {
+        prompt_tokens: PHASE83_PROMPT_CAPACITY,
+        output_tokens: 128,
+    };
+    if !config.phase83
+        || !config.mtp.enabled
+        || config.mtp.draft_width != 2
+        || config.sampling.mode != SamplingMode::GpuFixed
+        || config.sampling.replay_inputs
+        || config.rows.as_slice() != [expected_row]
+        || config.warmups != REQUIRED_WARMUPS
+        || config.measured != REQUIRED_MEASURED
+    {
+        return Err(format!(
+            "{PHASE87_STAGE9_ABBA_ENV}=1 requires Phase83 coding8192, MTP width2, gpu-fixed sampling, row 8192/128, warmup1, measured3"
+        ));
+    }
+
+    let artifact = Arc::new(
+        verify_unsloth_qwen38_nvfp4(&config.model_root).map_err(|error| error.to_string())?,
+    );
+    let prompt_fixture = build_prompt_fixture(&artifact, PromptFixtureKind::Coding8192)?;
+    let mut locked_tokenizer = load_locked_tokenizer(artifact.root())?;
+    locked_tokenizer.report.decode_mode =
+        "preserve-special-tokens; Stage9 AB/BA fixed GPU-selector comparison";
+
+    let lock_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/models/locks/qwen3.5-27b-bf16.json");
+    let lock = read_model_lock(&lock_path).map_err(|error| error.to_string())?;
+    let mtp_companion = config
+        .mtp_companion_path
+        .as_ref()
+        .map(|directory| {
+            verify_qwen38_mtp_quantized_sidecar(
+                &lock,
+                &artifact,
+                &directory.join("manifest.json"),
+                &directory.join("payload.safetensors"),
+            )
+            .map(Arc::new)
+            .map_err(|error| format!("Qwen3.8 MTP companion verification failed: {error}"))
+        })
+        .transpose()?;
+    let target_plan =
+        build_qwen38_nvfp4_weight_load_plan(&lock, &artifact).map_err(|error| error.to_string())?;
+    let target_graph = build_qwen35_unsloth_qwen38_nvfp4_graph(
+        &lock,
+        &target_plan,
+        &artifact,
+        config.chunk_capacity,
+        config.state_capacity,
+        config.kv_cache,
+    )
+    .map_err(|error| error.to_string())?;
+    let mtp_plan = build_qwen38_nvfp4_mtp_weight_load_plan(&lock, &artifact)
+        .map_err(|error| format!("Qwen3.8 MTP companion plan failed: {error}"))?;
+    let mtp_priming_chunk_capacity =
+        parse_env_or("SLLM_PHASE85_MTP_PRIMING_CHUNK_CAPACITY", Some(1_024_u64))?;
+    if mtp_priming_chunk_capacity == 0 || mtp_priming_chunk_capacity > config.state_capacity {
+        return Err("MTP priming chunk capacity must fit the request state".to_owned());
+    }
+    let draft_vocabulary = load_qwen38_mtp_draft_vocabulary(&config.model_root)
+        .map_err(|error| format!("Qwen3.8 MTP draft vocabulary failed: {error}"))?
+        .ok_or("Stage9 AB/BA requires the reviewed reduced draft vocabulary artifact")?;
+    let full_mtp_graph = build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
+        &lock,
+        &mtp_plan,
+        &artifact,
+        config.state_capacity,
+        config.kv_cache,
+        mtp_priming_chunk_capacity,
+        mtp_companion.as_deref(),
+        &[],
+    )
+    .map_err(|error| format!("full-vocabulary MTP graph failed: {error}"))?;
+    let reduced_mtp_graph = build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
+        &lock,
+        &mtp_plan,
+        &artifact,
+        config.state_capacity,
+        config.kv_cache,
+        mtp_priming_chunk_capacity,
+        mtp_companion.as_deref(),
+        draft_vocabulary.ids(),
+    )
+    .map_err(|error| format!("reduced-vocabulary MTP graph failed: {error}"))?;
+    let binary = stage9_binary_identity(&config.target)?;
+
+    let backend = HipBackend::connect().map_err(|error| error.to_string())?;
+    let session = backend
+        .open_execution_session(
+            ExecutionSessionRequest::new(config.device_index, config.target.clone())
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    let stop_token_ids = lock.generation_stop_policy().stop_token_ids.clone();
+    let operation = (|| -> Result<_, String> {
+        let target_resident = QwenResidentModel::new_unsloth_qwen38_nvfp4(
+            Arc::clone(&session),
+            target_graph.clone(),
+            target_plan,
+            Arc::clone(&artifact),
+            COMPLETION_TIMEOUT,
+        )
+        .map_err(|error| format!("Stage9 target provisioning failed: {error}"))?;
+        // Keep both candidate residents alive in one process so AB/BA rounds
+        // share the model, GPU, session, and target resident.
+        let full_mtp_resident = provision_qwen38_mtp_resident(
+            &target_resident,
+            full_mtp_graph.clone(),
+            mtp_plan.clone(),
+            Arc::clone(&artifact),
+            mtp_companion.clone(),
+        )?;
+        let reduced_mtp_resident = provision_qwen38_mtp_resident(
+            &target_resident,
+            reduced_mtp_graph.clone(),
+            mtp_plan,
+            Arc::clone(&artifact),
+            mtp_companion,
+        )?;
+        let resident_ready_memory = allocation_report(session.memory_snapshot());
+        if resident_ready_memory.poisoned || resident_ready_memory.model_resident.current_bytes == 0
+        {
+            return Err("Stage9 resident allocation snapshot is invalid".to_owned());
+        }
+        let mut rounds = Vec::with_capacity(2);
+        for (round, order) in [(1_usize, "AB"), (2_usize, "BA")] {
+            let (full_vocabulary, reduced_vocabulary) = if order == "AB" {
+                (
+                    run_stage9_variant(
+                        &session,
+                        &target_resident,
+                        &target_graph,
+                        &full_mtp_resident,
+                        &full_mtp_graph,
+                        &prompt_fixture.tokens,
+                        &config.target,
+                        &locked_tokenizer.tokenizer,
+                        config.sampling,
+                        Some(stop_token_ids.as_slice()),
+                        "A-full-vocabulary",
+                    )?,
+                    run_stage9_variant(
+                        &session,
+                        &target_resident,
+                        &target_graph,
+                        &reduced_mtp_resident,
+                        &reduced_mtp_graph,
+                        &prompt_fixture.tokens,
+                        &config.target,
+                        &locked_tokenizer.tokenizer,
+                        config.sampling,
+                        Some(stop_token_ids.as_slice()),
+                        "B-reduced-vocabulary",
+                    )?,
+                )
+            } else {
+                let reduced = run_stage9_variant(
+                    &session,
+                    &target_resident,
+                    &target_graph,
+                    &reduced_mtp_resident,
+                    &reduced_mtp_graph,
+                    &prompt_fixture.tokens,
+                    &config.target,
+                    &locked_tokenizer.tokenizer,
+                    config.sampling,
+                    Some(stop_token_ids.as_slice()),
+                    "B-reduced-vocabulary",
+                )?;
+                let full = run_stage9_variant(
+                    &session,
+                    &target_resident,
+                    &target_graph,
+                    &full_mtp_resident,
+                    &full_mtp_graph,
+                    &prompt_fixture.tokens,
+                    &config.target,
+                    &locked_tokenizer.tokenizer,
+                    config.sampling,
+                    Some(stop_token_ids.as_slice()),
+                    "A-full-vocabulary",
+                )?;
+                (full, reduced)
+            };
+            let full_tpot = full_vocabulary.measured_tpot_ms.median;
+            let reduced_tpot = reduced_vocabulary.measured_tpot_ms.median;
+            let shortening = if full_tpot == 0.0 {
+                0.0
+            } else {
+                (full_tpot - reduced_tpot) * 100.0 / full_tpot
+            };
+            let generated_tokens_equal = full_vocabulary
+                .measured
+                .iter()
+                .zip(&reduced_vocabulary.measured)
+                .all(|(full, reduced)| full.generated_tokens == reduced.generated_tokens);
+            rounds.push(Stage9AbbaRoundReport {
+                round,
+                order,
+                full_vocabulary,
+                reduced_vocabulary,
+                reduced_tpot_shortening_percent: shortening,
+                reduced_faster: reduced_tpot < full_tpot,
+                reduced_meets_one_percent: shortening >= 1.0,
+                generated_tokens_equal,
+            });
+        }
+        drop(reduced_mtp_resident);
+        drop(full_mtp_resident);
+        drop(target_resident);
+        Ok(rounds)
+    })();
+
+    let allocation_before_shutdown = allocation_report(session.memory_snapshot());
+    let shutdown = session
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .map_err(|error| format!("Stage9 session shutdown failed: {error}"));
+    let rounds = match operation {
+        Ok(report) => report,
+        Err(error) => {
+            let cleanup = shutdown
+                .map(|report| {
+                    format!(
+                        "current_bytes={} poisoned={} retryable_cleanup={} durable_quarantine={}",
+                        allocation_before_shutdown.current_bytes,
+                        allocation_before_shutdown.poisoned,
+                        report.retryable_cleanup,
+                        report.durable_quarantine
+                    )
+                })
+                .unwrap_or_else(|cleanup_error| cleanup_error);
+            return Err(format!("{error}; post-error cleanup: {cleanup}"));
+        }
+    };
+    let shutdown = shutdown?;
+    let cleanup_zero = allocation_before_shutdown.current_bytes == 0
+        && !allocation_before_shutdown.poisoned
+        && shutdown.retryable_cleanup == 0
+        && shutdown.durable_quarantine == 0;
+    let all_rounds_reduced_faster = rounds.iter().all(|round| round.reduced_faster);
+    let all_rounds_meet_one_percent = rounds.iter().all(|round| round.reduced_meets_one_percent);
+    let all_rounds_hip_only = rounds.iter().all(|round| {
+        round.full_vocabulary.all_dispatches_hip && round.reduced_vocabulary.all_dispatches_hip
+    });
+    let all_rounds_request_cleanup_zero = rounds.iter().all(|round| {
+        round.full_vocabulary.request_cleanup_zero && round.reduced_vocabulary.request_cleanup_zero
+    });
+    let state = if cleanup_zero
+        && all_rounds_reduced_faster
+        && all_rounds_meet_one_percent
+        && all_rounds_hip_only
+        && all_rounds_request_cleanup_zero
+    {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    Ok(Stage9AbbaReport {
+        schema_version: "phase87-stage9-abba-v1",
+        state,
+        benchmark_mode: "phase87-stage9-mtp-draft-vocabulary-abba-8192-128",
+        target: config.target.clone(),
+        device_index: config.device_index,
+        model: ModelReport {
+            root: config.model_root.display().to_string(),
+            path_environment: config.model_env,
+            repository: UNSLOTH_QWEN38_NVFP4_REPOSITORY,
+            revision: UNSLOTH_QWEN38_NVFP4_REVISION,
+            model_bytes: UNSLOTH_QWEN38_NVFP4_MODEL_SIZE,
+            model_sha256: UNSLOTH_QWEN38_NVFP4_MODEL_SHA256,
+        },
+        binary,
+        fixture: prompt_fixture.report,
+        draft_width: 2,
+        warmups_per_variant: REQUIRED_WARMUPS,
+        measured_per_variant: REQUIRED_MEASURED,
+        draft_vocabulary: Stage9DraftVocabularyReport {
+            variant_a: "full-vocabulary",
+            variant_b: "reduced-vocabulary",
+            reduced_count: draft_vocabulary.ids().len(),
+            vocab_sha256: draft_vocabulary.vocab_sha256().to_owned(),
+            manifest_sha256: draft_vocabulary.manifest_sha256().to_owned(),
+            tokenizer_sha256: draft_vocabulary.tokenizer_sha256().to_owned(),
+            special_token_ids: draft_vocabulary.special_token_ids().to_vec(),
+        },
+        rounds,
+        all_rounds_reduced_faster,
+        all_rounds_meet_one_percent,
+        all_rounds_hip_only,
+        all_rounds_request_cleanup_zero,
+        cleanup: CleanupReport {
+            allocation_after_resident_drop_before_shutdown: allocation_before_shutdown,
+            retryable_cleanup: shutdown.retryable_cleanup,
+            durable_quarantine: shutdown.durable_quarantine,
+            zero: cleanup_zero,
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_stage9_variant(
+    session: &Arc<sllm_core::ExecutionSession>,
+    target_resident: &QwenResidentModel,
+    target_graph: &sllm_core::QwenGraph,
+    mtp_resident: &QwenResidentModel,
+    mtp_graph: &sllm_core::QwenGraph,
+    fixture: &[i32],
+    target: &str,
+    tokenizer: &Tokenizer,
+    sampling: SamplingBench,
+    stop_token_ids: Option<&[u32]>,
+    variant: &'static str,
+) -> Result<Stage9VariantReport, String> {
+    let prompt = fixture
+        .get(..PHASE83_PROMPT_CAPACITY)
+        .ok_or("Stage9 fixture is shorter than 8192 tokens")?;
+    let mut warmups = Vec::with_capacity(1);
+    for sample_index in 0..1 {
+        let run = run_one_mtp(
+            session,
+            target_resident,
+            target_graph,
+            mtp_resident,
+            mtp_graph,
+            prompt,
+            128,
+            "warmup",
+            sample_index,
+            target,
+            tokenizer,
+            sampling,
+            stop_token_ids,
+            2,
+        )?;
+        warmups.push(stage9_run_report(run, variant)?);
+    }
+    let mut measured = Vec::with_capacity(3);
+    for sample_index in 0..3 {
+        let run = run_one_mtp(
+            session,
+            target_resident,
+            target_graph,
+            mtp_resident,
+            mtp_graph,
+            prompt,
+            128,
+            "measured",
+            sample_index,
+            target,
+            tokenizer,
+            sampling,
+            stop_token_ids,
+            2,
+        )?;
+        measured.push(stage9_run_report(run, variant)?);
+    }
+    let measured_tpot_ms = median_mad(measured.iter().map(|run| run.tpot_ms).collect());
+    let measured_decode_ms = median_mad(measured.iter().map(|run| run.decode_ms).collect());
+    let fallback_used = warmups
+        .iter()
+        .chain(&measured)
+        .any(|run| run.target_fallback_used || run.draft_fallback_used);
+    let all_dispatches_hip = warmups
+        .iter()
+        .chain(&measured)
+        .all(|run| run.all_dispatches_hip);
+    let request_cleanup_zero = warmups
+        .iter()
+        .chain(&measured)
+        .all(|run| run.request_cleanup_current_bytes == 0 && !run.request_cleanup_poisoned);
+    Ok(Stage9VariantReport {
+        variant,
+        warmups,
+        measured,
+        measured_tpot_ms,
+        measured_decode_ms,
+        fallback_used,
+        all_dispatches_hip,
+        request_cleanup_zero,
+    })
+}
+
+fn stage9_run_report(run: RunReport, variant: &'static str) -> Result<Stage9RunReport, String> {
+    let mtp = run
+        .mtp
+        .ok_or_else(|| format!("Stage9 {variant} run omitted MTP accounting"))?;
+    if run.generated_tokens.len() != 128 {
+        return Err(format!(
+            "Stage9 {variant} run generated {} tokens, expected 128",
+            run.generated_tokens.len()
+        ));
+    }
+    Ok(Stage9RunReport {
+        sample_kind: run.sample_kind,
+        sample_index: run.sample_index,
+        tpot_ms: run.timing.tpot_ms,
+        decode_ms: run.timing.decode_ns as f64 / 1_000_000.0,
+        generated_tokens_sha256: run.generated_tokens_sha256.clone(),
+        generated_tokens: run.generated_tokens,
+        proposed_draft_tokens: mtp.proposed_draft_tokens,
+        accepted_draft_tokens: mtp.accepted_draft_tokens,
+        rejected_draft_tokens: mtp.rejected_draft_tokens,
+        target_fallback_used: run.audit.fallback_used,
+        draft_fallback_used: mtp.draft_fallback_used,
+        all_dispatches_hip: run.audit.all_dispatches_hip && mtp.draft_all_dispatches_hip,
+        request_cleanup_current_bytes: run
+            .allocation_after_request_drop
+            .request_state
+            .current_bytes,
+        request_cleanup_poisoned: run.allocation_after_request_drop.poisoned,
+    })
+}
+
+fn stage9_binary_identity(target: &str) -> Result<Stage9BinaryIdentity, String> {
+    let executable = env::current_exe().map_err(|error| format!("current executable: {error}"))?;
+    let bytes = fs::read(&executable)
+        .map_err(|error| format!("read executable {}: {error}", executable.display()))?;
+    Ok(Stage9BinaryIdentity {
+        executable: executable.display().to_string(),
+        sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+        target: target.to_owned(),
     })
 }
 
@@ -2195,7 +2742,22 @@ fn run_stage0(config: Config) -> Result<Stage0Report, String> {
     .map_err(|error| error.to_string())?;
     let mtp_plan = build_qwen38_nvfp4_mtp_weight_load_plan(&lock, &artifact)
         .map_err(|error| format!("Stage0 companion plan failed: {error}"))?;
-    let mtp_graph = build_qwen38_nvfp4_mtp_graph_with_companion(
+    let full_m1_control = env::var(PHASE87_STAGE9_M1_FULL_ENV).as_deref() == Ok("1");
+    if full_m1_control && env::var(phase86_mtp_catch_up::MODE_ENV).as_deref() != Ok("P") {
+        return Err(format!(
+            "{PHASE87_STAGE9_M1_FULL_ENV}=1 is limited to the Phase86 P diagnostic"
+        ));
+    }
+    let reduced_m1_diagnostic =
+        env::var(phase86_mtp_catch_up::MODE_ENV).as_deref() == Ok("P") && !full_m1_control;
+    let mtp_draft_vocabulary = if reduced_m1_diagnostic {
+        load_qwen38_mtp_draft_vocabulary(&config.model_root)
+            .map_err(|error| format!("Qwen3.8 MTP draft vocabulary failed: {error}"))?
+            .map(Arc::new)
+    } else {
+        None
+    };
+    let mtp_graph = build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
         &lock,
         &mtp_plan,
         &artifact,
@@ -2203,6 +2765,9 @@ fn run_stage0(config: Config) -> Result<Stage0Report, String> {
         config.kv_cache,
         1_024,
         mtp_companion.as_deref(),
+        mtp_draft_vocabulary
+            .as_deref()
+            .map_or(&[], Qwen38MtpDraftVocabularyArtifact::ids),
     )
     .map_err(|error| format!("Stage0 companion graph failed: {error}"))?;
     let backend = HipBackend::connect().map_err(|error| error.to_string())?;

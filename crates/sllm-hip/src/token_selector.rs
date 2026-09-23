@@ -119,6 +119,24 @@ impl TokenSelectorDescriptor {
         &self.output
     }
 
+    /// Enable sorted local-row to global-vocabulary mapping for fixed K20.
+    /// The map occupies the tail of the bound workspace and is populated by
+    /// the request owner before any selector execution or graph capture.
+    pub fn with_vocab_map(mut self) -> Result<Self, RuntimeError> {
+        if self.workspace.is_none()
+            || self.top_k != 20
+            || self.top_p.to_bits() != 0.95_f32.to_bits()
+            || self.flags != 0
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "mapped token selector requires fixed K20 without additive logits or mask",
+            ));
+        }
+        self.flags |= sys::SLLM_HIP_TOKEN_SELECTOR_FLAG_VOCAB_MAP_PRESENT;
+        Ok(self)
+    }
+
     fn op_version_for_workspace(workspace_present: bool) -> u32 {
         // K0 is a fixed top-p profile too. `top_k == 0` alone cannot select
         // the legacy path because the fixed K0 contract needs its histogram
@@ -131,7 +149,11 @@ impl TokenSelectorDescriptor {
     }
 
     fn op_version(&self) -> u32 {
-        Self::op_version_for_workspace(self.workspace.is_some())
+        if self.flags & sys::SLLM_HIP_TOKEN_SELECTOR_FLAG_VOCAB_MAP_PRESENT != 0 {
+            sys::SLLM_HIP_TOKEN_SELECTOR_VERSION_FIXED_TOPK_TOPP_MAPPED
+        } else {
+            Self::op_version_for_workspace(self.workspace.is_some())
+        }
     }
 
     fn raw(&self) -> Result<sys::sllm_token_selector_desc_t, RuntimeError> {

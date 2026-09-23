@@ -109,14 +109,8 @@ std::vector<Expected> load_fixture() {
 MatmulFormat format(const std::string &name) {
   if (name == "mxfp8_w8a8")
     return MatmulFormat::Mxfp8E4M3W8A8;
-  if (name == "mxfp8_w8a16")
-    return MatmulFormat::Mxfp8E4M3W8A16;
   if (name == "mxfp6_w6a6")
     return MatmulFormat::Mxfp6E3M2W6A6;
-  if (name == "mxfp6_w6a16")
-    return MatmulFormat::Mxfp6E3M2W6A16;
-  if (name == "nvfp4_w4a16")
-    return MatmulFormat::Nvfp4W4A16;
   if (name == "nvfp4_w4a4")
     return MatmulFormat::Nvfp4W4A4;
   if (name == "mxfp4_w4a4_internal")
@@ -137,21 +131,9 @@ KernelVariant native_variant(const Expected &row) {
   if (f == MatmulFormat::Mxfp8E4M3W8A8)
     return sllm_matmul_kernel::select_mxfp8_variant(row.m, row.k, row.n,
                                                     row.target.c_str());
-  if (f == MatmulFormat::Mxfp8E4M3W8A16)
-    return row.m == 1U && sllm_matmul_kernel::phase85_mxfp_m1_a16_shape(
-                              row.m, row.k, row.n)
-               ? KernelVariant::Mxfp8W8A16M1Col2
-               : KernelVariant::Unspecialized;
   if (f == MatmulFormat::Mxfp6E3M2W6A6)
     return sllm_matmul_kernel::select_mxfp6_variant(row.m, row.k, row.n,
                                                     row.target.c_str());
-  if (f == MatmulFormat::Mxfp6E3M2W6A16)
-    return row.m == 1U && sllm_matmul_kernel::phase85_mxfp_m1_a16_shape(
-                              row.m, row.k, row.n)
-               ? KernelVariant::Mxfp6W6A16M1Col2
-               : KernelVariant::Unspecialized;
-  if (f == MatmulFormat::Nvfp4W4A16)
-    return sllm_matmul_kernel::select_nvfp4_variant(row.m);
   if (f == MatmulFormat::Nvfp4W4A4)
     return sllm_matmul_kernel::select_nvfp4_w4a4_variant(row.m, row.k, row.n,
                                                          row.target.c_str());
@@ -262,8 +244,13 @@ void compare_row(const Expected &row) {
 } // namespace
 
 int main() {
+  for (const uint32_t id : {8U, 9U, 10U}) {
+    const auto retired = static_cast<KernelVariant>(id);
+    assert(sllm_matmul_kernel::lowp_logical_kernel_id(retired) == nullptr);
+    assert(sllm_matmul_kernel::lowp_device_symbol(retired) == nullptr);
+  }
   const auto rows = load_fixture();
-  assert(rows.size() == 4700U);
+  assert(rows.size() == 3002U);
   for (const auto &row : rows)
     compare_row(row);
   return 0;

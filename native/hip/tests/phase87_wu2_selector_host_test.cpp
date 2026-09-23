@@ -15,12 +15,13 @@ struct Shape final {
   uint64_t n;
 };
 
-constexpr std::array<Shape, 8> kDot4Shapes = {{
+constexpr std::array<Shape, 9> kDot4Shapes = {{
     {5120U, 1024U},
     {5120U, 6144U},
     {5120U, 10240U},
     {5120U, 12288U},
     {5120U, 17408U},
+    {5120U, 98304U},
     {5120U, 248320U},
     {6144U, 5120U},
     {17408U, 5120U},
@@ -58,10 +59,12 @@ bool check_fallback_selection(const Shape &shape) {
 
 bool check_nonaligned_fallback() {
   using namespace sllm_matmul_kernel;
-  constexpr std::array<Shape, 5> kNonaligned = {{
+  constexpr std::array<Shape, 7> kNonaligned = {{
       {5119U, 1024U},
       {5120U, 1023U},
       {5121U, 1024U},
+      {5120U, 98303U},
+      {5120U, 98305U},
       {6144U, 5121U},
       {17408U, 5119U},
   }};

@@ -1139,7 +1139,7 @@ bool run_provider_contract() {
       MatmulFormat::Mxfp6E3M2W6A6, ExactTarget::Gfx1030, 17U, 9216U, 2560U));
   const auto mxfp6_below_scope = prepare_provider_plan(make_provider_request(
       MatmulFormat::Mxfp6E3M2W6A6, ExactTarget::Gfx1201, 16U, 1024U, 2048U));
-  const auto nvfp4_w4a16 = prepare_provider_plan(make_provider_request(
+  const auto retired_nvfp4_w4a16 = prepare_provider_plan(make_provider_request(
       MatmulFormat::Nvfp4W4A16, ExactTarget::Gfx1201, 17U, 9216U, 2560U));
   const auto nvfp4_w4a4 = prepare_provider_plan(make_provider_request(
       MatmulFormat::Nvfp4W4A4, ExactTarget::Gfx1201, 17U, 9216U, 2560U));
@@ -1151,8 +1151,6 @@ bool run_provider_contract() {
       MatmulFormat::Mxfp8E4M3W8A8, ExactTarget::Gfx942SrameccOnXnackOff, 17U,
       9216U, 2560U));
 
-  const FormatContract nvfp4_w4a16_contract =
-      format_contract(MatmulFormat::Nvfp4W4A16);
   const FormatContract mxfp4_contract =
       format_contract(MatmulFormat::Mxfp4W4A4);
   const bool ok =
@@ -1173,10 +1171,8 @@ bool run_provider_contract() {
       mxfp6_gfx1030.provider == ProviderKind::Mxfp6Block32 &&
       mxfp6_below_scope.supported() &&
       mxfp6_below_scope.provider == ProviderKind::Mxfp6Block32 &&
-      nvfp4_w4a16.supported() &&
-      nvfp4_w4a16.provider == ProviderKind::Nvfp4W4A16Block16 &&
-      nvfp4_w4a16.activation_pack == ActivationPack::NoneBf16 &&
-      nvfp4_w4a16_contract.activation_element == ScalarType::Bf16 &&
+      !retired_nvfp4_w4a16.supported() &&
+      retired_nvfp4_w4a16.rejection == ProviderRejection::UnsupportedNumerics &&
       nvfp4_w4a4.supported() &&
       nvfp4_w4a4.provider == ProviderKind::Nvfp4W4A4Block16 &&
       nvfp4_w4a4.activation_pack == ActivationPack::Nvfp4E2M1Block16 &&

@@ -307,12 +307,17 @@ impl ElementwiseDescriptor {
             Some(binding) => binding.raw()?,
             None => zero_binding(),
         };
+        let mut reserved = [0_u32; 4];
+        // reserved[0] carries the raw FP32 bits of the per-weight activation
+        // tensor scale an Encoding-B output (SiluMul) needs; it stays `0`
+        // for legacy BF16 and Encoding A. reserved[1..] must remain zero.
+        reserved[0] = self.semantic.activation_quant_scale_bits();
         Ok(sys::sllm_elementwise_desc_t {
             struct_size: size_of::<sys::sllm_elementwise_desc_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
             op_version: sys::SLLM_HIP_ELEMENTWISE_VERSION,
             operation: self.operation.raw(),
-            reserved: [0; 4],
+            reserved,
             input0: self.input0.raw()?,
             input1,
             output: self.output.raw()?,

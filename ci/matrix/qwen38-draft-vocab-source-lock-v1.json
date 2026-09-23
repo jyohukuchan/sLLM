@@ -1,0 +1,150 @@
+{
+  "schema_version": "qwen38-draft-vocab-source-lock-v1",
+  "manifest_schema_version": "qwen38-draft-vocab-v1",
+  "vocab_size": 98304,
+  "tokenizer": {
+    "path": "tokenizer.json",
+    "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+  },
+  "required_special_tokens": [
+    248044,
+    248045,
+    248046,
+    248047,
+    248048,
+    248049,
+    248050,
+    248051,
+    248052,
+    248053,
+    248054,
+    248055,
+    248056,
+    248057,
+    248058,
+    248059,
+    248060,
+    248061,
+    248062,
+    248063,
+    248064,
+    248065,
+    248066,
+    248067,
+    248068,
+    248069,
+    248070,
+    248071,
+    248072,
+    248073,
+    248074,
+    248075,
+    248076
+  ],
+  "overlap_exclusions": [
+    {
+      "dataset": "mtp-bench-v1",
+      "revision": "v1",
+      "file": "ci/matrix/mtp-bench-v1.json",
+      "sha256": "06ba0cebfd9b412244bebc0eb4c58c705bb20393851e4074e6152c30daeaf30a",
+      "reason": "benchmark source and authored sLLM repository content are excluded from ranking"
+    }
+  ],
+  "repositories": [
+    {"name": "vLLM", "path": "vLLM", "head": "568afb3a13806beb53bb2e6bd518269357b237c0"},
+    {"name": "SGLang", "path": "SGLang", "head": "fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1"},
+    {"name": "llama.cpp", "path": "llama.cpp", "head": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"},
+    {"name": "KTransformers", "path": "KTransformers", "head": "924754a00bd8e5c6a2ad97929065c113f35782cf"},
+    {"name": "LMDeploy", "path": "LMDeploy", "head": "f4b8140ba19cd823c541241cbb113cc32f854e6a"},
+    {"name": "TensorRT-LLM", "path": "TensorRT-LLM", "head": "376f7e1bd8ed543f75014309e3fd4b237e9b0e73"}
+  ],
+  "parquet_sources": [
+    {
+      "domain": "en_web",
+      "dataset": "HuggingFaceFW/fineweb",
+      "revision": "9bb295ddab0e05d785b879661af7260fed5140fc",
+      "file": "data/CC-MAIN-2025-26/000_00000.parquet",
+      "path": "fineweb/data/CC-MAIN-2025-26/000_00000.parquet",
+      "sha256": "65279189b14e4798f02c21f45e05c9a525cfd13b9b53a5e7304ef446cd14138c",
+      "format": "parquet",
+      "columns": ["text"],
+      "filters": [{"column": "language", "op": "eq", "value": "en"}],
+      "max_bytes": 60000000,
+      "max_rows": 100000
+    },
+    {
+      "domain": "agent_chat_code",
+      "dataset": "SALT-NLP/SWE-chat",
+      "revision": "f66cca95b14caaa4177f7ed5eaa424608dadcffa",
+      "file": "conversations.parquet",
+      "path": "swe-chat/conversations.parquet",
+      "sha256": "9ee1d937dbf7eb73a8dad75071c69a4f6b5aac7f4120bd8ef3799ee50f4f1c36",
+      "format": "parquet",
+      "columns": ["content"],
+      "filters": [{"column": "role", "op": "in", "value": ["user", "assistant", "tool_use", "tool_result"]}],
+      "max_bytes": 60000000,
+      "max_rows": 2692480
+    },
+    {
+      "domain": "ja_wikipedia",
+      "dataset": "wikimedia/wikipedia",
+      "revision": "3e1f92c331f318af862b87e2319ed5dc26d80f5d",
+      "file": "20231101.ja/train-00014-of-00015.parquet",
+      "path": "wikipedia-ja-20231101/20231101.ja/train-00014-of-00015.parquet",
+      "sha256": "f4b59ae7c4519ec8b1c2aae6ba892f6b406e70e23685123acdc2b34bcf4c84ed",
+      "format": "parquet",
+      "columns": ["text"],
+      "filters": [],
+      "max_bytes": 60000000,
+      "max_rows": 100000
+    },
+    {
+      "domain": "zh_wikipedia",
+      "dataset": "wikimedia/wikipedia",
+      "revision": "3e1f92c331f318af862b87e2319ed5dc26d80f5d",
+      "file": "20231101.zh/train-00002-of-00006.parquet",
+      "path": "wikipedia-zh-20231101/train-00002-of-00006.parquet",
+      "sha256": "ec8f6c0dd1418b8fcd454278fb4f2bc7cd0ce8312f29c80b672533942601338f",
+      "format": "parquet",
+      "columns": ["text"],
+      "filters": [],
+      "max_bytes": 60000000,
+      "max_rows": 100000
+    }
+  ],
+  "code_categories": {
+    "code_py": {
+      "suffixes": [".py"],
+      "target_bytes": 40000000,
+      "max_source_bytes": 200000,
+      "max_rows": 1000000,
+      "defer": [
+        {"round": 249, "repo": "KTransformers", "file": "kt-kernel/test/per_commit/test_port_checker.py"},
+        {"round": 539, "repo": "KTransformers", "file": "archive/kt-sft/ktransformers/moe_test_module.py"}
+      ],
+      "selected_count": 3299,
+      "selected_bytes": 40065037,
+      "selected_file_hashes_sha256": "fee1b8f64c7c6183bfd4c675ca988e9d9193c2206d5cf7493ee42eba9233d31d"
+    },
+    "code_cpp": {
+      "suffixes": [".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hip", ".hpp"],
+      "target_bytes": 50000000,
+      "max_source_bytes": 200000,
+      "max_rows": 1000000,
+      "selected_count": 6462,
+      "selected_bytes": 50007816,
+      "selected_file_hashes_sha256": "fc9b49429cc9079cb4c11ded015c5ae4e68681cd4dd393d322f1f8364e7a3c9a"
+    },
+    "code_other": {
+      "suffixes": [".css", ".go", ".html", ".js", ".rs", ".sh", ".toml", ".ts", ".yaml", ".yml"],
+      "target_bytes": 15000000,
+      "max_source_bytes": 200000,
+      "max_rows": 1000000,
+      "selected_count": 2643,
+      "selected_bytes": 15028978,
+      "selected_file_hashes_sha256": "e7e7805205574c1fa9df7b5d7a45ce906aaaf5867a9fd5b4352b344e52541ec5"
+    }
+  },
+  "manifest_sha256": "3c6fc65c10eee31d86ccd7a2e54e58eaa9282dfea68d7861fe171bad28329ab4",
+  "candidate_vocab_sha256": "24bff6b41785a7729bff183dfea7997e6446173e0df7254cc5761a7519fdebd0"
+}

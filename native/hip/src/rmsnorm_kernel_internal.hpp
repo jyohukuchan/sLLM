@@ -85,6 +85,31 @@ hipError_t launch_residual_fused(const uint16_t *residual,
                                  float epsilon, uint32_t scale_mode,
                                  hipStream_t stream) noexcept;
 
+// Phase 87 stage 7: producer-side activation quantization. The normalized
+// BF16 output is not written; the caller receives FP8 values plus per-row
+// scales, or NVFP4 packed values plus per-16-block scales.
+constexpr const char *kPrequantFp8LogicalKernelId =
+    "rmsnorm.residual_prequant.fp8.v1";
+constexpr const char *kPrequantFp8DeviceSymbol =
+    "sllm_rmsnorm_residual_prequant_fp8_v1";
+constexpr const char *kPrequantNvfp4LogicalKernelId =
+    "rmsnorm.residual_prequant.nvfp4.v1";
+constexpr const char *kPrequantNvfp4DeviceSymbol =
+    "sllm_rmsnorm_residual_prequant_nvfp4_v1";
+
+hipError_t launch_residual_prequant_fp8(
+    const uint16_t *residual, const uint16_t *addend, const uint16_t *raw_scale,
+    uint16_t *residual_output, uint8_t *quantized, float *activation_scales,
+    uint32_t normalized_size, uint32_t row_count, float epsilon,
+    uint32_t scale_mode, uint32_t fnuz, hipStream_t stream) noexcept;
+
+hipError_t launch_residual_prequant_nvfp4(
+    const uint16_t *residual, const uint16_t *addend, const uint16_t *raw_scale,
+    uint16_t *residual_output, uint8_t *packed_activation,
+    uint8_t *activation_block_scales, const float *input_tensor_scale,
+    uint32_t normalized_size, uint32_t row_count, float epsilon,
+    uint32_t scale_mode, hipStream_t stream) noexcept;
+
 } // namespace sllm_rmsnorm_kernel
 
 #endif // SLLM_RMSNORM_KERNEL_INTERNAL_HPP

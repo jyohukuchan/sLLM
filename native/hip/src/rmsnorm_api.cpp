@@ -58,10 +58,9 @@ bool multiply_overflows(const uint64_t left, const uint64_t right,
   return false;
 }
 
-sllm_status_t
-validate_tensor_binding_impl(const sllm_tensor_binding_t *const binding,
-                             TensorMetadata *const copied,
-                             sllm_error_sink_t *const sink) noexcept {
+sllm_status_t validate_tensor_binding_impl(
+    const sllm_tensor_binding_t *const binding, TensorMetadata *const copied,
+    const bool allow_prequantized, sllm_error_sink_t *const sink) noexcept {
   if (binding == nullptr || copied == nullptr) {
     return sllm_public_runtime::write_error(sink,
                                             SLLM_STATUS_INVALID_TENSOR_BINDING,
@@ -89,17 +88,31 @@ validate_tensor_binding_impl(const sllm_tensor_binding_t *const binding,
         sink, SLLM_STATUS_INVALID_TENSOR_BINDING,
         "RMSNorm tensor binding rank must be in 1..=8");
   }
-  if (binding->dtype != SLLM_TENSOR_DTYPE_BF16) {
+  /* Only a binding that is allowed to be prequantized may use a non-BF16
+   * dtype; everything else keeps the historical BF16 contract. */
+  const bool bf16_dtype = binding->dtype == SLLM_TENSOR_DTYPE_BF16;
+  const bool encoded_dtype =
+      allow_prequantized && (binding->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN ||
+                             binding->dtype == SLLM_TENSOR_DTYPE_U8);
+  if (!bf16_dtype && !encoded_dtype) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_UNSUPPORTED_DTYPE,
         "RMSNorm tensors must use BF16 storage");
   }
-  if (binding->encoding != SLLM_TENSOR_ENCODING_UNQUANTIZED) {
+  const bool legacy_encoding =
+      bf16_dtype && binding->encoding == SLLM_TENSOR_ENCODING_UNQUANTIZED;
+  const sllm_public_runtime::PrequantMode mode =
+      sllm_public_runtime::prequant_mode_from_binding(binding->dtype,
+                                                      binding->encoding);
+  const bool prequantized =
+      allow_prequantized && mode != sllm_public_runtime::PrequantMode::None;
+  if (!legacy_encoding && !prequantized) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_UNSUPPORTED_ENCODING,
-        "RMSNorm tensors must be unquantized");
+        "RMSNorm tensors must be unquantized or prequantized FP8/NVFP4 "
+        "producer output");
   }
-  if ((binding->byte_offset & UINT64_C(1)) != 0U) {
+  if (legacy_encoding && (binding->byte_offset & UINT64_C(1)) != 0U) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_MISALIGNED_OFFSET,
         "RMSNorm BF16 tensor offset must be two-byte aligned");
@@ -136,11 +149,48 @@ validate_tensor_binding_impl(const sllm_tensor_binding_t *const binding,
     }
   }
   uint64_t payload_bytes = 0U;
-  if (multiply_overflows(elements, UINT64_C(2), &payload_bytes) ||
-      sllm_public_runtime::add_overflows(binding->byte_offset, payload_bytes)) {
-    return sllm_public_runtime::write_error(
-        sink, SLLM_STATUS_METADATA_OVERFLOW,
-        "RMSNorm tensor byte interval overflowed u64");
+  if (!prequantized) {
+    if (multiply_overflows(elements, UINT64_C(2), &payload_bytes) ||
+        sllm_public_runtime::add_overflows(binding->byte_offset,
+                                           payload_bytes)) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "RMSNorm tensor byte interval overflowed u64");
+    }
+  } else {
+    /* Phase 87 stage 7: rows follow the RMSNorm row structure (every extent
+     * but the last), so the fused producer's grid and normalized width match
+     * the encoded (values, scales) layout. */
+    const uint64_t width = binding->shape[binding->rank - 1U];
+    const uint64_t rows = elements / width;
+    uint64_t value_bytes = 0U;
+    if (!sllm_public_runtime::prequant_payload_layout(
+            mode, rows, width, &value_bytes, &payload_bytes)) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "RMSNorm prequantized payload overflowed u64");
+    }
+    if (mode == sllm_public_runtime::PrequantMode::Fp8Outer) {
+      if (sllm_public_runtime::add_overflows(binding->byte_offset,
+                                             value_bytes)) {
+        return sllm_public_runtime::write_error(
+            sink, SLLM_STATUS_METADATA_OVERFLOW,
+            "RMSNorm FP8 value/scale interval overflowed u64");
+      }
+      const uint64_t scale_offset = binding->byte_offset + value_bytes;
+      if ((scale_offset & UINT64_C(3)) != 0U) {
+        return sllm_public_runtime::write_error(
+            sink, SLLM_STATUS_MISALIGNED_OFFSET,
+            "RMSNorm FP8 output scales require a four-byte-aligned value "
+            "payload end");
+      }
+    }
+    if (sllm_public_runtime::add_overflows(binding->byte_offset,
+                                           payload_bytes)) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "RMSNorm prequantized tensor byte interval overflowed u64");
+    }
   }
 
   copied->byte_offset = binding->byte_offset;
@@ -166,7 +216,14 @@ sllm_status_t
 validate_tensor_binding(const sllm_tensor_binding_t *const binding,
                         TensorMetadata *const metadata,
                         sllm_error_sink_t *const sink) noexcept {
-  return validate_tensor_binding_impl(binding, metadata, sink);
+  return validate_tensor_binding_impl(binding, metadata, false, sink);
+}
+
+sllm_status_t
+validate_output_tensor_binding(const sllm_tensor_binding_t *const binding,
+                               TensorMetadata *const metadata,
+                               sllm_error_sink_t *const sink) noexcept {
+  return validate_tensor_binding_impl(binding, metadata, true, sink);
 }
 
 sllm_status_t
@@ -195,8 +252,7 @@ validate_and_copy_descriptor(const sllm_rmsnorm_desc_t *const descriptor,
   if (struct_status != SLLM_STATUS_OK) {
     return struct_status;
   }
-  if (descriptor->reserved[0] != 0U || descriptor->reserved[1] != 0U ||
-      descriptor->reserved[2] != 0U) {
+  if (descriptor->reserved[1] != 0U || descriptor->reserved[2] != 0U) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_RESERVED_NONZERO,
         "RMSNorm descriptor reserved fields must be zero");
@@ -231,10 +287,30 @@ validate_and_copy_descriptor(const sllm_rmsnorm_desc_t *const descriptor,
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  status =
-      validate_tensor_binding(&descriptor->output, &metadata->output, sink);
+  status = validate_output_tensor_binding(&descriptor->output,
+                                          &metadata->output, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
+  }
+  metadata->output_prequant =
+      static_cast<uint32_t>(sllm_public_runtime::prequant_mode_from_binding(
+          descriptor->output.dtype, descriptor->output.encoding));
+  metadata->input_global_scale_f32_bits = descriptor->reserved[0];
+  float input_global_scale = 0.0F;
+  std::memcpy(&input_global_scale, &descriptor->reserved[0],
+              sizeof(input_global_scale));
+  if (metadata->output_prequant ==
+      static_cast<uint32_t>(sllm_public_runtime::PrequantMode::Nvfp4Block16)) {
+    if (!std::isfinite(input_global_scale) || input_global_scale <= 0.0F) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "RMSNorm NVFP4 output requires a finite positive input global "
+          "scale in reserved[0]");
+    }
+  } else if (descriptor->reserved[0] != 0U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_RESERVED_NONZERO,
+        "RMSNorm descriptor reserved fields must be zero");
   }
   if (!equal_shape(metadata->activation, metadata->output)) {
     return sllm_public_runtime::write_error(

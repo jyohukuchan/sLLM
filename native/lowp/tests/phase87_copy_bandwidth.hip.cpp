@@ -61,17 +61,21 @@ struct RunOptions {
 };
 
 __device__ uint32_t block_reduce_sum(uint32_t value) {
-  const uint32_t lane = threadIdx.x % warpSize;
-  const uint32_t wave = threadIdx.x / warpSize;
-  for (uint32_t offset = warpSize / 2U; offset; offset /= 2U)
+  const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
+  const uint32_t wave_size = static_cast<uint32_t>(warpSize);
+  const uint32_t lane = thread % wave_size;
+  const uint32_t wave = thread / wave_size;
+  for (uint32_t offset = wave_size / 2U; offset; offset /= 2U)
     value += __shfl_down(value, offset, warpSize);
   __shared__ uint32_t wave_sums[8];
   if (lane == 0U)
     wave_sums[wave] = value;
   __syncthreads();
   if (wave == 0U) {
-    value = lane < blockDim.x / warpSize ? wave_sums[lane] : 0U;
-    for (uint32_t offset = warpSize / 2U; offset; offset /= 2U)
+    value = lane < static_cast<uint32_t>(blockDim.x) / wave_size
+                ? wave_sums[lane]
+                : 0U;
+    for (uint32_t offset = wave_size / 2U; offset; offset /= 2U)
       value += __shfl_down(value, offset, warpSize);
   }
   return value;
@@ -185,17 +189,21 @@ __global__ void read_bytes(const uint8_t *source, uint32_t *block_results,
   (void)kTileBytes;
 
   uint32_t value = accumulator0 + accumulator1 + accumulator2 + accumulator3;
-  const uint32_t lane = threadIdx.x % warpSize;
-  const uint32_t wave = threadIdx.x / warpSize;
-  for (uint32_t offset = warpSize / 2U; offset; offset /= 2U)
+  const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
+  const uint32_t wave_size = static_cast<uint32_t>(warpSize);
+  const uint32_t lane = thread % wave_size;
+  const uint32_t wave = thread / wave_size;
+  for (uint32_t offset = wave_size / 2U; offset; offset /= 2U)
     value += __shfl_down(value, offset, warpSize);
   __shared__ uint32_t wave_sums[8];
   if (lane == 0U)
     wave_sums[wave] = value;
   __syncthreads();
   if (wave == 0U) {
-    value = lane < blockDim.x / warpSize ? wave_sums[lane] : 0U;
-    for (uint32_t offset = warpSize / 2U; offset; offset /= 2U)
+    value = lane < static_cast<uint32_t>(blockDim.x) / wave_size
+                ? wave_sums[lane]
+                : 0U;
+    for (uint32_t offset = wave_size / 2U; offset; offset /= 2U)
       value += __shfl_down(value, offset, warpSize);
     if (lane == 0U)
       block_results[blockIdx.x] = value;

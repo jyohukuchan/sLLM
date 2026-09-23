@@ -26,7 +26,16 @@ struct DescriptorMetadata final {
   uint64_t weight_scale_offset;
   uint64_t weight_tensor_scale_offset;
   uint64_t input_tensor_scale_offset;
+  /* Phase 87 stage 7: prequantized activation payload. Non-zero only when
+   * activation_prequant != 0: value_bytes covers the encoded values region
+   * and scale_offset is its absolute buffer offset (byte_offset +
+   * value_bytes) where the FP8 row scales or NVFP4 block scales start. */
+  uint64_t activation_value_bytes;
+  uint64_t activation_scale_offset;
   uint32_t fp8_dtype;
+  /* sllm_public_runtime::PrequantMode of the activation binding:
+   * 0 = legacy BF16, 1 = FP8 outer, 2 = NVFP4 block16 W4A4. */
+  uint32_t activation_prequant;
   bool fp8_outer;
   bool nvfp4;
   bool nvfp4_w4a4;

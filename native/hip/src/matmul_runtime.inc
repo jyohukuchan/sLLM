@@ -27,27 +27,15 @@ bool matmul_lowp_format(const sllm_matmul::DescriptorMetadata &metadata,
     return false;
   }
   if (metadata.mxfp8_w8a8) {
-    *format = metadata.m == 1U &&
-                      sllm_matmul_kernel::phase85_mxfp_m1_a16_enabled() &&
-                      !sllm_matmul_kernel::phase85_mxfp_m1_force_baseline()
-                  ? sllm_lowp::MatmulFormat::Mxfp8E4M3W8A16
-                  : sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8;
+    *format = sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8;
     return true;
   }
   if (metadata.mxfp6_w6a6) {
-    *format = metadata.m == 1U &&
-                      sllm_matmul_kernel::phase85_mxfp_m1_a16_enabled() &&
-                      !sllm_matmul_kernel::phase85_mxfp_m1_force_baseline()
-                  ? sllm_lowp::MatmulFormat::Mxfp6E3M2W6A16
-                  : sllm_lowp::MatmulFormat::Mxfp6E3M2W6A6;
+    *format = sllm_lowp::MatmulFormat::Mxfp6E3M2W6A6;
     return true;
   }
   if (metadata.nvfp4_w4a4) {
     *format = sllm_lowp::MatmulFormat::Nvfp4W4A4;
-    return true;
-  }
-  if (metadata.nvfp4) {
-    *format = sllm_lowp::MatmulFormat::Nvfp4W4A16;
     return true;
   }
   if (metadata.mxfp4_w4a4) {
@@ -368,6 +356,11 @@ sllm_status_t select_matmul_workspace_footprint(
         error_sink, SLLM_STATUS_INVALID_ARGUMENT,
         "matmul workspace footprint selection input is null");
   }
+  if (metadata.nvfp4 && !metadata.nvfp4_w4a4) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_UNSUPPORTED,
+        "legacy NVFP4 W4A16 workspace is retired; use NVFP4 W4A4");
+  }
   const sllm_status_t baseline_scope_status =
       validate_nvfp4_w4a4_baseline_scope(metadata, error_sink);
   if (baseline_scope_status != SLLM_STATUS_OK) {
@@ -381,8 +374,8 @@ sllm_status_t select_matmul_workspace_footprint(
   }
 
   const bool quantized_weight_path =
-      metadata.fp8_outer || metadata.nvfp4 || metadata.nvfp4_w4a4 ||
-      metadata.mxfp4_w4a4 || metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6;
+      metadata.fp8_outer || metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ||
+      metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6;
   bool short_mixed_shape =
       !quantized_weight_path &&
       ::sllm_matmul_kernel::phase49_gfx1030_short_mixed_shape(
@@ -799,6 +792,11 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
     if (descriptor_status != SLLM_STATUS_OK) {
       return descriptor_status;
     }
+    if (metadata.nvfp4 && !metadata.nvfp4_w4a4) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "legacy NVFP4 W4A16 matmul is retired; use NVFP4 W4A4");
+    }
     const sllm_status_t baseline_scope_status =
         validate_nvfp4_w4a4_baseline_scope(metadata, error_sink);
     if (baseline_scope_status != SLLM_STATUS_OK) {
@@ -879,8 +877,8 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
         // prepare time and then correctly dispatched to its quantized kernel
         // at execute time.
         const bool quantized_weight_path =
-            metadata.fp8_outer || metadata.nvfp4 || metadata.nvfp4_w4a4 ||
-            metadata.mxfp4_w4a4 || metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6;
+            metadata.fp8_outer || metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ||
+            metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6;
         bool short_mixed_shape =
             !quantized_weight_path &&
             ::sllm_matmul_kernel::phase49_gfx1030_short_mixed_shape(
@@ -1179,9 +1177,21 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
                   weight->accounting, output->accounting);
               return property_status;
             }
-            auto *const activation_scales = reinterpret_cast<float *>(
-                static_cast<uint8_t *>(candidate->matmul_workspace) +
-                scale_offset);
+            /* Phase 87 stage 7: a prequantized activation carries its row
+             * scales in the activation binding, and hipBLASLt bakes the scale
+             * pointer into the prepared matmul descriptor. The workspace is
+             * still allocated (graph capture gating depends on it) but is not
+             * the scale source on this path. */
+            float *const activation_scales =
+                metadata.activation_prequant !=
+                        static_cast<uint32_t>(
+                            sllm_public_runtime::PrequantMode::Fp8Outer)
+                    ? reinterpret_cast<float *>(
+                          static_cast<uint8_t *>(candidate->matmul_workspace) +
+                          scale_offset)
+                    : reinterpret_cast<float *>(
+                          static_cast<uint8_t *>(activation->device_pointer) +
+                          metadata.activation_scale_offset);
             const auto *const weight_scales = reinterpret_cast<const float *>(
                 static_cast<const uint8_t *>(weight->device_pointer) +
                 metadata.weight_scale_offset);
@@ -1589,6 +1599,17 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
     const uint16_t *const activation =
         static_cast<const uint16_t *>(byte_pointer(
             plan->input0, plan->matmul_metadata.activation.byte_offset));
+    [[maybe_unused]] const auto activation_prequant =
+        static_cast<sllm_public_runtime::PrequantMode>(
+            plan->matmul_metadata.activation_prequant);
+    [[maybe_unused]] const uint8_t *const prequant_activation =
+        static_cast<const uint8_t *>(byte_pointer(
+            plan->input0, plan->matmul_metadata.activation.byte_offset));
+    [[maybe_unused]] const uint8_t *const prequant_activation_scales =
+        plan->matmul_metadata.activation_scale_offset != 0U
+            ? static_cast<const uint8_t *>(byte_pointer(
+                  plan->input0, plan->matmul_metadata.activation_scale_offset))
+            : nullptr;
     const void *const weight_storage =
         byte_pointer(plan->input1, plan->matmul_metadata.weight.byte_offset);
     const uint16_t *const weight =
@@ -1641,7 +1662,15 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
 #else
       lowp_matmul_buffers_t buffers{};
       buffers.struct_size = sizeof(buffers);
-      buffers.activation = activation;
+      buffers.flags =
+          activation_prequant != sllm_public_runtime::PrequantMode::None
+              ? LOWP_ACTIVATION_PREQUANTIZED
+              : 0U;
+      buffers.activation =
+          activation_prequant != sllm_public_runtime::PrequantMode::None
+              ? static_cast<const void *>(prequant_activation)
+              : static_cast<const void *>(activation);
+      buffers.activation_scales = prequant_activation_scales;
       buffers.weight = weight_storage;
       buffers.weight_scales = static_cast<const uint8_t *>(weight_storage) +
                               plan->matmul_metadata.weight_value_bytes;
@@ -1650,7 +1679,7 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
       buffers.workspace_bytes = matmul_workspace_bytes;
       buffers.staging_workspace = matmul_f16_staging_workspace;
       buffers.staging_workspace_bytes = matmul_f16_staging_workspace_bytes;
-      if (plan->matmul_metadata.nvfp4 || plan->matmul_metadata.nvfp4_w4a4) {
+      if (plan->matmul_metadata.nvfp4_w4a4) {
         buffers.weight_tensor_scale = reinterpret_cast<const float *>(
             static_cast<const uint8_t *>(weight_storage) +
             (plan->matmul_metadata.weight_tensor_scale_offset -
@@ -1690,25 +1719,37 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
               scale_offset + plan->matmul_metadata.m * UINT64_C(4)) {
         launch_status = hipErrorOutOfMemory;
       } else {
-        auto *const quantized = static_cast<uint8_t *>(plan->matmul_workspace);
-        auto *const activation_scales = reinterpret_cast<float *>(
-            static_cast<uint8_t *>(plan->matmul_workspace) + scale_offset);
+        auto *const quantized =
+            activation_prequant == sllm_public_runtime::PrequantMode::Fp8Outer
+                ? const_cast<uint8_t *>(prequant_activation)
+                : static_cast<uint8_t *>(plan->matmul_workspace);
+        auto *const activation_scales =
+            activation_prequant == sllm_public_runtime::PrequantMode::Fp8Outer
+                ? const_cast<float *>(reinterpret_cast<const float *>(
+                      prequant_activation_scales))
+                : reinterpret_cast<float *>(
+                      static_cast<uint8_t *>(plan->matmul_workspace) +
+                      scale_offset);
         const auto *const fp8_weight =
             static_cast<const uint8_t *>(weight_storage);
         const auto *const weight_scales = reinterpret_cast<const float *>(
             static_cast<const uint8_t *>(weight_storage) +
             plan->matmul_metadata.weight_value_bytes);
-        launch_status = ::sllm_matmul_kernel::launch_fp8_quantize(
-            activation, quantized, activation_scales, plan->matmul_metadata.m,
-            plan->matmul_metadata.k,
-            plan->matmul_metadata.fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ,
-            queue->stream);
+        launch_status =
+            activation_prequant == sllm_public_runtime::PrequantMode::Fp8Outer
+                ? hipSuccess
+                : ::sllm_matmul_kernel::launch_fp8_quantize(
+                      activation, quantized, activation_scales,
+                      plan->matmul_metadata.m, plan->matmul_metadata.k,
+                      plan->matmul_metadata.fp8_dtype ==
+                          SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ,
+                      queue->stream);
         if (launch_status == hipSuccess) {
           if (variant ==
               ::sllm_matmul_kernel::HostKernelVariant::Fp8OuterGfx1201Dot4) {
             launch_status = ::sllm_matmul_kernel::launch_fp8_outer_gfx1201_dot4(
-                quantized, activation_scales, fp8_weight, weight_scales,
-                output, plan->matmul_metadata.m, plan->matmul_metadata.k,
+                quantized, activation_scales, fp8_weight, weight_scales, output,
+                plan->matmul_metadata.m, plan->matmul_metadata.k,
                 plan->matmul_metadata.n, queue->stream);
           } else if (variant ==
                      ::sllm_matmul_kernel::HostKernelVariant::Fp8Native) {
@@ -1796,7 +1837,8 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
 #endif
     } else
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-        if (variant == ::sllm_matmul_kernel::HostKernelVariant::PrefillShortMixed) {
+        if (variant ==
+            ::sllm_matmul_kernel::HostKernelVariant::PrefillShortMixed) {
       uint64_t workspace_bytes = 0U;
       uint64_t output_elements = 0U;
       bool workspace_valid =

@@ -4990,12 +4990,14 @@ fn validate_rmsnorm_nonoverlap(
         for right_index in left_index + 1..entries.len() {
             let (left_name, left) = entries[left_index];
             let (right_name, right) = entries[right_index];
+            // The full encoded span covers a producer-encoded activation's
+            // separately resident scale region, not only its value payload.
             if left.buffer.id() == right.buffer.id()
                 && intervals_overlap(
                     left.view.byte_offset(),
-                    left.view.end_offset(),
+                    crate::op::encoded_span_end(&left.view),
                     right.view.byte_offset(),
-                    right.view.end_offset(),
+                    crate::op::encoded_span_end(&right.view),
                 )
             {
                 return Err(ExecutionError::AliasOverlap {
@@ -5062,12 +5064,14 @@ fn validate_nonoverlap(
         for right_index in left_index + 1..entries.len() {
             let (left_name, left) = entries[left_index];
             let (right_name, right) = entries[right_index];
+            // The full encoded span covers a producer-encoded activation's
+            // separately resident scale region, not only its value payload.
             if left.buffer.id() == right.buffer.id()
                 && intervals_overlap(
                     left.view.byte_offset(),
-                    left.view.end_offset(),
+                    crate::op::encoded_span_end(&left.view),
                     right.view.byte_offset(),
-                    right.view.end_offset(),
+                    crate::op::encoded_span_end(&right.view),
                 )
             {
                 return Err(ExecutionError::AliasOverlap {
@@ -10503,6 +10507,141 @@ mod tests {
                 right: "copy output"
             })
         ));
+    }
+
+    #[test]
+    fn encoded_activation_scale_regions_participate_in_nonoverlap_checks() {
+        let session = session("test");
+        let buffer = session.allocate(80).unwrap();
+        let bf16_view = |shape: &[usize], strides: &[usize], offset: u64| {
+            TensorView::new(
+                crate::DType::Bf16,
+                crate::Encoding::Unquantized,
+                shape,
+                strides,
+                offset,
+            )
+            .expect("valid BF16 view")
+        };
+        let fp8_output = |offset: u64| {
+            TensorView::new(
+                crate::DType::F8E4M3Fn,
+                crate::Encoding::Fp8Scaled {
+                    granularity: crate::Fp8ScaleGranularity::OuterDimension,
+                    scale_dtype: crate::DType::F32,
+                    resident: crate::Fp8ResidentRepresentation::PackedBytes,
+                },
+                &[2, 8],
+                &[8, 1],
+                offset,
+            )
+            .expect("valid Encoding A view")
+        };
+        let bind_rmsnorm = |raw_scale_offset: u64,
+                            output_offset: u64|
+         -> Result<BoundSemanticOp, ExecutionError> {
+            let activation = bf16_view(&[2, 8], &[8, 1], 0);
+            let raw_scale = bf16_view(&[8], &[1], raw_scale_offset);
+            let output = fp8_output(output_offset);
+            let descriptor = Arc::new(
+                SemanticOpDescriptor::new_rms_norm(
+                    vec![activation.clone(), raw_scale.clone()],
+                    vec![output.clone()],
+                    1.0e-6,
+                    crate::RmsNormScaleMode::OffsetOne,
+                )
+                .expect("Encoding A RMSNorm descriptor"),
+            );
+            BoundSemanticOp::new(
+                descriptor,
+                vec![
+                    session.bind(&buffer, activation, AccessMode::Read).unwrap(),
+                    session.bind(&buffer, raw_scale, AccessMode::Read).unwrap(),
+                ],
+                vec![session.bind(&buffer, output, AccessMode::Write).unwrap()],
+            )
+        };
+
+        // The Encoding A output spans values [48,64) plus FP32 row scales
+        // [64,72). A raw-scale input starting at 64 touches only that scale
+        // region, never the value payload: values-only checks would wrongly
+        // accept it.
+        assert!(matches!(
+            bind_rmsnorm(64, 48),
+            Err(ExecutionError::AliasOverlap {
+                left: "raw scale",
+                right: "output",
+            })
+        ));
+        // The same layout with the raw scale one region earlier stays fully
+        // disjoint through the scale region.
+        assert!(bind_rmsnorm(32, 48).is_ok());
+    }
+
+    #[test]
+    fn encoded_elementwise_scale_regions_participate_in_nonoverlap_checks() {
+        let session = session("test");
+        let buffer = session.allocate(72).unwrap();
+        let gate_view = |offset: u64| {
+            TensorView::new(
+                crate::DType::Bf16,
+                crate::Encoding::Unquantized,
+                &[2, 8],
+                &[8, 1],
+                offset,
+            )
+            .expect("valid gate view")
+        };
+        let nvfp4_output = |offset: u64| {
+            TensorView::new(
+                crate::DType::U8,
+                crate::Encoding::Nvfp4W4A4 {
+                    block_size: 16,
+                    scale_dtype: crate::DType::F8E4M3Fn,
+                },
+                &[2, 8],
+                &[8, 1],
+                offset,
+            )
+            .expect("valid Encoding B view")
+        };
+        let bind_silu =
+            |gate_offset: u64, output_offset: u64| -> Result<BoundSemanticOp, ExecutionError> {
+                let gate = gate_view(gate_offset);
+                let up = gate_view(gate_offset + 32);
+                let output = nvfp4_output(output_offset);
+                let descriptor = Arc::new(
+                    SemanticOpDescriptor::new_with_quant_scale(
+                        SemanticOpKind::SiluMul,
+                        vec![gate.clone(), up.clone()],
+                        vec![output.clone()],
+                        512.0_f32.to_bits(),
+                    )
+                    .expect("Encoding B SiluMul descriptor"),
+                );
+                BoundSemanticOp::new(
+                    descriptor,
+                    vec![
+                        session.bind(&buffer, gate, AccessMode::Read).unwrap(),
+                        session.bind(&buffer, up, AccessMode::Read).unwrap(),
+                    ],
+                    vec![session.bind(&buffer, output, AccessMode::Write).unwrap()],
+                )
+            };
+
+        // The Encoding B output spans values [0,8) plus block scales
+        // [8,10). A gate input starting at 8 overlaps only the scale region;
+        // values-only checks would see touching half-open ranges.
+        assert!(matches!(
+            bind_silu(8, 0),
+            Err(ExecutionError::AliasOverlap {
+                left: "silu_mul gate",
+                right: "silu_mul output",
+            })
+        ));
+        // Back-to-back legacy operands with the encoded output placed after
+        // them stay disjoint through the scale region.
+        assert!(bind_silu(0, 64).is_ok());
     }
 
     #[test]

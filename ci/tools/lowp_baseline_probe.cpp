@@ -6,8 +6,8 @@
 // extracted lowp library headers.
 
 #include "low_precision_matmul_provider.hpp"
-#include "matmul_kernel_internal.hpp"
 #include "lowp_baseline_concrete.hpp"
+#include "matmul_kernel_internal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -41,12 +41,9 @@ struct FormatSpec {
   uint64_t base_n;
 };
 
-constexpr std::array<FormatSpec, 8> kFormats = {{
+constexpr std::array<FormatSpec, 5> kFormats = {{
     {MatmulFormat::Mxfp8E4M3W8A8, "mxfp8_w8a8", 2048U, 9216U},
-    {MatmulFormat::Mxfp8E4M3W8A16, "mxfp8_w8a16", 2048U, 1024U},
     {MatmulFormat::Mxfp6E3M2W6A6, "mxfp6_w6a6", 2048U, 9216U},
-    {MatmulFormat::Mxfp6E3M2W6A16, "mxfp6_w6a16", 2048U, 1024U},
-    {MatmulFormat::Nvfp4W4A16, "nvfp4_w4a16", 5120U, 17408U},
     {MatmulFormat::Nvfp4W4A4, "nvfp4_w4a4", 5120U, 17408U},
     {MatmulFormat::Mxfp4W4A4, "mxfp4_w4a4_internal", 5120U, 17408U},
     {MatmulFormat::Fp8OuterE4M3W8A8, "fp8_outer_w8a8", 5120U, 17408U},
@@ -77,21 +74,21 @@ std::vector<FixtureCase> make_cases() {
   // Every list contains both sides of the important provider/variant gates;
   // values such as 33, 65 and 1025 also exercise non-aligned tails.
   constexpr std::array<uint64_t, 30> m_values = {
-      0U, 1U, 2U, 3U, 4U, 7U, 8U, 9U, 16U, 17U, 18U, 31U, 32U,
-      33U, 63U, 64U, 65U, 127U, 128U, 129U, 511U, 512U, 513U,
-      1023U, 1024U, 1025U, 4095U, 4096U, 4097U, 4098U};
+      0U,   1U,   2U,   3U,    4U,    7U,    8U,    9U,    16U,   17U,
+      18U,  31U,  32U,  33U,   63U,   64U,   65U,   127U,  128U,  129U,
+      511U, 512U, 513U, 1023U, 1024U, 1025U, 4095U, 4096U, 4097U, 4098U};
   constexpr std::array<uint64_t, 38> k_values = {
-      0U, 1U, 15U, 16U, 17U, 31U, 32U, 33U, 63U, 64U, 65U, 127U,
-      128U, 129U, 2015U, 2016U, 2017U, 2047U, 2048U, 2049U, 5119U,
-      5120U, 5121U, 6143U, 6144U, 6145U, 8191U, 8192U, 8193U,
-      12287U, 12288U, 12289U, 16383U, 16384U, 16385U, 17407U,
-      17408U, 17409U};
+      0U,     1U,     15U,    16U,    17U,    31U,    32U,    33U,
+      63U,    64U,    65U,    127U,   128U,   129U,   2015U,  2016U,
+      2017U,  2047U,  2048U,  2049U,  5119U,  5120U,  5121U,  6143U,
+      6144U,  6145U,  8191U,  8192U,  8193U,  12287U, 12288U, 12289U,
+      16383U, 16384U, 16385U, 17407U, 17408U, 17409U};
   constexpr std::array<uint64_t, 44> n_values = {
-      0U, 1U, 15U, 16U, 17U, 31U, 32U, 33U, 63U, 64U, 65U, 127U,
-      128U, 129U, 255U, 256U, 257U, 511U, 512U, 513U, 1023U, 1024U,
-      1025U, 2047U, 2048U, 2049U, 6143U, 6144U, 6145U, 8191U, 8192U,
-      8193U, 12287U, 12288U, 12289U, 16383U, 16384U, 16385U, 32767U,
-      32768U, 32769U, 65535U, 65536U, 65537U};
+      0U,     1U,     15U,    16U,    17U,    31U,    32U,    33U,    63U,
+      64U,    65U,    127U,   128U,   129U,   255U,   256U,   257U,   511U,
+      512U,   513U,   1023U,  1024U,  1025U,  2047U,  2048U,  2049U,  6143U,
+      6144U,  6145U,  8191U,  8192U,  8193U,  12287U, 12288U, 12289U, 16383U,
+      16384U, 16385U, 32767U, 32768U, 32769U, 65535U, 65536U, 65537U};
 
   for (const auto &format : kFormats) {
     for (const auto &[target, target_name] : kTargets) {
@@ -113,28 +110,17 @@ std::vector<FixtureCase> make_cases() {
       // dimensions.  Keep these explicit even when a generic sweep happens
       // to contain the same coordinate.
       constexpr std::array<std::tuple<uint64_t, uint64_t, uint64_t>, 22>
-          special_cases = {{{127U, 2048U, 1024U},
-                            {128U, 2048U, 1024U},
-                            {129U, 2048U, 1024U},
-                            {128U, 2047U, 1024U},
-                            {128U, 2049U, 1024U},
-                            {128U, 2048U, 1023U},
-                            {128U, 2048U, 1025U},
-                            {128U, 2048U, 32768U},
-                            {128U, 2048U, 32769U},
-                            {17U, 2048U, 1024U},
-                            {16U, 2048U, 1024U},
-                            {17U, 2047U, 1024U},
-                            {17U, 2049U, 1024U},
-                            {17U, 2048U, 1023U},
-                            {17U, 2048U, 1025U},
-                            {1U, 64U, 33U},
-                            {1U, 63U, 33U},
-                            {1U, 65U, 33U},
-                            {3U, 2017U, 1025U},
-                            {17U, 2049U, 1023U},
-                            {129U, 2081U, 1025U},
-                            {513U, 5121U, 32769U}}};
+          special_cases = {{{127U, 2048U, 1024U},  {128U, 2048U, 1024U},
+                            {129U, 2048U, 1024U},  {128U, 2047U, 1024U},
+                            {128U, 2049U, 1024U},  {128U, 2048U, 1023U},
+                            {128U, 2048U, 1025U},  {128U, 2048U, 32768U},
+                            {128U, 2048U, 32769U}, {17U, 2048U, 1024U},
+                            {16U, 2048U, 1024U},   {17U, 2047U, 1024U},
+                            {17U, 2049U, 1024U},   {17U, 2048U, 1023U},
+                            {17U, 2048U, 1025U},   {1U, 64U, 33U},
+                            {1U, 63U, 33U},        {1U, 65U, 33U},
+                            {3U, 2017U, 1025U},    {17U, 2049U, 1023U},
+                            {129U, 2081U, 1025U},  {513U, 5121U, 32769U}}};
       for (const auto &[m, k, n] : special_cases) {
         add_case(cases, format, target, target_name, m, k, n);
       }
@@ -179,11 +165,12 @@ std::vector<FixtureCase> make_cases() {
       unique.push_back(item);
     }
   }
-  std::sort(unique.begin(), unique.end(), [](const FixtureCase &left,
-                                             const FixtureCase &right) {
-    return std::tie(left.format, left.target, left.m, left.k, left.n) <
-           std::tie(right.format, right.target, right.m, right.k, right.n);
-  });
+  std::sort(unique.begin(), unique.end(),
+            [](const FixtureCase &left, const FixtureCase &right) {
+              return std::tie(left.format, left.target, left.m, left.k,
+                              left.n) < std::tie(right.format, right.target,
+                                                 right.m, right.k, right.n);
+            });
   return unique;
 }
 
@@ -219,34 +206,18 @@ KernelVariant native_variant(const FixtureCase &item) {
   switch (item.format) {
   case MatmulFormat::Mxfp8E4M3W8A8:
     return sllm_matmul_kernel::select_mxfp8_variant(item.m, item.k, item.n,
-                                                     target);
-  case MatmulFormat::Mxfp8E4M3W8A16:
-    return item.m == 1U &&
-                   sllm_matmul_kernel::phase85_mxfp_m1_a16_shape(item.m,
-                                                                  item.k,
-                                                                  item.n)
-               ? KernelVariant::Mxfp8W8A16M1Col2
-               : KernelVariant::Baseline;
+                                                    target);
   case MatmulFormat::Mxfp6E3M2W6A6:
     return sllm_matmul_kernel::select_mxfp6_variant(item.m, item.k, item.n,
-                                                     target);
-  case MatmulFormat::Mxfp6E3M2W6A16:
-    return item.m == 1U &&
-                   sllm_matmul_kernel::phase85_mxfp_m1_a16_shape(item.m,
-                                                                  item.k,
-                                                                  item.n)
-               ? KernelVariant::Mxfp6W6A16M1Col2
-               : KernelVariant::Baseline;
-  case MatmulFormat::Nvfp4W4A16:
-    return sllm_matmul_kernel::select_nvfp4_variant(item.m);
+                                                    target);
   case MatmulFormat::Nvfp4W4A4:
-    return sllm_matmul_kernel::select_nvfp4_w4a4_variant(
-        item.m, item.k, item.n, target);
+    return sllm_matmul_kernel::select_nvfp4_w4a4_variant(item.m, item.k, item.n,
+                                                         target);
   case MatmulFormat::Mxfp4W4A4:
     return sllm_matmul_kernel::select_mxfp4_variant(item.m);
   case MatmulFormat::Fp8OuterE4M3W8A8:
-    return sllm_matmul_kernel::select_fp8_outer_variant(item.m, item.k,
-                                                         item.n, target);
+    return sllm_matmul_kernel::select_fp8_outer_variant(item.m, item.k, item.n,
+                                                        target);
   }
   return KernelVariant::Baseline;
 }
@@ -282,11 +253,11 @@ Result evaluate(const FixtureCase &item) {
   result.activation_pack = static_cast<int>(plan.activation_pack);
   result.inner_product = static_cast<int>(plan.inner_product);
   result.provider_supported = plan.supported();
-  const auto concrete = plan.supported()
-                            ? selection_fixture_concrete_provider_plan(
-                                  plan,
-                                  static_cast<KernelVariant>(result.native_variant))
-                            : std::nullopt;
+  const auto concrete =
+      plan.supported()
+          ? selection_fixture_concrete_provider_plan(
+                plan, static_cast<KernelVariant>(result.native_variant))
+          : std::nullopt;
   if (concrete.has_value()) {
     result.concrete_provider = static_cast<int>(concrete->provider);
     result.concrete_tile = static_cast<int>(concrete->tile);
@@ -318,7 +289,8 @@ Result evaluate(const FixtureCase &item) {
            sllm_matmul_kernel::phase78_gfx1030_nvfp4_w4a4_split4_shape(
                concrete->m, concrete->k, concrete->n)) ||
           (concrete->target == sllm_lowp::ExactTarget::Gfx1201 &&
-           native_variant(item) == KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
+           native_variant(item) ==
+               KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
            sllm_matmul_kernel::phase78_gfx1201_nvfp4_w4a4_split4_shape(
                concrete->m, concrete->k, concrete->n));
       if (split4) {
@@ -368,9 +340,8 @@ void print_csv(const std::vector<Result> &rows) {
   for (const auto &row : rows) {
     const auto &input = row.input;
     std::cout << format_name(input.format) << ',' << input.target_name << ','
-              << input.m
-              << ',' << input.k << ',' << input.n << ',' << row.native_variant
-              << ',' << row.decision_variant << ','
+              << input.m << ',' << input.k << ',' << input.n << ','
+              << row.native_variant << ',' << row.decision_variant << ','
               << (row.decision_supported ? 1 : 0) << ','
               << (row.decision_enabled ? 1 : 0) << ','
               << (row.decision_adopted ? 1 : 0) << ',' << row.decision_reason
@@ -379,14 +350,12 @@ void print_csv(const std::vector<Result> &rows) {
               << row.activation_pack << ',' << row.inner_product << ','
               << (row.provider_supported ? 1 : 0) << ','
               << row.concrete_provider << ',' << row.concrete_tile << ','
-              << row.concrete_inner_product << ','
-              << row.activation_value_bytes << ','
-              << row.activation_scale_offset << ','
+              << row.concrete_inner_product << ',' << row.activation_value_bytes
+              << ',' << row.activation_scale_offset << ','
               << row.activation_scale_bytes << ','
               << row.activation_workspace_bytes << ','
-              << row.total_workspace_bytes << ','
-              << row.split4_workspace_bytes << ','
-              << row.staging_workspace_bytes << '\n';
+              << row.total_workspace_bytes << ',' << row.split4_workspace_bytes
+              << ',' << row.staging_workspace_bytes << '\n';
   }
 }
 
@@ -410,9 +379,9 @@ void print_json(const std::vector<Result> &rows) {
               << (row.decision_enabled ? "true" : "false")
               << ", \"decision_adopted\": "
               << (row.decision_adopted ? "true" : "false")
-              << ", \"decision_reason\": "
-              << json_quote(row.decision_reason) << ", \"provider\": "
-              << row.provider << ", \"rejection\": " << row.rejection
+              << ", \"decision_reason\": " << json_quote(row.decision_reason)
+              << ", \"provider\": " << row.provider
+              << ", \"rejection\": " << row.rejection
               << ", \"architecture\": " << row.architecture
               << ", \"tile\": " << row.tile
               << ", \"activation_pack\": " << row.activation_pack
@@ -421,20 +390,15 @@ void print_json(const std::vector<Result> &rows) {
               << (row.provider_supported ? "true" : "false")
               << ", \"concrete_provider\": " << row.concrete_provider
               << ", \"concrete_tile\": " << row.concrete_tile
-              << ", \"concrete_inner_product\": "
-              << row.concrete_inner_product
-              << ", \"activation_value_bytes\": "
-              << row.activation_value_bytes
+              << ", \"concrete_inner_product\": " << row.concrete_inner_product
+              << ", \"activation_value_bytes\": " << row.activation_value_bytes
               << ", \"activation_scale_offset\": "
               << row.activation_scale_offset
-              << ", \"activation_scale_bytes\": "
-              << row.activation_scale_bytes
+              << ", \"activation_scale_bytes\": " << row.activation_scale_bytes
               << ", \"activation_workspace_bytes\": "
               << row.activation_workspace_bytes
-              << ", \"total_workspace_bytes\": "
-              << row.total_workspace_bytes
-              << ", \"split4_workspace_bytes\": "
-              << row.split4_workspace_bytes
+              << ", \"total_workspace_bytes\": " << row.total_workspace_bytes
+              << ", \"split4_workspace_bytes\": " << row.split4_workspace_bytes
               << ", \"staging_workspace_bytes\": "
               << row.staging_workspace_bytes << "}"
               << (index + 1 == rows.size() ? "\n" : ",\n");

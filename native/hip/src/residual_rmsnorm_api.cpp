@@ -77,12 +77,13 @@ sllm_status_t validate_and_copy_descriptor(
         sink, SLLM_STATUS_UNSUPPORTED_SCALE_MODE,
         "residual RMSNorm scale mode is unsupported");
   }
-  for (const uint32_t value : descriptor->reserved) {
-    if (value != 0U) {
-      return sllm_public_runtime::write_error(
-          sink, SLLM_STATUS_RESERVED_NONZERO,
-          "residual RMSNorm descriptor reserved fields must be zero");
-    }
+  /* reserved[0] is the Phase 87 stage 7 input_global_scale_f32_bits and is
+   * validated against the selected output encoding below; reserved[1..] stay
+   * zero-only. */
+  if (descriptor->reserved[1] != 0U || descriptor->reserved[2] != 0U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_RESERVED_NONZERO,
+        "residual RMSNorm descriptor reserved fields must be zero");
   }
   float epsilon = 0.0F;
   std::memcpy(&epsilon, &descriptor->epsilon_bits, sizeof(epsilon));
@@ -107,10 +108,35 @@ sllm_status_t validate_and_copy_descriptor(
       &descriptor->residual_output, &metadata->residual_output, sink);
   if (status != SLLM_STATUS_OK)
     return status;
-  status = sllm_rmsnorm::validate_tensor_binding(&descriptor->output,
-                                                 &metadata->output, sink);
+  status = sllm_rmsnorm::validate_output_tensor_binding(
+      &descriptor->output, &metadata->output, sink);
   if (status != SLLM_STATUS_OK)
     return status;
+
+  const sllm_public_runtime::PrequantMode prequant_mode =
+      sllm_public_runtime::prequant_mode_from_binding(
+          descriptor->output.dtype, descriptor->output.encoding);
+  metadata->output_prequant = static_cast<uint32_t>(prequant_mode);
+  metadata->input_global_scale_f32_bits = descriptor->reserved[0];
+  float input_global_scale = 0.0F;
+  std::memcpy(&input_global_scale, &descriptor->reserved[0],
+              sizeof(input_global_scale));
+  if (prequant_mode == sllm_public_runtime::PrequantMode::Nvfp4Block16) {
+    /* Phase 87 stage 7: an NVFP4 producer output needs the FP32 activation
+     * tensor scale that the consumer matmul takes from the weight binding;
+     * reserved[0] carries its raw bits. Validate exactly like the Qwen3.8
+     * projection-pack input_global_scale_f32_bits rule. */
+    if (!std::isfinite(input_global_scale) || input_global_scale <= 0.0F) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "residual RMSNorm NVFP4 output requires a finite positive input "
+          "global scale in reserved[0]");
+    }
+  } else if (descriptor->reserved[0] != 0U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_RESERVED_NONZERO,
+        "residual RMSNorm descriptor reserved fields must be zero");
+  }
 
   if (!same_shape(metadata->residual, metadata->addend) ||
       !same_shape(metadata->residual, metadata->residual_output) ||

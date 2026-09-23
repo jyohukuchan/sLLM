@@ -212,18 +212,6 @@ static_assert(
 static_assert(kFp8OuterDecodeGfx1030LdsLutStaticLdsBytes == 544U);
 static_assert(kFp8OuterDecodeGfx1030Half2WavesPerWorkgroup == 8U);
 static_assert(kFp8OuterDecodeGfx1030Half2ColumnsPerWorkgroup == 32U);
-constexpr const char *kNvfp4DecodeLogicalKernelId =
-    "matmul.nvfp4.block16.decode.packed_dequant.v1";
-constexpr const char *kNvfp4DecodeDeviceSymbol =
-    "sllm_matmul_nvfp4_block16_packed_dequant_v1";
-constexpr const char *kNvfp4PrefillLogicalKernelId =
-    "matmul.nvfp4.block16.prefill.row8_tiled256.v2";
-constexpr const char *kNvfp4PrefillDeviceSymbol =
-    "sllm_matmul_nvfp4_block16_prefill_row8_tiled256_v2";
-constexpr const char *kNvfp4BaselineLogicalKernelId =
-    "matmul.nvfp4.block16.packed_dequant.v1";
-constexpr const char *kNvfp4BaselineDeviceSymbol =
-    "sllm_matmul_nvfp4_block16_packed_dequant_v1";
 constexpr const char *kNvfp4W4A4LogicalKernelId =
     "matmul.nvfp4.w4a4.block16.packed.v1";
 constexpr const char *kNvfp4W4A4DeviceSymbol =
@@ -622,7 +610,6 @@ constexpr const char *kMxfp6W6A6PrefillPhase85SmallMDeviceSymbol =
     "sllm_mxfp6_w6a6_mmq_rows4_col8_v1";
 constexpr const char *kPhase85MxfpM1ForceBaselineEnvironment =
     "SLLM_MX_WA_M1_FORCE_BASELINE";
-constexpr const char *kPhase85MxfpM1A16Environment = "SLLM_MX_WA_M1_A16";
 constexpr const char *kMxfp8W8A8M1Col2LogicalKernelId =
     "matmul.mxfp8.w8a8.m1.col2.v1";
 constexpr const char *kMxfp8W8A8M1Col2DeviceSymbol =
@@ -631,14 +618,6 @@ constexpr const char *kMxfp6W6A6M1Col2LogicalKernelId =
     "matmul.mxfp6.w6a6.m1.col2.v1";
 constexpr const char *kMxfp6W6A6M1Col2DeviceSymbol =
     "sllm_mxfp6_w6a6_m1_col2_v1";
-constexpr const char *kMxfp8E4M3W8A16M1Col2LogicalKernelId =
-    "matmul.mxfp8.w8a16.m1.col2.v1";
-constexpr const char *kMxfp8E4M3W8A16M1Col2DeviceSymbol =
-    "sllm_mxfp8_w8a16_m1_col2_v1";
-constexpr const char *kMxfp6E3M2W6A16M1Col2LogicalKernelId =
-    "matmul.mxfp6.w6a16.m1.col2.v1";
-constexpr const char *kMxfp6E3M2W6A16M1Col2DeviceSymbol =
-    "sllm_mxfp6_w6a16_m1_col2_v1";
 static_assert(sizeof("matmul.mxfp8.w8a8.mmq.rows4.col8.v1") <= 64U);
 static_assert(sizeof("matmul.mxfp6.w6a6.mmq.rows4.col8.v1") <= 64U);
 static_assert(sizeof("sllm_mxfp8_w8a8_mmq_rows4_col8_v1") <= 64U);
@@ -647,10 +626,6 @@ static_assert(sizeof("matmul.mxfp8.w8a8.m1.col2.v1") <= 64U);
 static_assert(sizeof("sllm_mxfp8_w8a8_m1_col2_v1") <= 64U);
 static_assert(sizeof("matmul.mxfp6.w6a6.m1.col2.v1") <= 64U);
 static_assert(sizeof("sllm_mxfp6_w6a6_m1_col2_v1") <= 64U);
-static_assert(sizeof("matmul.mxfp8.w8a16.m1.col2.v1") <= 64U);
-static_assert(sizeof("sllm_mxfp8_w8a16_m1_col2_v1") <= 64U);
-static_assert(sizeof("matmul.mxfp6.w6a16.m1.col2.v1") <= 64U);
-static_assert(sizeof("sllm_mxfp6_w6a16_m1_col2_v1") <= 64U);
 static_assert(sizeof("matmul.nvfp4.w4a4.block16.prefill.row8_tiled256.v1") <=
               64U);
 static_assert(
@@ -721,15 +696,6 @@ constexpr bool phase85_mxfp_m1_col2_shape(const uint64_t m, const uint64_t k,
          (k % kMxfp8W8A8PrefillWmmaBlockK) == 0U;
 }
 
-// A16 consumes the original BF16 activation, so its only storage boundary is
-// the MX weight block. Keep N unrestricted here; the kernel handles the final
-// odd column through its existing has_column1 tail.
-constexpr bool phase85_mxfp_m1_a16_shape(const uint64_t m, const uint64_t k,
-                                         const uint64_t n) noexcept {
-  return m == 1U && k != 0U && n != 0U &&
-         (k % kMxfp8W8A8PrefillWmmaBlockK) == 0U;
-}
-
 // The V620 gfx1030 MXFP6 sweep regresses throughout the middle-K family,
 // independent of N. The R9700 sweep separately regresses only at N=1024 below
 // K=5120. Keep the candidate outside these measured crossover families.
@@ -747,11 +713,6 @@ constexpr bool phase85_mxfp6_gfx1201_m1_col2_shape(const uint64_t m,
 
 inline bool phase85_mxfp_m1_force_baseline() noexcept {
   const char *const value = std::getenv(kPhase85MxfpM1ForceBaselineEnvironment);
-  return value != nullptr && std::strcmp(value, "1") == 0;
-}
-
-inline bool phase85_mxfp_m1_a16_enabled() noexcept {
-  const char *const value = std::getenv(kPhase85MxfpM1A16Environment);
   return value != nullptr && std::strcmp(value, "1") == 0;
 }
 
@@ -785,10 +746,6 @@ static_assert(!phase85_mxfp_m1_col2_shape(1U, 2016U, 1024U));
 static_assert(!phase85_mxfp_m1_col2_shape(1U, 2048U, 1023U));
 static_assert(phase85_mxfp_m1_col2_shape(1U, 2048U, 1024U));
 static_assert(phase85_mxfp_m1_col2_shape(1U, 2080U, 1025U));
-static_assert(!phase85_mxfp_m1_a16_shape(2U, 2048U, 1024U));
-static_assert(phase85_mxfp_m1_a16_shape(1U, 2016U, 1023U));
-static_assert(phase85_mxfp_m1_a16_shape(1U, 2016U, 1024U));
-static_assert(phase85_mxfp_m1_a16_shape(1U, 2080U, 1025U));
 static_assert(!phase85_mxfp6_gfx1030_m1_col2_shape(1U, 5152U, 1024U));
 static_assert(!phase85_mxfp6_gfx1030_m1_col2_shape(1U, 6144U, 5120U));
 static_assert(!phase85_mxfp6_gfx1030_m1_col2_shape(1U, 10208U, 1024U));
@@ -806,9 +763,11 @@ enum class KernelVariant : uint32_t {
   // providers and must not be reused here: they appear in audit records.
   Unspecialized = 1U,
   Fp8Emulation = 6U,
-  Nvfp4DecodePackedDequant = 8U,
-  Nvfp4PrefillRow8Tiled256 = 9U,
-  Nvfp4BaselinePackedDequant = 10U,
+  // Retired W4A16 audit IDs. Keep the numbers reserved without mapping them
+  // to a kernel, provider, or launch path.
+  RetiredNvfp4W4A16DecodePackedDequant = 8U,
+  RetiredNvfp4W4A16PrefillRow8Tiled256 = 9U,
+  RetiredNvfp4W4A16BaselinePackedDequant = 10U,
   Nvfp4W4A4Packed = 11U,
   Mxfp4W4A4Decode = 14U,
   Mxfp4W4A4Prefill = 15U,
@@ -863,6 +822,8 @@ enum class KernelVariant : uint32_t {
   Mxfp6W6A6PrefillPhase85SmallM = 98U,
   Mxfp8W8A8M1Col2 = 99U,
   Mxfp6W6A6M1Col2 = 100U,
+  // Retired W8A16/W6A16 kernel IDs. Keep numeric tombstones for audit data;
+  // no symbols or launchers are compiled for these variants.
   Mxfp8W8A16M1Col2 = 101U,
   Mxfp6W6A16M1Col2 = 102U,
 };
@@ -1473,15 +1434,6 @@ inline KernelVariant select_mxfp6_variant(const uint64_t m, const uint64_t k,
 
 inline KernelVariant select_mxfp6_variant(const uint64_t m) noexcept {
   return select_mxfp6_variant(m, 0U, 0U, "");
-}
-
-inline KernelVariant select_nvfp4_variant(const uint64_t m) noexcept {
-  const char *const force_baseline = std::getenv("SLLM_NVFP4_FORCE_BASELINE");
-  if (force_baseline != nullptr && std::strcmp(force_baseline, "1") == 0) {
-    return KernelVariant::Nvfp4BaselinePackedDequant;
-  }
-  return m == 1U ? KernelVariant::Nvfp4DecodePackedDequant
-                 : KernelVariant::Nvfp4PrefillRow8Tiled256;
 }
 
 constexpr bool
@@ -2724,12 +2676,6 @@ lowp_logical_kernel_id(const KernelVariant variant) noexcept {
   if (variant == KernelVariant::Mxfp6W6A6M1Col2) {
     return kMxfp6W6A6M1Col2LogicalKernelId;
   }
-  if (variant == KernelVariant::Mxfp8W8A16M1Col2) {
-    return kMxfp8E4M3W8A16M1Col2LogicalKernelId;
-  }
-  if (variant == KernelVariant::Mxfp6W6A16M1Col2) {
-    return kMxfp6E3M2W6A16M1Col2LogicalKernelId;
-  }
   if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double) {
     return kMxfp8W8A8PrefillGfx1030Half2_128x64K32DoubleLogicalKernelId;
   }
@@ -2768,12 +2714,6 @@ lowp_logical_kernel_id(const KernelVariant variant) noexcept {
              ? kFp8OuterDecodeGfx1030Half2Wave4Col32LogicalKernelId
          : variant == KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32
              ? kFp8OuterDecodeGfx1030Dword8LogicalKernelId
-         : variant == KernelVariant::Nvfp4DecodePackedDequant
-             ? kNvfp4DecodeLogicalKernelId
-         : variant == KernelVariant::Nvfp4PrefillRow8Tiled256
-             ? kNvfp4PrefillLogicalKernelId
-         : variant == KernelVariant::Nvfp4BaselinePackedDequant
-             ? kNvfp4BaselineLogicalKernelId
          : variant == KernelVariant::Nvfp4W4A4Decode
              ? kNvfp4W4A4DecodeLogicalKernelId
          : variant == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256
@@ -2866,12 +2806,6 @@ constexpr const char *lowp_device_symbol(const KernelVariant variant) noexcept {
   if (variant == KernelVariant::Mxfp6W6A6M1Col2) {
     return kMxfp6W6A6M1Col2DeviceSymbol;
   }
-  if (variant == KernelVariant::Mxfp8W8A16M1Col2) {
-    return kMxfp8E4M3W8A16M1Col2DeviceSymbol;
-  }
-  if (variant == KernelVariant::Mxfp6W6A16M1Col2) {
-    return kMxfp6E3M2W6A16M1Col2DeviceSymbol;
-  }
   if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double) {
     return kMxfp8W8A8PrefillGfx1030Half2_128x64K32DoubleDeviceSymbol;
   }
@@ -2910,12 +2844,6 @@ constexpr const char *lowp_device_symbol(const KernelVariant variant) noexcept {
              ? kFp8OuterDecodeGfx1030Half2Wave4Col32DeviceSymbol
          : variant == KernelVariant::Fp8OuterDecodeGfx1030Dword8Wave4Col32
              ? kFp8OuterDecodeGfx1030Dword8DeviceSymbol
-         : variant == KernelVariant::Nvfp4DecodePackedDequant
-             ? kNvfp4DecodeDeviceSymbol
-         : variant == KernelVariant::Nvfp4PrefillRow8Tiled256
-             ? kNvfp4PrefillDeviceSymbol
-         : variant == KernelVariant::Nvfp4BaselinePackedDequant
-             ? kNvfp4BaselineDeviceSymbol
          : variant == KernelVariant::Nvfp4W4A4Decode
              ? kNvfp4W4A4DecodeDeviceSymbol
          : variant == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256
@@ -3121,9 +3049,7 @@ constexpr uint32_t lowp_grid_size_x(const KernelVariant variant,
          kPhase85MxfpSmallMColumnsPerWorkgroup));
   }
   if (variant == KernelVariant::Mxfp8W8A8M1Col2 ||
-      variant == KernelVariant::Mxfp6W6A6M1Col2 ||
-      variant == KernelVariant::Mxfp8W8A16M1Col2 ||
-      variant == KernelVariant::Mxfp6W6A16M1Col2) {
+      variant == KernelVariant::Mxfp6W6A6M1Col2) {
     return static_cast<uint32_t>((n + 1U) / 2U);
   }
   if (variant == KernelVariant::Nvfp4W4A4PrefillCompensated64x64 &&
@@ -3171,12 +3097,6 @@ constexpr uint32_t lowp_grid_size_x(const KernelVariant variant,
          : variant ==
                  KernelVariant::Fp8OuterDecodeGfx1030ActivationSharedWave8Col64
              ? static_cast<uint32_t>((n + 63U) / 64U)
-         : variant == KernelVariant::Nvfp4DecodePackedDequant
-             ? static_cast<uint32_t>(n)
-         : variant == KernelVariant::Nvfp4PrefillRow8Tiled256
-             ? static_cast<uint32_t>(((m + 7U) / 8U) * n)
-         : variant == KernelVariant::Nvfp4BaselinePackedDequant
-             ? static_cast<uint32_t>(m * n)
          : variant == KernelVariant::Nvfp4W4A4Decode ? static_cast<uint32_t>(n)
          : variant == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256
              ? static_cast<uint32_t>(((m + 7U) / 8U) * n)
@@ -3315,8 +3235,6 @@ static_assert(workgroup_size_x(KernelVariant::Mxfp6W6A6PrefillPhase85SmallM) ==
               128U);
 static_assert(workgroup_size_x(KernelVariant::Mxfp8W8A8M1Col2) == 256U);
 static_assert(workgroup_size_x(KernelVariant::Mxfp6W6A6M1Col2) == 256U);
-static_assert(workgroup_size_x(KernelVariant::Mxfp8W8A16M1Col2) == 256U);
-static_assert(workgroup_size_x(KernelVariant::Mxfp6W6A16M1Col2) == 256U);
 static_assert(workgroup_size_x(
                   KernelVariant::Mxfp8W8A8PrefillWmmaN128DirectBoth) == 256U);
 static_assert(
@@ -3377,12 +3295,6 @@ static_assert(lowp_grid_size_x(KernelVariant::Mxfp8W8A8M1Col2, 1U, 1024U) ==
 static_assert(lowp_grid_size_x(KernelVariant::Mxfp8W8A8M1Col2, 1U, 1025U) ==
               513U);
 static_assert(lowp_grid_size_x(KernelVariant::Mxfp6W6A6M1Col2, 1U, 1024U) ==
-              512U);
-static_assert(lowp_grid_size_x(KernelVariant::Mxfp8W8A16M1Col2, 1U, 1024U) ==
-              512U);
-static_assert(lowp_grid_size_x(KernelVariant::Mxfp8W8A16M1Col2, 1U, 1025U) ==
-              513U);
-static_assert(lowp_grid_size_x(KernelVariant::Mxfp6W6A16M1Col2, 1U, 1024U) ==
               512U);
 static_assert(lowp_grid_size_x(KernelVariant::Nvfp4W4A4Decode, 1U, 7U) == 7U);
 static_assert(lowp_grid_size_x(KernelVariant::Nvfp4W4A4DecodeWave4Column32, 1U,
@@ -3591,12 +3503,6 @@ hipError_t launch_fp8_outer_decode_gfx1030_activation_shared_wave8col64(
     const uint8_t *weight, const float *weight_scales, uint16_t *output,
     uint64_t m, uint64_t k, uint64_t n, hipStream_t stream) noexcept;
 
-hipError_t launch_nvfp4(const uint16_t *activation,
-                        const uint8_t *packed_weight,
-                        const uint8_t *block_scales, const float *tensor_scale,
-                        uint16_t *output, uint64_t m, uint64_t k, uint64_t n,
-                        KernelVariant variant, hipStream_t stream) noexcept;
-
 hipError_t launch_nvfp4_quantize(const uint16_t *activation,
                                  uint8_t *packed_activation,
                                  uint8_t *block_scales,
@@ -3654,12 +3560,6 @@ hipError_t launch_mxfp8_w8a8(const uint8_t *activation,
                              uint64_t n, KernelVariant variant,
                              hipStream_t stream) noexcept;
 
-hipError_t launch_mxfp8_w8a16(const uint16_t *activation, const uint8_t *weight,
-                              const uint8_t *weight_block_scales,
-                              uint16_t *output, uint64_t m, uint64_t k,
-                              uint64_t n, KernelVariant variant,
-                              hipStream_t stream) noexcept;
-
 hipError_t launch_mxfp6_quantize(const uint16_t *activation,
                                  uint8_t *packed_activation,
                                  uint8_t *block_scales, uint64_t m, uint64_t k,
@@ -3672,12 +3572,6 @@ hipError_t launch_mxfp6_w6a6(const uint8_t *packed_activation,
                              uint16_t *output, uint64_t m, uint64_t k,
                              uint64_t n, KernelVariant variant,
                              hipStream_t stream) noexcept;
-
-hipError_t launch_mxfp6_w6a16(const uint16_t *activation, const uint8_t *weight,
-                              const uint8_t *weight_block_scales,
-                              uint16_t *output, uint64_t m, uint64_t k,
-                              uint64_t n, KernelVariant variant,
-                              hipStream_t stream) noexcept;
 
 } // namespace sllm_matmul_kernel
 

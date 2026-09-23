@@ -67,10 +67,10 @@ hipError_t launch_fp8_outer_gfx1201_dot4(
 // MTP verification rows and unmeasured shapes on their existing providers.
 constexpr bool fp8_outer_gfx1201_dot4_shape(const uint64_t m, const uint64_t k,
                                             const uint64_t n) noexcept {
-  return m == 1U &&
-         ((k == 5120U && (n == 1024U || n == 6144U || n == 10240U ||
-                          n == 12288U || n == 17408U || n == 248320U)) ||
-          (k == 6144U && n == 5120U) || (k == 17408U && n == 5120U));
+  return m == 1U && ((k == 5120U &&
+                      (n == 1024U || n == 6144U || n == 10240U || n == 12288U ||
+                       n == 17408U || n == 98304U || n == 248320U)) ||
+                     (k == 6144U && n == 5120U) || (k == 17408U && n == 5120U));
 }
 
 // Matmul provider IDs owned by this runtime.  They share the numeric audit ID

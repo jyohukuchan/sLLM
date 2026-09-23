@@ -231,7 +231,7 @@ impl RmsNormDescriptor {
             },
             alias_policy: sys::SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP,
             epsilon_bits: contract.epsilon().bits(),
-            reserved: [0; 3],
+            reserved: [self.semantic.activation_quant_scale_bits(), 0, 0],
             activation: self.activation.raw()?,
             raw_scale: self.raw_scale.raw()?,
             output: self.output.raw()?,

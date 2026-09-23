@@ -2,6 +2,12 @@
 
 ## 決定
 
+**2026-09-24の方針（ユーザー決定）**: vAttentionを完全に廃止し、Paged Attentionへ完全移行する。
+ただし、pagedを最適化しても性能低下が10%以上になる場合は再考する。判断材料はPhase 87のWU-P1（段階9・4の後）の試作で取り、
+問題がなければPhase 88のバッチ処理より前に本移行する。それまでは以下の決定が現行の実装を表す。
+経緯は[paged移行の検討記録](../history/2026/09/21-30/kv-paged-migration-decision.md)。
+
+
 2026-08-13時点のPhase 6初期方式は、canonical AMD Radeon Pro V620 `gfx1030`と
 Radeon AI PRO R9700 `gfx1201`に限定して、HIP VMMによるvirtual-contiguous KV memory
 （vAttention型）とする。KV storageはFP16のtoken-major `[capacity, kv_heads, head_dim]`であり、

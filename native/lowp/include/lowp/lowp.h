@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 #define LOWP_ABI_VERSION 1U
-#define LOWP_MXFP4_W4A8_CONTRACT_VERSION 1U
+#define LOWP_MXFP4_W4A6_CONTRACT_VERSION 1U
 
 /* Launch results preserve HIP error numbers; host planning needs no HIP header.
  */
@@ -24,14 +24,16 @@ typedef uint32_t lowp_format_t;
 enum {
   LOWP_MXFP8_E4M3_W8A8 = 0,
   LOWP_MXFP6_E3M2_W6A6 = 1,
-  LOWP_NVFP4_W4A16 = 2,
+  /* Value 2 is a retired NVFP4 W4A16 ABI id. */
+  LOWP_RETIRED_NVFP4_W4A16 = 2,
   LOWP_NVFP4_W4A4 = 3,
   /* Value 4 is reserved and is never a public format. */
   LOWP_FP8_OUTER_E4M3_W8A8 = 5,
-  LOWP_MXFP8_E4M3_W8A16 = 6,
-  LOWP_MXFP6_E3M2_W6A16 = 7,
-  /* Defined contract, not implemented: E2M1/E8M0 W4 + E4M3/E8M0 A8. */
-  LOWP_MXFP4_W4A8_V1 = 8
+  /* Values 6 and 7 are retired MXFP W8A16/W6A16 ABI ids. */
+  LOWP_RETIRED_MXFP8_E4M3_W8A16 = 6,
+  LOWP_RETIRED_MXFP6_E3M2_W6A16 = 7,
+  /* Defined contract, not implemented: E2M1 W4 + MXFP6 E3M2 A6. */
+  LOWP_MXFP4_W4A6_V1 = 8
 };
 
 typedef uint32_t lowp_target_t;

@@ -78,6 +78,7 @@ mod prefix_cache;
 mod prepared_execution;
 mod quantized_model;
 mod qwen35_moe;
+mod qwen_draft_vocab_artifact;
 mod qwen_execution;
 mod qwen_graph;
 mod qwen_mtp;
@@ -573,7 +574,7 @@ pub use nvfp4_sidecar::{
     verify_gemma4_nvfp4_sidecar, verify_nvfp4_sidecar,
 };
 pub use op::{
-    ArgmaxTensor, AttentionPreprocessContract, AttentionPreprocessPacking,
+    ActivationQuantFormat, ArgmaxTensor, AttentionPreprocessContract, AttentionPreprocessPacking,
     AttentionPreprocessPositionMode, AttentionPreprocessPositionPayloadModeV1,
     AttentionPreprocessTensor, DeepSeekV4MoeRouteContractV1, DeepSeekV4MoeRouteMode,
     ElementwiseTensor, GdnProjectionBundleContractV1, MiniMaxM3MoeRouteContractV1,
@@ -582,6 +583,7 @@ pub use op::{
     RmsNormScaleMode, RmsNormTensor, RotaryPositionModeV1, RotaryTensor, SemanticOp,
     SemanticOpDescriptor, SemanticOpKind, SparseMoeContract, SplitHalfRotaryContract,
     TokenSelectorContractV1, TokenSelectorTensor, WindowedCausalAttentionContract,
+    activation_quant_format, encoded_span_end, is_legacy_bf16, is_producer_activation,
 };
 #[cfg(feature = "phase54-research")]
 pub use phase54_kq_transform::{
@@ -634,6 +636,11 @@ pub use quantized_model::{
     UNSLOTH_QWEN38_NVFP4_REPOSITORY, UNSLOTH_QWEN38_NVFP4_REVISION, VerifiedUnslothGemma4Nvfp4,
     VerifiedUnslothQwen38Nvfp4, verify_unsloth_gemma4_nvfp4, verify_unsloth_qwen38_nvfp4,
 };
+pub use qwen_draft_vocab_artifact::{
+    QWEN38_MTP_DRAFT_VOCAB_METADATA_RELATIVE_PATH, QWEN38_MTP_DRAFT_VOCAB_RELATIVE_PATH,
+    QWEN38_MTP_DRAFT_VOCAB_SCHEMA, QWEN38_TOKENIZER_SHA256, Qwen38MtpDraftVocabularyArtifact,
+    Qwen38MtpDraftVocabularyError, load_qwen38_mtp_draft_vocabulary,
+};
 pub use qwen_execution::{
     QWEN_PREFILL_CHUNK_BUCKETS, QWEN_PREFILL_SMALL_DEVICE_CHUNK_TOKENS,
     QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES, QwenExecutionAudit, QwenExecutionError,
@@ -646,18 +653,21 @@ pub use qwen_execution::{
 pub use qwen_graph::{
     QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES,
     QWEN35_MAX_POSITION_EMBEDDINGS, QWEN35_PLAN_ENTRY_COUNT, QWEN35_RECOMMENDED_CONTEXT_TOKENS,
-    QWEN35_REQUIRED_WEIGHT_COUNT, QwenGraph, QwenGraphDispatchError, QwenGraphError, QwenGraphNode,
-    QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor, QwenGraphStateKind,
-    QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding, build_qwen35_fp8_fnuz_graph,
-    build_qwen35_fp8_graph, build_qwen35_fp8_graph_with_kv_cache_encoding,
-    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_mixed_graph,
-    build_qwen35_gguf_moe_execution_graph, build_qwen35_gguf_mx_weight_activation_graph,
-    build_qwen35_graph, build_qwen35_graph_with_kv_cache_encoding,
-    build_qwen35_graph_with_kv_cache_selection, build_qwen35_graph_with_position_payload_mode,
-    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
-    build_qwen35_nvfp4_graph, build_qwen35_nvfp4_graph_with_kv_cache_encoding,
-    build_qwen35_unsloth_qwen38_nvfp4_graph, build_qwen38_nvfp4_mtp_graph,
-    build_qwen38_nvfp4_mtp_graph_with_companion, build_qwen38_nvfp4_mtp_graph_with_token_count,
+    QWEN35_REQUIRED_WEIGHT_COUNT, QWEN38_MTP_DRAFT_VOCAB_SIZE, QwenGraph, QwenGraphDispatchError,
+    QwenGraphError, QwenGraphNode, QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor,
+    QwenGraphStateKind, QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
+    build_qwen35_fp8_graph_with_kv_cache_encoding, build_qwen35_gguf_fp8_graph,
+    build_qwen35_gguf_mixed_graph, build_qwen35_gguf_moe_execution_graph,
+    build_qwen35_gguf_mx_weight_activation_graph, build_qwen35_graph,
+    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_kv_cache_selection,
+    build_qwen35_graph_with_position_payload_mode, build_qwen35_moe_execution_graph,
+    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_unsloth_qwen38_nvfp4_graph,
+    build_qwen38_nvfp4_mtp_graph, build_qwen38_nvfp4_mtp_graph_with_companion,
+    build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids,
+    build_qwen38_nvfp4_mtp_graph_with_token_count,
+    build_qwen38_nvfp4_mtp_graph_with_vocabulary_ids, decode_qwen38_mtp_draft_vocabulary_le,
+    validate_qwen38_mtp_draft_vocabulary_ids,
 };
 pub use qwen_mtp::{
     QWEN35_MTP_DRAFT_WIDTH, QWEN35_MTP_HIDDEN_SIZE, QWEN35_MTP_INTERMEDIATE_SIZE,

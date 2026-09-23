@@ -11,14 +11,12 @@ sLLMの低精度行列積・量子化・codecを独立したCMake libraryとし�
 | --- | --- | --- | --- |
 | MXFP8 E4M3 W8A8 | E4M3FN、block 32 | E4M3FN、block 32 | E8M0 |
 | MXFP6 E3M2 W6A6 | packed E3M2、block 32 | packed E3M2、block 32 | E8M0 |
-| MXFP8 W8A16 / MXFP6 W6A16 | 上記MX重み | BF16、M=1の対応shape | 重みE8M0 |
-| NVFP4 W4A16 | E2M1、block 16 | BF16 | E4M3FN block scale＋FP32 tensor scale |
 | NVFP4 W4A4 | E2M1、block 16 | E2M1、block 16 | 各operandのE4M3FN block scale＋FP32 tensor scale |
 | FP8 outer W8A8 | E4M3FN | E4M3FN | FP32 row scale。gfx1030 softwareのみ |
-| MXFP4 W4A8 v1 | E2M1、block 32 | E4M3FN、K方向block 32 | E8M0。**契約定義のみ、planは未対応として拒否** |
+| MXFP4 W4A6 v1 | E2M1、block 32 | E3M2、K方向block 32 | E8M0。**契約定義のみ、planは未対応として拒否** |
 
-公開format番号4は予約値で、公開APIでは受理しない。
-既存のMXFP4 W4A4はsLLMのMoE等が使う内部C++ APIにだけ残し、W4A8とは別に扱う。
+公開format番号2、6、7は旧W×A16の退役値、4は予約値であり、いずれも公開APIでは受理しない。
+既存のMXFP4 W4A4はsLLMのMoE等が使う内部C++ APIにだけ残し、W4A6とは別に扱う。
 BF16行列積、FP8 native、hipBLAS/hipBLASLt、KV/attention本体はこのライブラリの外にある。
 
 ## 演算と配置
@@ -54,7 +52,7 @@ planの実行可能性を表す`supported`とは区別する。たとえば端�
 通常のlaunchはBF16 activationをworkspaceへ量子化して行列積を実行する。
 `lowp_quantize_activation`で先に量子化し、`LOWP_ACTIVATION_PREQUANTIZED`とvalue/scale pointerを
 渡すこともできる。projection packはこの経路でactivation量子化を共有する。
-BF16 activationを直接読むA16形式は量子化せず、workspaceも不要。
+旧A16形式のBF16 activation直接読み込み経路は退役し、kernel・launcherを含まない。
 
 libraryはdevice allocation、同期、CPU fallbackを行わない。stream完了まで全bufferを有効に保つ。
 FP16 stagingを使う既存の実験variantだけは、caller-owned staging bufferとGEMM callbackを要求する。
@@ -71,6 +69,7 @@ codec、形式契約、variant選択、kernel起動関数、内部MXFP4 W4A4の�
 `KernelVariant`は低精度providerの監査IDだけを持つ。値1（`Unspecialized`）は低精度の特化経路を
 選ばなかったことを表す。値2、3、4、5、7、12、13、16、17、91は統合側（sLLMのBF16、hipBLAS、
 FP8 native経路）が同じ監査ID空間で使うため、lowpでは再利用しない。
+値8、9、10は旧NVFP4 W4A16の退役IDであり、実行可能kernelへは対応付けない。
 `lowp_logical_kernel_id`等はlowpの知らないIDに`nullptr`を返し、統合側が自分のIDを解決する。
 
 ## 単体ビルドと検査

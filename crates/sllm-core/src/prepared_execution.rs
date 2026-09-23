@@ -375,7 +375,9 @@ pub(crate) fn prepared_deferred_completion_scope_enabled(
 /// The native Qwen ProjectionPack contract performs stricter role and shape
 /// checks when it is selected.  This common predicate only proves the shared
 /// activation, layout, dtype, and weight-encoding conditions needed before an
-/// adapter can consider a pair.
+/// adapter can consider a pair.  The shared activation may be legacy BF16 or
+/// a stage-7 producer-encoded activation; shape, strides, and identity must
+/// still match exactly.
 pub(crate) fn prepared_projection_pair_compatible(
     first: &SemanticOpDescriptor,
     second: &SemanticOpDescriptor,
@@ -392,8 +394,7 @@ pub(crate) fn prepared_projection_pair_compatible(
     let activation = &first.inputs()[0];
     let second_activation = &second.inputs()[0];
     if activation != second_activation
-        || activation.dtype() != crate::DType::Bf16
-        || activation.encoding() != crate::Encoding::Unquantized
+        || !crate::op::is_producer_activation(activation)
         || !activation.is_contiguous()
         || activation.shape().len() != 2
         || activation.shape().contains(&0)
@@ -1503,11 +1504,18 @@ impl ExecutionAuditAccumulator {
         label: &str,
         evidence: &DispatchEvidence,
     ) -> Result<(), PreparedExecutionError> {
-        let projection_pack2 = label.ends_with(".qwen38_projection_pack2");
-        if projection_pack2 && evidence.dispatch_count != 3 {
+        let projection_pack2 = label.ends_with(".qwen38_projection_pack2")
+            || evidence
+                .kernel_symbol
+                .starts_with("qwen38.projection_pack2.");
+        let producer_prequant_pack = projection_pack2
+            && evidence.kernel_symbol
+                == "qwen38.projection_pack2.nvfp4.shared_activation.prequantized.v1";
+        let expected_dispatches = if producer_prequant_pack { 2 } else { 3 };
+        if projection_pack2 && evidence.dispatch_count != expected_dispatches {
             return Err(PreparedExecutionError::InvalidAudit(format!(
-                "qwen38_projection_pack2 requires exactly three physical dispatches, got {}",
-                evidence.dispatch_count
+                "qwen38_projection_pack2 requires exactly {expected_dispatches} physical dispatches, got {}",
+                evidence.dispatch_count,
             )));
         }
         self.record(evidence)?;
@@ -1528,14 +1536,16 @@ impl ExecutionAuditAccumulator {
                         "projection-pack member count overflowed u64".to_owned(),
                     )
                 })?;
-            self.projection_pack_activation_quantize_count = self
-                .projection_pack_activation_quantize_count
-                .checked_add(1)
-                .ok_or_else(|| {
-                    PreparedExecutionError::InvalidAudit(
-                        "projection-pack activation-quantize count overflowed u64".to_owned(),
-                    )
-                })?;
+            if !producer_prequant_pack {
+                self.projection_pack_activation_quantize_count = self
+                    .projection_pack_activation_quantize_count
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        PreparedExecutionError::InvalidAudit(
+                            "projection-pack activation-quantize count overflowed u64".to_owned(),
+                        )
+                    })?;
+            }
         }
         if label.ends_with(".sparse_moe")
             || label.ends_with(".routed_expert")
@@ -2315,16 +2325,55 @@ mod tests {
         let gate = SemanticOpDescriptor::new(
             crate::SemanticOpKind::Matmul,
             vec![activation.clone(), gate_weight],
-            vec![gate_output],
+            vec![gate_output.clone()],
         )
         .unwrap();
         let up = SemanticOpDescriptor::new(
             crate::SemanticOpKind::Matmul,
             vec![activation, up_weight],
-            vec![up_output],
+            vec![up_output.clone()],
         )
         .unwrap();
         assert!(prepared_projection_pair_compatible(&gate, &up));
+
+        // Stage-7 producer-encoded activations remain a compatible pair as
+        // long as both matmuls share the exact same view.
+        let encoded_activation = TensorView::with_encoding(
+            crate::DType::F8E4M3Fn,
+            crate::Encoding::Fp8Scaled {
+                granularity: crate::Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: crate::DType::F32,
+                resident: crate::Fp8ResidentRepresentation::PackedBytes,
+            },
+            &[3, 3_840],
+        )
+        .unwrap();
+        let fp8_weight = TensorView::with_encoding(
+            crate::DType::F8E4M3Fn,
+            crate::Encoding::Fp8Scaled {
+                granularity: crate::Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: crate::DType::F32,
+                resident: crate::Fp8ResidentRepresentation::PackedBytes,
+            },
+            &[15_360, 3_840],
+        )
+        .unwrap();
+        let encoded_gate = SemanticOpDescriptor::new(
+            crate::SemanticOpKind::Matmul,
+            vec![encoded_activation.clone(), fp8_weight.clone()],
+            vec![gate_output.clone()],
+        )
+        .unwrap();
+        let encoded_up = SemanticOpDescriptor::new(
+            crate::SemanticOpKind::Matmul,
+            vec![encoded_activation, fp8_weight],
+            vec![up_output],
+        )
+        .unwrap();
+        assert!(prepared_projection_pair_compatible(
+            &encoded_gate,
+            &encoded_up
+        ));
     }
 
     #[test]
@@ -2407,6 +2456,33 @@ mod tests {
         assert_eq!(snapshot.projection_pack_member_count(), 2);
         assert_eq!(snapshot.projection_pack_activation_quantize_count(), 1);
         assert_eq!(snapshot.kernel_dispatch_count(), 3);
+
+        let mut prequant_evidence = evidence(2);
+        prequant_evidence.kernel_symbol =
+            "qwen38.projection_pack2.nvfp4.shared_activation.prequantized.v1".to_owned();
+        let mut prequant_audit = ExecutionAuditAccumulator::new(1);
+        prequant_audit
+            .record_labeled(
+                "qwen38_projection_pack2.prefill.shared_activation",
+                &prequant_evidence,
+            )
+            .unwrap();
+        prequant_audit
+            .record_boundary(ExecutionBoundaryKind::TerminalReadback, true)
+            .unwrap();
+        let prequant_snapshot = prequant_audit.snapshot().unwrap();
+        assert_eq!(prequant_snapshot.projection_pack_submission_count(), 1);
+        assert_eq!(prequant_snapshot.projection_pack_member_count(), 2);
+        assert_eq!(
+            prequant_snapshot.projection_pack_activation_quantize_count(),
+            0
+        );
+        assert_eq!(prequant_snapshot.kernel_dispatch_count(), 2);
+        prequant_evidence.dispatch_count = 3;
+        assert!(matches!(
+            ExecutionAuditAccumulator::new(1).record_labeled(label, &prequant_evidence),
+            Err(PreparedExecutionError::InvalidAudit(_))
+        ));
 
         let mut decomposed = ExecutionAuditAccumulator::new(1);
         decomposed

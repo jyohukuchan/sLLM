@@ -1,5 +1,6 @@
 #include "elementwise_api.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -43,6 +44,8 @@ bool all_zero(const void *const bytes, const std::size_t size) noexcept {
 }
 
 sllm_status_t validate_tensor(const sllm_tensor_binding_t &binding,
+                              const bool allow_prequantized,
+                              const sllm_elementwise_operation_t operation,
                               TensorMetadata *const copied,
                               sllm_error_sink_t *const sink) noexcept {
   if (copied == nullptr) {
@@ -68,17 +71,47 @@ sllm_status_t validate_tensor(const sllm_tensor_binding_t &binding,
         sink, SLLM_STATUS_INVALID_TENSOR_BINDING,
         "elementwise tensor binding requires a buffer and rank in 1..=8");
   }
-  if (binding.dtype != SLLM_TENSOR_DTYPE_BF16) {
+  /* Phase 87 stage 7: only a producer output may be prequantized; inputs and
+   * every other binding keep the historical BF16 contract. */
+  const bool bf16_dtype = binding.dtype == SLLM_TENSOR_DTYPE_BF16;
+  const bool encoded_dtype =
+      allow_prequantized && (binding.dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN ||
+                             binding.dtype == SLLM_TENSOR_DTYPE_U8);
+  if (!bf16_dtype && !encoded_dtype) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_UNSUPPORTED_DTYPE,
         "elementwise tensors must use BF16 storage");
   }
-  if (binding.encoding != SLLM_TENSOR_ENCODING_UNQUANTIZED) {
+  const bool legacy_encoding =
+      bf16_dtype && binding.encoding == SLLM_TENSOR_ENCODING_UNQUANTIZED;
+  const sllm_public_runtime::PrequantMode mode =
+      sllm_public_runtime::prequant_mode_from_binding(binding.dtype,
+                                                      binding.encoding);
+  const bool prequantized =
+      allow_prequantized && mode != sllm_public_runtime::PrequantMode::None;
+  if (!legacy_encoding && !prequantized) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_UNSUPPORTED_ENCODING,
-        "elementwise tensors must be unquantized");
+        "elementwise tensors must be unquantized or a prequantized FP8/NVFP4 "
+        "producer output");
   }
-  if ((binding.byte_offset & UINT64_C(1)) != 0U) {
+  if (prequantized) {
+    const bool producer_operation =
+        operation == SLLM_ELEMENTWISE_OPERATION_SILU_MUL ||
+        operation == SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL;
+    if (!producer_operation) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_UNSUPPORTED,
+          "only SiLU/Sigmoid multiply producers write prequantized output");
+    }
+    if (mode == sllm_public_runtime::PrequantMode::Nvfp4Block16 &&
+        operation == SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_UNSUPPORTED,
+          "sigmoid multiply has no NVFP4 prequant producer variant");
+    }
+  }
+  if (legacy_encoding && (binding.byte_offset & UINT64_C(1)) != 0U) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_MISALIGNED_OFFSET,
         "elementwise BF16 tensor offset must be two-byte aligned");
@@ -115,11 +148,48 @@ sllm_status_t validate_tensor(const sllm_tensor_binding_t &binding,
     }
   }
   uint64_t payload_bytes = 0U;
-  if (multiply_overflows(elements, UINT64_C(2), &payload_bytes) ||
-      sllm_public_runtime::add_overflows(binding.byte_offset, payload_bytes)) {
-    return sllm_public_runtime::write_error(
-        sink, SLLM_STATUS_METADATA_OVERFLOW,
-        "elementwise tensor byte interval overflowed u64");
+  if (!prequantized) {
+    if (multiply_overflows(elements, UINT64_C(2), &payload_bytes) ||
+        sllm_public_runtime::add_overflows(binding.byte_offset,
+                                           payload_bytes)) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "elementwise tensor byte interval overflowed u64");
+    }
+  } else {
+    /* Phase 87 stage 7 layout: rows are the leading extent (one for rank
+     * one), width is the product of the remaining extents. Sigmoid's
+     * [M, heads, width] binding therefore flattens to k = heads * width. */
+    const uint64_t rows = binding.rank == 1U ? UINT64_C(1) : binding.shape[0];
+    const uint64_t width = elements / rows;
+    uint64_t value_bytes = 0U;
+    if (!sllm_public_runtime::prequant_payload_layout(
+            mode, rows, width, &value_bytes, &payload_bytes)) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "elementwise prequantized payload overflowed u64");
+    }
+    if (mode == sllm_public_runtime::PrequantMode::Fp8Outer) {
+      if (sllm_public_runtime::add_overflows(binding.byte_offset,
+                                             value_bytes)) {
+        return sllm_public_runtime::write_error(
+            sink, SLLM_STATUS_METADATA_OVERFLOW,
+            "elementwise FP8 value/scale interval overflowed u64");
+      }
+      const uint64_t scale_offset = binding.byte_offset + value_bytes;
+      if ((scale_offset & UINT64_C(3)) != 0U) {
+        return sllm_public_runtime::write_error(
+            sink, SLLM_STATUS_MISALIGNED_OFFSET,
+            "elementwise FP8 output scales require a four-byte-aligned value "
+            "payload end");
+      }
+    }
+    if (sllm_public_runtime::add_overflows(binding.byte_offset,
+                                           payload_bytes)) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "elementwise prequantized byte interval overflowed u64");
+    }
   }
 
   copied->byte_offset = binding.byte_offset;
@@ -192,7 +262,11 @@ validate_and_copy_descriptor(const sllm_elementwise_desc_t *const descriptor,
         sink, SLLM_STATUS_INVALID_ELEMENTWISE_DESCRIPTOR,
         "elementwise descriptor has an unsupported operation contract");
   }
-  if (!all_zero(descriptor->reserved, sizeof(descriptor->reserved))) {
+  /* Phase 87 stage 7: reserved[0] is the NVFP4 input_global_scale_f32_bits
+   * and is validated against the output encoding below; reserved[1..] stay
+   * zero-only. */
+  if (descriptor->reserved[1] != 0U || descriptor->reserved[2] != 0U ||
+      descriptor->reserved[3] != 0U) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_RESERVED_NONZERO,
         "elementwise descriptor reserved fields must be zero");
@@ -205,21 +279,44 @@ validate_and_copy_descriptor(const sllm_elementwise_desc_t *const descriptor,
   }
 
   sllm_status_t status =
-      validate_tensor(descriptor->input0, &metadata->input0, sink);
+      validate_tensor(descriptor->input0, false, descriptor->operation,
+                      &metadata->input0, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
   if (descriptor->operation != SLLM_ELEMENTWISE_OPERATION_COPY) {
-    status = validate_tensor(descriptor->input1, &metadata->input1, sink);
+    status = validate_tensor(descriptor->input1, false, descriptor->operation,
+                             &metadata->input1, sink);
     if (status != SLLM_STATUS_OK) {
       return status;
     }
   } else {
     metadata->input1 = {};
   }
-  status = validate_tensor(descriptor->output, &metadata->output, sink);
+  status = validate_tensor(descriptor->output, true, descriptor->operation,
+                           &metadata->output, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
+  }
+  const sllm_public_runtime::PrequantMode prequant_mode =
+      sllm_public_runtime::prequant_mode_from_binding(
+          descriptor->output.dtype, descriptor->output.encoding);
+  metadata->output_prequant = static_cast<uint32_t>(prequant_mode);
+  metadata->input_global_scale_f32_bits = descriptor->reserved[0];
+  float input_global_scale = 0.0F;
+  std::memcpy(&input_global_scale, &descriptor->reserved[0],
+              sizeof(input_global_scale));
+  if (prequant_mode == sllm_public_runtime::PrequantMode::Nvfp4Block16) {
+    if (!std::isfinite(input_global_scale) || input_global_scale <= 0.0F) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "elementwise NVFP4 output requires a finite positive input global "
+          "scale in reserved[0]");
+    }
+  } else if (descriptor->reserved[0] != 0U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_RESERVED_NONZERO,
+        "elementwise descriptor reserved fields must be zero");
   }
   const bool scalar_input =
       descriptor->operation == SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL ||

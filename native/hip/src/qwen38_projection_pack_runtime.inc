@@ -452,9 +452,14 @@ void initialize_qwen38_projection_pack_dispatch_info(
   info->info_version = info_version;
   info->backend = 1U;
   info->dispatch_id = dispatch_id;
-  info->dispatch_count = 3U;
   const bool fp8_gdn =
       qwen38_projection_pack_fp8_gdn_role(plan->qwen38_projection_pack2_role);
+  const bool prequantized_nvfp4 =
+      !fp8_gdn &&
+      plan->qwen38_projection_pack2_metadata[0].activation_prequant ==
+          static_cast<uint32_t>(
+              sllm_public_runtime::PrequantMode::Nvfp4Block16);
+  info->dispatch_count = prequantized_nvfp4 ? 2U : 3U;
   uint64_t nvfp4_workspace_bytes = 0U;
   uint32_t nvfp4_quantize_grid = 0U;
   uint64_t fp8_gdn_workspace_bytes = 0U;
@@ -470,7 +475,7 @@ void initialize_qwen38_projection_pack_dispatch_info(
             &fp8_gdn_quantize_grid)) {
       return;
     }
-  } else {
+  } else if (!prequantized_nvfp4) {
     if (!qwen38_projection_pack_nvfp4_workspace_bytes(
             plan->qwen38_projection_pack2_metadata[0].m,
             plan->qwen38_projection_pack2_metadata[0].k,
@@ -488,7 +493,9 @@ void initialize_qwen38_projection_pack_dispatch_info(
           : SLLM_HIP_QWEN38_PROJECTION_PACK2_KERNEL_ID_NVFP4_SHARED_ACTIVATION_V1;
   info->workgroup_size_x = 256U;
   const uint32_t quantize_grid =
-      fp8_gdn ? fp8_gdn_quantize_grid : nvfp4_quantize_grid;
+      prequantized_nvfp4
+          ? 0U
+          : (fp8_gdn ? fp8_gdn_quantize_grid : nvfp4_quantize_grid);
   const uint32_t compute_grid0 = qwen38_projection_pack_compute_grid(
       plan->qwen38_projection_pack2_kernel_variants[0],
       plan->qwen38_projection_pack2_metadata[0].m,
@@ -511,17 +518,20 @@ void initialize_qwen38_projection_pack_dispatch_info(
   info->output_elements =
       plan->qwen38_projection_pack2_metadata[0].output_elements +
       plan->qwen38_projection_pack2_metadata[1].output_elements;
-  info->workspace_bytes =
-      fp8_gdn ? fp8_gdn_workspace_bytes : nvfp4_workspace_bytes;
+  info->workspace_bytes = plan->matmul_workspace_bytes;
   info->role = plan->qwen38_projection_pack2_role;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, sizeof(info->kernel_symbol),
       fp8_gdn ? "qwen38.projection_pack2.fp8_gdn.shared_activation.v1"
-              : kQwen38ProjectionPackLogicalKernelId);
+              : (prequantized_nvfp4 ? "qwen38.projection_pack2.nvfp4.shared_"
+                                      "activation.prequantized.v1"
+                                    : kQwen38ProjectionPackLogicalKernelId));
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, sizeof(info->device_symbol),
       fp8_gdn ? "sllm_qwen38_projection_pack2_fp8_gdn_shared_activation_v1"
-              : kQwen38ProjectionPackDeviceSymbol);
+              : (prequantized_nvfp4 ? "sllm_qwen38_projection_pack2_nvfp4_"
+                                      "shared_activation_prequantized_v1"
+                                    : kQwen38ProjectionPackDeviceSymbol));
   sllm_public_runtime::copy_fixed_string(
       info->gcn_arch_name, sizeof(info->gcn_arch_name), arch_name);
 }
@@ -635,6 +645,16 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
           "Qwen3.8 projection-pack NVFP4 members require one BF16 M=1, M=2..4, "
           "or M>=64 activation K and compatible block scales");
     }
+    const bool prequantized_nvfp4 =
+        !fp8_gdn && metadata[0].activation_prequant ==
+                        static_cast<uint32_t>(
+                            sllm_public_runtime::PrequantMode::Nvfp4Block16);
+    if (!fp8_gdn &&
+        metadata[1].activation_prequant != metadata[0].activation_prequant) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED_ENCODING,
+          "Qwen3.8 projection-pack activation prequant modes differ");
+    }
     // The baseline pack path is directly admitted only for the existing M=1
     // pair. Keep the established M>=64 fallback-to-member behavior intact,
     // while applying the standalone baseline reference scope to an admitted
@@ -664,7 +684,7 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_prepare(
             "Qwen3.8 projection-pack FP8 GDN M*K exceeds workspace or "
             "quantizer grid range");
       }
-    } else {
+    } else if (!prequantized_nvfp4) {
       uint32_t quantize_grid = 0U;
       if (!qwen38_projection_pack_nvfp4_quantize_grid(
               metadata[0].m, metadata[0].k, &quantize_grid)) {
@@ -1389,12 +1409,18 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
         return reinterpret_cast<uint16_t *>(
             static_cast<uint8_t *>(buffer->device_pointer) + offset);
       };
+      const bool prequantized_nvfp4 =
+          !fp8_gdn &&
+          plan->qwen38_projection_pack2_metadata[0].activation_prequant ==
+              static_cast<uint32_t>(
+                  sllm_public_runtime::PrequantMode::Nvfp4Block16);
       // M=1 and M=3 use read-only prequantized activation/scales in each
       // member. Larger variants may write shared reduction scratch and retain
       // their ordered capture. The prepared pack rejects output/input overlap.
       // gfx1030 improves for NVFP4 M=1/3 and FP8 M=1. FP8 M=3 has
       // regressing measurement rounds; gfx1201 also retains serial
-      // dependencies.
+      // dependencies. With producer-prequantized activation the upstream
+      // producer is the captured root frontier instead of a pack quantizer.
       ProjectionPackCaptureFork capture_fork(
           queue, std::strcmp(arch_name, "gfx1030") == 0 &&
                      (projection_m == 1U || (!fp8_gdn && projection_m == 3U)));
@@ -1470,28 +1496,40 @@ extern "C" sllm_status_t sllm_qwen38_projection_pack2_execute(
             launch_status = capture_fork.member_complete(index);
         }
       } else {
-        auto *const packed_activation = workspace;
         const auto &gate = plan->qwen38_projection_pack2_metadata[0];
+        const auto *const shared_input_tensor_scale =
+            reinterpret_cast<const float *>(
+                weight_pointer(plan->qwen38_projection_pack2_weights[0],
+                               gate.input_tensor_scale_offset));
+        const uint8_t *packed_activation = nullptr;
+        const uint8_t *activation_block_scales = nullptr;
         uint64_t packed_activation_bytes = 0U;
         if (!qwen38_projection_pack_nvfp4_packed_activation_bytes(
                 gate.m, gate.k, &packed_activation_bytes)) {
           launch_status = hipErrorInvalidValue;
         } else {
-          // The quantizer writes all M packed rows before the scale plane;
-          // using one-row bytes here aliases scales with rows M>1.
-          auto *const activation_block_scales =
-              workspace + packed_activation_bytes;
-          const auto *const shared_input_tensor_scale =
-              reinterpret_cast<const float *>(
-                  weight_pointer(plan->qwen38_projection_pack2_weights[0],
-                                 gate.input_tensor_scale_offset));
-          const lowp_status_t quantize_status = lowp_quantize_activation(
-              &plan->qwen38_projection_pack2_lowp_plans[0], activation,
-              packed_activation, activation_block_scales,
-              shared_input_tensor_scale, queue->stream);
-          launch_status = quantize_status == LOWP_SUCCESS
-                              ? hipSuccess
-                              : hipErrorInvalidValue;
+          if (prequantized_nvfp4) {
+            packed_activation = reinterpret_cast<const uint8_t *>(
+                static_cast<const uint8_t *>(plan->input0->device_pointer) +
+                gate.activation.byte_offset);
+            activation_block_scales =
+                static_cast<const uint8_t *>(plan->input0->device_pointer) +
+                gate.activation_scale_offset;
+            launch_status = hipSuccess;
+          } else {
+            // The quantizer writes all M packed rows before the scale plane;
+            // using one-row bytes here aliases scales with rows M>1.
+            packed_activation = workspace;
+            activation_block_scales = workspace + packed_activation_bytes;
+            const lowp_status_t quantize_status = lowp_quantize_activation(
+                &plan->qwen38_projection_pack2_lowp_plans[0], activation,
+                const_cast<uint8_t *>(packed_activation),
+                const_cast<uint8_t *>(activation_block_scales),
+                shared_input_tensor_scale, queue->stream);
+            launch_status = quantize_status == LOWP_SUCCESS
+                                ? hipSuccess
+                                : hipErrorInvalidValue;
+          }
           if (launch_status == hipSuccess)
             launch_status = capture_fork.begin();
           for (uint32_t index = 0U; launch_status == hipSuccess && index != 2U;

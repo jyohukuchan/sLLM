@@ -73,6 +73,11 @@ impl ResidualRmsNormDescriptor {
                 "fused contract absent",
             )
         })?;
+        let mut reserved = [0_u32; 3];
+        // reserved[0] carries the raw FP32 bits of the per-weight activation
+        // tensor scale an Encoding-B normalized output needs; it stays `0`
+        // for legacy BF16 and Encoding A. reserved[1..] must remain zero.
+        reserved[0] = self.semantic.activation_quant_scale_bits();
         Ok(sys::sllm_residual_rmsnorm_desc_t {
             struct_size: size_of::<sys::sllm_residual_rmsnorm_desc_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
@@ -84,7 +89,7 @@ impl ResidualRmsNormDescriptor {
             },
             alias_policy: sys::SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP,
             epsilon_bits: contract.epsilon().bits(),
-            reserved: [0; 3],
+            reserved,
             residual: self.residual.raw()?,
             addend: self.addend.raw()?,
             raw_scale: self.raw_scale.raw()?,

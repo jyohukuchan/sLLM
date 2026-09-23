@@ -13,8 +13,9 @@ use crate::model::{
     TensorDescriptor, reviewed_qwen35_spec,
 };
 use crate::op::{
-    AttentionPreprocessPositionPayloadModeV1, OpError, Qwen38ProjectionPackContractV1,
-    RmsNormScaleMode, SemanticOpDescriptor, SemanticOpKind, SparseMoeContract,
+    ActivationQuantFormat, AttentionPreprocessPositionPayloadModeV1, OpError,
+    Qwen38ProjectionPackContractV1, RmsNormScaleMode, SemanticOpDescriptor, SemanticOpKind,
+    SparseMoeContract,
 };
 use crate::qwen35_moe::{
     QWEN35_MOE_LAYER_BLOB_BYTES, QWEN35_MOE_MODEL_FINGERPRINT, VerifiedGgufQwen35Moe,
@@ -46,6 +47,9 @@ pub const QWEN_RUNTIME_MAX_CONTEXT_TOKENS: u64 = u32::MAX as u64;
 pub const QWEN35_LAYER_COUNT: usize = 32;
 pub const QWEN35_REQUIRED_WEIGHT_COUNT: usize = 426;
 pub const QWEN35_PLAN_ENTRY_COUNT: usize = 738;
+/// First Stage 9 candidate: number of rows retained by the MTP-only draft
+/// output projection.  The target graph continues to use the full vocabulary.
+pub const QWEN38_MTP_DRAFT_VOCAB_SIZE: usize = 98_304;
 
 #[derive(Clone, Copy, Debug)]
 struct QwenGraphDimensions {
@@ -170,6 +174,55 @@ pub enum QwenGraphError {
     UnsupportedDType(TensorDType),
     Tensor(TensorError),
     Operation(OpError),
+}
+
+/// Validate the immutable, ID-ordered vocabulary selected for the Qwen3.8
+/// MTP draft head.  The caller remains responsible for verifying the artifact
+/// identity and SHA; this boundary only checks the decoded bytes and the
+/// graph-level vocabulary contract.
+pub fn validate_qwen38_mtp_draft_vocabulary_ids(ids: &[u32]) -> Result<Vec<u32>, QwenGraphError> {
+    if ids.is_empty() {
+        return Err(QwenGraphError::InvalidPlan(
+            "Qwen3.8 MTP draft vocabulary is empty".to_owned(),
+        ));
+    }
+    if ids.len() > QWEN35_VOCAB_SIZE {
+        return Err(QwenGraphError::InvalidPlan(format!(
+            "Qwen3.8 MTP draft vocabulary has too many rows: {} > {}",
+            ids.len(),
+            QWEN35_VOCAB_SIZE
+        )));
+    }
+    if ids.windows(2).any(|window| window[0] >= window[1]) {
+        return Err(QwenGraphError::InvalidPlan(
+            "Qwen3.8 MTP draft vocabulary must be strictly increasing".to_owned(),
+        ));
+    }
+    if ids
+        .iter()
+        .any(|&id| usize::try_from(id).map_or(true, |id| id >= QWEN35_VOCAB_SIZE))
+    {
+        return Err(QwenGraphError::InvalidPlan(
+            "Qwen3.8 MTP draft vocabulary contains an out-of-range token ID".to_owned(),
+        ));
+    }
+    Ok(ids.to_vec())
+}
+
+/// Decode the raw little-endian u32 payload emitted by the model-side Stage 9
+/// vocabulary tool, then apply the same sorted/unique/range validation as the
+/// graph builder.
+pub fn decode_qwen38_mtp_draft_vocabulary_le(bytes: &[u8]) -> Result<Vec<u32>, QwenGraphError> {
+    if bytes.len() % std::mem::size_of::<u32>() != 0 {
+        return Err(QwenGraphError::InvalidPlan(
+            "Qwen3.8 MTP draft vocabulary bytes are not u32-aligned".to_owned(),
+        ));
+    }
+    let ids = bytes
+        .chunks_exact(std::mem::size_of::<u32>())
+        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect::<Vec<_>>();
+    validate_qwen38_mtp_draft_vocabulary_ids(&ids)
 }
 
 impl fmt::Display for QwenGraphError {
@@ -622,6 +675,9 @@ pub struct QwenGraph {
     states: Vec<QwenGraphState>,
     total_state_bytes: u64,
     fp8_sidecar_fingerprint: Option<String>,
+    /// Sorted source vocabulary IDs when this is a reduced MTP draft head.
+    /// `None` means the graph's output projection spans the full vocabulary.
+    draft_vocab_ids: Option<Vec<u32>>,
     mtp: bool,
     multimodal: bool,
     position_payload_mode: AttentionPreprocessPositionPayloadModeV1,
@@ -640,6 +696,16 @@ impl QwenGraph {
 
     pub fn fp8_sidecar_fingerprint(&self) -> Option<&str> {
         self.fp8_sidecar_fingerprint.as_deref()
+    }
+
+    pub fn draft_vocab_ids(&self) -> Option<&[u32]> {
+        self.draft_vocab_ids.as_deref()
+    }
+
+    pub fn draft_vocab_size(&self) -> usize {
+        self.draft_vocab_ids
+            .as_ref()
+            .map_or(QWEN35_VOCAB_SIZE, Vec::len)
     }
 
     pub const fn is_mtp(&self) -> bool {
@@ -726,7 +792,10 @@ impl QwenGraph {
     ///
     /// Unrelated Qwen graphs return `Ok(None)`. Once the exact model and
     /// recipe identities match, any structural, encoding, or scale mismatch
-    /// is an error rather than a partially usable plan.
+    /// is an error rather than a partially usable plan. Individual packs are
+    /// skipped (not an error) when stage-7 producer quantization has already
+    /// retyped their shared activation, because such a pack can no longer
+    /// consume one legacy BF16 activation.
     pub fn plan_unsloth_qwen38_projection_pack_reuse(
         &self,
         artifact: &VerifiedUnslothQwen38Nvfp4,
@@ -766,6 +835,19 @@ impl QwenGraph {
         }
 
         let mut packs = Vec::with_capacity(128);
+        let mut skipped = [0_usize; 4];
+        let mut record = |kind: Qwen38ProjectionPackKind, pack: Option<Qwen38ProjectionPack>| {
+            let index = match kind {
+                Qwen38ProjectionPackKind::Nvfp4MlpGateUp => 0,
+                Qwen38ProjectionPackKind::Fp8MlpGateUp => 1,
+                Qwen38ProjectionPackKind::Fp8FullAttentionQkv => 2,
+                Qwen38ProjectionPackKind::Fp8GdnQkvZ => 3,
+            };
+            match pack {
+                Some(pack) => packs.push(pack),
+                None => skipped[index] += 1,
+            }
+        };
         for layer in 0..64_u32 {
             let (kind, expected_dtype, expected_encoding) = if layer < 56 {
                 (
@@ -783,19 +865,21 @@ impl QwenGraph {
                     qwen38_fp8_projection_encoding(),
                 )
             };
-            packs.push(self.build_qwen38_projection_pack(
+            let pack = self.build_qwen38_projection_pack(
                 layer,
                 kind,
                 &[WeightConsumer::MlpGate, WeightConsumer::MlpUp],
                 expected_dtype,
                 expected_encoding,
                 &mut nvfp4_input_scale_bits,
-            )?);
+            )?;
+            record(kind, pack);
 
             if (layer + 1) % 4 == 0 {
-                packs.push(self.build_qwen38_projection_pack(
+                let kind = Qwen38ProjectionPackKind::Fp8FullAttentionQkv;
+                let pack = self.build_qwen38_projection_pack(
                     layer,
-                    Qwen38ProjectionPackKind::Fp8FullAttentionQkv,
+                    kind,
                     &[
                         WeightConsumer::AttentionQ,
                         WeightConsumer::AttentionK,
@@ -804,16 +888,19 @@ impl QwenGraph {
                     DType::F8E4M3Fn,
                     qwen38_fp8_projection_encoding(),
                     &mut nvfp4_input_scale_bits,
-                )?);
+                )?;
+                record(kind, pack);
             } else {
-                packs.push(self.build_qwen38_projection_pack(
+                let kind = Qwen38ProjectionPackKind::Fp8GdnQkvZ;
+                let pack = self.build_qwen38_projection_pack(
                     layer,
-                    Qwen38ProjectionPackKind::Fp8GdnQkvZ,
+                    kind,
                     &[WeightConsumer::GdnInProjQkv, WeightConsumer::GdnInProjZ],
                     DType::F8E4M3Fn,
                     qwen38_fp8_projection_encoding(),
                     &mut nvfp4_input_scale_bits,
-                )?);
+                )?;
+                record(kind, pack);
             }
         }
 
@@ -827,9 +914,12 @@ impl QwenGraph {
             counts[index] += 1;
             counts
         });
-        if counts != [56, 8, 16, 48] {
+        // Every expected pack is either planned or deliberately skipped
+        // because stage-7 retyped its shared activation, never dropped.
+        let planned: [usize; 4] = std::array::from_fn(|index| counts[index] + skipped[index]);
+        if planned != [56, 8, 16, 48] {
             return Err(QwenGraphError::InvalidPlan(format!(
-                "Qwen3.8 projection-pack counts differ: {counts:?}"
+                "Qwen3.8 projection-pack counts differ: {planned:?} planned+skipped"
             )));
         }
         Ok(Some(Qwen38ProjectionPackReusePlan {
@@ -838,6 +928,11 @@ impl QwenGraph {
         }))
     }
 
+    /// Builds one projection pack, or returns `Ok(None)` when stage-7
+    /// producer quantization has retyped the shared activation: the pack
+    /// kernel consumes legacy BF16 values it quantizes itself, so a
+    /// prequantized activation makes this pack inapplicable rather than
+    /// malformed.
     fn build_qwen38_projection_pack<F>(
         &self,
         layer: u32,
@@ -846,7 +941,7 @@ impl QwenGraph {
         expected_weight_dtype: DType,
         expected_weight_encoding: Encoding,
         nvfp4_input_scale_bits: &mut F,
-    ) -> Result<Qwen38ProjectionPack, QwenGraphError>
+    ) -> Result<Option<Qwen38ProjectionPack>, QwenGraphError>
     where
         F: FnMut(&str) -> Option<u32>,
     {
@@ -892,9 +987,20 @@ impl QwenGraph {
                     "Qwen3.8 projection operation/view differs: {consumer:?}"
                 )));
             }
-            if activation.view.dtype() != DType::Bf16
-                || activation.view.encoding() != Encoding::Unquantized
-                || activation.view.shape() != [self.token_count as usize, 5120]
+            if !crate::op::is_legacy_bf16(&activation.view) {
+                let encoded = crate::op::activation_quant_format(&activation.view);
+                let accepted = kind == Qwen38ProjectionPackKind::Nvfp4MlpGateUp
+                    && encoded == Some(ActivationQuantFormat::Nvfp4Block16);
+                if !accepted {
+                    if encoded.is_some() {
+                        return Ok(None);
+                    }
+                    return Err(QwenGraphError::InvalidPlan(format!(
+                        "Qwen3.8 projection encoding or activation view differs: {consumer:?}"
+                    )));
+                }
+            }
+            if activation.view.shape() != [self.token_count as usize, 5120]
                 || weight.view.dtype() != expected_weight_dtype
                 || weight.view.encoding() != expected_weight_encoding
             {
@@ -958,7 +1064,7 @@ impl QwenGraph {
                 Qwen38ProjectionPackVariant::Fp8W8A8DynamicPerTokenE4M3Fn
             }
         };
-        Ok(Qwen38ProjectionPack {
+        Ok(Some(Qwen38ProjectionPack {
             kind,
             layer,
             activation_tensor_id: activation_tensor_id.ok_or_else(|| {
@@ -969,7 +1075,7 @@ impl QwenGraph {
             })?,
             variant,
             members,
-        })
+        }))
     }
 
     fn qwen38_projection_node(
@@ -1073,6 +1179,48 @@ impl QwenGraph {
                     "Qwen3.8 projection-pack activation view differs from the verified plan"
                         .to_owned(),
                 ));
+            }
+            if pack.kind() == Qwen38ProjectionPackKind::Nvfp4MlpGateUp
+                && crate::op::activation_quant_format(&activation.view)
+                    == Some(ActivationQuantFormat::Nvfp4Block16)
+            {
+                let source_scale_bits =
+                    pack.variant()
+                        .input_global_scale_f32_bits()
+                        .ok_or_else(|| {
+                            QwenGraphError::InvalidPlan(
+                                "Qwen3.8 NVFP4 projection-pack scale is absent".to_owned(),
+                            )
+                        })?;
+                let producer = self
+                    .nodes
+                    .iter()
+                    .find(|node| node.outputs().contains(&pack.activation_tensor_id()))
+                    .ok_or_else(|| {
+                        QwenGraphError::InvalidPlan(
+                            "Qwen3.8 prequantized projection activation has no producer".to_owned(),
+                        )
+                    })?;
+                let producer_operation = producer.operation().ok_or_else(|| {
+                    QwenGraphError::InvalidPlan(
+                        "Qwen3.8 prequantized projection activation producer is not semantic"
+                            .to_owned(),
+                    )
+                })?;
+                // The source artifact stores the encoding scale, while the
+                // resident weight plane and activation quantizer use its
+                // FP32 reciprocal. Compare the producer to the resident
+                // value, exactly as weight upload materializes it.
+                let resident_scale = 1.0_f32 / f32::from_bits(source_scale_bits);
+                if !resident_scale.is_finite()
+                    || resident_scale <= 0.0
+                    || producer_operation.activation_quant_scale_bits() != resident_scale.to_bits()
+                {
+                    return Err(QwenGraphError::InvalidPlan(format!(
+                        "Qwen3.8 NVFP4 projection-pack scale differs from producer: layer {}",
+                        pack.layer()
+                    )));
+                }
             }
             let expected_roles = match pack.kind() {
                 Qwen38ProjectionPackKind::Nvfp4MlpGateUp => {
@@ -1341,6 +1489,14 @@ impl QwenGraph {
             if let Some(pair) = plan.pair_for_add(cursor) {
                 let add = &self.nodes[pair.add_index()];
                 let norm = &self.nodes[pair.norm_index()];
+                // The pair's explicit scale field and the fused descriptor
+                // must agree: the rewrite propagates the RMSNorm side's
+                // Encoding-B scale, never invents or drops one.
+                debug_assert_eq!(
+                    pair.activation_quant_scale_bits(),
+                    pair.operation().activation_quant_scale_bits(),
+                    "residual rewrite lost the activation quantization scale"
+                );
                 let label = if norm.label == "final_rmsnorm" {
                     norm.label.clone()
                 } else {
@@ -1838,6 +1994,7 @@ fn build_qwen35_graph_with_kv_cache_descriptor_and_position_payload_mode(
         fp8_dtype: None,
         quantized_weight_encoding: None,
         quantized_weight_encodings: BTreeMap::new(),
+        activation_quant_scales: BTreeMap::new(),
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding,
         mtp: false,
@@ -2006,6 +2163,7 @@ fn build_qwen35_moe_execution_graph_config(
         fp8_dtype: None,
         quantized_weight_encoding: None,
         quantized_weight_encodings: BTreeMap::new(),
+        activation_quant_scales: BTreeMap::new(),
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         mtp: false,
@@ -2096,6 +2254,7 @@ pub fn build_qwen35_multimodal_graph(
         fp8_dtype: None,
         quantized_weight_encoding: None,
         quantized_weight_encodings: BTreeMap::new(),
+        activation_quant_scales: BTreeMap::new(),
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         mtp: false,
@@ -2140,6 +2299,7 @@ pub fn build_qwen35_mtp_graph(
         fp8_dtype: None,
         quantized_weight_encoding: None,
         quantized_weight_encodings: BTreeMap::new(),
+        activation_quant_scales: BTreeMap::new(),
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         mtp: true,
@@ -2194,6 +2354,29 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_token_count(
     )
 }
 
+/// Build the Qwen3.8 MTP graph with a verified, ID-ordered draft vocabulary.
+/// Only the draft output projection is reduced; embedding and all target
+/// graphs retain the full vocabulary.
+pub fn build_qwen38_nvfp4_mtp_graph_with_vocabulary_ids(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    artifact: &VerifiedUnslothQwen38Nvfp4,
+    state_capacity: u64,
+    kv_cache_encoding: crate::KvCacheEncoding,
+    vocabulary_ids: &[u32],
+) -> Result<QwenGraph, QwenGraphError> {
+    build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
+        lock,
+        plan,
+        artifact,
+        state_capacity,
+        kv_cache_encoding,
+        1_024,
+        None,
+        vocabulary_ids,
+    )
+}
+
 /// Build the one-layer Qwen3.8 companion graph, optionally replacing the
 /// eight matrix weights with a verified MXFP8/MXFP6 sidecar.  The shared
 /// embedding and output projection remain bound to the reviewed artifact;
@@ -2208,6 +2391,35 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_companion(
     token_count: u64,
     companion: Option<&crate::VerifiedQwen38MtpQuantizedSidecar>,
 ) -> Result<QwenGraph, QwenGraphError> {
+    build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
+        lock,
+        plan,
+        artifact,
+        state_capacity,
+        kv_cache_encoding,
+        token_count,
+        companion,
+        &[],
+    )
+}
+
+/// Companion graph constructor used by Stage 9 callers that provide a
+/// verified reduced vocabulary. An empty slice preserves the full-vocabulary
+/// companion behavior of the compatibility constructor above.
+#[allow(clippy::too_many_arguments)]
+pub fn build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    artifact: &VerifiedUnslothQwen38Nvfp4,
+    state_capacity: u64,
+    kv_cache_encoding: crate::KvCacheEncoding,
+    token_count: u64,
+    companion: Option<&crate::VerifiedQwen38MtpQuantizedSidecar>,
+    vocabulary_ids: &[u32],
+) -> Result<QwenGraph, QwenGraphError> {
+    let draft_vocab_ids = (!vocabulary_ids.is_empty())
+        .then(|| validate_qwen38_mtp_draft_vocabulary_ids(vocabulary_ids))
+        .transpose()?;
     if token_count == 0 {
         return Err(QwenGraphError::ZeroTokenCount);
     }
@@ -2341,7 +2553,7 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_companion(
     let fp8_sidecar_fingerprint = companion
         .map(|sidecar| sidecar.combined_recipe_digest(artifact.recipe_digest()))
         .or_else(|| Some(artifact.recipe_digest().to_owned()));
-    GraphBuilder::new(GraphBuilderConfig {
+    let builder = GraphBuilder::new(GraphBuilderConfig {
         layer_types: lock.model.architecture.text_config.layer_types.clone(),
         dimensions,
         token_count,
@@ -2354,14 +2566,19 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_companion(
         fp8_dtype,
         quantized_weight_encoding: None,
         quantized_weight_encodings,
+        activation_quant_scales: BTreeMap::new(),
         fp8_sidecar_fingerprint,
         kv_cache_encoding,
         mtp: true,
         multimodal: false,
         moe: false,
         position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
-    })?
-    .build()
+    })?;
+    let builder = match draft_vocab_ids.as_deref() {
+        Some(ids) => builder.with_draft_vocab_ids(ids)?,
+        None => builder,
+    };
+    builder.build()
 }
 
 /// Build the same production Qwen3.5 graph with every text-linear weight that
@@ -2502,6 +2719,7 @@ pub fn build_qwen35_gguf_fp8_graph(
             resident: Fp8ResidentRepresentation::PackedBytes,
         }),
         quantized_weight_encodings: BTreeMap::new(),
+        activation_quant_scales: BTreeMap::new(),
         fp8_sidecar_fingerprint: source.recipe_digest().map(ToOwned::to_owned),
         kv_cache_encoding,
         mtp: false,
@@ -2662,6 +2880,7 @@ pub fn build_qwen35_gguf_mx_weight_activation_graph(
         fp8_dtype: Some(dtype),
         quantized_weight_encoding: Some(encoding),
         quantized_weight_encodings: BTreeMap::new(),
+        activation_quant_scales: BTreeMap::new(),
         fp8_sidecar_fingerprint: source.recipe_digest().map(ToOwned::to_owned),
         kv_cache_encoding,
         mtp: false,
@@ -2794,6 +3013,7 @@ pub fn build_qwen35_gguf_mixed_graph(
         fp8_dtype: Some(DType::F8E4M3Fn),
         quantized_weight_encoding: None,
         quantized_weight_encodings: encodings,
+        activation_quant_scales: BTreeMap::new(),
         fp8_sidecar_fingerprint: source.recipe_digest().map(ToOwned::to_owned),
         kv_cache_encoding,
         mtp: false,
@@ -2856,6 +3076,7 @@ pub fn build_qwen35_unsloth_qwen38_nvfp4_graph(
         .collect();
     let mut tensor_names = BTreeSet::new();
     let mut encodings = BTreeMap::new();
+    let mut activation_quant_scales = BTreeMap::new();
     for tensor in artifact.tensors() {
         let Some(encoding) = (match tensor.encoding {
             crate::QuantizedTensorEncoding::Nvfp4E2M1Block16E4M3FnF32Outer => {
@@ -2891,6 +3112,34 @@ pub fn build_qwen35_unsloth_qwen38_nvfp4_graph(
             )));
         }
         encodings.insert(tensor.logical_name.clone(), encoding);
+        // The source plane is an encoding scale; the resident weight upload
+        // stores its FP32 reciprocal. The producer must use that same
+        // resident value to match the decomposed activation quantizer.
+        if matches!(encoding, Encoding::Nvfp4W4A4 { .. }) {
+            let bits = artifact
+                .nvfp4_input_global_scale_f32_bits(tensor.logical_name.as_str())
+                .ok_or_else(|| {
+                    QwenGraphError::InvalidPlan(format!(
+                        "Qwen3.8 NVFP4 input-global scale is absent: {}",
+                        tensor.logical_name
+                    ))
+                })?;
+            let scale = f32::from_bits(bits);
+            if !scale.is_finite() || scale <= 0.0 {
+                return Err(QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 NVFP4 input-global scale is invalid: {}",
+                    tensor.logical_name
+                )));
+            }
+            let resident_scale = 1.0_f32 / scale;
+            if !resident_scale.is_finite() || resident_scale <= 0.0 {
+                return Err(QwenGraphError::InvalidPlan(format!(
+                    "Qwen3.8 NVFP4 reciprocal input-global scale is invalid: {}",
+                    tensor.logical_name
+                )));
+            }
+            activation_quant_scales.insert(tensor.logical_name.clone(), resident_scale.to_bits());
+        }
     }
     let expected: BTreeSet<_> = bindings
         .iter()
@@ -2917,6 +3166,7 @@ pub fn build_qwen35_unsloth_qwen38_nvfp4_graph(
         fp8_dtype: Some(DType::F8E4M3Fn),
         quantized_weight_encoding: None,
         quantized_weight_encodings: encodings,
+        activation_quant_scales,
         fp8_sidecar_fingerprint: Some(artifact.recipe_digest().to_owned()),
         kv_cache_encoding,
         mtp: false,
@@ -2962,119 +3212,6 @@ pub fn build_qwen35_fp8_fnuz_graph(
         DType::F8E4M3FnuZ,
         crate::KvCacheEncoding::Fp16,
     )
-}
-
-/// Build the production Qwen3.5 graph with every text-linear weight in a
-/// verified weight-only NVFP4 sidecar represented as packed E2M1 plus
-/// block16 E4M3FN and tensor FP32 scales.
-pub fn build_qwen35_nvfp4_graph(
-    lock: &ModelLock,
-    plan: &WeightLoadPlan,
-    sidecar: &crate::VerifiedNvfp4Sidecar,
-    token_count: u64,
-    state_capacity: u64,
-) -> Result<QwenGraph, QwenGraphError> {
-    build_qwen35_nvfp4_graph_with_kv_cache_encoding(
-        lock,
-        plan,
-        sidecar,
-        token_count,
-        state_capacity,
-        crate::KvCacheEncoding::Fp16,
-    )
-}
-
-/// Build a verified NVFP4-weight graph with an internally selected KV recipe.
-pub fn build_qwen35_nvfp4_graph_with_kv_cache_encoding(
-    lock: &ModelLock,
-    plan: &WeightLoadPlan,
-    sidecar: &crate::VerifiedNvfp4Sidecar,
-    token_count: u64,
-    state_capacity: u64,
-    kv_cache_encoding: crate::KvCacheEncoding,
-) -> Result<QwenGraph, QwenGraphError> {
-    if sidecar.source_lock_fingerprint() != lock.fingerprint() {
-        return Err(QwenGraphError::InvalidModel(
-            "NVFP4 sidecar source identity differs from the model lock".to_owned(),
-        ));
-    }
-    let spec = validate_reviewed_model(lock)?;
-    let dimensions = QwenGraphDimensions::from_spec(spec)?;
-    if token_count == 0 {
-        return Err(QwenGraphError::ZeroTokenCount);
-    }
-    if state_capacity == 0 {
-        return Err(QwenGraphError::ZeroStateCapacity);
-    }
-    if token_count > state_capacity {
-        return Err(QwenGraphError::TokenCountExceedsCapacity {
-            token_count,
-            capacity: state_capacity,
-        });
-    }
-    if state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
-        return Err(QwenGraphError::CapacityExceedsMax {
-            capacity: state_capacity,
-            max_position: QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
-        });
-    }
-    let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
-    let by_name: BTreeMap<_, _> = bindings
-        .iter()
-        .map(|binding| (binding.tensor_name.as_str(), binding))
-        .collect();
-    let mut tensor_names = BTreeSet::new();
-    for tensor in sidecar.tensors() {
-        let binding = by_name.get(tensor.name.as_str()).ok_or_else(|| {
-            QwenGraphError::InvalidPlan(format!(
-                "NVFP4 sidecar tensor is not a required Qwen weight: {}",
-                tensor.name
-            ))
-        })?;
-        if tensor.shape.as_slice() != binding.shape.as_slice()
-            || !is_fp8_linear_consumer(binding.consumer.role)
-            || !tensor_names.insert(tensor.name.clone())
-        {
-            return Err(QwenGraphError::InvalidPlan(format!(
-                "NVFP4 sidecar tensor differs from its graph binding: {}",
-                tensor.name
-            )));
-        }
-    }
-    let expected: BTreeSet<_> = bindings
-        .iter()
-        .filter(|binding| is_fp8_linear_consumer(binding.consumer.role))
-        .map(|binding| binding.tensor_name.clone())
-        .collect();
-    if tensor_names != expected {
-        return Err(QwenGraphError::InvalidPlan(
-            "NVFP4 sidecar does not cover the exact text-linear weight set".to_owned(),
-        ));
-    }
-    GraphBuilder::new(GraphBuilderConfig {
-        layer_types: lock.model.architecture.text_config.layer_types.clone(),
-        dimensions,
-        token_count,
-        state_capacity,
-        bindings,
-        known_unconsumed,
-        model_fingerprint: lock.fingerprint().to_owned(),
-        plan_digest: *plan.digest(),
-        fp8_tensor_names: tensor_names,
-        fp8_dtype: Some(DType::U8),
-        quantized_weight_encoding: Some(Encoding::Nvfp4 {
-            block_size: 16,
-            scale_dtype: DType::F8E4M3Fn,
-        }),
-        quantized_weight_encodings: BTreeMap::new(),
-        fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
-        kv_cache_encoding,
-        mtp: false,
-        multimodal: false,
-        moe: false,
-        position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
-    })?
-    .build()
 }
 
 fn build_qwen35_fp8_graph_with_dtype(
@@ -3161,6 +3298,7 @@ fn build_qwen35_fp8_graph_with_dtype(
             resident: Fp8ResidentRepresentation::PackedBytes,
         }),
         quantized_weight_encodings: BTreeMap::new(),
+        activation_quant_scales: BTreeMap::new(),
         fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
         kv_cache_encoding,
         mtp: false,
@@ -4115,6 +4253,12 @@ struct GraphBuilderConfig {
     /// Unsloth Qwen3.8 NVFP4 checkpoint.  The legacy fields remain the
     /// compatibility path for homogeneous sidecars/recipes.
     quantized_weight_encodings: BTreeMap<String, Encoding>,
+    /// Raw FP32 bits of each NVFP4 weight's dynamic input-global activation
+    /// scale, keyed by the same weight tensor name as
+    /// `quantized_weight_encodings`. Producer ops whose output becomes
+    /// Encoding B read the scale of their consuming weight here; a missing
+    /// entry keeps the producer on legacy BF16.
+    activation_quant_scales: BTreeMap<String, u32>,
     fp8_sidecar_fingerprint: Option<String>,
     kv_cache_encoding: crate::KvCacheEncoding,
     mtp: bool,
@@ -4158,6 +4302,17 @@ fn qwen_kv_state_descriptor(
     descriptor.map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))
 }
 
+/// Which producer encodings a stage-7 activation retype may select.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProducerEncodingPolicy {
+    /// The contract fixes this producer to Encoding A, or legacy BF16 when
+    /// its consumers are not uniformly FP8-quantized.
+    EncodingAOnly,
+    /// Encoding A on FP8 consumers and Encoding B on NVFP4 W4A4 consumers,
+    /// with the consuming weight's input-global activation scale.
+    EncodingAOrB { scale_role: WeightConsumer },
+}
+
 struct GraphBuilder {
     layer_types: Vec<LayerType>,
     dimensions: QwenGraphDimensions,
@@ -4171,7 +4326,9 @@ struct GraphBuilder {
     fp8_dtype: Option<DType>,
     quantized_weight_encoding: Option<Encoding>,
     quantized_weight_encodings: BTreeMap<String, Encoding>,
+    activation_quant_scales: BTreeMap<String, u32>,
     fp8_sidecar_fingerprint: Option<String>,
+    draft_vocab_ids: Option<Vec<u32>>,
     kv_cache_encoding: crate::KvCacheEncoding,
     kv_fp8_block16_descriptor: Option<crate::KvFp8Block16Descriptor>,
     kv_mxfp8_descriptor: Option<crate::KvMxfp8Descriptor>,
@@ -4203,6 +4360,7 @@ impl GraphBuilder {
             fp8_dtype,
             quantized_weight_encoding,
             quantized_weight_encodings,
+            activation_quant_scales,
             fp8_sidecar_fingerprint,
             kv_cache_encoding,
             mtp,
@@ -4246,7 +4404,9 @@ impl GraphBuilder {
             fp8_dtype,
             quantized_weight_encoding,
             quantized_weight_encodings,
+            activation_quant_scales,
             fp8_sidecar_fingerprint,
+            draft_vocab_ids: None,
             kv_cache_encoding,
             kv_fp8_block16_descriptor: crate::KvFp8Block16Descriptor::canonical_for_encoding(
                 kv_cache_encoding,
@@ -4289,10 +4449,47 @@ impl GraphBuilder {
             states: self.states,
             total_state_bytes: self.total_state_bytes,
             fp8_sidecar_fingerprint: self.fp8_sidecar_fingerprint,
+            draft_vocab_ids: self.draft_vocab_ids,
             mtp: self.mtp,
             multimodal: self.multimodal,
             position_payload_mode: self.position_payload_mode,
         })
+    }
+
+    fn with_draft_vocab_ids(mut self, ids: &[u32]) -> Result<Self, QwenGraphError> {
+        if !self.mtp {
+            return Err(QwenGraphError::InvalidPlan(
+                "reduced vocabulary is only valid for an MTP graph".to_owned(),
+            ));
+        }
+        let ids = validate_qwen38_mtp_draft_vocabulary_ids(ids)?;
+        let binding = self
+            .bindings
+            .values_mut()
+            .find(|binding| {
+                binding.consumer.layer.is_none()
+                    && binding.consumer.role == WeightConsumer::OutputProjection
+            })
+            .ok_or_else(|| {
+                QwenGraphError::InvalidPlan(
+                    "reduced MTP vocabulary requires an untied output projection".to_owned(),
+                )
+            })?;
+        if binding.shape.len() != 2 || binding.shape[0] != self.dimensions.vocab {
+            return Err(QwenGraphError::InvalidPlan(
+                "MTP output projection does not have the full vocabulary shape".to_owned(),
+            ));
+        }
+        binding.shape[0] = u64::try_from(ids.len())
+            .map_err(|_| QwenGraphError::Overflow("MTP draft vocabulary rows"))?;
+        self.draft_vocab_ids = Some(ids);
+        Ok(self)
+    }
+
+    fn output_vocab(&self) -> u64 {
+        self.draft_vocab_ids
+            .as_ref()
+            .map_or(self.dimensions.vocab, |ids| ids.len() as u64)
     }
 
     fn build_states(&mut self) -> Result<(), QwenGraphError> {
@@ -4612,10 +4809,18 @@ impl GraphBuilder {
 
         let input_norm_key = key(layer, WeightConsumer::InputNorm);
         let input_norm_weight = self.weight_tensor(input_norm_key)?;
-        let normed = self.activation(
+        // The MTP layer is full attention; its q/k/v weights decide whether
+        // the normalized activation is retyped to Encoding A.
+        let (normed, _) = self.producer_activation(
             layer,
             "input_rmsnorm.output",
             &[self.token_count, self.dimensions.hidden],
+            &[
+                WeightConsumer::AttentionQ,
+                WeightConsumer::AttentionK,
+                WeightConsumer::AttentionV,
+            ],
+            ProducerEncodingPolicy::EncodingAOnly,
         )?;
         self.add_semantic(
             &format!("layer.{layer}.input_rmsnorm"),
@@ -4637,14 +4842,23 @@ impl GraphBuilder {
 
         let post_key = key(layer, WeightConsumer::PostAttentionNorm);
         let post_weight = self.weight_tensor(post_key)?;
-        let post_normed = self.activation(
+        let (post_normed, post_format) = self.producer_activation(
             layer,
             "post_attention_rmsnorm.output",
             &[self.token_count, self.dimensions.hidden],
+            &[WeightConsumer::MlpGate, WeightConsumer::MlpUp],
+            ProducerEncodingPolicy::EncodingAOrB {
+                scale_role: WeightConsumer::MlpGate,
+            },
         )?;
+        let post_scale_bits = if post_format == Some(ActivationQuantFormat::Nvfp4Block16) {
+            self.activation_quant_scale_bits(layer, WeightConsumer::MlpGate)
+        } else {
+            0
+        };
         self.add_semantic(
             &format!("layer.{layer}.post_attention_rmsnorm"),
-            SemanticOpDescriptor::new_rms_norm(
+            SemanticOpDescriptor::new_rms_norm_with_quant_scale(
                 vec![
                     self.tensors[attention_residual].view.clone(),
                     self.tensors[post_weight].view.clone(),
@@ -4652,6 +4866,7 @@ impl GraphBuilder {
                 vec![self.tensors[post_normed].view.clone()],
                 1.0e-6,
                 RmsNormScaleMode::OffsetOne,
+                post_scale_bits,
             )?,
             vec![attention_residual, post_weight],
             vec![post_normed],
@@ -4687,20 +4902,30 @@ impl GraphBuilder {
             WeightConsumer::MlpUp,
             layer,
         )?;
-        let silu = self.activation(
+        let (silu, silu_format) = self.producer_activation(
             layer,
             "mlp.silu_mul.output",
             &[self.token_count, self.dimensions.intermediate],
+            &[WeightConsumer::MlpDown],
+            ProducerEncodingPolicy::EncodingAOrB {
+                scale_role: WeightConsumer::MlpDown,
+            },
         )?;
+        let silu_scale_bits = if silu_format == Some(ActivationQuantFormat::Nvfp4Block16) {
+            self.activation_quant_scale_bits(layer, WeightConsumer::MlpDown)
+        } else {
+            0
+        };
         self.add_semantic(
             &format!("layer.{layer}.mlp_silu_mul"),
-            SemanticOpDescriptor::new(
+            SemanticOpDescriptor::new_with_quant_scale(
                 SemanticOpKind::SiluMul,
                 vec![
                     self.tensors[gate].view.clone(),
                     self.tensors[up].view.clone(),
                 ],
                 vec![self.tensors[silu].view.clone()],
+                silu_scale_bits,
             )?,
             vec![gate, up],
             vec![silu],
@@ -4777,7 +5002,7 @@ impl GraphBuilder {
         };
         let logits = self.add_tensor(
             logits_label,
-            view(DType::Bf16, &[self.token_count, self.dimensions.vocab])?,
+            view(DType::Bf16, &[self.token_count, self.output_vocab()])?,
         );
         self.add_matmul(
             output_label,
@@ -4904,10 +5129,23 @@ impl GraphBuilder {
                 layer: Some(layer_index as u64),
                 role: WeightConsumer::InputNorm,
             })?;
-            let normed = self.activation(
+            // LinearAttention layers pass an empty consumer set: their
+            // normalized activation feeds `linear.b_matmul` and
+            // `linear.a_matmul`, which keep reading legacy BF16.
+            let input_consumers: &[WeightConsumer] = match layer_type {
+                LayerType::FullAttention => &[
+                    WeightConsumer::AttentionQ,
+                    WeightConsumer::AttentionK,
+                    WeightConsumer::AttentionV,
+                ],
+                LayerType::LinearAttention => &[],
+            };
+            let (normed, _) = self.producer_activation(
                 layer,
                 "input_rmsnorm.output",
                 &[self.token_count, self.dimensions.hidden],
+                input_consumers,
+                ProducerEncodingPolicy::EncodingAOnly,
             )?;
             let norm_op = SemanticOpDescriptor::new_rms_norm(
                 vec![
@@ -4939,12 +5177,21 @@ impl GraphBuilder {
                 layer: Some(layer_index as u64),
                 role: WeightConsumer::PostAttentionNorm,
             })?;
-            let post_normed = self.activation(
+            let (post_normed, post_format) = self.producer_activation(
                 layer,
                 "post_attention_rmsnorm.output",
                 &[self.token_count, self.dimensions.hidden],
+                &[WeightConsumer::MlpGate, WeightConsumer::MlpUp],
+                ProducerEncodingPolicy::EncodingAOrB {
+                    scale_role: WeightConsumer::MlpGate,
+                },
             )?;
-            let post_op = SemanticOpDescriptor::new_rms_norm(
+            let post_scale_bits = if post_format == Some(ActivationQuantFormat::Nvfp4Block16) {
+                self.activation_quant_scale_bits(layer, WeightConsumer::MlpGate)
+            } else {
+                0
+            };
+            let post_op = SemanticOpDescriptor::new_rms_norm_with_quant_scale(
                 vec![
                     self.tensors[attention_residual].view.clone(),
                     self.tensors[post_weight].view.clone(),
@@ -4952,6 +5199,7 @@ impl GraphBuilder {
                 vec![self.tensors[post_normed].view.clone()],
                 1.0e-6,
                 RmsNormScaleMode::OffsetOne,
+                post_scale_bits,
             )?;
             self.add_semantic(
                 &format!("layer.{layer}.post_attention_rmsnorm"),
@@ -5058,18 +5306,28 @@ impl GraphBuilder {
                 WeightConsumer::MlpUp,
                 layer,
             )?;
-            let silu = self.activation(
+            let (silu, silu_format) = self.producer_activation(
                 layer,
                 "mlp.silu_mul.output",
                 &[self.token_count, self.dimensions.intermediate],
+                &[WeightConsumer::MlpDown],
+                ProducerEncodingPolicy::EncodingAOrB {
+                    scale_role: WeightConsumer::MlpDown,
+                },
             )?;
-            let silu_op = SemanticOpDescriptor::new(
+            let silu_scale_bits = if silu_format == Some(ActivationQuantFormat::Nvfp4Block16) {
+                self.activation_quant_scale_bits(layer, WeightConsumer::MlpDown)
+            } else {
+                0
+            };
+            let silu_op = SemanticOpDescriptor::new_with_quant_scale(
                 SemanticOpKind::SiluMul,
                 vec![
                     self.tensors[gate].view.clone(),
                     self.tensors[up].view.clone(),
                 ],
                 vec![self.tensors[silu].view.clone()],
+                silu_scale_bits,
             )?;
             self.add_semantic(
                 &format!("layer.{layer}.mlp_silu_mul"),
@@ -5164,7 +5422,7 @@ impl GraphBuilder {
             } else {
                 "lm_head.logits"
             },
-            view(DType::Bf16, &[self.token_count, self.dimensions.vocab])?,
+            view(DType::Bf16, &[self.token_count, self.output_vocab()])?,
         );
         self.add_matmul(
             if self.dimensions.tied_embeddings {
@@ -5575,7 +5833,7 @@ impl GraphBuilder {
             vec![kv_node],
             vec![],
         )?;
-        let sigmoid = self.activation(
+        let (sigmoid, _) = self.producer_activation(
             layer,
             "full.sigmoid_mul.output",
             &[
@@ -5583,6 +5841,8 @@ impl GraphBuilder {
                 self.dimensions.q_heads,
                 self.dimensions.head_dim,
             ],
+            &[WeightConsumer::AttentionO],
+            ProducerEncodingPolicy::EncodingAOnly,
         )?;
         let sigmoid_op = SemanticOpDescriptor::new(
             SemanticOpKind::SigmoidMul,
@@ -5601,12 +5861,20 @@ impl GraphBuilder {
             vec![],
         )?;
         let sigmoid_node = self.nodes.len() - 1;
+        // The o_proj handoff must carry the sigmoid output's exact dtype and
+        // encoding so `allocate_tensors` and the consumer matmul agree with
+        // the producer-encoded source.
+        let (sigmoid_dtype, sigmoid_encoding) = {
+            let view = &self.tensors[sigmoid].view;
+            (view.dtype(), view.encoding())
+        };
         let o_input = self.add_alias(
             &format!("layer.{layer}.full.o.input"),
             sigmoid,
-            view(
-                DType::Bf16,
+            fp8_weight_view(
                 &[self.token_count, self.dimensions.full_output_width],
+                sigmoid_dtype,
+                sigmoid_encoding,
             )?,
             sigmoid_node,
         )?;
@@ -5820,6 +6088,114 @@ impl GraphBuilder {
             &format!("layer.{layer}.{suffix}"),
             view(DType::Bf16, shape)?,
         ))
+    }
+
+    /// Stage-7 producer encoding a tensor may take when every consuming
+    /// weight of `layer` in `consumers` carries the same quantized resident
+    /// encoding. Returns `None` for legacy BF16: a non-quantized consumer, a
+    /// mixed-encoding consumer set, or an unsupported weight family.
+    fn shared_consumer_quantization(
+        &self,
+        layer: u32,
+        consumers: &[WeightConsumer],
+    ) -> Option<ActivationQuantFormat> {
+        let mut selected: Option<ActivationQuantFormat> = None;
+        for role in consumers {
+            let binding = self.bindings.get(&key(layer, *role))?;
+            let encoding = self
+                .quantized_weight_encodings
+                .get(&binding.tensor_name)
+                .copied()?;
+            let format = match encoding {
+                Encoding::Fp8Scaled {
+                    granularity: Fp8ScaleGranularity::OuterDimension,
+                    scale_dtype: DType::F32,
+                    resident: Fp8ResidentRepresentation::PackedBytes,
+                } => ActivationQuantFormat::Fp8PerRow,
+                Encoding::Nvfp4W4A4 {
+                    block_size: 16,
+                    scale_dtype: DType::F8E4M3Fn,
+                } => ActivationQuantFormat::Nvfp4Block16,
+                _ => return None,
+            };
+            match selected {
+                None => selected = Some(format),
+                Some(current) if current == format => {}
+                Some(_) => return None,
+            }
+        }
+        selected
+    }
+
+    /// Raw FP32 bits of one weight's NVFP4 input-global activation scale,
+    /// or `0` when the artifact supplied none.
+    fn activation_quant_scale_bits(&self, layer: u32, role: WeightConsumer) -> u32 {
+        self.bindings
+            .get(&key(layer, role))
+            .and_then(|binding| self.activation_quant_scales.get(&binding.tensor_name))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Creates `layer.{layer}.{suffix}` retyped to the producer encoding its
+    /// consumers allow under `policy`, or plain legacy BF16 when none
+    /// applies. Encoding B additionally requires a valid NVFP4 input-global
+    /// activation scale on the policy's scale weight; without one the tensor
+    /// stays BF16 and the consumer keeps its separate quantize launch.
+    fn producer_activation(
+        &mut self,
+        layer: u32,
+        suffix: &str,
+        shape: &[u64],
+        consumers: &[WeightConsumer],
+        policy: ProducerEncodingPolicy,
+    ) -> Result<(usize, Option<ActivationQuantFormat>), QwenGraphError> {
+        let allowed: fn(ActivationQuantFormat) -> bool = match policy {
+            ProducerEncodingPolicy::EncodingAOnly => {
+                |format| format == ActivationQuantFormat::Fp8PerRow
+            }
+            ProducerEncodingPolicy::EncodingAOrB { .. } => |_| true,
+        };
+        let format = self
+            .shared_consumer_quantization(layer, consumers)
+            .filter(|format| allowed(*format))
+            .filter(|format| match format {
+                ActivationQuantFormat::Fp8PerRow => true,
+                ActivationQuantFormat::Nvfp4Block16 => {
+                    let scale_role = match policy {
+                        ProducerEncodingPolicy::EncodingAOrB { scale_role } => scale_role,
+                        ProducerEncodingPolicy::EncodingAOnly => return false,
+                    };
+                    let bits = self.activation_quant_scale_bits(layer, scale_role);
+                    let scale = f32::from_bits(bits);
+                    scale.is_finite() && scale > 0.0
+                }
+            });
+        let Some(format) = format else {
+            return Ok((self.activation(layer, suffix, shape)?, None));
+        };
+        let (dtype, encoding) = match format {
+            ActivationQuantFormat::Fp8PerRow => (
+                DType::F8E4M3Fn,
+                Encoding::Fp8Scaled {
+                    granularity: Fp8ScaleGranularity::OuterDimension,
+                    scale_dtype: DType::F32,
+                    resident: Fp8ResidentRepresentation::PackedBytes,
+                },
+            ),
+            ActivationQuantFormat::Nvfp4Block16 => (
+                DType::U8,
+                Encoding::Nvfp4W4A4 {
+                    block_size: 16,
+                    scale_dtype: DType::F8E4M3Fn,
+                },
+            ),
+        };
+        let tensor = self.add_tensor(
+            &format!("layer.{layer}.{suffix}"),
+            fp8_weight_view(shape, dtype, encoding)?,
+        );
+        Ok((tensor, Some(format)))
     }
 
     fn add_scale_materialization(
@@ -6128,6 +6504,13 @@ pub(crate) fn qwen38_residual_rmsnorm_execution_fixture(
     token_count: u64,
 ) -> (QwenGraph, WeightLoadPlan) {
     tests::residual_rmsnorm_execution_fixture(token_count)
+}
+
+/// Stage-7 producer-quantized fixture paired with a load plan and no
+/// projection-pack lowering.
+#[cfg(test)]
+pub(crate) fn qwen38_stage7_execution_fixture(token_count: u64) -> (QwenGraph, WeightLoadPlan) {
+    tests::qwen38_stage7_execution_fixture(token_count)
 }
 
 #[cfg(test)]
@@ -6535,6 +6918,7 @@ mod tests {
             fp8_dtype: None,
             quantized_weight_encoding: None,
             quantized_weight_encodings: BTreeMap::new(),
+            activation_quant_scales: BTreeMap::new(),
             fp8_sidecar_fingerprint: None,
             kv_cache_encoding: crate::KvCacheEncoding::Fp16,
             mtp: false,
@@ -6553,6 +6937,21 @@ mod tests {
 
     fn qwen38_projection_pack_fixture_with_token_count(
         token_count: u64,
+    ) -> (QwenGraph, BTreeMap<String, u32>) {
+        qwen38_projection_pack_fixture_inner(token_count, false)
+    }
+
+    /// Stage-7 variant of the Qwen3.8 fixture whose configuration also
+    /// carries the NVFP4 input-global activation scales, so producers may
+    /// retype their outputs to Encoding B exactly like the verified artifact
+    /// builder does.
+    fn qwen38_stage7_producer_fixture(token_count: u64) -> (QwenGraph, BTreeMap<String, u32>) {
+        qwen38_projection_pack_fixture_inner(token_count, true)
+    }
+
+    fn qwen38_projection_pack_fixture_inner(
+        token_count: u64,
+        producer_quantized: bool,
     ) -> (QwenGraph, BTreeMap<String, u32>) {
         let lock = read_model_lock(repository_path("docs/models/locks/qwen3.5-27b-bf16.json"))
             .expect("Qwen3.5-27B lock parses");
@@ -6601,10 +7000,16 @@ mod tests {
                 );
             let encoding = if nvfp4 {
                 let layer = binding.consumer.layer.expect("NVFP4 layer");
-                input_scale_bits.insert(
-                    binding.tensor_name.clone(),
-                    (512.0_f32 + layer as f32).to_bits(),
-                );
+                // gate == up for every layer, while down differs — the same
+                // asymmetry the verified artifact exhibits, so producer tests
+                // can tell which consuming weight's scale was selected.
+                let base = if binding.consumer.role == WeightConsumer::MlpDown {
+                    640.0_f32
+                } else {
+                    512.0_f32
+                };
+                input_scale_bits
+                    .insert(binding.tensor_name.clone(), (base + layer as f32).to_bits());
                 Encoding::Nvfp4W4A4 {
                     block_size: 16,
                     scale_dtype: DType::F8E4M3Fn,
@@ -6630,6 +7035,14 @@ mod tests {
             fp8_dtype: Some(DType::F8E4M3Fn),
             quantized_weight_encoding: None,
             quantized_weight_encodings: quantized_encodings,
+            activation_quant_scales: if producer_quantized {
+                input_scale_bits
+                    .iter()
+                    .map(|(name, bits)| (name.clone(), (1.0_f32 / f32::from_bits(*bits)).to_bits()))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            },
             fp8_sidecar_fingerprint: Some("qwen38-projection-pack-fixture".to_owned()),
             kv_cache_encoding: crate::KvCacheEncoding::Fp16,
             mtp: false,
@@ -6641,6 +7054,56 @@ mod tests {
         .build()
         .expect("Qwen3.8 fixture graph");
         (graph, input_scale_bits)
+    }
+
+    /// Builds the synthetic verified load plan for a Qwen3.8 fixture graph
+    /// and stamps its digest onto the graph.
+    fn qwen38_fixture_weight_plan(graph: &mut QwenGraph) -> WeightLoadPlan {
+        let entries = graph
+            .weight_bindings()
+            .iter()
+            .map(|binding| crate::weights::WeightLoadEntry {
+                tensor_name: binding.tensor_name().to_owned(),
+                classification: binding.classification(),
+                consumer: Some(binding.consumer()),
+                dtype: binding.dtype(),
+                shape: binding.shape().to_vec(),
+                source_file: "qwen38-projection-pack-fixture.safetensors".to_owned(),
+                locked_file_size: 1,
+                locked_file_sha256: "00".repeat(32),
+                source_range: binding.source_range(),
+                destination_start: Some(binding.destination_start()),
+                chunks: vec![crate::weights::WeightLoadChunk {
+                    source_offset: binding.source_range()[0],
+                    destination_offset: binding.destination_start(),
+                    byte_length: binding.source_range()[1] - binding.source_range()[0],
+                }],
+            })
+            .collect();
+        let plan = WeightLoadPlan::from_verified_entries(
+            crate::weights::VerifiedWeightPlanMetadata {
+                schema_version: "qwen38-projection-pack-test-plan-v1".to_owned(),
+                repo_id: "fixture/qwen38-projection-pack".to_owned(),
+                resolved_revision: "fixture".to_owned(),
+                lock_fingerprint: graph.model_fingerprint().to_owned(),
+                tied_embeddings: false,
+                chunk_size: 1,
+                total_destination_bytes: 1,
+            },
+            entries,
+        )
+        .expect("Qwen3.8 projection-pack fixture plan");
+        graph.plan_digest = *plan.digest();
+        plan
+    }
+
+    /// Stage-7 fixture paired with a load plan, without any projection-pack
+    /// lowering, so execution tests can provision the producer-quantized
+    /// graph exactly as the verified artifact builder emits it.
+    pub(super) fn qwen38_stage7_execution_fixture(token_count: u64) -> (QwenGraph, WeightLoadPlan) {
+        let (mut graph, _scales) = qwen38_stage7_producer_fixture(token_count);
+        let plan = qwen38_fixture_weight_plan(&mut graph);
+        (graph, plan)
     }
 
     pub(super) fn projection_pack_execution_fixture(
@@ -6686,41 +7149,7 @@ mod tests {
     ) -> (QwenGraph, WeightLoadPlan) {
         let (mut graph, input_scale_bits) =
             qwen38_projection_pack_fixture_with_token_count(token_count);
-        let entries = graph
-            .weight_bindings()
-            .iter()
-            .map(|binding| crate::weights::WeightLoadEntry {
-                tensor_name: binding.tensor_name().to_owned(),
-                classification: binding.classification(),
-                consumer: Some(binding.consumer()),
-                dtype: binding.dtype(),
-                shape: binding.shape().to_vec(),
-                source_file: "qwen38-projection-pack-fixture.safetensors".to_owned(),
-                locked_file_size: 1,
-                locked_file_sha256: "00".repeat(32),
-                source_range: binding.source_range(),
-                destination_start: Some(binding.destination_start()),
-                chunks: vec![crate::weights::WeightLoadChunk {
-                    source_offset: binding.source_range()[0],
-                    destination_offset: binding.destination_start(),
-                    byte_length: binding.source_range()[1] - binding.source_range()[0],
-                }],
-            })
-            .collect();
-        let plan = WeightLoadPlan::from_verified_entries(
-            crate::weights::VerifiedWeightPlanMetadata {
-                schema_version: "qwen38-projection-pack-test-plan-v1".to_owned(),
-                repo_id: "fixture/qwen38-projection-pack".to_owned(),
-                resolved_revision: "fixture".to_owned(),
-                lock_fingerprint: graph.model_fingerprint().to_owned(),
-                tied_embeddings: false,
-                chunk_size: 1,
-                total_destination_bytes: 1,
-            },
-            entries,
-        )
-        .expect("Qwen3.8 projection-pack fixture plan");
-        graph.plan_digest = *plan.digest();
+        let plan = qwen38_fixture_weight_plan(&mut graph);
         let reuse_plan = graph
             .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
                 input_scale_bits.get(name).copied()
@@ -6839,7 +7268,13 @@ mod tests {
             QWEN38_PROJECTION_PACK_REUSE_SCHEMA_V1
         );
         assert_eq!(plan.recipe_digest(), "qwen38-projection-pack-fixture");
-        assert_eq!(plan.packs().len(), 128);
+        // Stage-7 producer quantization retypes the FP8 activations
+        // (full-attention input RMSNorm and FP8-MLP post-attention RMSNorm)
+        // to Encoding A, so those packs lose their shared legacy-BF16
+        // premise and are skipped; the NVFP4 gate/up packs keep BF16 here
+        // because this fixture carries no NVFP4 input-global scales, and the
+        // GDN qkv/z activations stay BF16 by contract.
+        assert_eq!(plan.packs().len(), 104);
 
         let mut counts = BTreeMap::new();
         for pack in plan.packs() {
@@ -6887,10 +7322,202 @@ mod tests {
             counts,
             BTreeMap::from([
                 (Qwen38ProjectionPackKind::Nvfp4MlpGateUp, 56),
-                (Qwen38ProjectionPackKind::Fp8MlpGateUp, 8),
-                (Qwen38ProjectionPackKind::Fp8FullAttentionQkv, 16),
                 (Qwen38ProjectionPackKind::Fp8GdnQkvZ, 48),
             ])
+        );
+    }
+
+    #[test]
+    fn stage7_producer_quantization_retypes_only_quantized_matmul_producer_outputs() {
+        let (graph, input_scale_bits) = qwen38_stage7_producer_fixture(3);
+        let view_of = |name: &str| {
+            graph.tensor_metadata()[tensor_id(&graph, name)]
+                .view
+                .clone()
+        };
+        let fp8_encoding = qwen38_fp8_projection_encoding();
+        let legacy = |name: &str| {
+            let view = view_of(name);
+            view.dtype() == DType::Bf16 && view.encoding() == Encoding::Unquantized
+        };
+
+        // input_rmsnorm.output becomes Encoding A on FullAttention layers
+        // (q/k/v matmuls) and stays BF16 on LinearAttention layers, whose
+        // linear.b_matmul and linear.a_matmul still read BF16.
+        for layer in [3_u32, 63] {
+            let view = view_of(&format!("layer.{layer}.input_rmsnorm.output"));
+            assert_eq!(
+                (view.dtype(), view.encoding()),
+                (DType::F8E4M3Fn, fp8_encoding),
+                "full-attention input RMSNorm {layer}"
+            );
+        }
+        for layer in [0_u32, 1, 54] {
+            assert!(
+                legacy(&format!("layer.{layer}.input_rmsnorm.output")),
+                "linear-attention input RMSNorm {layer} must stay BF16"
+            );
+        }
+        let qkv_activation =
+            &graph.nodes()[node_id(&graph, "layer.0.linear.qkv_matmul")].inputs()[0];
+        assert!(
+            graph.tensor_metadata()[*qkv_activation].view.dtype() == DType::Bf16,
+            "GDN qkv still consumes legacy BF16"
+        );
+
+        // NVFP4-MLP layers emit Encoding B directly from their producers.
+        let nvfp4_encoding = Encoding::Nvfp4W4A4 {
+            block_size: 16,
+            scale_dtype: DType::F8E4M3Fn,
+        };
+        for layer in [0_u32, 55] {
+            for suffix in ["post_attention_rmsnorm.output", "mlp.silu_mul.output"] {
+                let view = view_of(&format!("layer.{layer}.{suffix}"));
+                assert_eq!(
+                    (view.dtype(), view.encoding()),
+                    (DType::U8, nvfp4_encoding),
+                    "NVFP4 layer {layer} {suffix}"
+                );
+            }
+        }
+        // FP8-MLP layers do emit Encoding A directly from their producers.
+        for layer in [56_u32, 63] {
+            for suffix in ["post_attention_rmsnorm.output", "mlp.silu_mul.output"] {
+                let view = view_of(&format!("layer.{layer}.{suffix}"));
+                assert_eq!(
+                    (view.dtype(), view.encoding()),
+                    (DType::F8E4M3Fn, fp8_encoding),
+                    "FP8 layer {layer} {suffix}"
+                );
+            }
+        }
+
+        // full.sigmoid_mul.output becomes Encoding A (rank [M, H, 256]
+        // preserved), and the o_proj alias carries the same dtype/encoding.
+        let sigmoid = view_of("layer.3.full.sigmoid_mul.output");
+        assert_eq!(
+            (sigmoid.dtype(), sigmoid.encoding()),
+            (DType::F8E4M3Fn, fp8_encoding)
+        );
+        assert_eq!(sigmoid.shape().len(), 3);
+        let o_input = view_of("layer.3.full.o.input");
+        assert_eq!(
+            (o_input.dtype(), o_input.encoding()),
+            (sigmoid.dtype(), sigmoid.encoding()),
+            "the o_proj alias must match its sigmoid source"
+        );
+        assert_eq!(o_input.shape().len(), 2);
+        assert_eq!(o_input.shape()[1], sigmoid.shape()[1] * sigmoid.shape()[2]);
+        assert_eq!(o_input.payload_bytes(), sigmoid.payload_bytes());
+
+        // Producers without an all-quantized matmul consumer stay BF16.
+        for name in [
+            "final_rmsnorm.output",
+            "layer.0.linear.state.output",
+            "layer.0.mlp.residual.output",
+            "layer.0.attention.residual.output",
+            "layer.0.mlp.gate.output",
+            "layer.0.mlp.up.output",
+            "layer.0.mlp.down.output",
+        ] {
+            assert!(legacy(name), "{name} must stay legacy BF16");
+        }
+
+        // Encoding-B producer descriptors carry the consuming NVFP4 weight's
+        // input-global scale; FP8 producer descriptors carry none.
+        let operation_of = |label: &str| {
+            graph.nodes()[node_id(&graph, label)]
+                .operation()
+                .expect("semantic operation")
+                .clone()
+        };
+        let valid_scale = |bits: u32| {
+            let scale = f32::from_bits(bits);
+            scale.is_finite() && scale > 0.0
+        };
+        let post = operation_of("layer.0.post_attention_rmsnorm");
+        assert_eq!(
+            (post.outputs()[0].dtype(), post.outputs()[0].encoding()),
+            (DType::U8, nvfp4_encoding)
+        );
+        assert!(valid_scale(post.activation_quant_scale_bits()));
+        let silu = operation_of("layer.0.mlp_silu_mul");
+        assert!(valid_scale(silu.activation_quant_scale_bits()));
+        let fp8_post = operation_of("layer.56.post_attention_rmsnorm");
+        assert_eq!(fp8_post.activation_quant_scale_bits(), 0);
+        let sigmoid_op = operation_of("layer.3.sigmoid_gate");
+        assert_eq!(sigmoid_op.activation_quant_scale_bits(), 0);
+        let input_norm = operation_of("layer.3.input_rmsnorm");
+        assert_eq!(input_norm.activation_quant_scale_bits(), 0);
+
+        // The residual rewrite keeps the Encoding-B NVFP4-MLP input and its
+        // scale on the fused pair.
+        let fused = graph
+            .with_residual_rmsnorm_fusion(true)
+            .expect("stage-7 target pairs fuse");
+        let attention_pair = fused.nodes()[node_id(&fused, "layer.0.attention_residual_add.fused")]
+            .operation()
+            .expect("fused attention pair")
+            .clone();
+        assert_eq!(
+            (
+                attention_pair.outputs()[1].dtype(),
+                attention_pair.outputs()[1].encoding()
+            ),
+            (DType::U8, nvfp4_encoding)
+        );
+        assert_eq!(
+            attention_pair.activation_quant_scale_bits(),
+            post.activation_quant_scale_bits()
+        );
+        let mlp_pair = fused.nodes()[node_id(&fused, "layer.2.mlp_residual_add.fused")]
+            .operation()
+            .expect("fused mlp pair")
+            .clone();
+        assert_eq!(
+            (
+                mlp_pair.outputs()[1].dtype(),
+                mlp_pair.outputs()[1].encoding()
+            ),
+            (DType::F8E4M3Fn, fp8_encoding)
+        );
+        assert_eq!(mlp_pair.activation_quant_scale_bits(), 0);
+
+        // NVFP4 MLP gate/up packs consume the Encoding-B producer output and
+        // GDN qkv/z keeps its shared BF16 input. FP8 MLP/full-attention
+        // activations are producer-encoded and their legacy-BF16 packs are
+        // excluded.
+        let plan = fused
+            .plan_qwen38_projection_pack_reuse_with("qwen38-projection-pack-fixture", |name| {
+                input_scale_bits.get(name).copied()
+            })
+            .expect("stage-7 graph still plans projection packs")
+            .expect("exact Qwen3.8 projection plan applies");
+        assert_eq!(plan.packs().len(), 104);
+        assert_eq!(
+            plan.packs()
+                .iter()
+                .filter(|pack| pack.kind() == Qwen38ProjectionPackKind::Nvfp4MlpGateUp)
+                .count(),
+            56
+        );
+        assert_eq!(
+            plan.packs()
+                .iter()
+                .filter(|pack| pack.kind() == Qwen38ProjectionPackKind::Fp8GdnQkvZ)
+                .count(),
+            48
+        );
+        let lowered = fused
+            .with_qwen38_projection_pack_reuse(
+                &plan,
+                Qwen38ProjectionPackLoweringScope::Nvfp4MlpGateUpAndFp8GdnQkvZ,
+            )
+            .expect("stage-7 packs lower");
+        assert_eq!(
+            lowered.nodes().len(),
+            fused.nodes().len() - 104,
+            "NVFP4 gate/up and GDN packs lower alongside producer-encoded inputs"
         );
     }
 
@@ -7868,6 +8495,38 @@ mod tests {
                 .iter()
                 .any(|node| node.label() == "tied_lm_head_matmul")
         );
+
+        let reduced = build_qwen38_nvfp4_mtp_graph_with_vocabulary_ids(
+            &lock,
+            &plan,
+            &artifact,
+            17,
+            crate::KvCacheEncoding::Mxfp8E4,
+            &[0, 7, 42],
+        )
+        .expect("reduced Qwen3.8 MTP graph builds");
+        assert_eq!(reduced.draft_vocab_ids(), Some(&[0, 7, 42][..]));
+        let reduced_binding = reduced
+            .weight_bindings()
+            .iter()
+            .find(|binding| {
+                binding.consumer().layer.is_none()
+                    && binding.consumer().role == WeightConsumer::OutputProjection
+            })
+            .expect("reduced output binding");
+        assert_eq!(reduced_binding.shape(), &[3, 5120]);
+        let embedding = reduced
+            .weight_bindings()
+            .iter()
+            .find(|binding| binding.consumer().role == WeightConsumer::Embedding)
+            .expect("full embedding binding");
+        assert_eq!(embedding.shape()[0], QWEN35_VOCAB_SIZE as u64);
+        let logits = reduced
+            .tensor_metadata()
+            .iter()
+            .find(|tensor| tensor.name() == "lm_head.logits")
+            .expect("reduced logits tensor");
+        assert_eq!(logits.view().shape(), &[1, 3]);
     }
 
     #[test]
@@ -8399,6 +9058,7 @@ mod tests {
             fp8_dtype: None,
             quantized_weight_encoding: None,
             quantized_weight_encodings: BTreeMap::new(),
+            activation_quant_scales: BTreeMap::new(),
             fp8_sidecar_fingerprint: None,
             kv_cache_encoding: crate::KvCacheEncoding::Fp16,
             mtp: false,
@@ -8425,5 +9085,20 @@ mod tests {
         );
         assert_eq!(builder.tensors.len(), 1);
         assert_eq!(builder.producers[source], Some(0));
+    }
+
+    #[test]
+    fn stage9_draft_vocabulary_bytes_are_sorted_unique_and_bounded() {
+        let ids = [3_u32, 19, 42];
+        let bytes = ids
+            .iter()
+            .flat_map(|id| id.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(decode_qwen38_mtp_draft_vocabulary_le(&bytes).unwrap(), ids);
+        assert_eq!(validate_qwen38_mtp_draft_vocabulary_ids(&ids).unwrap(), ids);
+        assert!(decode_qwen38_mtp_draft_vocabulary_le(&bytes[..bytes.len() - 1]).is_err());
+        assert!(validate_qwen38_mtp_draft_vocabulary_ids(&[3, 3]).is_err());
+        assert!(validate_qwen38_mtp_draft_vocabulary_ids(&[19, 3]).is_err());
+        assert!(validate_qwen38_mtp_draft_vocabulary_ids(&[QWEN35_VOCAB_SIZE as u32]).is_err());
     }
 }

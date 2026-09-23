@@ -230,6 +230,17 @@ fn top_summary(logits: &[f32]) -> Result<(usize, f32, f32, f32), String> {
     ))
 }
 
+fn global_draft_token(local: usize, map: Option<&[u32]>) -> Result<usize, String> {
+    match map {
+        Some(ids) => ids
+            .get(local)
+            .copied()
+            .map(|id| id as usize)
+            .ok_or_else(|| "reduced draft top-1 is outside its vocabulary map".to_owned()),
+        None => Ok(local),
+    }
+}
+
 fn stage1_prefix_path(output_dir: &Path) -> Result<PathBuf, String> {
     if let Some(manifest) = env::var_os(MANIFEST_ENV).map(PathBuf::from) {
         if !manifest.is_absolute() {
@@ -670,6 +681,7 @@ fn run_entry_t(
     let mut draft_request = draft_resident
         .new_request(draft_graph.clone())
         .map_err(|error| format!("Phase86 T draft request creation failed: {error}"))?;
+    let draft_map = draft_request.draft_vocab_ids_arc();
     let primed = prime_requests(
         &mut target_request,
         &mut draft_request,
@@ -730,8 +742,9 @@ fn run_entry_t(
             .last_logits()
             .ok_or_else(|| format!("Phase86 T draft logits missing at {index}"))?
             .to_vec();
-        let (draft_top1, draft_top1_value, draft_top2_value, draft_margin) =
+        let (draft_top1_local, draft_top1_value, draft_top2_value, draft_margin) =
             top_summary(&draft_row)?;
+        let draft_top1 = global_draft_token(draft_top1_local, draft_map.as_deref())?;
         let matches =
             forced.map(|token| draft_top1 == usize::try_from(token).unwrap_or(usize::MAX));
         draft_rows.push(Phase86LogitSummary {
@@ -826,6 +839,7 @@ fn run_entry(
     let mut draft_request = draft_resident
         .new_request(draft_graph.clone())
         .map_err(|error| format!("Phase86 draft request creation failed: {error}"))?;
+    let draft_map = draft_request.draft_vocab_ids_arc();
     let primed = prime_requests(
         &mut target_request,
         &mut draft_request,
@@ -911,7 +925,8 @@ fn run_entry(
             .into_iter()
             .enumerate()
         {
-            let (top1, top1_value, top2_value, margin) = top_summary(logits)?;
+            let (top1_local, top1_value, top2_value, margin) = top_summary(logits)?;
+            let top1 = global_draft_token(top1_local, draft_map.as_deref())?;
             let forced = inputs[row + 1];
             let matches = top1 == usize::try_from(forced).unwrap_or(usize::MAX);
             row_matches[row] = matches;

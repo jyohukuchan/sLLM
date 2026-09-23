@@ -346,25 +346,34 @@ weight・activation format、block/scale policy、layout、M/N/K、FP32 accumula
 semantic providerと具体kernel variantを一度だけ決め、executeとdispatch metadataはそのfrozen identityを使う。model名、layer、
 prompt、token、測定値はselector keyではなく、prepare後の環境変更もplanを変えない。
 
-共通format contractはMXFP8 E4M3 W8A8 block32/E8M0、MXFP6 E3M2 W6A6 block32/E8M0、NVFP4 W4A16／W4A4
-block16＋tensor scale、MXFP4 W4A4 block32/E8M0を区別する。MXFP4にはE2M1/E8M0 block32 viewを追加し、
+共通format contractの履歴ではMXFP8 E4M3 W8A8 block32/E8M0、MXFP6 E3M2 W6A6 block32/E8M0、NVFP4
+W4A16／W4A4 block16＋tensor scale、MXFP4 W4A4 block32/E8M0を区別する。MXFP4にはE2M1/E8M0 block32 viewを追加し、
 NVFP4と同一packingへ畳み込まない。NVFP4／MXFP4 W4A4は既存device kernelへのroutingをprepared providerへ移したもので、
 同期比較用の別kernelを作らない。MXFP8／MXFP6のK非32倍はfail-closeし、NVFP4／MXFP4は既存masked tail kernelと同じceil-block
 契約を保持する。
 
-上記Phase 66のW4A4記述は実装済み契約と証拠の履歴である。2026-09-03以降のMXFP4対応方針はW4A8だけに限定し、
-既存W4A4 ABI／providerを新規対応形式として拡張しない。W4A8 providerが実装されるまでは方針とruntime実装に差分があり、
-既存W4A4をW4A8として報告または自動選択してはならない。MXFP4 weightはOCP E2M1／block 32／E8M0 scale、
-ActivationはOCP MXFP8 E4M3／K-axis block 32／E8M0 scaleとし、この組合せを新しいversioned W4A8 provider contractで固定する。
+上記Phase 66のW4A4記述は実装済み契約と証拠の履歴である。2026-09-19の対応方針変更により、MXFP4の公開契約は
+W4A6（weight E2M1、activation OCP MXFP6 E3M2、block 32、E8M0 scale）へ更新した。
+`LOWP_MXFP4_W4A6_V1` はversioned placeholderとしてformat情報だけを公開し、provider planは未実装としてunsupportedを返す。
+既存MXFP4 W4A4をW4A6へ読み替えたり自動選択したりしてはならない。
+
+Phase 87段階4（2026-09-24）の現行契約から、NVFP4 W4A16、MXFP8 W8A16、MXFP6 W6A16を除外した。
+これらの公開ABI値、provider enum値、selector IDは過去の監査記録を解釈できるようtombstoneとして保持するが、
+prepare／planはunsupportedを返し、実行可能なselectorやlauncherを生成しない。旧Qwen／GemmaのW4A16 sidecar入口も
+fail-closedで拒否する。WU-4Rでは呼び出し元のなかったNVFP4 W4A16 kernel 2本とlauncher／variant選択を削除し、
+variant数値8／9／10だけを監査用tombstoneとして保持した。直接artifactのQwen3.8 NVFP4 W4A4とGemma 4のW4A4経路、MXFP8 W8A8／MXFP6 W6A6の
+動的activation経路はこの整理の影響を受けない。NVIDIA Gemma 4 31Bはlocked metadataだけを保持する参照対象で、
+ローカルpayloadがないためruntime対応や実機動作を意味しない。両GPUのモデル確認状況と履歴は
+[Phase 87段階4履歴](../history/2026/09/21-30/phase87-stage4.md)に集約する。
 
 低精度行列積のdevice実装は`native/lowp`へ境界化し、sLLMのRust実行層とHIP kernel本体を分離する。
 呼び出し側はdevice buffer、workspace、HIP streamを所有してC APIへ渡す。lowp libraryはplan作成・kernel選択・launchを行うが、
 launch中にdevice allocationや同期を行わず、caller-owned buffer以外へ状態を保持しない。`PreparedProviderPlan`はexact target、format/layout、
 M/N/K、provider、variant、tile、inner product、activation packとfootprintをprepare時に固定し、executeとdispatch監査は同じ値を使う。
-対象はexact `gfx1030`／`gfx1201`のMXFP8 W8A8、MXFP6 W6A6、weight-MXのW8A16／W6A16、NVFP4 W4A16／W4A4であり、
+対象はexact `gfx1030`／`gfx1201`のMXFP8 W8A8、MXFP6 W6A6、NVFP4 W4A4であり、
 累積はFP32、出力境界はBF16-RNEである。FP8 outerはsoftware providerを`gfx1030`に限定し、`gfx1201` native FP8はsLLM側の別経路として扱う。
 
-公開C APIはMXFP4 W4A8をversioned contractとして定義するが、実装が未対応の間はplanをunsupportedとして返す。
+公開C APIはMXFP4 W4A6をversioned contractとして定義するが、実装が未対応の間はplanをunsupportedとして返す。
 既存のMXFP4 W4A4は移動対象の内部providerとして保持し、公開format enumへは追加しない。reserved format value 4も公開APIでは拒否する。
 BF16／FP8 native／hipBLAS経路はlowp libraryの対象外であり、lowpのplan failureを別dtypeやCPU providerへ暗黙にfallbackさせない。
 sLLMはlowpの公開C APIと`native/lowp/include/lowp/detail/`のC++連携ヘッダだけを使い、`native/lowp/src/`へ依存しない。
