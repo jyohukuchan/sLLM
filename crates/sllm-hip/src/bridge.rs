@@ -21,16 +21,16 @@ use sllm_core::{
     ExecutionLinearAttentionSubmissionAdapter, ExecutionMinistral3YarnSubmissionAdapter,
     ExecutionQueueFenceAdapter, ExecutionReadbackAdapter, ExecutionSession,
     ExecutionSessionAdapter, ExecutionSessionRequest, ExecutionState, ExecutionStateImageV1,
-    ExecutionSubmissionAdapter, ExecutionTransferAdapter, ExecutionWholeDecodeCaptureAdapter,
-    KvCacheEncoding, OpaqueStatePlane, OwnedTensorBinding, PrepareSupport, PreparedMatmulFootprint,
-    PreparedOperation, QueueCompletionMode as CoreQueueCompletionMode, ShutdownReport,
-    StateLayerMetadataV1, StateOwnerKindV1, StatePlaneKindV1,
+    ExecutionStateImageV2, ExecutionSubmissionAdapter, ExecutionTransferAdapter,
+    ExecutionWholeDecodeCaptureAdapter, OpaqueStatePlane, OwnedTensorBinding, PrepareSupport,
+    PreparedMatmulFootprint, PreparedOperation, QueueCompletionMode as CoreQueueCompletionMode,
+    ShutdownReport, StateLayerMetadataV1, StateOwnerKindV1, StatePlaneKindV1,
 };
 
 use crate::argmax::{ArgmaxDispatchInfo, ArgmaxSubmission, PreparedArgmax};
 use crate::kv_state::{
     CausalAttentionCompletion, CausalAttentionEvidence, KvAppendCompletion, KvAppendEvidence,
-    KvStateResource, native_kv_storage,
+    KvStateResource,
 };
 use crate::linear_attention::{
     LinearAttentionCompletion, LinearAttentionEvidence, LinearAttentionStateResource,
@@ -112,57 +112,6 @@ fn image_failure(reason: impl Into<String>) -> ExecutionError {
     }
 }
 
-fn kv_image_planes(encoding: KvCacheEncoding, count: u32) -> Vec<(u32, StatePlaneKindV1)> {
-    let mut planes = vec![
-        (sys::SLLM_HIP_KV_STATE_PLANE_KEY, StatePlaneKindV1::KvKey),
-        (
-            sys::SLLM_HIP_KV_STATE_PLANE_VALUE,
-            StatePlaneKindV1::KvValue,
-        ),
-    ];
-    if matches!(
-        encoding,
-        KvCacheEncoding::Fp8E4M3Fn
-            | KvCacheEncoding::Fp8E4M3Block16
-            | KvCacheEncoding::Fp8E5M2Block16
-            | KvCacheEncoding::Mxfp8E4
-            | KvCacheEncoding::Mxfp8E5
-    ) {
-        planes.extend([
-            (
-                sys::SLLM_HIP_KV_STATE_PLANE_KEY_SCALE,
-                StatePlaneKindV1::KvKeyScale,
-            ),
-            (
-                sys::SLLM_HIP_KV_STATE_PLANE_VALUE_SCALE,
-                StatePlaneKindV1::KvValueScale,
-            ),
-        ]);
-    }
-    if matches!(encoding, KvCacheEncoding::Nvfp4) {
-        planes.extend([
-            (
-                sys::SLLM_HIP_KV_STATE_PLANE_KEY_SCALE,
-                StatePlaneKindV1::KvKeyScale,
-            ),
-            (
-                sys::SLLM_HIP_KV_STATE_PLANE_VALUE_SCALE,
-                StatePlaneKindV1::KvValueScale,
-            ),
-            (
-                sys::SLLM_HIP_KV_STATE_PLANE_KEY_OUTER_SCALE,
-                StatePlaneKindV1::KvKeyOuterScale,
-            ),
-            (
-                sys::SLLM_HIP_KV_STATE_PLANE_VALUE_OUTER_SCALE,
-                StatePlaneKindV1::KvValueOuterScale,
-            ),
-        ]);
-    }
-    planes.truncate(count as usize);
-    planes
-}
-
 fn linear_image_planes(count: u32) -> Vec<(u32, StatePlaneKindV1)> {
     let mut planes = vec![
         (1, StatePlaneKindV1::LinearConvSlot0),
@@ -211,6 +160,14 @@ pub(crate) fn open_execution_session(
     backend: HipBackend,
     request: ExecutionSessionRequest,
 ) -> Result<Arc<ExecutionSession>, ExecutionError> {
+    if !matches!(request.expected_target(), "gfx1030" | "gfx1201") {
+        return Err(ExecutionError::Unsupported {
+            reason: format!(
+                "target {} is unsupported by the current HIP runtime; only gfx1030 and gfx1201 are admitted",
+                request.expected_target()
+            ),
+        });
+    }
     let device = Context::query_device(request.device_index()).map_err(map_backend_error)?;
     let context = Context::create(request.device_index(), request.expected_target())
         .map_err(map_backend_error)?;
@@ -435,6 +392,38 @@ struct HipExecutionSession {
     context: Context,
     total_memory_bytes: u64,
     available_memory: HipAvailableMemory,
+}
+
+#[allow(dead_code)]
+impl HipExecutionSession {
+    /// Additive V2 Paged image entry point. The generic core trait will adopt
+    /// this once its V2 image API is wired into session checkpoint flow.
+    pub(crate) fn export_paged_kv_state_image_v2(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::KvState,
+    ) -> Result<ExecutionStateImageV2, ExecutionError> {
+        self.state.ensure_open()?;
+        access
+            .downcast_kv_state_payload::<KvStateResource>(state)?
+            .export_paged_image_v2()
+            .map_err(map_backend_error)
+    }
+
+    /// Additive V2 Paged image import entry point. Publication is delegated to
+    /// native finalize only after topology and all plane sections validate.
+    pub(crate) fn import_paged_kv_state_image_v2(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::KvState,
+        image: &ExecutionStateImageV2,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        access
+            .downcast_kv_state_payload::<KvStateResource>(state)?
+            .import_paged_image_v2(image)
+            .map_err(map_backend_error)
+    }
 }
 
 impl ExecutionSessionAdapter for HipExecutionSession {
@@ -668,7 +657,7 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         descriptor: sllm_core::KvStateDescriptor,
     ) -> Result<AdapterResource, ExecutionError> {
         self.state.ensure_open()?;
-        KvStateResource::create(&self.context, access.session_id(), state_id, descriptor)
+        KvStateResource::create_paged(&self.context, access.session_id(), state_id, descriptor)
             .map(AdapterResource::new)
             .map_err(map_backend_error)
     }
@@ -729,172 +718,40 @@ impl ExecutionSessionAdapter for HipExecutionSession {
 
     fn export_kv_state_image(
         &self,
-        access: &ExecutionAdapterAccess<'_>,
-        state: &sllm_core::KvState,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &sllm_core::KvState,
     ) -> Result<ExecutionStateImageV1, ExecutionError> {
-        self.state.ensure_open()?;
-        let resource = access.downcast_kv_state_payload::<KvStateResource>(state)?;
-        let info = resource.image_query().map_err(map_backend_error)?;
-        let encoding = state.descriptor().cache_encoding();
-        let (dtype, native_encoding, _, _) =
-            native_kv_storage(state.descriptor(), self.context.expected_target())
-                .map_err(map_backend_error)?;
-        if info.session_id != access.session_id().raw()
-            || info.layer_id != state.layer_id()
-            || info.dtype != dtype
-            || info.encoding != native_encoding
-            || info.active_slot != 0
-            || info.capacity_tokens != state.capacity()
-            || info.published_length > info.capacity_tokens
-        {
-            return Err(image_failure(
-                "native KV image metadata does not match descriptor",
-            ));
-        }
-        let retained_start = info.published_length.saturating_sub(
-            state
-                .descriptor()
-                .sliding_window()
-                .unwrap_or(info.published_length),
-        );
-        let image_version_matches = if let Some(window) = state.descriptor().sliding_window() {
-            info.info_version == sys::SLLM_HIP_STATE_IMAGE_SLIDING_VERSION
-                && (u64::from(info.reserved[0]) | (u64::from(info.reserved[1]) << 32)) == window
-                && (u64::from(info.reserved[2]) | (u64::from(info.reserved[3]) << 32))
-                    == retained_start
-                && info.reserved[4..].iter().all(|value| *value == 0)
-        } else {
-            info.info_version == sys::SLLM_HIP_STATE_FORK_INFO_VERSION
-                && info.reserved.iter().all(|value| *value == 0)
-        };
-        if !image_version_matches {
-            return Err(image_failure(
-                "native KV image version or retention metadata is invalid",
-            ));
-        }
-        let planes = kv_image_planes(encoding, info.plane_count);
-        if planes.len() != info.plane_count as usize {
-            return Err(image_failure("native KV image plane count is invalid"));
-        }
-        let mut output = Vec::with_capacity(planes.len());
-        for (native_plane, semantic_plane) in planes {
-            let size = resource
-                .image_plane_size(native_plane)
-                .map_err(map_backend_error)?;
-            let bytes = read_native_plane(size, |offset, destination| {
-                resource.export_chunk(native_plane, offset, destination, info.published_length)
-            })?;
-            output.push(OpaqueStatePlane {
-                owner: StateOwnerKindV1::Kv,
-                layer_id: state.layer_id(),
-                plane: semantic_plane,
-                bytes,
-            });
-        }
-        Ok(ExecutionStateImageV1::new(
-            StateLayerMetadataV1 {
-                owner: StateOwnerKindV1::Kv,
-                layer_id: state.layer_id(),
-                published_length: info.published_length,
-                generation: info.generation,
-                active_slot: None,
-            },
-            output,
+        Err(image_failure(
+            "legacy V1 KV images are retired; use the Paged V2 state image API",
         ))
     }
 
     fn import_kv_state_image(
         &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &sllm_core::KvState,
+        _image: &ExecutionStateImageV1,
+    ) -> Result<(), ExecutionError> {
+        Err(image_failure(
+            "legacy V1 KV images are retired; use the Paged V2 state image API",
+        ))
+    }
+
+    fn export_kv_state_image_v2(
+        &self,
         access: &ExecutionAdapterAccess<'_>,
         state: &sllm_core::KvState,
-        image: &ExecutionStateImageV1,
+    ) -> Result<ExecutionStateImageV2, ExecutionError> {
+        HipExecutionSession::export_paged_kv_state_image_v2(self, access, state)
+    }
+
+    fn import_kv_state_image_v2(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::KvState,
+        image: &ExecutionStateImageV2,
     ) -> Result<(), ExecutionError> {
-        self.state.ensure_open()?;
-        let resource = access.downcast_kv_state_payload::<KvStateResource>(state)?;
-        let info = resource.image_query().map_err(map_backend_error)?;
-        if info.published_length != 0 {
-            return Err(image_failure("KV image import destination is not empty"));
-        }
-        let encoding = state.descriptor().cache_encoding();
-        let planes = kv_image_planes(encoding, info.plane_count);
-        let (expected_dtype, expected_encoding, _, _) =
-            native_kv_storage(state.descriptor(), self.context.expected_target())
-                .map_err(map_backend_error)?;
-        if info.session_id != access.session_id().raw()
-            || info.layer_id != state.layer_id()
-            || info.capacity_tokens != state.capacity()
-            || info.dtype != expected_dtype
-            || info.encoding != expected_encoding
-        {
-            return Err(image_failure("native KV import target metadata mismatch"));
-        }
-        if image.metadata().owner != StateOwnerKindV1::Kv
-            || image.metadata().layer_id != state.layer_id()
-            || image.metadata().active_slot.is_some()
-            || image.metadata().published_length > state.capacity()
-            || image.planes().len() != planes.len()
-        {
-            return Err(image_failure("KV image metadata or topology mismatch"));
-        }
-        let mut native_info = info;
-        native_info.published_length = image.metadata().published_length;
-        native_info.generation = image.metadata().generation;
-        let retained_length = state
-            .descriptor()
-            .sliding_window()
-            .map_or(image.metadata().published_length, |window| {
-                image.metadata().published_length.min(window)
-            });
-        if let Some(window) = state.descriptor().sliding_window() {
-            let retained_start = image.metadata().published_length - retained_length;
-            native_info.reserved[0] = window as u32;
-            native_info.reserved[1] = (window >> 32) as u32;
-            native_info.reserved[2] = retained_start as u32;
-            native_info.reserved[3] = (retained_start >> 32) as u32;
-        }
-        let sliding_bytes_per_token = state
-            .descriptor()
-            .sliding_window()
-            .map(|_| {
-                state
-                    .descriptor()
-                    .resident_bytes_per_plane()
-                    .and_then(|bytes| {
-                        bytes.checked_div(state.descriptor().physical_capacity_tokens())
-                    })
-                    .ok_or_else(|| image_failure("sliding KV plane stride overflow"))
-            })
-            .transpose()?;
-        for (native_plane, semantic_plane) in planes {
-            let plane = image
-                .planes()
-                .iter()
-                .find(|plane| plane.plane == semantic_plane)
-                .ok_or_else(|| image_failure("KV image is missing a required plane"))?;
-            let expected = if let Some(bytes_per_token) = sliding_bytes_per_token {
-                retained_length
-                    .checked_mul(bytes_per_token)
-                    .ok_or_else(|| image_failure("sliding KV image plane size overflow"))?
-            } else {
-                resource
-                    .image_plane_size(native_plane)
-                    .map_err(map_backend_error)?
-            };
-            if plane.bytes.len() as u64 != expected {
-                return Err(image_failure("KV image plane byte length mismatch"));
-            }
-            write_native_plane(&plane.bytes, |offset, bytes| {
-                resource.import_chunk(
-                    native_plane,
-                    offset,
-                    bytes,
-                    image.metadata().published_length,
-                )
-            })?;
-        }
-        resource
-            .import_finalize(&native_info)
-            .map_err(map_backend_error)
+        HipExecutionSession::import_paged_kv_state_image_v2(self, access, state, image)
     }
 
     fn rewind_last_kv_state_transition(
@@ -1179,11 +1036,17 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             ));
         }
         let planes = linear_image_planes(info.plane_count);
+        let has_saved_scratch = image
+            .planes()
+            .iter()
+            .any(|plane| plane.plane == StatePlaneKindV1::LinearScratch);
+        let persistent_plane_count_matches = image.planes().len() == planes.len()
+            || (info.plane_count == 4 && image.planes().len() == 5 && has_saved_scratch);
         if image.metadata().owner != StateOwnerKindV1::LinearAttention
             || image.metadata().layer_id != state.layer_id()
             || image.metadata().active_slot != Some(0) && image.metadata().active_slot != Some(1)
             || image.metadata().published_length > state.capacity()
-            || image.planes().len() != planes.len()
+            || !persistent_plane_count_matches
         {
             return Err(image_failure("linear image metadata or topology mismatch"));
         }
@@ -1206,6 +1069,21 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             write_native_plane(&plane.bytes, |offset, bytes| {
                 resource.import_chunk(native_plane, offset, bytes)
             })?;
+        }
+        if info.plane_count == 4 && image.planes().len() == 5 {
+            let scratch = image
+                .planes()
+                .iter()
+                .find(|plane| plane.plane == StatePlaneKindV1::LinearScratch)
+                .ok_or_else(|| image_failure("linear image scratch plane is missing"))?;
+            if scratch.owner != StateOwnerKindV1::LinearAttention
+                || scratch.layer_id != state.layer_id()
+                || scratch.bytes.is_empty()
+            {
+                return Err(image_failure(
+                    "linear image scratch plane metadata or bytes are invalid",
+                ));
+            }
         }
         resource
             .import_finalize(&native_info)
@@ -2309,6 +2187,19 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 final_position,
                 successful_generations,
             )
+            .map_err(map_backend_error)
+    }
+
+    fn prepare_graph_paged_kv(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        span: &sllm_core::ExecutionGraphSpan,
+        conservative_end: u64,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        let graph = access.downcast_graph_span_payload::<GraphSpan>(span)?;
+        graph
+            .prepare_paged_kv(conservative_end)
             .map_err(map_backend_error)
     }
 
@@ -3663,6 +3554,19 @@ mod tests {
             Err(ExecutionError::ExecutionUnavailable { .. })
         ));
         assert!(!backend.capabilities().numerical_execution);
+    }
+
+    #[test]
+    fn non_exact_session_admission_fails_before_native_context_creation() {
+        let backend = HipBackend { _private: () };
+        for target in ["gfx942", "gfx942:sramecc+:xnack-", "unknown"] {
+            let request = ExecutionSessionRequest::new(0, target).unwrap();
+            assert!(matches!(
+                backend.open_execution_session(request),
+                Err(ExecutionError::Unsupported { reason })
+                    if reason.contains("target") && reason.contains("gfx1030")
+            ));
+        }
     }
 
     #[test]

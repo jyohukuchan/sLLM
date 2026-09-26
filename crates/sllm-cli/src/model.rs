@@ -15,7 +15,7 @@ use sllm_core::{
     Ministral3ResidentModel, ModelLock, OsSamplingRandom, QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
     QWEN35_4B_REPO_ID, QwenComponentSelection, QwenExecutionRequest, QwenMultimodalImageEmbedding,
     QwenMultimodalPrompt, QwenResidentModel, QwenVisionExecutionInput, QwenVisionResidentModel,
-    ReviewedModelLock, SamplingParametersV1, SessionCheckpoint, VerifiedCache,
+    ReviewedModelLock, SamplingParametersV1, SessionCheckpointV2, VerifiedCache,
     VerifiedGgufGemma4Moe, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe,
     VerifiedGgufWeightSource, VerifiedMinistral3WeightSource, WeightClassification,
     assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
@@ -120,6 +120,15 @@ fn validate_gemma4_moe_chat_kv_cache_encoding(
             "Gemma 4 MoE chat uses its fixed static FP8 E4M3 KV contract; only --kv-cache-encoding fp8-static is supported",
         ),
     }
+}
+
+fn validate_gemma4_moe_paged_target(target: &str) -> Result<(), String> {
+    if matches!(target, "gfx1030" | "gfx1201") {
+        return Ok(());
+    }
+    Err(format!(
+        "Gemma 4 MoE Paged KV requires exact target gfx1030 or gfx1201; target {target} is unsupported"
+    ))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -521,10 +530,10 @@ impl CliGemma4MoeExecutor {
         }
     }
 
-    fn state_image(&self) -> Result<sllm_core::Gemma4MoeStateImageV1, String> {
+    fn state_image(&self) -> Result<sllm_core::Gemma4MoeStateImageV2, String> {
         self.inner
-            .export_state_image()
-            .map_err(|error| format!("Gemma 4 MoE state image export failed: {error}"))
+            .export_state_image_v2()
+            .map_err(|error| format!("Gemma 4 MoE Paged V2 state image export failed: {error}"))
     }
 
     fn absorb(&mut self, output: &Gemma4MoeExecutionOutput) {
@@ -1654,14 +1663,13 @@ impl Qwen38ProductionBackend {
         ) {
             return Err("Qwen3.8 NVFP4 supports only fp16 or kv-mxfp8-e4 KV cache".to_owned());
         }
-        let mtp_enabled = match mtp_draft_width {
-            None => true,
-            Some(0) => false,
-            Some(width) if width == sllm_core::QWEN38_MTP_DRAFT_WIDTH as u8 => true,
+        let mtp_enabled = mtp_draft_width != Some(0);
+        let effective_mtp_draft_width = match mtp_draft_width {
+            None | Some(0) => sllm_core::QWEN38_MTP_DRAFT_WIDTH,
+            Some(width @ 2..=4) => usize::from(width),
             Some(width) => {
                 return Err(format!(
-                    "Qwen3.8 MTP uses fixed draft width {}; got {width}",
-                    sllm_core::QWEN38_MTP_DRAFT_WIDTH
+                    "Qwen3.8 MTP draft width must be 0, 2, 3, or 4; got {width}"
                 ));
             }
         };
@@ -1685,6 +1693,7 @@ impl Qwen38ProductionBackend {
             context_length: u32::try_from(sllm_core::QWEN35_RECOMMENDED_CONTEXT_TOKENS)
                 .map_err(|_| "Qwen3.8 context length does not fit u32".to_owned())?,
             kv_cache_encoding,
+            mtp_draft_width: effective_mtp_draft_width,
             phase41,
         })
         .map_err(|error| format!("Qwen3.8 NVFP4 backend failed to open: {error}"))?;
@@ -1853,14 +1862,11 @@ impl ModelFrontendBackend for Qwen38ProductionBackend {
         if request.prefill_chunk_tokens.is_some() {
             return Err("Qwen3.8 CLI does not accept --prefill-chunk-tokens".to_owned());
         }
-        let expected_width = sllm_core::QWEN38_MTP_DRAFT_WIDTH as u8;
         if request
             .mtp_draft_width
-            .is_some_and(|width| width != 0 && width != expected_width)
+            .is_some_and(|width| width != 0 && !(2..=4).contains(&width))
         {
-            return Err(format!(
-                "Qwen3.8 MTP uses fixed draft width {expected_width}"
-            ));
+            return Err("Qwen3.8 MTP draft width must be 0, 2, 3, or 4".to_owned());
         }
         let local = self.local_request(request)?;
         let cancellation = GenerationCancellationV1::new();
@@ -2452,6 +2458,7 @@ impl ModelFrontendBackend for Gemma4MoeProductionBackend {
                 );
             }
         }
+        validate_gemma4_moe_paged_target(&request.target)?;
         let tokenizer = self.tokenizer()?;
         let renderer = self.renderer()?;
         let stop_policy = gemma4_moe_generation_stop_policy()
@@ -2621,6 +2628,7 @@ impl ModelFrontendBackend for Gemma4MoeProductionBackend {
         {
             return Err("Gemma 4 MoE benchmark requires static FP8 E4M3 KV".to_owned());
         }
+        validate_gemma4_moe_paged_target(&request.target)?;
         validate_benchmark_protocol(request.warmups, request.measured)?;
         let completion_timeout = benchmark_completion_timeout(request.completion_timeout_seconds)?;
         let tokenizer = self.tokenizer()?;
@@ -2868,9 +2876,9 @@ pub(crate) struct Gemma4MoeCliChatBackend {
     context_length: u64,
     shutdown_timeout: Duration,
     checkpoint_store: Arc<CheckpointStore>,
-    current_checkpoint: Option<SessionCheckpoint>,
+    current_checkpoint: Option<SessionCheckpointV2>,
     checkpoint_loaded_explicitly: bool,
-    pending_state: Option<(sllm_core::Gemma4MoeStateImageV1, Vec<u32>)>,
+    pending_state: Option<(sllm_core::Gemma4MoeStateImageV2, Vec<u32>)>,
     active_cancellation: Option<GenerationCancellationV1>,
 }
 
@@ -3001,7 +3009,7 @@ impl Gemma4MoeCliChatBackend {
 
     fn checkpoint_identity(
         &self,
-        image: &sllm_core::Gemma4MoeStateImageV1,
+        image: &sllm_core::Gemma4MoeStateImageV2,
         tokens: &[u32],
     ) -> Result<CheckpointIdentity, String> {
         if image.model_fingerprint() != sllm_core::GEMMA4_MOE_MODEL_FINGERPRINT
@@ -3012,7 +3020,7 @@ impl Gemma4MoeCliChatBackend {
         CheckpointIdentity::for_tokens(
             sllm_core::GEMMA4_MOE_MODEL_FINGERPRINT,
             format!("derived-artifact:{}", self.source.file_sha256()),
-            "adapter:none-v1",
+            "adapter:none-v2",
             self.renderer_identity()?,
             self.tokenizer.snapshot().fingerprint(),
             format!(
@@ -3059,7 +3067,7 @@ impl Gemma4MoeCliChatBackend {
         &self,
         tokens: &[u32],
         state_capacity: u64,
-    ) -> Result<sllm_core::Gemma4MoeStateImageV1, String> {
+    ) -> Result<sllm_core::Gemma4MoeStateImageV2, String> {
         if tokens.is_empty() || u64::try_from(tokens.len()).unwrap_or(u64::MAX) > state_capacity {
             return Err("Gemma 4 MoE checkpoint history exceeds its state capacity".to_owned());
         }
@@ -3104,7 +3112,7 @@ impl Gemma4MoeCliChatBackend {
     fn candidate_checkpoint(
         &self,
         conversation: &[u8],
-    ) -> Result<SessionCheckpoint, ChatBackendErrorV1> {
+    ) -> Result<SessionCheckpointV2, ChatBackendErrorV1> {
         let (image, tokens) = self
             .pending_state
             .as_ref()
@@ -3113,7 +3121,7 @@ impl Gemma4MoeCliChatBackend {
             .checkpoint_identity(image, tokens)
             .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
         image
-            .to_checkpoint(
+            .to_checkpoint_v2(
                 identity,
                 tokens,
                 conversation,
@@ -3136,7 +3144,7 @@ impl Gemma4MoeCliChatBackend {
         }
         let checkpoint = self
             .checkpoint_store
-            .load_validated(name)
+            .load_v2_validated(name)
             .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
         let capacity = Self::checkpoint_capacity(&checkpoint.header.identity)
             .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
@@ -3151,7 +3159,7 @@ impl Gemma4MoeCliChatBackend {
             .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
         if identity.model_lock_fingerprint != sllm_core::GEMMA4_MOE_MODEL_FINGERPRINT
             || identity.derived_artifact_identity != expected_derived
-            || identity.adapter_identity != "adapter:none-v1"
+            || identity.adapter_identity != "adapter:none-v2"
             || identity.renderer_identity != expected_renderer
             || identity.tokenizer_identity != self.tokenizer.snapshot().fingerprint()
             || identity.target_semantics != expected_target
@@ -3251,7 +3259,7 @@ impl crate::chat::ChatBackendV1 for Gemma4MoeCliChatBackend {
                 .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
             let resident = self.resident.as_ref().ok_or(ChatBackendErrorV1::Failed)?;
             let owner = resident
-                .new_request_from_checkpoint(checkpoint, graph, &checkpoint.header.identity)
+                .new_request_from_checkpoint_v2(checkpoint, graph, &checkpoint.header.identity)
                 .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
             (
                 CliGemma4MoeExecutor::new_restored_with_prefix(owner, prefix_len),
@@ -3344,7 +3352,7 @@ impl crate::chat::ChatBackendV1 for Gemma4MoeCliChatBackend {
     ) -> Result<(), ChatBackendErrorV1> {
         let checkpoint = self.candidate_checkpoint(conversation)?;
         self.checkpoint_store
-            .save(name, &checkpoint)
+            .save_v2(name, &checkpoint)
             .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
         self.current_checkpoint = Some(checkpoint);
         self.checkpoint_loaded_explicitly = false;
@@ -6202,20 +6210,83 @@ impl ModelFrontendBackend for ProductionBackend {
                         .kv_layers()
                         .iter()
                         .map(|layer| {
-                            let physical = layer.physical();
-                            json!({
-                                "layer": layer.layer(),
-                                "logical_capacity_tokens": layer.logical_capacity_tokens(),
-                                "observed_length_tokens": layer.observed_length_tokens(),
-                                "memory_kind": match physical.memory_kind() {
-                                    sllm_core::KvMemoryKind::VirtualContiguous => "virtual-contiguous",
-                                    sllm_core::KvMemoryKind::ContiguousResident => "contiguous-resident",
-                                },
-                                "physical_page_bytes": physical.physical_page_bytes(),
-                                "tokens_per_page": physical.tokens_per_page(),
-                                "mapped_token_capacity": physical.mapped_token_capacity(),
-                                "committed_bytes_per_plane": physical.committed_bytes_per_plane(),
-                            })
+                            let common = || {
+                                json!({
+                                    "layer": layer.layer(),
+                                    "logical_capacity_tokens": layer.logical_capacity_tokens(),
+                                    "observed_length_tokens": layer.observed_length_tokens(),
+                                })
+                            };
+                            match layer.physical_metadata() {
+                                sllm_core::KvPhysicalMemoryMetadata::Vmm(physical) => {
+                                    let mut value = common().as_object().cloned().expect("object");
+                                    value.extend([
+                                        (
+                                            "memory_kind".to_owned(),
+                                            json!(match physical.memory_kind() {
+                                                sllm_core::KvMemoryKind::VirtualContiguous => {
+                                                    "virtual-contiguous"
+                                                }
+                                                sllm_core::KvMemoryKind::ContiguousResident => {
+                                                    "contiguous-resident"
+                                                }
+                                            }),
+                                        ),
+                                        (
+                                            "physical_page_bytes".to_owned(),
+                                            json!(physical.physical_page_bytes()),
+                                        ),
+                                        (
+                                            "tokens_per_page".to_owned(),
+                                            json!(physical.tokens_per_page()),
+                                        ),
+                                        (
+                                            "mapped_token_capacity".to_owned(),
+                                            json!(physical.mapped_token_capacity()),
+                                        ),
+                                        (
+                                            "committed_bytes_per_plane".to_owned(),
+                                            json!(physical.committed_bytes_per_plane()),
+                                        ),
+                                    ]);
+                                    Value::Object(value)
+                                }
+                                sllm_core::KvPhysicalMemoryMetadata::Paged(physical) => {
+                                    let mut value = common().as_object().cloned().expect("object");
+                                    value.extend([
+                                        ("memory_kind".to_owned(), json!("paged")),
+                                        (
+                                            "paged_token_block_size".to_owned(),
+                                            json!(physical.token_block_size()),
+                                        ),
+                                        (
+                                            "paged_physical_layout_version".to_owned(),
+                                            json!(physical.physical_layout_version()),
+                                        ),
+                                        (
+                                            "paged_logical_table_capacity".to_owned(),
+                                            json!(physical.logical_table_capacity()),
+                                        ),
+                                        (
+                                            "paged_max_physical_blocks".to_owned(),
+                                            json!(physical.max_physical_blocks()),
+                                        ),
+                                        (
+                                            "paged_allocated_physical_blocks".to_owned(),
+                                            json!(physical.allocated_physical_blocks()),
+                                        ),
+                                        (
+                                            "paged_committed_bytes_per_plane".to_owned(),
+                                            json!(physical.committed_bytes_per_plane()),
+                                        ),
+                                        (
+                                            "paged_committed_bytes_total".to_owned(),
+                                            json!(physical.committed_bytes_total()),
+                                        ),
+                                    ]);
+                                    Value::Object(value)
+                                }
+                            }
                         })
                         .collect::<Vec<_>>();
                     (
@@ -7485,12 +7556,10 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     || top_p.is_some_and(|value| value != 0.95)
                     || presence_penalty.is_some_and(|value| value != 0.0)
                     || frequency_penalty.is_some_and(|value| value != 0.0)
-                    || mtp_draft_width.is_some_and(|width| {
-                        width != 0 && width != sllm_core::QWEN38_MTP_DRAFT_WIDTH as u8
-                    })
+                    || mtp_draft_width.is_some_and(|width| width != 0 && !(2..=4).contains(&width))
                 {
                     return Err(
-                        "Qwen3.8 NVFP4 CLI requires fixed temperature=1.0, zero penalties, and MTP width 0 or 2"
+                        "Qwen3.8 NVFP4 CLI requires fixed temperature=1.0, zero penalties, and MTP width 0, 2, 3, or 4"
                             .to_owned(),
                     );
                 }
@@ -8465,6 +8534,31 @@ mod tests {
                 && sampling.temperature() == 1.0
                 && sampling.top_p() == 0.95
         ));
+        for width in [2_u8, 3, 4] {
+            let value = width.to_string();
+            let args = [
+                "--qwen38-nvfp4",
+                "/models/qwen38",
+                "--prompt",
+                "abc",
+                "--max-new-tokens",
+                "3",
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1030",
+                "--mtp-draft-width",
+                value.as_str(),
+            ];
+            let parsed = parse_args("generate", &args).unwrap();
+            assert!(matches!(
+                parsed.operation,
+                Operation::Generate(GenerateRequest {
+                    mtp_draft_width: Some(actual),
+                    ..
+                }) if actual == width
+            ));
+        }
         for (flag, value) in [
             ("--greedy", ""),
             ("--top-p", "1.0"),
@@ -10322,6 +10416,18 @@ mod tests {
             KvCacheEncoding::Mxfp8E5,
         ] {
             assert!(validate_gemma4_moe_chat_kv_cache_encoding(Some(encoding)).is_err());
+        }
+    }
+
+    #[test]
+    fn gemma_moe_paged_session_requires_reviewed_exact_targets() {
+        for target in ["gfx1030", "gfx1201"] {
+            assert!(validate_gemma4_moe_paged_target(target).is_ok());
+        }
+        for target in ["gfx942", "gfx942:sramecc+:xnack-", "unknown"] {
+            let error = validate_gemma4_moe_paged_target(target).unwrap_err();
+            assert!(error.contains("requires exact target gfx1030 or gfx1201"));
+            assert!(error.contains(target));
         }
     }
 

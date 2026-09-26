@@ -1022,7 +1022,7 @@ bool run_activation_shared_matmul_oracle(const bool default_lut = false) {
           default_lut
               ? (std::strcmp(SLLM_TEST_EXPECTED_TARGET, "gfx1201") == 0
                      ? "sllm_nvfp4_w4a4_decode_scale_lut_gfx1201_actshared_v1"
-                     : "sllm_matmul_nvfp4_w4a4_decode_scale_lut_v1")
+                     : "sllm_nvfp4_w4a4_decode_scale_lut_gfx1030_sgpr_v1")
               : "sllm_matmul_nvfp4_w4a4_decode_dp4a_activation_shared_v1",
           static_cast<uint32_t>((n + UINT64_C(31)) / UINT64_C(32)));
       valid = control.valid && candidate.valid && control.deterministic &&

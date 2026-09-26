@@ -180,7 +180,10 @@
 ## External code and provenance
 
 - Consider llama.cpp direct reuse before implementing clean-room code; it is
-  allowed under `docs/provenance/README.md`.
+  allowed under `docs/provenance/README.md`. The MIT-licensed parts of
+  rocm_exl3 (the ROCm fork of exllamav3) may be reused the same way for EXL3
+  work, under the same records; parts derived from non-MIT sources are not
+  covered.
 - Whenever external project code is copied, adapted, or ported, proactively
   append to the [import log](THIRD_PARTY_NOTICES.md#import-log) during the same
   task without waiting for a separate user instruction. Include the approximate
@@ -205,9 +208,10 @@
 - Provenance is required for release/distribution, not as a human-review gate
   or a provenance-only follow-up commit at each checkpoint. A pending import
   commit is acceptable in development and must be resolved for release.
-- AI similarity/provenance checking is allowed at integration. vLLM and other
-  non-llama sources remain no-copy references. Keep inspection notes separate
-  from implementation; separate agents are optional.
+- AI similarity/provenance checking is allowed at integration. vLLM, QTIP
+  (GPL-3.0, cited by exllamav3), and other sources not allowed above remain
+  no-copy references. Keep inspection notes separate from implementation;
+  separate agents are optional.
 
 ## Repository safeguards
 

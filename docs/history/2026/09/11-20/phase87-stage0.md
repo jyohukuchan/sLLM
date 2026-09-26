@@ -5,7 +5,7 @@
 2026-09-19完了。対象はQwen3.8-27B Unsloth混合NVFP4、single GPU、
 exact `gfx1030`／`gfx1201`。この記録は段階0だけを扱い、Phase 87全体の完了を意味しない。
 
-受入項目は[計画](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)の段階0に固定する。
+受入項目は[計画](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)の段階0に固定する。
 
 1. 両GPU、MTPなし／ありのdecode内訳、読み出し量、実効帯域、形状別copy帯域。
 2. NVFP4 M=1の実行形式の確認、現行W4A4の速度・KLD基準。
@@ -306,4 +306,4 @@ GDNの新しい最適化はこの段階0で対象へ追加していない。host
   copyのread＋write帯域とmatmulのread帯域の分母も明記する。
 - 実行失敗、未取得、未確認の項目はPASSにしない。
 
-計画: [Phase 87](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)
+計画: [Phase 87](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)

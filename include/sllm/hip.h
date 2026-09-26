@@ -381,6 +381,12 @@ typedef uint32_t sllm_deepseek_v4_moe_route_mode_t;
 #define SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E5_BLOCK16_TOKEN_MAJOR_V1 UINT32_C(7)
 #define SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E4_TOKEN_MAJOR_V1 UINT32_C(8)
 #define SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E5_TOKEN_MAJOR_V1 UINT32_C(9)
+#define SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_F16_V1 UINT32_C(108)
+#define SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_MXFP8_E4_V1 UINT32_C(109)
+#define SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_FP8_E4_V1 UINT32_C(112)
+#define SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_FP8_STATIC_E4_V1 UINT32_C(113)
+#define SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_NVFP4_V1 UINT32_C(114)
+#define SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_MXFP8_E5_V1 UINT32_C(115)
 #define SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E4_BLOCK16_TOKEN_MAJOR_V2 UINT32_C(10)
 #define SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E5_BLOCK16_TOKEN_MAJOR_V2 UINT32_C(11)
 #define SLLM_HIP_KV_WORKGROUP_SIZE UINT32_C(256)
@@ -389,6 +395,13 @@ typedef uint32_t sllm_deepseek_v4_moe_route_mode_t;
 #define SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS UINT32_C(1)
 #define SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED UINT32_C(0)
 #define SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT UINT32_C(2)
+#define SLLM_HIP_KV_MEMORY_KIND_PAGED UINT32_C(3)
+#define SLLM_HIP_KV_PAGED_CREATE_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_KV_PAGED_VIEW_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_KV_PAGED_TOKEN_BLOCK_SIZE UINT32_C(128)
+#define SLLM_HIP_KV_PAGED_LAYOUT_VERSION UINT32_C(1)
+#define SLLM_HIP_KV_PAGED_STATE_FORK_VERSION UINT32_C(1)
+#define SLLM_HIP_KV_PAGED_STATE_FORK_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR UINT32_C(1)
 #define SLLM_HIP_KV_ENCODING_FP16_V1 UINT32_C(0)
 #define SLLM_HIP_KV_ENCODING_FP8_V1 UINT32_C(1)
@@ -406,6 +419,15 @@ typedef uint32_t sllm_deepseek_v4_moe_route_mode_t;
 #define SLLM_HIP_STATE_FORK_VERSION UINT32_C(1)
 #define SLLM_HIP_STATE_FORK_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_STATE_IMAGE_SLIDING_VERSION UINT32_C(2)
+#define SLLM_HIP_KV_PAGED_IMAGE_VERSION UINT32_C(1)
+#define SLLM_HIP_KV_PAGED_IMAGE_ENDIAN_LITTLE UINT32_C(1)
+#define SLLM_HIP_KV_PAGED_IMAGE_TABLE_ENTRY_U32 UINT32_C(1)
+#define SLLM_HIP_KV_PAGED_IMAGE_FLAG_SLIDING UINT32_C(1)
+#define SLLM_HIP_KV_PAGED_IMAGE_FLAG_STATIC_SCALES UINT32_C(2)
+#define SLLM_HIP_KV_PAGED_IMAGE_SECTION_LOGICAL_TABLE UINT32_C(1)
+#define SLLM_HIP_KV_PAGED_IMAGE_SECTION_RING_TAGS UINT32_C(2)
+#define SLLM_HIP_KV_PAGED_IMAGE_SECTION_RING_TABLE UINT32_C(3)
+#define SLLM_HIP_KV_PAGED_IMAGE_SECTION_PLANE UINT32_C(4)
 #define SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY UINT32_C(1)
 #define SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES UINT32_C(2)
 #define SLLM_HIP_KV_STATE_PLANE_KEY UINT32_C(1)
@@ -455,6 +477,21 @@ typedef uint32_t sllm_deepseek_v4_moe_route_mode_t;
  * evidence is complete. */
 #define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_V1        \
   UINT32_C(93)
+/* Phase87 Stage10 exact Qwen3.8 MXFP8 E4 Paged KV providers.  The logical
+ * block table is resolved to a physical descriptor before any KV load. */
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_GQA6_V1 UINT32_C(106)
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_GQA6_V1 UINT32_C(107)
+/* Phase87 Stage11 C1 candidate: M3, committed KV>=8192, exact gfx1030/
+ * gfx1201 only.  M2 and short KV remain on the Stage10 provider. */
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_GQA6_C1_M3_V1         \
+  UINT32_C(118)
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_FP16_V1 UINT32_C(110)
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_FP16_V1 UINT32_C(111)
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_GENERIC_FORMATS_V1           \
+  UINT32_C(116)
+/* Phase87 Stage10 Gemma4 static-FP8 Paged 1024-token ring provider. */
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_SLIDING_STATIC_FP8_V1        \
+  UINT32_C(117)
 #define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE UINT32_C(256)
@@ -1591,6 +1628,39 @@ typedef struct sllm_kv_state_create_info_v2_t {
   uint32_t reserved[4];
 } sllm_kv_state_create_info_v2_t;
 
+/* Additive paged KV create contract.  `token_block_size` is the physical
+ * block's token count; it is deliberately separate from
+ * `quantization_block_size`, which preserves the encoding's quantization
+ * group width.  Static FP8 scale fields contain the IEEE-754 binary32 bits
+ * for the independent K and V decode scales. The logical table and physical
+ * pool capacities are counts, not byte sizes. */
+typedef struct sllm_kv_state_paged_create_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t create_info_version;
+  uint32_t reserved0;
+  uint64_t session_id;
+  uint32_t layer_id;
+  uint32_t flags;
+  uint64_t capacity_tokens;
+  uint32_t head_count;
+  uint32_t head_dim;
+  uint32_t memory_kind;
+  uint32_t layout;
+  uint32_t dtype;
+  uint32_t encoding;
+  uint32_t scale_dtype;
+  uint32_t quantization_block_size;
+  uint32_t token_block_size;
+  uint32_t physical_layout_version;
+  uint64_t logical_table_capacity;
+  uint64_t max_physical_blocks;
+  uint64_t sliding_window_tokens;
+  uint32_t static_key_scale_bits;
+  uint32_t static_value_scale_bits;
+  uint32_t reserved[4];
+} sllm_kv_state_paged_create_info_t;
+
 typedef struct sllm_kv_view_info_t {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -1618,6 +1688,42 @@ typedef struct sllm_kv_view_info_t {
   uint64_t v_stride_elements[3];
   uint32_t reserved[4];
 } sllm_kv_view_info_t;
+
+/* Additive paged KV query view.  The VMM-specific fields in
+ * sllm_kv_view_info_t retain their existing meanings and are not reused for
+ * paged pool metrics. committed_bytes_per_plane follows the plane constants
+ * SLLM_HIP_KV_STATE_PLANE_* in order and equals the plane's
+ * bytes-per-block multiplied by the number of allocated slab slots.
+ * committed_bytes_total is the sum of the six plane values and represents
+ * the total allocation accounted to the planes. */
+typedef struct sllm_kv_paged_view_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t reserved0;
+  uint64_t session_id;
+  uint32_t layer_id;
+  uint32_t dtype;
+  uint32_t encoding;
+  uint32_t head_count;
+  uint32_t head_dim;
+  uint32_t memory_kind;
+  uint32_t layout;
+  uint32_t token_block_size;
+  uint32_t physical_layout_version;
+  uint32_t reserved1;
+  uint64_t capacity_tokens;
+  uint64_t observed_length;
+  uint64_t generation;
+  uint64_t logical_table_capacity;
+  uint64_t max_physical_blocks;
+  uint64_t allocated_physical_blocks;
+  uint64_t committed_bytes_per_plane[6];
+  uint64_t committed_bytes_total;
+  uint64_t context_identity;
+  uint64_t state_identity;
+  uint32_t reserved[4];
+} sllm_kv_paged_view_info_t;
 
 /* Append inputs are independent, read-only BF16 [M, 4, 256] bindings.  The
  * expected length and start position must both equal the state's published
@@ -1761,6 +1867,34 @@ typedef struct sllm_state_fork_info_t {
   uint32_t reserved[4];
 } sllm_state_fork_info_t;
 
+/* Additive paged KV fork result.  The legacy page_bytes field above is
+ * intentionally absent: token blocks, logical tables, and physical blocks
+ * have their own versioned fields here. In a post-COW query, shared blocks
+ * are current, while copied blocks/bytes are cumulative since the fork. */
+typedef struct sllm_kv_paged_state_fork_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t reserved0;
+  uint64_t source_state_identity;
+  uint64_t child_state_identity;
+  uint64_t source_owned_bytes;
+  uint64_t child_owned_bytes;
+  uint64_t copied_bytes;
+  uint64_t shared_bytes;
+  uint64_t published_length;
+  uint32_t token_block_size;
+  uint32_t physical_layout_version;
+  uint64_t source_logical_table_capacity;
+  uint64_t child_logical_table_capacity;
+  uint64_t source_physical_blocks;
+  uint64_t child_physical_blocks;
+  uint64_t copied_physical_blocks;
+  uint64_t shared_physical_blocks;
+  uint64_t committed_bytes_total;
+  uint32_t reserved[4];
+} sllm_kv_paged_state_fork_info_t;
+
 /* Chunk operations copy the exact native encoding.  No FP16 conversion,
  * host replay, or scheduler-visible pointers are involved. */
 typedef struct sllm_state_chunk_t {
@@ -1793,6 +1927,59 @@ typedef struct sllm_state_image_info_t {
   uint32_t plane_count;
   uint32_t reserved[7];
 } sllm_state_image_info_t;
+
+/* Versioned Paged KV image metadata.  This additive contract does not reuse
+ * legacy image fields: logical table entries, optional sliding ring tags, and
+ * six block-major plane payloads have distinct section operations below. All
+ * serialized table/tag integers are little-endian; plane bytes retain the
+ * exact encoded KV representation. */
+typedef struct sllm_kv_paged_image_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t image_version;
+  uint32_t flags;
+  uint32_t byte_order;
+  uint64_t session_id;
+  uint32_t layer_id;
+  uint32_t dtype;
+  uint32_t encoding;
+  uint32_t head_count;
+  uint32_t head_dim;
+  uint32_t layout;
+  uint32_t token_block_size;
+  uint32_t physical_layout_version;
+  uint64_t capacity_tokens;
+  uint64_t published_length;
+  uint64_t generation;
+  uint64_t retained_start;
+  uint64_t retained_length;
+  uint64_t sliding_window_tokens;
+  uint64_t logical_table_capacity;
+  uint64_t physical_block_count;
+  uint32_t plane_count;
+  uint32_t ring_slot_count;
+  uint32_t table_entry_width;
+  uint32_t reserved0;
+  uint64_t plane_block_stride[6];
+  uint64_t plane_bytes[6];
+  uint32_t static_key_scale_bits;
+  uint32_t static_value_scale_bits;
+  uint32_t reserved[8];
+} sllm_kv_paged_image_info_t;
+
+typedef struct sllm_kv_paged_image_chunk_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t image_version;
+  uint32_t section;
+  uint32_t plane;
+  uint32_t reserved0;
+  uint64_t byte_offset;
+  uint64_t byte_length;
+  void *host_pointer;
+  uint64_t host_capacity;
+  uint32_t reserved[4];
+} sllm_kv_paged_image_chunk_t;
 
 /* Projected inputs use qkv BF16 [M, (2*qk_heads+value_heads)*head_dim], z
  * BF16 [M,value_heads*head_dim], b/a BF16 [M,value_heads]. Convolution
@@ -2289,12 +2476,21 @@ SLLM_HIP_API sllm_status_t sllm_kv_state_create_v2(
     const sllm_context_t *context, const sllm_kv_state_create_info_v2_t *info,
     sllm_kv_state_t **state, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
+SLLM_HIP_API sllm_status_t sllm_kv_state_create_paged(
+    const sllm_context_t *context,
+    const sllm_kv_state_paged_create_info_t *info, sllm_kv_state_t **state,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
 SLLM_HIP_API sllm_status_t sllm_kv_state_release(
     sllm_kv_state_t **state, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t
 sllm_kv_state_query(const sllm_kv_state_t *state, sllm_kv_view_info_t *info,
                     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_query_paged(
+    const sllm_kv_state_t *state, sllm_kv_paged_view_info_t *info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 /* Rewinds a quiescent committed KV tail to an earlier length. The expected
  * current length makes stale rollback fail closed. Tail bytes are left
@@ -2310,6 +2506,10 @@ sllm_kv_state_snapshot(const sllm_kv_state_t *state, sllm_kv_view_t **view,
 SLLM_HIP_API sllm_status_t
 sllm_kv_view_query(const sllm_kv_view_t *view, sllm_kv_view_info_t *info,
                    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_view_query_paged(
+    const sllm_kv_view_t *view, sllm_kv_paged_view_info_t *info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_kv_view_release(
     sllm_kv_view_t **view, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
@@ -2337,6 +2537,20 @@ SLLM_HIP_API sllm_status_t sllm_kv_state_fork_query(
     const sllm_kv_state_t *state, sllm_state_fork_info_t *fork_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
+SLLM_HIP_API sllm_status_t sllm_kv_state_fork_paged(
+    const sllm_kv_state_t *source,
+    const sllm_kv_state_paged_create_info_t *destination_info,
+    sllm_kv_state_t **child, sllm_kv_paged_state_fork_info_t *fork_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_fork_query_paged(
+    const sllm_kv_state_t *state, sllm_kv_paged_state_fork_info_t *fork_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+/* The legacy raw-plane image ABI is fail-closed for paged states.  A future
+ * paged image ABI must introduce its own versioned chunk and image records;
+ * these entries must not reinterpret page_bytes or plane offsets as token
+ * block metadata. */
 SLLM_HIP_API sllm_status_t sllm_kv_state_export(
     const sllm_kv_state_t *state, const sllm_state_chunk_t *chunk,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
@@ -2355,6 +2569,29 @@ SLLM_HIP_API sllm_status_t sllm_kv_state_image_plane_size(
 
 SLLM_HIP_API sllm_status_t sllm_kv_state_import_finalize(
     const sllm_kv_state_t *state, const sllm_state_image_info_t *image_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+/* Additive Paged KV image ABI.  The legacy image functions above remain
+ * fail-closed for Paged states; these entries describe compact logical table
+ * and ring metadata separately from the six exact encoded planes. */
+SLLM_HIP_API sllm_status_t sllm_kv_state_paged_image_query(
+    const sllm_kv_state_t *state, sllm_kv_paged_image_info_t *image_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_paged_image_section_size(
+    const sllm_kv_state_t *state, uint32_t section, uint32_t plane,
+    uint64_t *size_bytes, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_paged_image_export(
+    const sllm_kv_state_t *state, const sllm_kv_paged_image_chunk_t *chunk,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_paged_image_import(
+    const sllm_kv_state_t *state, const sllm_kv_paged_image_chunk_t *chunk,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_paged_image_import_finalize(
+    const sllm_kv_state_t *state, const sllm_kv_paged_image_info_t *image_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_causal_attention_execute(

@@ -271,6 +271,68 @@ void initialize_state_image_info(sllm_state_image_info_t *const info) noexcept {
   info->info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
 }
 
+sllm_status_t
+validate_paged_image_info(sllm_kv_paged_image_info_t *const info,
+                          sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "paged KV image info output is null");
+  }
+  const uint32_t struct_size = info->struct_size;
+  const uint32_t abi_version = info->abi_version;
+  const uint32_t image_version = info->image_version;
+  const uint32_t flags = info->flags;
+  const uint32_t reserved0 = info->reserved0;
+  bool reserved_zero = reserved0 == 0U;
+  for (const uint32_t value : info->reserved)
+    reserved_zero = reserved_zero && value == 0U;
+  std::memset(info, 0, sizeof(*info));
+  if (struct_size != sizeof(*info)) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "paged KV image info struct size is unsupported");
+  }
+  if (abi_version != SLLM_HIP_ABI_VERSION) {
+    return write_error(sink, SLLM_STATUS_INVALID_ABI_VERSION,
+                       "paged KV image info ABI is unsupported");
+  }
+  if (image_version != SLLM_HIP_KV_PAGED_IMAGE_VERSION) {
+    return write_error(sink, SLLM_STATUS_INVALID_ABI_VERSION,
+                       "paged KV image version is unsupported");
+  }
+  if (!reserved_zero ||
+      (flags & ~(SLLM_HIP_KV_PAGED_IMAGE_FLAG_SLIDING |
+                 SLLM_HIP_KV_PAGED_IMAGE_FLAG_STATIC_SCALES)) != 0U) {
+    return write_error(sink, SLLM_STATUS_RESERVED_NONZERO,
+                       "paged KV image flags or reserved fields are invalid");
+  }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t
+validate_paged_image_chunk(const sllm_kv_paged_image_chunk_t *const chunk,
+                           sllm_error_sink_t *const sink) noexcept {
+  if (chunk == nullptr || chunk->struct_size != sizeof(*chunk)) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "paged KV image chunk struct size is unsupported");
+  }
+  if (chunk->abi_version != SLLM_HIP_ABI_VERSION ||
+      chunk->image_version != SLLM_HIP_KV_PAGED_IMAGE_VERSION) {
+    return write_error(sink, SLLM_STATUS_INVALID_ABI_VERSION,
+                       "paged KV image chunk ABI or version is unsupported");
+  }
+  if (chunk->host_pointer == nullptr || chunk->byte_length == 0U ||
+      chunk->byte_length > chunk->host_capacity ||
+      chunk->byte_offset > UINT64_MAX - chunk->byte_length) {
+    return write_error(sink, SLLM_STATUS_BUFFER_TOO_SMALL,
+                       "paged KV image chunk host range is invalid");
+  }
+  for (const uint32_t value : chunk->reserved)
+    if (value != 0U)
+      return write_error(sink, SLLM_STATUS_RESERVED_NONZERO,
+                         "paged KV image chunk reserved fields are invalid");
+  return SLLM_STATUS_OK;
+}
+
 sllm_status_t validate_dispatch_info(
     const sllm_attention_preprocess_dispatch_info_t *const info,
     sllm_error_sink_t *const sink) noexcept {
@@ -796,6 +858,24 @@ extern "C" sllm_status_t sllm_graph_span_select_linear_state(
   } catch (...) {
     return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
                        "unexpected linear graph state selection");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_graph_span_prepare_paged_kv(sllm_graph_span_t *const span,
+                                 const uint64_t conservative_end,
+                                 sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (span == nullptr || conservative_end == 0U)
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "graph paged KV preparation argument is invalid");
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected graph paged KV preparation");
   }
 }
 
@@ -2312,6 +2392,31 @@ sllm_kv_state_create_v2(const sllm_context_t *const context,
 }
 
 extern "C" sllm_status_t
+sllm_kv_state_create_paged(const sllm_context_t *const context,
+                           const sllm_kv_state_paged_create_info_t *const info,
+                           sllm_kv_state_t **const state,
+                           sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (state != nullptr)
+      *state = nullptr;
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    const sllm_status_t info_status =
+        sllm_kv_state::validate_state_create_info_paged(info, error_sink);
+    if (info_status != SLLM_STATUS_OK)
+      return info_status;
+    if (context == nullptr || state == nullptr)
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "paged KV state context or output is null");
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in paged KV create stub");
+  }
+}
+
+extern "C" sllm_status_t
 sllm_kv_state_release(sllm_kv_state_t **const state,
                       sllm_error_sink_t *const error_sink) noexcept {
   try {
@@ -2354,6 +2459,24 @@ sllm_kv_state_query(const sllm_kv_state_t *const state,
     return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
                        "unexpected exception in KV state query stub");
   }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_query_paged(const sllm_kv_state_t *const state,
+                          sllm_kv_paged_view_info_t *const info,
+                          sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  if (info == nullptr || info->struct_size != sizeof(*info) ||
+      info->abi_version != SLLM_HIP_ABI_VERSION ||
+      info->info_version != SLLM_HIP_KV_PAGED_VIEW_INFO_VERSION)
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "paged KV view header is invalid");
+  if (state == nullptr)
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "paged KV state handle is null");
+  return unavailable(error_sink);
 }
 
 extern "C" sllm_status_t
@@ -2417,6 +2540,24 @@ sllm_kv_view_query(const sllm_kv_view_t *const view,
     return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
                        "unexpected exception in KV snapshot query stub");
   }
+}
+
+extern "C" sllm_status_t
+sllm_kv_view_query_paged(const sllm_kv_view_t *const view,
+                         sllm_kv_paged_view_info_t *const info,
+                         sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  if (info == nullptr || info->struct_size != sizeof(*info) ||
+      info->abi_version != SLLM_HIP_ABI_VERSION ||
+      info->info_version != SLLM_HIP_KV_PAGED_VIEW_INFO_VERSION)
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "paged KV snapshot view header is invalid");
+  if (view == nullptr)
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "paged KV snapshot handle is null");
+  return unavailable(error_sink);
 }
 
 extern "C" sllm_status_t
@@ -2561,6 +2702,56 @@ sllm_kv_state_fork_query(const sllm_kv_state_t *const state,
   }
 }
 
+extern "C" sllm_status_t sllm_kv_state_fork_paged(
+    const sllm_kv_state_t *const source,
+    const sllm_kv_state_paged_create_info_t *const destination_info,
+    sllm_kv_state_t **const child,
+    sllm_kv_paged_state_fork_info_t *const fork_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (child != nullptr)
+      *child = nullptr;
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    const sllm_status_t info_status =
+        sllm_kv_state::validate_state_create_info_paged(destination_info,
+                                                        error_sink);
+    if (info_status != SLLM_STATUS_OK)
+      return info_status;
+    if (fork_info == nullptr || fork_info->struct_size != sizeof(*fork_info) ||
+        fork_info->abi_version != SLLM_HIP_ABI_VERSION ||
+        fork_info->info_version != SLLM_HIP_KV_PAGED_STATE_FORK_INFO_VERSION)
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "paged KV fork info header is invalid");
+    if (source == nullptr || child == nullptr)
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "paged KV fork source or child output is null");
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in paged KV fork stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_fork_query_paged(const sllm_kv_state_t *const state,
+                               sllm_kv_paged_state_fork_info_t *const fork_info,
+                               sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  if (fork_info == nullptr || fork_info->struct_size != sizeof(*fork_info) ||
+      fork_info->abi_version != SLLM_HIP_ABI_VERSION ||
+      fork_info->info_version != SLLM_HIP_KV_PAGED_STATE_FORK_INFO_VERSION)
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "paged KV fork query info header is invalid");
+  if (state == nullptr)
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "paged KV fork query state handle is null");
+  return unavailable(error_sink);
+}
+
 extern "C" sllm_status_t
 sllm_kv_state_export(const sllm_kv_state_t *const state,
                      const sllm_state_chunk_t *const chunk,
@@ -2678,6 +2869,121 @@ sllm_kv_state_import_finalize(const sllm_kv_state_t *const state,
   } catch (...) {
     return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
                        "unexpected exception in KV import finalize stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_paged_image_query(const sllm_kv_state_t *const state,
+                                sllm_kv_paged_image_info_t *const image_info,
+                                sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    const sllm_status_t info_status =
+        validate_paged_image_info(image_info, error_sink);
+    if (info_status != SLLM_STATUS_OK)
+      return info_status;
+    if (state == nullptr)
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "paged KV image query state handle is null");
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in paged KV image query stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_kv_state_paged_image_section_size(
+    const sllm_kv_state_t *const state, const uint32_t section,
+    const uint32_t plane, uint64_t *const size_bytes,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (state == nullptr || size_bytes == nullptr)
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "paged KV image section size arguments are null");
+    (void)section;
+    (void)plane;
+    *size_bytes = 0U;
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in paged KV image section size stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_paged_image_export(const sllm_kv_state_t *const state,
+                                 const sllm_kv_paged_image_chunk_t *const chunk,
+                                 sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    const sllm_status_t chunk_status =
+        validate_paged_image_chunk(chunk, error_sink);
+    if (chunk_status != SLLM_STATUS_OK)
+      return chunk_status;
+    if (state == nullptr)
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "paged KV image export state handle is null");
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in paged KV image export stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_paged_image_import(const sllm_kv_state_t *const state,
+                                 const sllm_kv_paged_image_chunk_t *const chunk,
+                                 sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    const sllm_status_t chunk_status =
+        validate_paged_image_chunk(chunk, error_sink);
+    if (chunk_status != SLLM_STATUS_OK)
+      return chunk_status;
+    if (state == nullptr)
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "paged KV image import state handle is null");
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in paged KV image import stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_kv_state_paged_image_import_finalize(
+    const sllm_kv_state_t *const state,
+    const sllm_kv_paged_image_info_t *const image_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (image_info == nullptr || image_info->struct_size != sizeof(*image_info))
+      return write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "paged KV image finalize info struct size is unsupported");
+    if (image_info->abi_version != SLLM_HIP_ABI_VERSION ||
+        image_info->image_version != SLLM_HIP_KV_PAGED_IMAGE_VERSION)
+      return write_error(
+          error_sink, SLLM_STATUS_INVALID_ABI_VERSION,
+          "paged KV image finalize ABI or version is unsupported");
+    if (state == nullptr)
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "paged KV image finalize state handle is null");
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in paged KV image finalize stub");
   }
 }
 

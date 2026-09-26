@@ -129,4 +129,4 @@ Gemma 4 31Bはreference-only・payloadなしであり、両GPU実行対象へ数
 rollbackは本作業単位のGit差分を戻す。dirty worktreeのため、未作成commitをsource identityやimmutable release identityとして扱わない。
 過去のW4A16／MX A16 evidenceは削除せず、retired ABI／provider／selector IDに対応する履歴として参照可能に保つ。
 
-計画: [Phase 87 Qwen3.8 NVFP4 single-request plan](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#段階4-wa16の廃止と契約の整理)
+計画: [Phase 87 Qwen3.8 NVFP4 single-request plan](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#段階4-wa16の廃止と契約の整理)

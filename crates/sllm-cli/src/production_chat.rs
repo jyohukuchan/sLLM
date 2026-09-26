@@ -362,10 +362,8 @@ fn split_args(
         {
             return Err("Qwen3.8 NVFP4 supports only fp16 or kv-mxfp8-e4 KV cache".to_owned());
         }
-        if mtp_draft_width
-            .is_some_and(|width| width != 0 && width != sllm_core::QWEN38_MTP_DRAFT_WIDTH as u8)
-        {
-            return Err("Qwen3.8 MTP uses fixed draft width 2 (or 0 for target-only)".to_owned());
+        if mtp_draft_width.is_some_and(|width| width != 0 && !(2..=4).contains(&width)) {
+            return Err("Qwen3.8 MTP draft width must be 0, 2, 3, or 4".to_owned());
         }
         if mtp_weights.is_some() && mtp_draft_width == Some(0) {
             return Err(
@@ -694,6 +692,10 @@ impl Qwen38CliChatBackend {
             shutdown_timeout: Duration::from_secs(config.shutdown_timeout_seconds),
             context_length: config.context_length,
             kv_cache_encoding,
+            mtp_draft_width: config
+                .mtp_draft_width
+                .filter(|width| *width != 0)
+                .map_or(sllm_core::QWEN38_MTP_DRAFT_WIDTH, usize::from),
             phase41: Phase41ProductionConfigV1 {
                 prefix_cache: PrefixCacheStartupConfigV1::Disabled,
                 context_window: ContextWindowStartupConfigV1::Disabled,
@@ -1301,6 +1303,21 @@ mod tests {
             config.mtp_weights,
             Some(std::path::PathBuf::from("/models/qwen38-mtp-mxfp8"))
         );
+        for width in [2, 3, 4] {
+            let value = width.to_string();
+            let args = [
+                "--qwen38-nvfp4",
+                "/models/qwen38",
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1030",
+                "--mtp-draft-width",
+                value.as_str(),
+            ];
+            let (config, _) = split_args(args.into_iter().map(str::to_owned)).unwrap();
+            assert_eq!(config.mtp_draft_width, Some(width));
+        }
     }
 
     #[test]
@@ -1338,7 +1355,7 @@ mod tests {
             "1",
         ];
         let error = split_args(args.into_iter().map(str::to_owned)).unwrap_err();
-        assert!(error.contains("fixed draft width 2"));
+        assert!(error.contains("must be 0, 2, 3, or 4"));
         let args = [
             "--gguf",
             "/models/qwen.gguf",

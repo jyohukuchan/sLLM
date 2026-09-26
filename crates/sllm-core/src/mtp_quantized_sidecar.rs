@@ -1,15 +1,17 @@
-//! Verified MXFP8/MXFP6 sidecars for the Qwen3.8 MTP companion.
+//! Verified MXFP8 and NVFP4 sidecars for the Qwen3.8 MTP companion.
 //!
 //! The sidecar owns only the eight matrix weights of the one-layer MTP
 //! companion.  Norms, the shared embedding/output, and the original weight
 //! load plan remain BF16/FP8 source bindings.  The source model artifact is
 //! therefore still the provenance authority; this module only supplies the
-//! replacement value and E8M0 scale planes.
+//! replacement value and format-specific scale planes.  NVFP4 uses packed
+//! E2M1 values, block16 E4M3FN scales, one FP32 weight tensor scale, and a
+//! separately authenticated calibration manifest containing resident input `g`.
 
 use crate::{
     ModelLock, QuantizedMx, QuantizedTensorEncoding, UNSLOTH_QWEN38_NVFP4_MTP_SHA256,
     UNSLOTH_QWEN38_NVFP4_REPOSITORY, UNSLOTH_QWEN38_NVFP4_REVISION, VerifiedUnslothQwen38Nvfp4,
-    quantize_mxfp6_e3m2, quantize_mxfp8_e4m3, quantize_mxfp8_e4m3_no_clipping_scale,
+    quantize_mxfp8_e4m3, quantize_mxfp8_e4m3_no_clipping_scale, quantize_nvfp4_weights,
     validate_qwen38_mtp_artifact,
 };
 use serde::{Deserialize, Serialize};
@@ -24,13 +26,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const SCHEMA: &str = "sllm-qwen38-mtp-mx-sidecar-v1";
+const NVFP4_SCHEMA: &str = "sllm-qwen38-mtp-nvfp4-sidecar-v1";
+const NVFP4_ACTIVATION_SCALE_SCHEMA: &str = "qwen38-mtp-nvfp4-activation-scale-v1";
+const NVFP4_CALIBRATION_SCALE_RULE: &str = "f32(max_abs_bf16_activation / (6 * 448))";
 const PAYLOAD_FILE: &str = "payload.safetensors";
 const MANIFEST_FILE: &str = "manifest.json";
 const SCALE_SUFFIX: &str = ".sllm_mxfp_scale";
+const NVFP4_BLOCK_SCALE_SUFFIX: &str = ".sllm_nvfp4_block_scale";
+const NVFP4_TENSOR_SCALE_SUFFIX: &str = ".sllm_nvfp4_tensor_scale";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_HEADER_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_TENSOR_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const DIGEST_DOMAIN: &[u8] = b"sLLM-qwen38-mtp-combined-recipe-v1\0";
+const NVFP4_INPUT_SCALE_CONVENTION: &str = "raw-calibrated-g; resident activation scale is g";
+
+const NVFP4_ACTIVATION_SITES: [&str; 5] = [
+    "mtp.concat.output",
+    "layer.64.input_rmsnorm.output",
+    "layer.64.full.sigmoid_mul.output",
+    "layer.64.post_attention_rmsnorm.output",
+    "layer.64.mlp.silu_mul.output",
+];
 
 const MTP_MATRIX_NAMES: [&str; 8] = [
     "mtp.fc.weight",
@@ -64,25 +80,20 @@ fn expected_matrix_shape(name: &str) -> Option<[u64; 2]> {
 pub enum MtpWeightEncoding {
     Bf16,
     Mxfp8W8A8Block32E8M0,
-    Mxfp6W6A6Block32E8M0,
     Mxfp8W8A8Block32E8M0NoClippingScale,
-    Mxfp6W6A6Block32E8M0NoClippingScale,
+    Nvfp4W4A4Block16E2M1E4M3FnF32,
 }
 
-/// Stage-0 fake-quant recipe.  The resident payload is BF16 in both cases;
-/// the recipe name remains distinct so MXFP8 and MXFP6 roundtrip evidence
-/// cannot collide in the sidecar identity.
+/// Stage-0 MXFP8 fake-quant recipe. The resident payload is BF16.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MtpBf16RoundtripEncoding {
     Mxfp8,
-    Mxfp6,
 }
 
 impl MtpBf16RoundtripEncoding {
     pub const fn manifest_name(self) -> &'static str {
         match self {
             Self::Mxfp8 => "bf16-roundtrip-mxfp8",
-            Self::Mxfp6 => "bf16-roundtrip-mxfp6",
         }
     }
 
@@ -94,13 +105,12 @@ impl MtpBf16RoundtripEncoding {
     ) -> Result<QuantizedMx, MtpQuantizedSidecarError> {
         match self {
             Self::Mxfp8 => quantize_mxfp8_e4m3(input, rows, columns),
-            Self::Mxfp6 => quantize_mxfp6_e3m2(input, rows, columns),
         }
         .map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bf16RoundtripDiagnostics {
     pub recipe: String,
     pub element_count: u64,
@@ -124,13 +134,10 @@ impl MtpWeightEncoding {
         match self {
             Self::Bf16 => "bf16",
             Self::Mxfp8W8A8Block32E8M0 => "mxfp8-w8a8-e4m3-block32-e8m0",
-            Self::Mxfp6W6A6Block32E8M0 => "mxfp6-w6a6-e3m2-block32-e8m0",
             Self::Mxfp8W8A8Block32E8M0NoClippingScale => {
                 "mxfp8-w8a8-e4m3-block32-e8m0:mx-scale=no-clipping"
             }
-            Self::Mxfp6W6A6Block32E8M0NoClippingScale => {
-                "mxfp6-w6a6-e3m2-block32-e8m0:mx-scale=no-clipping"
-            }
+            Self::Nvfp4W4A4Block16E2M1E4M3FnF32 => "nvfp4-w4a4-e2m1-block16-e4m3fn-f32",
         }
     }
 
@@ -138,13 +145,14 @@ impl MtpWeightEncoding {
         match value {
             "bf16" => Ok(Self::Bf16),
             "mxfp8-w8a8-e4m3-block32-e8m0" => Ok(Self::Mxfp8W8A8Block32E8M0),
-            "mxfp6-w6a6-e3m2-block32-e8m0" => Ok(Self::Mxfp6W6A6Block32E8M0),
             "mxfp8-w8a8-e4m3-block32-e8m0:mx-scale=no-clipping" => {
                 Ok(Self::Mxfp8W8A8Block32E8M0NoClippingScale)
             }
-            "mxfp6-w6a6-e3m2-block32-e8m0:mx-scale=no-clipping" => {
-                Ok(Self::Mxfp6W6A6Block32E8M0NoClippingScale)
-            }
+            "nvfp4-w4a4-e2m1-block16-e4m3fn-f32" => Ok(Self::Nvfp4W4A4Block16E2M1E4M3FnF32),
+            "mxfp6-w6a6-e3m2-block32-e8m0"
+            | "mxfp6-w6a6-e3m2-block32-e8m0:mx-scale=no-clipping" => Err(
+                MtpQuantizedSidecarError::invalid("retired MTP MXFP6 sidecar encoding"),
+            ),
             _ => Err(MtpQuantizedSidecarError::invalid(
                 "unsupported MTP sidecar encoding",
             )),
@@ -155,7 +163,7 @@ impl MtpWeightEncoding {
         match self {
             Self::Bf16 => "BF16",
             Self::Mxfp8W8A8Block32E8M0 | Self::Mxfp8W8A8Block32E8M0NoClippingScale => "F8_E4M3",
-            Self::Mxfp6W6A6Block32E8M0 | Self::Mxfp6W6A6Block32E8M0NoClippingScale => "U8",
+            Self::Nvfp4W4A4Block16E2M1E4M3FnF32 => "U8",
         }
     }
 
@@ -172,9 +180,8 @@ fn parse_manifest_encoding(
             MtpWeightEncoding::Bf16,
             Some(MtpBf16RoundtripEncoding::Mxfp8),
         )),
-        "bf16-roundtrip-mxfp6" => Ok((
-            MtpWeightEncoding::Bf16,
-            Some(MtpBf16RoundtripEncoding::Mxfp6),
+        "bf16-roundtrip-mxfp6" => Err(MtpQuantizedSidecarError::invalid(
+            "retired MTP MXFP6 roundtrip sidecar encoding",
         )),
         "bf16" => Err(MtpQuantizedSidecarError::invalid(
             "plain BF16 MTP sidecars are not a verified roundtrip recipe",
@@ -219,9 +226,17 @@ pub struct MtpQuantizedSidecarTensor {
     pub logical_shape: [u64; 2],
     pub value_range: [u64; 2],
     pub scale_range: [u64; 2],
+    /// NVFP4 has a separate one-element FP32 tensor-scale plane.  MX/BF16
+    /// sidecars leave this absent, preserving their original contract.
+    pub tensor_scale_range: Option<[u64; 2]>,
     pub source_sha256: String,
     pub value_sha256: String,
     pub scale_sha256: String,
+    pub tensor_scale_sha256: Option<String>,
+    /// The verified NVFP4 weight tensor-scale bits and calibrated input
+    /// scale `g`. The resident activation quantizer uses this `g` unchanged.
+    pub nvfp4_weight_tensor_scale_f32_bits: Option<u32>,
+    pub nvfp4_input_global_scale_f32_bits: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -295,6 +310,70 @@ impl VerifiedQwen38MtpQuantizedSidecar {
         self.tensors.values()
     }
 
+    /// Return `(weight_tensor_scale_bits, raw_calibrated_input_g_bits)` for
+    /// an NVFP4 tensor. The second value is calibrated `g` itself and is
+    /// uploaded unchanged as the resident activation scale.
+    pub fn nvfp4_scale_bits(&self, name: &str) -> Option<(u32, u32)> {
+        if self.encoding != MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32 {
+            return None;
+        }
+        let tensor = self.tensors.get(name)?;
+        Some((
+            tensor.nvfp4_weight_tensor_scale_f32_bits?,
+            tensor.nvfp4_input_global_scale_f32_bits?,
+        ))
+    }
+
+    /// The input scale stored by this sidecar is the resident `g` itself.
+    pub const fn nvfp4_input_scale_convention() -> &'static str {
+        NVFP4_INPUT_SCALE_CONVENTION
+    }
+
+    /// Read and hash-check the three NVFP4 planes: packed E2M1 values,
+    /// block16 E4M3FN scales, and the one-element FP32 tensor scale.
+    #[allow(clippy::type_complexity)] // The tuple mirrors the three on-disk planes.
+    pub fn read_nvfp4_tensor_bytes(
+        &self,
+        name: &str,
+    ) -> Result<(Vec<u8>, Vec<u8>, [u8; 4]), MtpQuantizedSidecarError> {
+        if self.encoding != MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32 {
+            return Err(MtpQuantizedSidecarError::invalid(
+                "MTP sidecar is not an NVFP4 sidecar",
+            ));
+        }
+        let tensor = self
+            .tensor(name)
+            .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP sidecar tensor is absent"))?;
+        let tensor_scale_range = tensor.tensor_scale_range.ok_or_else(|| {
+            MtpQuantizedSidecarError::invalid("NVFP4 tensor scale plane is absent")
+        })?;
+        let tensor_scale_sha256 = tensor.tensor_scale_sha256.as_deref().ok_or_else(|| {
+            MtpQuantizedSidecarError::invalid("NVFP4 tensor scale hash is absent")
+        })?;
+        let values = read_range(&self.payload, self.data_start, tensor.value_range)?;
+        let block_scales = read_range(&self.payload, self.data_start, tensor.scale_range)?;
+        let tensor_scale: [u8; 4] = read_range(&self.payload, self.data_start, tensor_scale_range)?
+            .try_into()
+            .map_err(|_| {
+                MtpQuantizedSidecarError::invalid("NVFP4 tensor scale is not four bytes")
+            })?;
+        if sha256_bytes(&values) != tensor.value_sha256
+            || sha256_bytes(&block_scales) != tensor.scale_sha256
+            || sha256_bytes(&tensor_scale) != tensor_scale_sha256
+        {
+            return Err(MtpQuantizedSidecarError::invalid(
+                "MTP sidecar NVFP4 payload changed after verification",
+            ));
+        }
+        let scale = f32::from_le_bytes(tensor_scale);
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(MtpQuantizedSidecarError::invalid(
+                "MTP sidecar NVFP4 tensor scale is non-positive or non-finite",
+            ));
+        }
+        Ok((values, block_scales, tensor_scale))
+    }
+
     /// Read and hash-check one value/scale pair.  This catches payload
     /// mutation after verification before bytes reach the resident upload.
     pub fn read_tensor_bytes(
@@ -327,6 +406,8 @@ struct Manifest {
     base_recipe_digest: String,
     payload: Payload,
     tensors: Vec<TensorRecord>,
+    #[serde(default)]
+    activation_scales: Option<OutputActivationScales>,
     fingerprint: String,
 }
 
@@ -357,6 +438,58 @@ struct TensorRecord {
     scale_sha256: String,
     #[serde(default)]
     roundtrip: Option<Bf16RoundtripDiagnostics>,
+    #[serde(default)]
+    tensor_scale_sha256: Option<String>,
+    #[serde(default)]
+    input_global_scale_f32_bits: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutputActivationScales {
+    schema: String,
+    scale_rule: String,
+    input_manifest_sha256: String,
+    suite_sha256: String,
+    source_report_sha256: String,
+    source_reports: Vec<CalibrationSourceReport>,
+    activation_amax: BTreeMap<String, f64>,
+    input_scale_convention: String,
+    scales: BTreeMap<String, u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalibrationSourceReport {
+    pub target: String,
+    pub report_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputActivationScaleManifest {
+    schema: String,
+    scale_rule: String,
+    input_manifest_sha256: String,
+    suite_sha256: String,
+    source_report_sha256: String,
+    source_reports: Vec<CalibrationSourceReport>,
+    activation_amax: BTreeMap<String, Value>,
+    scales: BTreeMap<String, Value>,
+}
+
+/// Calibration identity and exact FP32 bit patterns used by an NVFP4 MTP
+/// companion. `scales` contains calibrated resident activation scale `g` bits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MtpNvfp4ActivationScaleManifest {
+    pub schema: String,
+    pub scale_rule: String,
+    pub input_manifest_sha256: String,
+    pub suite_sha256: String,
+    pub source_report_sha256: String,
+    pub source_reports: Vec<CalibrationSourceReport>,
+    pub activation_amax: BTreeMap<String, f64>,
+    pub scales: BTreeMap<String, u32>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -376,6 +509,8 @@ struct OutputManifest<'a> {
     payload: OutputPayload<'a>,
     tensors: &'a [OutputTensor],
     fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activation_scales: Option<&'a OutputActivationScales>,
 }
 
 #[derive(Serialize)]
@@ -402,6 +537,10 @@ struct OutputTensor {
     scale_sha256: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     roundtrip: Option<Bf16RoundtripDiagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tensor_scale_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_global_scale_f32_bits: Option<u32>,
 }
 
 struct ConvertedTensor {
@@ -411,6 +550,215 @@ struct ConvertedTensor {
     scale_shape: Vec<u64>,
     values: Vec<u8>,
     scales: Vec<u8>,
+    tensor_scale: Vec<u8>,
+}
+
+/// Read the strict activation calibration manifest consumed by the NVFP4
+/// MTP converter.  The target artifact is never consulted for these values.
+/// The JSON contract is:
+///
+/// ```json
+/// {
+///   "schema": "qwen38-mtp-nvfp4-activation-scale-v1",
+///   "scale_rule": "f32(max_abs_bf16_activation / (6 * 448))",
+///   "input_manifest_sha256": "sha256:<64 hex digits>",
+///   "suite_sha256": "sha256:<64 hex digits>",
+///   "source_report_sha256": "sha256:<64 hex digits>",
+///   "source_reports": [{"target":"gfx1030","report_sha256":"sha256:<64 hex digits>"}],
+///   "activation_amax": {"mtp.concat.output": 1.0 /* exactly five sites */},
+///   "scales": { "mtp.fc.weight": 1.0 /* exactly eight matrix names */ }
+/// }
+/// ```
+pub fn read_qwen38_mtp_nvfp4_activation_scale_manifest(
+    path: &Path,
+) -> Result<MtpNvfp4ActivationScaleManifest, MtpQuantizedSidecarError> {
+    if !path.is_absolute() {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "NVFP4 activation-scale manifest path must be absolute",
+        ));
+    }
+    let bytes = bounded_read(path, MAX_MANIFEST_BYTES, "activation-scale manifest")?;
+    let manifest: InputActivationScaleManifest =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            MtpQuantizedSidecarError::invalid(format!("activation-scale manifest schema: {error}"))
+        })?;
+    if manifest.schema != NVFP4_ACTIVATION_SCALE_SCHEMA
+        || manifest.scale_rule != NVFP4_CALIBRATION_SCALE_RULE
+        || !is_sha256(&manifest.input_manifest_sha256)
+        || !is_sha256(&manifest.suite_sha256)
+        || !is_sha256(&manifest.source_report_sha256)
+    {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "NVFP4 activation-scale manifest identity or schema differs",
+        ));
+    }
+    if manifest.source_reports.is_empty()
+        || manifest.source_reports.len() > 2
+        || manifest.source_reports.iter().any(|report| {
+            !matches!(report.target.as_str(), "gfx1030" | "gfx1201")
+                || !is_sha256(&report.report_sha256)
+        })
+        || manifest
+            .source_reports
+            .iter()
+            .map(|report| report.target.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            != manifest.source_reports.len()
+    {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "NVFP4 activation-scale source reports are malformed",
+        ));
+    }
+    if source_report_digest(&manifest.source_reports) != manifest.source_report_sha256 {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "NVFP4 activation-scale source report digest differs",
+        ));
+    }
+    let mut activation_amax = BTreeMap::new();
+    let expected_sites: BTreeSet<&str> = NVFP4_ACTIVATION_SITES.into_iter().collect();
+    if manifest
+        .activation_amax
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        != expected_sites
+    {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "NVFP4 activation-amax site set differs",
+        ));
+    }
+    for site in NVFP4_ACTIVATION_SITES {
+        let value = manifest.activation_amax.get(site).ok_or_else(|| {
+            MtpQuantizedSidecarError::invalid("NVFP4 activation-amax site is absent")
+        })?;
+        let value = value.as_f64().ok_or_else(|| {
+            MtpQuantizedSidecarError::invalid(format!(
+                "NVFP4 activation-amax is not a JSON number: {site}"
+            ))
+        })?;
+        if !value.is_finite() || value <= 0.0 {
+            return Err(MtpQuantizedSidecarError::invalid(format!(
+                "NVFP4 activation-amax is not finite and positive: {site}"
+            )));
+        }
+        activation_amax.insert(site.to_owned(), value);
+    }
+    let expected_names: BTreeSet<&str> = MTP_MATRIX_NAMES.into_iter().collect();
+    if manifest
+        .scales
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        != expected_names
+    {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "NVFP4 activation-scale manifest matrix set differs",
+        ));
+    }
+    let mut scales = BTreeMap::new();
+    for name in MTP_MATRIX_NAMES {
+        let value = manifest
+            .scales
+            .get(name)
+            .ok_or_else(|| MtpQuantizedSidecarError::invalid("NVFP4 activation scale is absent"))?;
+        let value = value.as_f64().ok_or_else(|| {
+            MtpQuantizedSidecarError::invalid(format!(
+                "NVFP4 activation scale is not a JSON number: {name}"
+            ))
+        })?;
+        let scale = value as f32;
+        if !value.is_finite() || !scale.is_finite() || scale <= 0.0 {
+            return Err(MtpQuantizedSidecarError::invalid(format!(
+                "NVFP4 activation scale is not finite and positive: {name}"
+            )));
+        }
+        scales.insert(name.to_owned(), scale.to_bits());
+    }
+    validate_nvfp4_activation_scale_groups(&scales)?;
+    for (name, bits) in &scales {
+        let site = nvfp4_activation_site(name).ok_or_else(|| {
+            MtpQuantizedSidecarError::invalid("NVFP4 activation scale matrix is unknown")
+        })?;
+        let expected = (activation_amax[site] / (6.0_f64 * 448.0_f64)) as f32;
+        let expected = expected.to_bits();
+        if *bits != expected {
+            return Err(MtpQuantizedSidecarError::invalid(format!(
+                "NVFP4 activation scale does not match activation-amax: {name}"
+            )));
+        }
+    }
+    Ok(MtpNvfp4ActivationScaleManifest {
+        schema: manifest.schema,
+        scale_rule: manifest.scale_rule,
+        input_manifest_sha256: manifest.input_manifest_sha256,
+        suite_sha256: manifest.suite_sha256,
+        source_report_sha256: manifest.source_report_sha256,
+        source_reports: manifest.source_reports,
+        activation_amax,
+        scales,
+    })
+}
+
+fn nvfp4_activation_site(name: &str) -> Option<&'static str> {
+    match name {
+        "mtp.fc.weight" => Some("mtp.concat.output"),
+        "mtp.layers.0.self_attn.q_proj.weight"
+        | "mtp.layers.0.self_attn.k_proj.weight"
+        | "mtp.layers.0.self_attn.v_proj.weight" => Some("layer.64.input_rmsnorm.output"),
+        "mtp.layers.0.self_attn.o_proj.weight" => Some("layer.64.full.sigmoid_mul.output"),
+        "mtp.layers.0.mlp.gate_proj.weight" | "mtp.layers.0.mlp.up_proj.weight" => {
+            Some("layer.64.post_attention_rmsnorm.output")
+        }
+        "mtp.layers.0.mlp.down_proj.weight" => Some("layer.64.mlp.silu_mul.output"),
+        _ => None,
+    }
+}
+
+fn source_report_digest(reports: &[CalibrationSourceReport]) -> String {
+    let mut hashes = reports
+        .iter()
+        .map(|report| report.report_sha256.as_str())
+        .collect::<Vec<_>>();
+    hashes.sort_unstable();
+    sha256_bytes(hashes.join("\n").as_bytes())
+}
+
+fn validate_nvfp4_activation_scale_groups(
+    scales: &BTreeMap<String, u32>,
+) -> Result<(), MtpQuantizedSidecarError> {
+    let equal = |names: &[&str], label: &str| {
+        let first = scales
+            .get(names[0])
+            .copied()
+            .ok_or_else(|| MtpQuantizedSidecarError::invalid("NVFP4 activation scale is absent"))?;
+        if names
+            .iter()
+            .skip(1)
+            .any(|name| scales.get(*name).copied() != Some(first))
+        {
+            return Err(MtpQuantizedSidecarError::invalid(format!(
+                "NVFP4 activation scales for {label} must be identical"
+            )));
+        }
+        Ok(())
+    };
+    equal(
+        &[
+            "mtp.layers.0.self_attn.q_proj.weight",
+            "mtp.layers.0.self_attn.k_proj.weight",
+            "mtp.layers.0.self_attn.v_proj.weight",
+        ],
+        "Q/K/V",
+    )?;
+    equal(
+        &[
+            "mtp.layers.0.mlp.gate_proj.weight",
+            "mtp.layers.0.mlp.up_proj.weight",
+        ],
+        "gate/up",
+    )?;
+    Ok(())
 }
 
 /// Verify a generated Qwen3.8 MTP MXFP sidecar against the immutable source
@@ -447,8 +795,11 @@ pub fn verify_qwen38_mtp_quantized_sidecar(
         ));
     }
     let (encoding, roundtrip_encoding) = parse_manifest_encoding(&manifest.encoding)?;
-    if (encoding == MtpWeightEncoding::Bf16 && roundtrip_encoding.is_none())
-        || manifest.schema_version != SCHEMA
+    let is_nvfp4 = encoding == MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32;
+    if (is_nvfp4 && roundtrip_encoding.is_some())
+        || (!is_nvfp4 && (encoding == MtpWeightEncoding::Bf16 && roundtrip_encoding.is_none()))
+        || ((is_nvfp4 && manifest.schema_version != NVFP4_SCHEMA)
+            || (!is_nvfp4 && manifest.schema_version != SCHEMA))
         || (roundtrip_encoding.is_none() && manifest.converter != "sllm-qwen38-mtp-quantizer-v1")
         || (roundtrip_encoding.is_some()
             && manifest.converter != "sllm-qwen38-mtp-bf16-roundtrip-v1")
@@ -464,6 +815,22 @@ pub fn verify_qwen38_mtp_quantized_sidecar(
             "MTP sidecar source or recipe identity differs",
         ));
     }
+    let output_activation_scales = if is_nvfp4 {
+        let scales = manifest.activation_scales.as_ref().ok_or_else(|| {
+            MtpQuantizedSidecarError::invalid(
+                "NVFP4 sidecar activation calibration manifest is absent",
+            )
+        })?;
+        validate_output_activation_scales(scales)?;
+        Some(scales)
+    } else {
+        if manifest.activation_scales.is_some() {
+            return Err(MtpQuantizedSidecarError::invalid(
+                "MX/BF16 sidecar unexpectedly contains activation calibration",
+            ));
+        }
+        None
+    };
     let payload_name = payload_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -498,7 +865,7 @@ pub fn verify_qwen38_mtp_quantized_sidecar(
         if expected_matrix_shape(&record.name) != Some(shape)
             || shape[0] == 0
             || shape[1] == 0
-            || shape[1] % 32 != 0
+            || shape[1] % 16 != 0
         {
             return Err(MtpQuantizedSidecarError::invalid(
                 "MTP sidecar matrix shape differs from the Qwen3.8 contract",
@@ -528,23 +895,45 @@ pub fn verify_qwen38_mtp_quantized_sidecar(
             .try_into()
             .map_err(|_| MtpQuantizedSidecarError::invalid("MTP sidecar shape is invalid"))?;
         let value_name = name.as_str();
-        let scale_name = format!("{name}{SCALE_SUFFIX}");
+        let scale_name = if is_nvfp4 {
+            format!("{name}{NVFP4_BLOCK_SCALE_SUFFIX}")
+        } else {
+            format!("{name}{SCALE_SUFFIX}")
+        };
         let value = header
             .get(value_name)
             .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP value tensor is absent"))?;
         let scale = header
             .get(scale_name.as_str())
             .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP scale tensor is absent"))?;
-        validate_record(
-            &record,
-            value,
-            scale,
-            shape,
-            encoding,
-            roundtrip_encoding.is_some(),
-            &mut payload_file,
-            data_start,
-        )?;
+        let tensor_scale = if is_nvfp4 {
+            let tensor_scale_name = format!("{name}{NVFP4_TENSOR_SCALE_SUFFIX}");
+            let tensor_scale = header.get(tensor_scale_name.as_str()).ok_or_else(|| {
+                MtpQuantizedSidecarError::invalid("MTP NVFP4 tensor scale is absent")
+            })?;
+            validate_nvfp4_record(
+                &record,
+                value,
+                scale,
+                tensor_scale,
+                shape,
+                &mut payload_file,
+                data_start,
+            )?;
+            Some(tensor_scale)
+        } else {
+            validate_record(
+                &record,
+                value,
+                scale,
+                shape,
+                encoding,
+                roundtrip_encoding.is_some(),
+                &mut payload_file,
+                data_start,
+            )?;
+            None
+        };
         if let Some(roundtrip) = &roundtrip_encoding {
             let diagnostic = record.roundtrip.as_ref().ok_or_else(|| {
                 MtpQuantizedSidecarError::invalid(
@@ -568,22 +957,77 @@ pub fn verify_qwen38_mtp_quantized_sidecar(
                 "MTP sidecar source tensor differs from the locked BF16 artifact",
             ));
         }
+        let (tensor_scale_range, tensor_scale_sha256, nvfp4_weight_tensor_scale_f32_bits) =
+            if let Some(tensor_scale) = tensor_scale {
+                let bytes = read_range(&payload_file, data_start, tensor_scale.data_offsets)?;
+                let bits: [u8; 4] = bytes.clone().try_into().map_err(|_| {
+                    MtpQuantizedSidecarError::invalid("MTP NVFP4 tensor scale is not four bytes")
+                })?;
+                (
+                    Some(tensor_scale.data_offsets),
+                    Some(record.tensor_scale_sha256.clone().ok_or_else(|| {
+                        MtpQuantizedSidecarError::invalid("MTP NVFP4 tensor scale hash is absent")
+                    })?),
+                    Some(f32::from_le_bytes(bits).to_bits()),
+                )
+            } else {
+                (None, None, None)
+            };
+        let nvfp4_input_global_scale_f32_bits = if is_nvfp4 {
+            let expected = output_activation_scales
+                .and_then(|scales| scales.scales.get(&name).copied())
+                .ok_or_else(|| {
+                    MtpQuantizedSidecarError::invalid("MTP NVFP4 input activation scale is absent")
+                })?;
+            if record.input_global_scale_f32_bits != Some(expected) {
+                return Err(MtpQuantizedSidecarError::invalid(
+                    "MTP NVFP4 input activation scale differs from calibration manifest",
+                ));
+            }
+            Some(expected)
+        } else {
+            if record.tensor_scale_sha256.is_some() || record.input_global_scale_f32_bits.is_some()
+            {
+                return Err(MtpQuantizedSidecarError::invalid(
+                    "MX/BF16 sidecar unexpectedly contains NVFP4 scale metadata",
+                ));
+            }
+            None
+        };
         let tensor = MtpQuantizedSidecarTensor {
             name: name.clone(),
             logical_shape: shape,
             value_range: value.data_offsets,
             scale_range: scale.data_offsets,
+            tensor_scale_range,
             source_sha256: record.source_sha256.clone(),
             value_sha256: record.value_sha256.clone(),
             scale_sha256: record.scale_sha256.clone(),
+            tensor_scale_sha256,
+            nvfp4_weight_tensor_scale_f32_bits,
+            nvfp4_input_global_scale_f32_bits,
         };
         tensors.insert(name.clone(), tensor);
         header_names.insert(name.clone());
         header_names.insert(scale_name);
+        if let Some(tensor_scale) = tensor_scale {
+            header_names.insert(format!("{name}{NVFP4_TENSOR_SCALE_SUFFIX}"));
+            let _ = tensor_scale;
+        }
     }
     let expected_header_names: BTreeSet<String> = MTP_MATRIX_NAMES
         .into_iter()
-        .flat_map(|name| [name.to_owned(), format!("{name}{SCALE_SUFFIX}")])
+        .flat_map(|name| {
+            if is_nvfp4 {
+                vec![
+                    name.to_owned(),
+                    format!("{name}{NVFP4_BLOCK_SCALE_SUFFIX}"),
+                    format!("{name}{NVFP4_TENSOR_SCALE_SUFFIX}"),
+                ]
+            } else {
+                vec![name.to_owned(), format!("{name}{SCALE_SUFFIX}")]
+            }
+        })
         .collect();
     if header_names != expected_header_names
         || header
@@ -616,6 +1060,86 @@ pub fn verify_qwen38_mtp_quantized_sidecar(
     })
 }
 
+fn validate_output_activation_scales(
+    scales: &OutputActivationScales,
+) -> Result<(), MtpQuantizedSidecarError> {
+    if scales.schema != NVFP4_ACTIVATION_SCALE_SCHEMA
+        || scales.scale_rule != NVFP4_CALIBRATION_SCALE_RULE
+        || scales.input_scale_convention != NVFP4_INPUT_SCALE_CONVENTION
+        || !is_sha256(&scales.input_manifest_sha256)
+        || !is_sha256(&scales.suite_sha256)
+        || !is_sha256(&scales.source_report_sha256)
+        || scales.source_reports.is_empty()
+        || scales.source_reports.len() > 2
+        || scales.source_reports.iter().any(|report| {
+            !matches!(report.target.as_str(), "gfx1030" | "gfx1201")
+                || !is_sha256(&report.report_sha256)
+        })
+        || scales
+            .source_reports
+            .iter()
+            .map(|report| report.target.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            != scales.source_reports.len()
+        || source_report_digest(&scales.source_reports) != scales.source_report_sha256
+    {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "MTP NVFP4 activation calibration identity differs",
+        ));
+    }
+    let expected_names: BTreeSet<&str> = MTP_MATRIX_NAMES.into_iter().collect();
+    if scales
+        .scales
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        != expected_names
+    {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "MTP NVFP4 activation calibration matrix set differs",
+        ));
+    }
+    for (name, bits) in &scales.scales {
+        let value = f32::from_bits(*bits);
+        if !value.is_finite() || value <= 0.0 {
+            return Err(MtpQuantizedSidecarError::invalid(format!(
+                "MTP NVFP4 activation scale is non-positive or non-finite: {name}"
+            )));
+        }
+        let site = nvfp4_activation_site(name).ok_or_else(|| {
+            MtpQuantizedSidecarError::invalid("MTP NVFP4 activation scale matrix is unknown")
+        })?;
+        let amax = scales.activation_amax.get(site).copied().ok_or_else(|| {
+            MtpQuantizedSidecarError::invalid("MTP NVFP4 activation-amax site is absent")
+        })?;
+        let expected = (amax / (6.0_f64 * 448.0_f64)) as f32;
+        let expected = expected.to_bits();
+        if *bits != expected {
+            return Err(MtpQuantizedSidecarError::invalid(format!(
+                "MTP NVFP4 activation scale does not match activation-amax: {name}"
+            )));
+        }
+    }
+    let expected_sites: BTreeSet<&str> = NVFP4_ACTIVATION_SITES.into_iter().collect();
+    if scales
+        .activation_amax
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        != expected_sites
+        || scales
+            .activation_amax
+            .values()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "MTP NVFP4 activation-amax site set or values differ",
+        ));
+    }
+    validate_nvfp4_activation_scale_groups(&scales.scales)
+}
+
 /// Convert the eight verified BF16 MTP matrices and publish a complete
 /// sidecar directory atomically.  The returned object has already been
 /// verified by rereading the published payload and manifest.
@@ -627,7 +1151,12 @@ pub fn convert_qwen38_mtp_quantized_sidecar(
 ) -> Result<VerifiedQwen38MtpQuantizedSidecar, MtpQuantizedSidecarError> {
     if encoding == MtpWeightEncoding::Bf16 {
         return Err(MtpQuantizedSidecarError::invalid(
-            "MTP sidecar conversion requires MXFP8 or MXFP6",
+            "MTP sidecar conversion requires MXFP8",
+        ));
+    }
+    if encoding == MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32 {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "NVFP4 MTP sidecar conversion requires an activation-scale manifest",
         ));
     }
     validate_qwen38_mtp_artifact(lock, artifact)
@@ -655,7 +1184,7 @@ pub fn convert_qwen38_mtp_quantized_sidecar(
     fs::create_dir(&temporary)
         .map_err(|error| MtpQuantizedSidecarError::io("create temporary output", error))?;
     let result =
-        convert_into_directory(lock, artifact, encoding, None, &temporary).and_then(|()| {
+        convert_into_directory(lock, artifact, encoding, None, None, &temporary).and_then(|()| {
             verify_qwen38_mtp_quantized_sidecar(
                 lock,
                 artifact,
@@ -682,7 +1211,77 @@ pub fn convert_qwen38_mtp_quantized_sidecar(
     verified
 }
 
-/// Convert the verified BF16 MTP matrices through an MXFP8/MXFP6 fake-quant
+/// Convert the eight verified BF16 MTP matrices to NVFP4 W4A4.  The
+/// activation calibration manifest is mandatory and supplies resident `g` values
+/// for all eight matrices; no scale is inferred from the target artifact.
+pub fn convert_qwen38_mtp_nvfp4_sidecar(
+    lock: &ModelLock,
+    artifact: &VerifiedUnslothQwen38Nvfp4,
+    activation_scale_manifest_path: &Path,
+    output_dir: &Path,
+) -> Result<VerifiedQwen38MtpQuantizedSidecar, MtpQuantizedSidecarError> {
+    let activation_scales =
+        read_qwen38_mtp_nvfp4_activation_scale_manifest(activation_scale_manifest_path)?;
+    validate_qwen38_mtp_artifact(lock, artifact)
+        .map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))?;
+    if output_dir.exists() {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "MTP sidecar output directory already exists",
+        ));
+    }
+    let parent = output_dir
+        .parent()
+        .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP sidecar output has no parent"))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| MtpQuantizedSidecarError::io("create output parent", error))?;
+    let name = output_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP sidecar output has no basename"))?;
+    let temporary = parent.join(format!(".{name}.tmp-{}", std::process::id()));
+    if temporary.exists() {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "MTP sidecar temporary output already exists",
+        ));
+    }
+    fs::create_dir(&temporary)
+        .map_err(|error| MtpQuantizedSidecarError::io("create temporary output", error))?;
+    let result = convert_into_directory(
+        lock,
+        artifact,
+        MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32,
+        None,
+        Some(&activation_scales),
+        &temporary,
+    )
+    .and_then(|()| {
+        verify_qwen38_mtp_quantized_sidecar(
+            lock,
+            artifact,
+            &temporary.join(MANIFEST_FILE),
+            &temporary.join(PAYLOAD_FILE),
+        )
+        .map(|_| ())?;
+        fs::rename(&temporary, output_dir)
+            .map_err(|error| MtpQuantizedSidecarError::io("publish MTP sidecar", error))
+    });
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&temporary);
+    }
+    result?;
+    let verified = verify_qwen38_mtp_quantized_sidecar(
+        lock,
+        artifact,
+        &output_dir.join(MANIFEST_FILE),
+        &output_dir.join(PAYLOAD_FILE),
+    );
+    if verified.is_err() {
+        let _ = fs::remove_dir_all(output_dir);
+    }
+    verified
+}
+
+/// Convert the verified BF16 MTP matrices through an MXFP8 fake-quant
 /// path and write the BF16 dequantized values.  The sidecar keeps an empty
 /// scale plane so the existing value+scale upload contract remains intact;
 /// its manifest encoding and recipe digest are independent of the normal MX
@@ -722,6 +1321,7 @@ pub fn convert_qwen38_mtp_bf16_roundtrip_sidecar(
         artifact,
         MtpWeightEncoding::Bf16,
         Some(roundtrip),
+        None,
         &temporary,
     )
     .and_then(|()| {
@@ -849,13 +1449,14 @@ fn quantize_mtp_matrix(
         MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => {
             quantize_mxfp8_e4m3_no_clipping_scale(values, rows, columns)
         }
-        MtpWeightEncoding::Mxfp6W6A6Block32E8M0 => quantize_mxfp6_e3m2(values, rows, columns),
-        MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => {
-            crate::mxfp::quantize_mxfp6_e3m2_no_clipping_scale(values, rows, columns)
-        }
         MtpWeightEncoding::Bf16 => {
             return Err(MtpQuantizedSidecarError::invalid(
                 "BF16 MTP sidecars do not use MX quantization",
+            ));
+        }
+        MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32 => {
+            return Err(MtpQuantizedSidecarError::invalid(
+                "NVFP4 MTP sidecars use the NVFP4 quantizer",
             ));
         }
     };
@@ -867,12 +1468,22 @@ fn convert_into_directory(
     artifact: &VerifiedUnslothQwen38Nvfp4,
     encoding: MtpWeightEncoding,
     roundtrip: Option<MtpBf16RoundtripEncoding>,
+    activation_scales: Option<&MtpNvfp4ActivationScaleManifest>,
     directory: &Path,
 ) -> Result<(), MtpQuantizedSidecarError> {
     if (encoding == MtpWeightEncoding::Bf16) != roundtrip.is_some() {
         return Err(MtpQuantizedSidecarError::invalid(
             "BF16 payload requires a roundtrip recipe and MX payloads do not accept one",
         ));
+    }
+    let is_nvfp4 = encoding == MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32;
+    if is_nvfp4 != activation_scales.is_some() {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "NVFP4 sidecars require exactly one activation-scale manifest",
+        ));
+    }
+    if let Some(activation_scales) = activation_scales {
+        validate_nvfp4_activation_scale_groups(&activation_scales.scales)?;
     }
     let mut converted = Vec::with_capacity(MTP_MATRIX_NAMES.len());
     for name in MTP_MATRIX_NAMES {
@@ -881,7 +1492,7 @@ fn convert_into_directory(
         })?;
         if descriptor.encoding != QuantizedTensorEncoding::UnquantizedBf16
             || descriptor.logical_shape.len() != 2
-            || descriptor.logical_shape[1] % 32 != 0
+            || descriptor.logical_shape[1] % 16 != 0
         {
             return Err(MtpQuantizedSidecarError::invalid(format!(
                 "MTP tensor is not a block32 BF16 matrix: {name}"
@@ -907,40 +1518,69 @@ fn convert_into_directory(
             .chunks_exact(2)
             .map(|bytes| f32::from_bits(u32::from(u16::from_le_bytes([bytes[0], bytes[1]])) << 16))
             .collect::<Vec<_>>();
-        let (values, scales, value_dtype, value_shape, scale_shape, roundtrip_diagnostics) =
-            if let Some(roundtrip) = roundtrip {
-                let quantized = roundtrip.quantize(&values, rows, columns)?;
-                let (values, diagnostics) = bf16_roundtrip_values(&quantized, &values, roundtrip)?;
-                (
-                    values,
-                    Vec::new(),
-                    "BF16",
-                    vec![rows as u64, columns as u64],
-                    vec![rows as u64, 0],
-                    Some(diagnostics),
-                )
-            } else {
-                let quantized = quantize_mtp_matrix(encoding, &values, rows, columns)?;
-                let value_shape = match encoding {
-                    MtpWeightEncoding::Mxfp8W8A8Block32E8M0
-                    | MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => {
-                        vec![rows as u64, columns as u64]
-                    }
-                    MtpWeightEncoding::Mxfp6W6A6Block32E8M0
-                    | MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => {
-                        vec![rows as u64, (columns * 3 / 4) as u64]
-                    }
-                    MtpWeightEncoding::Bf16 => unreachable!(),
-                };
-                (
-                    quantized.values().to_vec(),
-                    quantized.scales().to_vec(),
-                    encoding.value_dtype(),
-                    value_shape,
-                    vec![rows as u64, (columns / 32) as u64],
-                    None,
-                )
+        let (
+            values,
+            scales,
+            value_dtype,
+            value_shape,
+            scale_shape,
+            roundtrip_diagnostics,
+            tensor_scale,
+            input_global_scale_f32_bits,
+        ) = if let Some(roundtrip) = roundtrip {
+            let quantized = roundtrip.quantize(&values, rows, columns)?;
+            let (values, diagnostics) = bf16_roundtrip_values(&quantized, &values, roundtrip)?;
+            (
+                values,
+                Vec::new(),
+                "BF16",
+                vec![rows as u64, columns as u64],
+                vec![rows as u64, 0],
+                Some(diagnostics),
+                Vec::new(),
+                None,
+            )
+        } else if is_nvfp4 {
+            let activation_scales = activation_scales.expect("NVFP4 activation scales");
+            let input_global_scale_f32_bits =
+                activation_scales.scales.get(name).copied().ok_or_else(|| {
+                    MtpQuantizedSidecarError::invalid(format!(
+                        "NVFP4 activation scale is absent: {name}"
+                    ))
+                })?;
+            let quantized = quantize_nvfp4_weights(&values, rows, columns)
+                .map_err(|error| MtpQuantizedSidecarError::invalid(error.to_string()))?;
+            (
+                quantized.packed_values,
+                quantized.block_scales,
+                encoding.value_dtype(),
+                vec![rows as u64, (columns / 2) as u64],
+                vec![rows as u64, (columns / 16) as u64],
+                None,
+                quantized.tensor_scale.to_le_bytes().to_vec(),
+                Some(input_global_scale_f32_bits),
+            )
+        } else {
+            let quantized = quantize_mtp_matrix(encoding, &values, rows, columns)?;
+            let value_shape = match encoding {
+                MtpWeightEncoding::Mxfp8W8A8Block32E8M0
+                | MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => {
+                    vec![rows as u64, columns as u64]
+                }
+                MtpWeightEncoding::Bf16 => unreachable!(),
+                MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32 => unreachable!(),
             };
+            (
+                quantized.values().to_vec(),
+                quantized.scales().to_vec(),
+                encoding.value_dtype(),
+                value_shape,
+                vec![rows as u64, (columns / 32) as u64],
+                None,
+                Vec::new(),
+                None,
+            )
+        };
         converted.push(ConvertedTensor {
             record: OutputTensor {
                 name: name.to_owned(),
@@ -949,12 +1589,19 @@ fn convert_into_directory(
                 value_sha256: sha256_bytes(&values),
                 scale_sha256: sha256_bytes(&scales),
                 roundtrip: roundtrip_diagnostics,
+                tensor_scale_sha256: if is_nvfp4 {
+                    Some(sha256_bytes(&tensor_scale))
+                } else {
+                    None
+                },
+                input_global_scale_f32_bits,
             },
             value_dtype,
             value_shape,
             scale_shape,
             values,
             scales,
+            tensor_scale,
         });
     }
     let mut data = Vec::new();
@@ -981,20 +1628,43 @@ fn convert_into_directory(
                 "data_offsets": [value_start, value_end],
             }),
         );
-        header.insert(
-            format!("{}{SCALE_SUFFIX}", tensor.record.name),
-            serde_json::json!({
-                "dtype": encoding.scale_dtype(),
-                "shape": tensor.scale_shape,
-                "data_offsets": [scale_start, scale_end],
-            }),
-        );
+        if is_nvfp4 {
+            header.insert(
+                format!("{}{NVFP4_BLOCK_SCALE_SUFFIX}", tensor.record.name),
+                serde_json::json!({
+                    "dtype": encoding.scale_dtype(),
+                    "shape": tensor.scale_shape,
+                    "data_offsets": [scale_start, scale_end],
+                }),
+            );
+            let tensor_scale_start = scale_end;
+            data.extend_from_slice(&tensor.tensor_scale);
+            let tensor_scale_end = u64::try_from(data.len())
+                .map_err(|_| MtpQuantizedSidecarError::invalid("MTP payload size overflows"))?;
+            header.insert(
+                format!("{}{NVFP4_TENSOR_SCALE_SUFFIX}", tensor.record.name),
+                serde_json::json!({
+                    "dtype": "F32",
+                    "shape": [1],
+                    "data_offsets": [tensor_scale_start, tensor_scale_end],
+                }),
+            );
+        } else {
+            header.insert(
+                format!("{}{SCALE_SUFFIX}", tensor.record.name),
+                serde_json::json!({
+                    "dtype": encoding.scale_dtype(),
+                    "shape": tensor.scale_shape,
+                    "data_offsets": [scale_start, scale_end],
+                }),
+            );
+        }
     }
     header.insert(
         "__metadata__".to_owned(),
         serde_json::json!({
             "format": "pt",
-            "sllm_schema": SCHEMA,
+            "sllm_schema": if is_nvfp4 { NVFP4_SCHEMA } else { SCHEMA },
             "sllm_encoding": manifest_encoding,
         }),
     );
@@ -1025,14 +1695,27 @@ fn convert_into_directory(
             value_sha256: tensor.record.value_sha256,
             scale_sha256: tensor.record.scale_sha256,
             roundtrip: tensor.record.roundtrip,
+            tensor_scale_sha256: tensor.record.tensor_scale_sha256,
+            input_global_scale_f32_bits: tensor.record.input_global_scale_f32_bits,
         })
         .collect::<Vec<_>>();
     let base_recipe = artifact.recipe_digest();
     let lock_fingerprint = lock.fingerprint().to_owned();
     let payload_size = u64::try_from(payload_bytes.len())
         .map_err(|_| MtpQuantizedSidecarError::invalid("payload size overflows"))?;
+    let output_activation_scales = activation_scales.map(|scales| OutputActivationScales {
+        schema: scales.schema.clone(),
+        scale_rule: scales.scale_rule.clone(),
+        input_manifest_sha256: scales.input_manifest_sha256.clone(),
+        suite_sha256: scales.suite_sha256.clone(),
+        source_report_sha256: scales.source_report_sha256.clone(),
+        source_reports: scales.source_reports.clone(),
+        activation_amax: scales.activation_amax.clone(),
+        input_scale_convention: NVFP4_INPUT_SCALE_CONVENTION.to_owned(),
+        scales: scales.scales.clone(),
+    });
     let manifest_without_fingerprint = OutputManifest {
-        schema_version: SCHEMA,
+        schema_version: if is_nvfp4 { NVFP4_SCHEMA } else { SCHEMA },
         source: OutputSource {
             repository: UNSLOTH_QWEN38_NVFP4_REPOSITORY,
             resolved_revision: UNSLOTH_QWEN38_NVFP4_REVISION,
@@ -1053,6 +1736,7 @@ fn convert_into_directory(
         },
         tensors: &tensors,
         fingerprint: String::new(),
+        activation_scales: output_activation_scales.as_ref(),
     };
     let mut value = serde_json::to_value(&manifest_without_fingerprint).map_err(|error| {
         MtpQuantizedSidecarError::invalid(format!("manifest serialization: {error}"))
@@ -1099,12 +1783,6 @@ fn validate_record(
         | MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => logical_shape[0]
             .checked_mul(logical_shape[1])
             .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP value shape overflows"))?,
-        MtpWeightEncoding::Mxfp6W6A6Block32E8M0
-        | MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => logical_shape[0]
-            .checked_mul(logical_shape[1])
-            .and_then(|elements| elements.checked_mul(3))
-            .map(|bytes| bytes / 4)
-            .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP value shape overflows"))?,
         MtpWeightEncoding::Bf16 if roundtrip => logical_shape[0]
             .checked_mul(logical_shape[1])
             .and_then(|elements| elements.checked_mul(2))
@@ -1112,6 +1790,11 @@ fn validate_record(
         MtpWeightEncoding::Bf16 => {
             return Err(MtpQuantizedSidecarError::invalid(
                 "BF16 sidecar is unsupported",
+            ));
+        }
+        MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32 => {
+            return Err(MtpQuantizedSidecarError::invalid(
+                "NVFP4 sidecars use the three-plane validator",
             ));
         }
     };
@@ -1133,14 +1816,11 @@ fn validate_record(
                 | MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => {
                     vec![logical_shape[0], logical_shape[1]]
                 }
-                MtpWeightEncoding::Mxfp6W6A6Block32E8M0
-                | MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => {
-                    vec![logical_shape[0], expected_values / logical_shape[0]]
-                }
                 MtpWeightEncoding::Bf16 if roundtrip => {
                     vec![logical_shape[0], logical_shape[1]]
                 }
                 MtpWeightEncoding::Bf16 => unreachable!(),
+                MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32 => unreachable!(),
             }
         || scale.shape
             != if roundtrip {
@@ -1159,6 +1839,85 @@ fn validate_record(
             "MTP sidecar value/scale contract differs: {}",
             record.name
         )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_nvfp4_record(
+    record: &TensorRecord,
+    value: &SafeTensorMetadata,
+    block_scale: &SafeTensorMetadata,
+    tensor_scale: &SafeTensorMetadata,
+    logical_shape: [u64; 2],
+    file: &mut File,
+    data_start: u64,
+) -> Result<(), MtpQuantizedSidecarError> {
+    if logical_shape[0] == 0 || logical_shape[1] == 0 || logical_shape[1] % 16 != 0 {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "MTP NVFP4 matrix shape is not block16 aligned",
+        ));
+    }
+    let values_len = value.data_offsets[1]
+        .checked_sub(value.data_offsets[0])
+        .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP NVFP4 value range is reversed"))?;
+    let block_scales_len = block_scale.data_offsets[1]
+        .checked_sub(block_scale.data_offsets[0])
+        .ok_or_else(|| {
+            MtpQuantizedSidecarError::invalid("MTP NVFP4 block-scale range is reversed")
+        })?;
+    let tensor_scale_len = tensor_scale.data_offsets[1]
+        .checked_sub(tensor_scale.data_offsets[0])
+        .ok_or_else(|| {
+            MtpQuantizedSidecarError::invalid("MTP NVFP4 tensor-scale range is reversed")
+        })?;
+    let expected_values = logical_shape[0]
+        .checked_mul(logical_shape[1] / 2)
+        .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP NVFP4 value shape overflows"))?;
+    let expected_block_scales = logical_shape[0]
+        .checked_mul(logical_shape[1] / 16)
+        .ok_or_else(|| MtpQuantizedSidecarError::invalid("MTP NVFP4 scale shape overflows"))?;
+    if record.roundtrip.is_some()
+        || record.tensor_scale_sha256.is_none()
+        || !is_sha256(&record.source_sha256)
+        || !is_sha256(&record.value_sha256)
+        || !is_sha256(&record.scale_sha256)
+        || !is_sha256(record.tensor_scale_sha256.as_deref().unwrap_or_default())
+        || value.dtype != "U8"
+        || value.shape != vec![logical_shape[0], logical_shape[1] / 2]
+        || block_scale.dtype != "U8"
+        || block_scale.shape != vec![logical_shape[0], logical_shape[1] / 16]
+        || tensor_scale.dtype != "F32"
+        || tensor_scale.shape != vec![1]
+        || values_len != expected_values
+        || block_scales_len != expected_block_scales
+        || tensor_scale_len != 4
+        || data_start.checked_add(value.data_offsets[1]).is_none()
+        || data_start
+            .checked_add(block_scale.data_offsets[1])
+            .is_none()
+        || data_start
+            .checked_add(tensor_scale.data_offsets[1])
+            .is_none()
+        || sha256_range(file, data_start, value.data_offsets)? != record.value_sha256
+        || sha256_range(file, data_start, block_scale.data_offsets)? != record.scale_sha256
+        || sha256_range(file, data_start, tensor_scale.data_offsets)?
+            != record.tensor_scale_sha256.as_deref().unwrap_or_default()
+    {
+        return Err(MtpQuantizedSidecarError::invalid(format!(
+            "MTP NVFP4 value/scale contract differs: {}",
+            record.name
+        )));
+    }
+    let tensor_scale_bytes = read_range(file, data_start, tensor_scale.data_offsets)?;
+    let bits: [u8; 4] = tensor_scale_bytes.try_into().map_err(|_| {
+        MtpQuantizedSidecarError::invalid("MTP NVFP4 tensor scale is not four bytes")
+    })?;
+    let tensor_scale_value = f32::from_le_bytes(bits);
+    if !tensor_scale_value.is_finite() || tensor_scale_value <= 0.0 {
+        return Err(MtpQuantizedSidecarError::invalid(
+            "MTP NVFP4 tensor scale is non-positive or non-finite",
+        ));
     }
     Ok(())
 }
@@ -1382,8 +2141,7 @@ mod tests {
             MtpWeightEncoding::Bf16 => rows * columns * 2,
             MtpWeightEncoding::Mxfp8W8A8Block32E8M0
             | MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => rows * columns,
-            MtpWeightEncoding::Mxfp6W6A6Block32E8M0
-            | MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => rows * columns * 3 / 4,
+            MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32 => rows * columns / 2,
         }
     }
 
@@ -1452,6 +2210,8 @@ mod tests {
             value_sha256: sha256_bytes(&values),
             scale_sha256: sha256_bytes(&scales),
             roundtrip: None,
+            tensor_scale_sha256: None,
+            input_global_scale_f32_bits: None,
         };
         let value = SafeTensorMetadata {
             dtype: encoding.value_dtype().to_owned(),
@@ -1460,11 +2220,10 @@ mod tests {
                 | MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => {
                     vec![rows as u64, columns as u64]
                 }
-                MtpWeightEncoding::Mxfp6W6A6Block32E8M0
-                | MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => {
-                    vec![rows as u64, (columns * 3 / 4) as u64]
-                }
                 MtpWeightEncoding::Bf16 => vec![rows as u64, columns as u64],
+                MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32 => {
+                    vec![rows as u64, (columns / 2) as u64]
+                }
             },
             data_offsets: [0, value_len as u64],
         };
@@ -1495,16 +2254,8 @@ mod tests {
             "mxfp8-w8a8-e4m3-block32-e8m0"
         );
         assert_eq!(
-            MtpWeightEncoding::Mxfp6W6A6Block32E8M0.manifest_name(),
-            "mxfp6-w6a6-e3m2-block32-e8m0"
-        );
-        assert_eq!(
             MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale.manifest_name(),
             "mxfp8-w8a8-e4m3-block32-e8m0:mx-scale=no-clipping"
-        );
-        assert_eq!(
-            MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale.manifest_name(),
-            "mxfp6-w6a6-e3m2-block32-e8m0:mx-scale=no-clipping"
         );
         let base = "sha256:base";
         let manifest = "sha256:manifest";
@@ -1517,7 +2268,7 @@ mod tests {
             combined_recipe_digest(
                 base,
                 manifest,
-                MtpWeightEncoding::Mxfp6W6A6Block32E8M0.manifest_name(),
+                MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32.manifest_name(),
             )
         );
         assert_ne!(
@@ -1536,26 +2287,17 @@ mod tests {
 
     #[test]
     fn no_clipping_encoding_names_round_trip_and_unknown_names_are_rejected() {
-        for (name, encoding) in [
-            (
-                "mxfp8-w8a8-e4m3-block32-e8m0:mx-scale=no-clipping",
-                MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale,
-            ),
-            (
-                "mxfp6-w6a6-e3m2-block32-e8m0:mx-scale=no-clipping",
-                MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale,
-            ),
-        ] {
-            assert_eq!(
-                MtpWeightEncoding::parse(name).expect("parse encoding"),
-                encoding
-            );
-            assert_eq!(
-                parse_manifest_encoding(name).expect("parse manifest encoding"),
-                (encoding, None)
-            );
-            assert_eq!(encoding.manifest_name(), name);
-        }
+        let name = "mxfp8-w8a8-e4m3-block32-e8m0:mx-scale=no-clipping";
+        let encoding = MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale;
+        assert_eq!(
+            MtpWeightEncoding::parse(name).expect("parse encoding"),
+            encoding
+        );
+        assert_eq!(
+            parse_manifest_encoding(name).expect("parse manifest encoding"),
+            (encoding, None)
+        );
+        assert_eq!(encoding.manifest_name(), name);
 
         for unknown in [
             "mxfp8-w8a8-e4m3-block32-e8m0:mx-scale=clipping",
@@ -1563,6 +2305,129 @@ mod tests {
         ] {
             assert!(MtpWeightEncoding::parse(unknown).is_err());
             assert!(parse_manifest_encoding(unknown).is_err());
+        }
+        for retired in [
+            "mxfp6-w6a6-e3m2-block32-e8m0",
+            "mxfp6-w6a6-e3m2-block32-e8m0:mx-scale=no-clipping",
+            "bf16-roundtrip-mxfp6",
+        ] {
+            let error = parse_manifest_encoding(retired).expect_err("MXFP6 MTP is retired");
+            assert!(error.to_string().contains("retired MTP MXFP6"));
+        }
+    }
+
+    #[test]
+    fn nvfp4_weight_roundtrip_has_block16_planes_and_positive_tensor_scale() {
+        let input = (0..64)
+            .map(|index| (index as f32 - 31.0) * 0.125)
+            .collect::<Vec<_>>();
+        let quantized = quantize_nvfp4_weights(&input, 2, 32).expect("NVFP4 quantize");
+        assert_eq!(quantized.packed_values.len(), 2 * 32 / 2);
+        assert_eq!(quantized.block_scales.len(), 2 * 32 / 16);
+        assert!(quantized.tensor_scale.is_finite());
+        assert!(quantized.tensor_scale > 0.0);
+        let decoded = quantized.dequantize();
+        assert!(decoded.iter().all(|value| value.is_finite()));
+        assert!(
+            decoded
+                .iter()
+                .zip(input)
+                .all(|(decoded, source)| (decoded - source).abs() <= 0.8)
+        );
+    }
+
+    fn valid_activation_scale_manifest_value() -> Value {
+        let mut scales = Map::new();
+        for name in MTP_MATRIX_NAMES {
+            scales.insert(name.to_owned(), Value::from(0.5_f64));
+        }
+        let mut activation_amax = Map::new();
+        for site in NVFP4_ACTIVATION_SITES {
+            activation_amax.insert(site.to_owned(), Value::from(1344.0_f64));
+        }
+        let source_reports = vec![
+            CalibrationSourceReport {
+                target: "gfx1030".to_owned(),
+                report_sha256: sha256_bytes(b"gfx1030"),
+            },
+            CalibrationSourceReport {
+                target: "gfx1201".to_owned(),
+                report_sha256: sha256_bytes(b"gfx1201"),
+            },
+        ];
+        let source_report_sha256 = source_report_digest(&source_reports);
+        serde_json::json!({
+            "schema": NVFP4_ACTIVATION_SCALE_SCHEMA,
+            "scale_rule": NVFP4_CALIBRATION_SCALE_RULE,
+            "input_manifest_sha256": sha256_bytes(b"held-out-input"),
+            "suite_sha256": sha256_bytes(b"suite"),
+            "source_report_sha256": source_report_sha256,
+            "source_reports": source_reports,
+            "activation_amax": activation_amax,
+            "scales": scales,
+        })
+    }
+
+    fn write_activation_scale_manifest(value: &Value) -> PathBuf {
+        let path = temporary_test_path("activation-scale");
+        let mut file = File::create(&path).expect("create activation manifest");
+        file.write_all(serde_json::to_string(value).unwrap().as_bytes())
+            .expect("write activation manifest");
+        file.sync_all().expect("sync activation manifest");
+        path
+    }
+
+    #[test]
+    fn activation_scale_manifest_rejects_missing_extra_nonpositive_and_unequal_scales() {
+        let valid_path = write_activation_scale_manifest(&valid_activation_scale_manifest_value());
+        let valid = read_qwen38_mtp_nvfp4_activation_scale_manifest(&valid_path)
+            .expect("valid activation manifest");
+        assert_eq!(valid.scales.len(), 8);
+        assert_eq!(valid.source_reports.len(), 2);
+        std::fs::remove_file(&valid_path).expect("remove valid activation manifest");
+
+        let mut invalid_cases = Vec::<(&str, Box<dyn Fn(&mut Value)>)>::new();
+        invalid_cases.push((
+            "missing",
+            Box::new(|value: &mut Value| {
+                value
+                    .get_mut("scales")
+                    .and_then(Value::as_object_mut)
+                    .expect("scales")
+                    .remove("mtp.fc.weight");
+            }),
+        ));
+        invalid_cases.push((
+            "extra",
+            Box::new(|value: &mut Value| {
+                value
+                    .get_mut("scales")
+                    .and_then(Value::as_object_mut)
+                    .expect("scales")
+                    .insert("mtp.extra.weight".to_owned(), Value::from(0.5_f64));
+            }),
+        ));
+        invalid_cases.push((
+            "nonpositive",
+            Box::new(|value: &mut Value| {
+                value["scales"]["mtp.fc.weight"] = Value::from(0.0_f64);
+            }),
+        ));
+        invalid_cases.push((
+            "unequal-gate-up",
+            Box::new(|value: &mut Value| {
+                value["scales"]["mtp.layers.0.mlp.up_proj.weight"] = Value::from(0.25_f64);
+            }),
+        ));
+        for (label, mutate) in invalid_cases {
+            let mut value = valid_activation_scale_manifest_value();
+            mutate(&mut value);
+            let path = write_activation_scale_manifest(&value);
+            assert!(
+                read_qwen38_mtp_nvfp4_activation_scale_manifest(&path).is_err(),
+                "{label} manifest was accepted"
+            );
+            std::fs::remove_file(path).expect("remove invalid activation manifest");
         }
     }
 
@@ -1585,46 +2450,24 @@ mod tests {
         )
         .expect("no-clipping mxfp8");
         assert_ne!(mxfp8_clipped.scales(), mxfp8_no_clipping.scales());
-
-        let mut mxfp6_values = vec![1.0_f32; 32];
-        mxfp6_values[0] = 29.0;
-        let mxfp6_clipped = quantize_mtp_matrix(
-            MtpWeightEncoding::Mxfp6W6A6Block32E8M0,
-            &mxfp6_values,
-            1,
-            32,
-        )
-        .expect("clipped mxfp6");
-        let mxfp6_no_clipping = quantize_mtp_matrix(
-            MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale,
-            &mxfp6_values,
-            1,
-            32,
-        )
-        .expect("no-clipping mxfp6");
-        assert_ne!(mxfp6_clipped.scales(), mxfp6_no_clipping.scales());
     }
 
     #[test]
-    fn bf16_roundtrip_records_bit_exact_finite_mxfp8_and_mxfp6_values() {
+    fn bf16_roundtrip_records_bit_exact_finite_mxfp8_values() {
         let input = (0..64)
             .map(|index| (index as f32 - 31.0) * 0.25)
             .collect::<Vec<_>>();
-        for recipe in [
-            MtpBf16RoundtripEncoding::Mxfp8,
-            MtpBf16RoundtripEncoding::Mxfp6,
-        ] {
-            let quantized = recipe.quantize(&input, 1, 64).expect("quantize");
-            let (bytes, diagnostics) =
-                bf16_roundtrip_values(&quantized, &input, recipe).expect("roundtrip");
-            assert_eq!(bytes.len(), 64 * 2);
-            assert!(diagnostics.bit_exact, "{recipe:?}: {diagnostics:?}");
-            assert_eq!(diagnostics.source_nonfinite_count, 0);
-            assert_eq!(diagnostics.dequant_nonfinite_count, 0);
-            assert_eq!(diagnostics.underflow_count, 0);
-            assert_eq!(diagnostics.overflow_count, 0);
-            assert_eq!(diagnostics.bit_mismatch_count, 0);
-        }
+        let recipe = MtpBf16RoundtripEncoding::Mxfp8;
+        let quantized = recipe.quantize(&input, 1, 64).expect("quantize");
+        let (bytes, diagnostics) =
+            bf16_roundtrip_values(&quantized, &input, recipe).expect("roundtrip");
+        assert_eq!(bytes.len(), 64 * 2);
+        assert!(diagnostics.bit_exact, "{recipe:?}: {diagnostics:?}");
+        assert_eq!(diagnostics.source_nonfinite_count, 0);
+        assert_eq!(diagnostics.dequant_nonfinite_count, 0);
+        assert_eq!(diagnostics.underflow_count, 0);
+        assert_eq!(diagnostics.overflow_count, 0);
+        assert_eq!(diagnostics.bit_mismatch_count, 0);
     }
 
     #[test]
@@ -1681,18 +2524,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_record_accepts_n3_for_mxfp8_and_mxfp6_at_block_boundaries() {
-        for encoding in [
-            MtpWeightEncoding::Mxfp8W8A8Block32E8M0,
-            MtpWeightEncoding::Mxfp6W6A6Block32E8M0,
-        ] {
-            for columns in [32, 64] {
-                let (record, value, scale, data) = make_validate_fixture(encoding, columns);
-                assert!(
-                    validate_fixture(encoding, columns, record, value, scale, &data).is_ok(),
-                    "valid {encoding} N=3 K={columns} fixture rejected"
-                );
-            }
+    fn validate_record_accepts_n3_for_mxfp8_at_block_boundaries() {
+        let encoding = MtpWeightEncoding::Mxfp8W8A8Block32E8M0;
+        for columns in [32, 64] {
+            let (record, value, scale, data) = make_validate_fixture(encoding, columns);
+            assert!(
+                validate_fixture(encoding, columns, record, value, scale, &data).is_ok(),
+                "valid {encoding} N=3 K={columns} fixture rejected"
+            );
         }
     }
 
@@ -1724,6 +2563,8 @@ mod tests {
                 first_overflow_positions: Vec::new(),
                 first_bit_mismatch_positions: Vec::new(),
             }),
+            tensor_scale_sha256: None,
+            input_global_scale_f32_bits: None,
         };
         let value = SafeTensorMetadata {
             dtype: "BF16".to_owned(),
@@ -1808,9 +2649,13 @@ mod tests {
                 logical_shape: [3, 32],
                 value_range: [0, 96],
                 scale_range: [96, 99],
+                tensor_scale_range: None,
                 source_sha256: sha256_bytes(b"source"),
                 value_sha256: sha256_bytes(&values),
                 scale_sha256: sha256_bytes(&scales),
+                tensor_scale_sha256: None,
+                nvfp4_weight_tensor_scale_f32_bits: None,
+                nvfp4_input_global_scale_f32_bits: None,
             },
         );
         let sidecar = VerifiedQwen38MtpQuantizedSidecar {

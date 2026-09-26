@@ -13,7 +13,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::KvCacheEncoding;
+use crate::{
+    KV_PAGED_IMAGE_METADATA_VERSION, KV_PAGED_PLANE_COUNT, KV_PAGED_RING_SLOT_COUNT,
+    KvCacheEncoding, KvFp8PhysicalVariant, KvPagedImageMetadataV1, KvPagedImageTopologyV1,
+    KvPagedRingTableV1, KvStateDescriptor,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -24,6 +28,13 @@ pub const CHECKPOINT_MAGIC: [u8; 8] = *b"SLLMCKP1";
 pub const CHECKPOINT_SCHEMA_VERSION: u16 = 1;
 /// Stable descriptive identifier for the v1 little-endian envelope.
 pub const CHECKPOINT_SCHEMA_ID: &str = "sllm-session-checkpoint-v1";
+/// Additive Paged checkpoint envelope magic. V1 readers reject this magic.
+pub const CHECKPOINT_MAGIC_V2: [u8; 8] = *b"SLLMCKP2";
+/// Wire schema for [`SessionCheckpointV2`].
+pub const CHECKPOINT_SCHEMA_VERSION_V2: u16 = 2;
+/// Stable descriptive identifier for the topology-aware Paged envelope.
+#[allow(dead_code)]
+pub const CHECKPOINT_SCHEMA_ID_V2: &str = "sllm-session-checkpoint-v2-paged";
 /// Maximum encoded header size, including identity and the section table.
 pub const MAX_CHECKPOINT_HEADER_BYTES: usize = 4096;
 /// Maximum number of logical sections/opaque planes represented by v1.
@@ -320,6 +331,1187 @@ impl fmt::Debug for OpaqueStatePlane {
             .field("byte_len", &self.bytes.len())
             .finish()
     }
+}
+
+/// Version of the in-memory Paged state image representation. This is kept
+/// separate from the V1 opaque-plane image so the V1 checkpoint wire format
+/// and its plane tags retain their existing meaning.
+#[allow(dead_code)]
+pub const PAGED_STATE_IMAGE_VERSION_V2: u32 = 1;
+
+/// A Paged state image carries topology separately from its six native planes.
+/// Absent encoding planes are represented by empty vectors and are validated
+/// against the six metadata strides; no legacy `StatePlaneKindV1` is reused.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub struct PagedStateImageV2 {
+    metadata: StateLayerMetadataV1,
+    paged_metadata: KvPagedImageMetadataV1,
+    planes: [Vec<u8>; KV_PAGED_PLANE_COUNT],
+}
+
+#[allow(dead_code)]
+impl PagedStateImageV2 {
+    pub fn new(
+        metadata: StateLayerMetadataV1,
+        paged_metadata: KvPagedImageMetadataV1,
+        planes: [Vec<u8>; KV_PAGED_PLANE_COUNT],
+    ) -> Result<Self, CheckpointError> {
+        if metadata.owner != StateOwnerKindV1::Kv
+            || metadata.active_slot.is_some()
+            || metadata.layer_id != paged_metadata.descriptor().layer_id()
+            || metadata.published_length != paged_metadata.observed_length()
+            || metadata.generation != paged_metadata.generation()
+        {
+            return Err(CheckpointError::Invalid(
+                "Paged state image layer metadata does not match topology".into(),
+            ));
+        }
+        let strides = paged_metadata.plane_strides();
+        let block_capacity = paged_metadata.physical_block_capacity();
+        for (index, (bytes, stride)) in planes.iter().zip(strides).enumerate() {
+            let expected = block_capacity.checked_mul(stride).ok_or_else(|| {
+                CheckpointError::Bounds(format!("Paged plane {index} size overflow"))
+            })?;
+            if expected > MAX_SECTION_BYTES {
+                return Err(CheckpointError::Bounds(format!(
+                    "Paged plane {index} exceeds section limit"
+                )));
+            }
+            if bytes.len() as u64 != expected {
+                return Err(CheckpointError::Invalid(format!(
+                    "Paged plane {index} byte length does not match topology"
+                )));
+            }
+        }
+        Ok(Self {
+            metadata,
+            paged_metadata,
+            planes,
+        })
+    }
+
+    pub const fn format_version(&self) -> u32 {
+        PAGED_STATE_IMAGE_VERSION_V2
+    }
+
+    pub const fn metadata(&self) -> &StateLayerMetadataV1 {
+        &self.metadata
+    }
+
+    pub const fn paged_metadata(&self) -> &KvPagedImageMetadataV1 {
+        &self.paged_metadata
+    }
+
+    pub const fn planes(&self) -> &[Vec<u8>; KV_PAGED_PLANE_COUNT] {
+        &self.planes
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        StateLayerMetadataV1,
+        KvPagedImageMetadataV1,
+        [Vec<u8>; KV_PAGED_PLANE_COUNT],
+    ) {
+        (self.metadata, self.paged_metadata, self.planes)
+    }
+}
+
+/// In-memory Paged-capable checkpoint payload. V1 payloads and serialization
+/// remain unchanged; this representation is the explicit V2 integration point
+/// for topology-aware adapters and future envelope serialization.
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+#[allow(dead_code)]
+pub struct CheckpointPayloadV2 {
+    pub token_history: Vec<u32>,
+    pub conversation: Vec<u8>,
+    pub paged_state_layers: Vec<PagedStateImageV2>,
+    /// Existing V1 linear/GDN metadata and plane bytes carried additively by
+    /// the V2 envelope. Their V1 plane tags retain their original meaning.
+    pub linear_state_layers: Vec<StateLayerMetadataV1>,
+    pub linear_state_planes: Vec<OpaqueStatePlane>,
+    pub sampler_state: Vec<u8>,
+    pub grammar_state: Vec<u8>,
+    pub stop_state: Vec<u8>,
+}
+
+#[allow(dead_code)]
+impl CheckpointPayloadV2 {
+    pub fn validate(&self) -> Result<(), CheckpointError> {
+        if self.token_history.len() > MAX_TOKEN_HISTORY {
+            return Err(CheckpointError::Bounds(
+                "token history exceeds limit".into(),
+            ));
+        }
+        if self.conversation.len() > MAX_CONVERSATION_BYTES {
+            return Err(CheckpointError::Bounds(
+                "conversation exceeds maximum size".into(),
+            ));
+        }
+        for (name, bytes) in [
+            ("sampler_state", &self.sampler_state),
+            ("grammar_state", &self.grammar_state),
+            ("stop_state", &self.stop_state),
+        ] {
+            if bytes.len() as u64 > MAX_SECTION_BYTES {
+                return Err(CheckpointError::Bounds(format!(
+                    "{name} exceeds section limit"
+                )));
+            }
+        }
+        if self.paged_state_layers.len() > MAX_STATE_LAYERS {
+            return Err(CheckpointError::Bounds(
+                "too many Paged state layers".into(),
+            ));
+        }
+        let mut layers = std::collections::BTreeSet::new();
+        let mut total_plane_bytes = 0_u64;
+        for image in &self.paged_state_layers {
+            let layer = image.metadata();
+            if layer.owner != StateOwnerKindV1::Kv || layer.active_slot.is_some() {
+                return Err(CheckpointError::Invalid(
+                    "V2 Paged state layer must be a KV layer without an active slot".into(),
+                ));
+            }
+            if !layers.insert((StateOwnerKindV1::Kv, layer.layer_id)) {
+                return Err(CheckpointError::Invalid(
+                    "duplicate Paged state layer".into(),
+                ));
+            }
+            for plane in image.planes() {
+                let bytes = u64::try_from(plane.len()).map_err(|_| {
+                    CheckpointError::Bounds("Paged state plane length exceeds u64".into())
+                })?;
+                total_plane_bytes = total_plane_bytes.checked_add(bytes).ok_or_else(|| {
+                    CheckpointError::Bounds("Paged state image size overflow".into())
+                })?;
+            }
+            match image.paged_metadata().topology() {
+                KvPagedImageTopologyV1::LogicalTable(table)
+                    if table.len() > MAX_CHECKPOINT_SECTIONS =>
+                {
+                    return Err(CheckpointError::Bounds(
+                        "Paged logical table exceeds entry limit".into(),
+                    ));
+                }
+                KvPagedImageTopologyV1::LogicalTable(_)
+                | KvPagedImageTopologyV1::SlidingRing(_) => {}
+            }
+        }
+        if self.linear_state_layers.len() > MAX_STATE_LAYERS {
+            return Err(CheckpointError::Bounds(
+                "too many V2 linear state layers".into(),
+            ));
+        }
+        for layer in &self.linear_state_layers {
+            if layer.owner != StateOwnerKindV1::LinearAttention
+                || !matches!(layer.active_slot, Some(0 | 1))
+                || !layers.insert((layer.owner, layer.layer_id))
+            {
+                return Err(CheckpointError::Invalid(
+                    "invalid or duplicate V2 linear state layer".into(),
+                ));
+            }
+        }
+        if self.linear_state_planes.len() > MAX_STATE_PLANES {
+            return Err(CheckpointError::Bounds(
+                "too many V2 linear state planes".into(),
+            ));
+        }
+        let mut seen_planes = std::collections::BTreeSet::new();
+        for plane in &self.linear_state_planes {
+            if plane.owner != StateOwnerKindV1::LinearAttention
+                || plane.plane.owner() != StateOwnerKindV1::LinearAttention
+                || !layers.contains(&(plane.owner, plane.layer_id))
+                || !seen_planes.insert((plane.owner, plane.layer_id, plane.plane))
+            {
+                return Err(CheckpointError::Invalid(
+                    "invalid, missing, or duplicate V2 linear state plane".into(),
+                ));
+            }
+            if plane.bytes.len() as u64 > MAX_SECTION_BYTES {
+                return Err(CheckpointError::Bounds(
+                    "V2 linear state plane exceeds section limit".into(),
+                ));
+            }
+            if plane.bytes.is_empty() {
+                return Err(CheckpointError::Invalid(
+                    "V2 linear state plane must not be empty".into(),
+                ));
+            }
+            total_plane_bytes = total_plane_bytes
+                .checked_add(plane.bytes.len() as u64)
+                .ok_or_else(|| CheckpointError::Bounds("V2 state image size overflow".into()))?;
+        }
+        for layer in &self.linear_state_layers {
+            let actual = seen_planes
+                .iter()
+                .filter_map(|(owner, layer_id, plane)| {
+                    (*owner == layer.owner && *layer_id == layer.layer_id).then_some(*plane)
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            let expected = [
+                StatePlaneKindV1::LinearConvSlot0,
+                StatePlaneKindV1::LinearConvSlot1,
+                StatePlaneKindV1::LinearRecurrentSlot0,
+                StatePlaneKindV1::LinearRecurrentSlot1,
+                StatePlaneKindV1::LinearScratch,
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+            if actual != expected {
+                return Err(CheckpointError::Invalid(
+                    "V2 linear state layer has missing or unexpected planes".into(),
+                ));
+            }
+        }
+        if total_plane_bytes > MAX_CHECKPOINT_BYTES {
+            return Err(CheckpointError::Bounds(
+                "V2 state image exceeds checkpoint limit".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// In-memory V2 checkpoint envelope. Its wire encoding is intentionally a
+/// later additive schema; V1 `SessionCheckpoint::encode/decode` remains
+/// unchanged and continues to read all existing checkpoint files.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub struct SessionCheckpointV2 {
+    pub header: SessionCheckpointHeader,
+    pub payload: CheckpointPayloadV2,
+}
+
+#[allow(dead_code)]
+impl SessionCheckpointV2 {
+    pub fn new(
+        identity: CheckpointIdentity,
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+        payload: CheckpointPayloadV2,
+    ) -> Result<Self, CheckpointError> {
+        identity.validate()?;
+        payload.validate()?;
+        if identity.token_sequence_digest != token_sequence_digest(&payload.token_history) {
+            return Err(CheckpointError::Invalid(
+                "V2 identity token sequence digest does not match token history".into(),
+            ));
+        }
+        let checkpoint = Self {
+            header: SessionCheckpointHeader {
+                identity,
+                token_count: payload.token_history.len() as u64,
+                absolute_position,
+                logical_position,
+                generation_state_version,
+            },
+            payload,
+        };
+        checkpoint.validate()?;
+        Ok(checkpoint)
+    }
+
+    pub fn validate(&self) -> Result<(), CheckpointError> {
+        self.header.identity.validate()?;
+        self.payload.validate()?;
+        if self.header.token_count != self.payload.token_history.len() as u64
+            || self.header.identity.token_sequence_digest
+                != token_sequence_digest(&self.payload.token_history)
+        {
+            return Err(CheckpointError::Invalid(
+                "V2 checkpoint header does not match its payload".into(),
+            ));
+        }
+        if self.payload.paged_state_layers.iter().any(|image| {
+            image.paged_metadata().descriptor().cache_encoding() != self.header.identity.kv_encoding
+        }) {
+            return Err(CheckpointError::Invalid(
+                "V2 Paged descriptor encoding differs from checkpoint identity".into(),
+            ));
+        }
+        let position_delta = self
+            .header
+            .absolute_position
+            .checked_sub(self.header.logical_position)
+            .ok_or_else(|| {
+                CheckpointError::Invalid("absolute position precedes logical position".into())
+            })?;
+        i64::try_from(position_delta).map_err(|_| {
+            CheckpointError::Bounds("absolute/logical position delta exceeds i64".into())
+        })?;
+        Ok(())
+    }
+
+    /// Encode the topology-aware Paged checkpoint using an additive wire
+    /// schema. The V1 envelope and its section meanings remain unchanged.
+    pub fn encode(&self) -> Result<Vec<u8>, CheckpointError> {
+        self.validate()?;
+        let sections = self.encode_sections()?;
+        encode_checkpoint_v2_envelope(&self.header, sections)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, CheckpointError> {
+        Self::decode_with_identity(bytes, None)
+    }
+
+    pub fn decode_with_identity(
+        bytes: &[u8],
+        expected_identity: Option<&CheckpointIdentity>,
+    ) -> Result<Self, CheckpointError> {
+        let envelope = decode_checkpoint_envelope(
+            bytes,
+            CHECKPOINT_MAGIC_V2,
+            CHECKPOINT_SCHEMA_VERSION_V2,
+            expected_identity,
+        )?;
+        let mut payload = CheckpointPayloadV2::default();
+        for (kind, data) in envelope.sections {
+            match kind {
+                SECTION_TOKEN_HISTORY => payload.token_history = decode_tokens(data)?,
+                SECTION_CONVERSATION => {
+                    payload.conversation =
+                        bounded_copy(data, "conversation", MAX_CONVERSATION_BYTES as u64)?
+                }
+                SECTION_STATE_LAYERS => {
+                    payload.paged_state_layers = decode_paged_state_layers(data)?
+                }
+                SECTION_SAMPLER_STATE => {
+                    payload.sampler_state = bounded_copy(data, "sampler state", MAX_SECTION_BYTES)?
+                }
+                SECTION_GRAMMAR_STATE => {
+                    payload.grammar_state = bounded_copy(data, "grammar state", MAX_SECTION_BYTES)?
+                }
+                SECTION_STOP_STATE => {
+                    payload.stop_state = bounded_copy(data, "stop state", MAX_SECTION_BYTES)?
+                }
+                SECTION_STATE_PLANES => {
+                    let (layers, planes) = decode_v2_linear_state_bundle(data)?;
+                    payload.linear_state_layers = layers;
+                    payload.linear_state_planes = planes;
+                }
+                _ => unreachable!(),
+            }
+        }
+        let checkpoint = Self {
+            header: envelope.header,
+            payload,
+        };
+        checkpoint.validate()?;
+        Ok(checkpoint)
+    }
+
+    fn encode_sections(&self) -> Result<Vec<(u16, Vec<u8>)>, CheckpointError> {
+        let mut tokens = Vec::with_capacity(
+            4usize
+                .checked_add(
+                    self.payload
+                        .token_history
+                        .len()
+                        .checked_mul(4)
+                        .ok_or_else(|| CheckpointError::Bounds("token bytes overflow".into()))?,
+                )
+                .ok_or_else(|| CheckpointError::Bounds("token bytes overflow".into()))?,
+        );
+        tokens.extend_from_slice(&(self.payload.token_history.len() as u32).to_le_bytes());
+        for token in &self.payload.token_history {
+            tokens.extend_from_slice(&token.to_le_bytes());
+        }
+        let layers = encode_paged_state_layers(&self.payload.paged_state_layers)?;
+        let linear = encode_v2_linear_state_bundle(
+            &self.payload.linear_state_layers,
+            &self.payload.linear_state_planes,
+        )?;
+        let sections = vec![
+            (SECTION_TOKEN_HISTORY, tokens),
+            (SECTION_CONVERSATION, self.payload.conversation.clone()),
+            (SECTION_STATE_LAYERS, layers),
+            (SECTION_SAMPLER_STATE, self.payload.sampler_state.clone()),
+            (SECTION_GRAMMAR_STATE, self.payload.grammar_state.clone()),
+            (SECTION_STOP_STATE, self.payload.stop_state.clone()),
+            (SECTION_STATE_PLANES, linear),
+        ];
+        for (_, bytes) in &sections {
+            if bytes.len() as u64 > MAX_SECTION_BYTES {
+                return Err(CheckpointError::Bounds(
+                    "section exceeds maximum size".into(),
+                ));
+            }
+        }
+        Ok(sections)
+    }
+}
+
+fn encode_checkpoint_v2_envelope(
+    header: &SessionCheckpointHeader,
+    sections: Vec<(u16, Vec<u8>)>,
+) -> Result<Vec<u8>, CheckpointError> {
+    if sections.len() != SECTION_COUNT {
+        return Err(CheckpointError::Invalid(
+            "V2 checkpoint has an unexpected section count".into(),
+        ));
+    }
+    let identity = encode_identity(&header.identity)?;
+    let table_bytes = SECTION_COUNT
+        .checked_mul(SECTION_ENTRY_BYTES)
+        .ok_or_else(|| CheckpointError::Bounds("section table overflow".into()))?;
+    let header_len = FIXED_HEADER_BYTES
+        .checked_add(identity.len())
+        .and_then(|length| length.checked_add(table_bytes))
+        .ok_or_else(|| CheckpointError::Bounds("header length overflow".into()))?;
+    if header_len > MAX_CHECKPOINT_HEADER_BYTES {
+        return Err(CheckpointError::Bounds(
+            "checkpoint header exceeds maximum size".into(),
+        ));
+    }
+    let payload_len = sections.iter().try_fold(0usize, |sum, (_, bytes)| {
+        sum.checked_add(bytes.len())
+            .ok_or_else(|| CheckpointError::Bounds("payload length overflow".into()))
+    })?;
+    let total_len = header_len
+        .checked_add(payload_len)
+        .ok_or_else(|| CheckpointError::Bounds("checkpoint length overflow".into()))?;
+    if total_len as u64 > MAX_CHECKPOINT_BYTES {
+        return Err(CheckpointError::Bounds(
+            "checkpoint exceeds maximum size".into(),
+        ));
+    }
+    let mut output = Vec::with_capacity(total_len);
+    output.extend_from_slice(&CHECKPOINT_MAGIC_V2);
+    output.extend_from_slice(&CHECKPOINT_SCHEMA_VERSION_V2.to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&(header_len as u32).to_le_bytes());
+    output.extend_from_slice(&(SECTION_COUNT as u16).to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&(total_len as u64).to_le_bytes());
+    output.extend_from_slice(&[0u8; 32]);
+    output.extend_from_slice(&(identity.len() as u32).to_le_bytes());
+    output.extend_from_slice(&header.token_count.to_le_bytes());
+    output.extend_from_slice(&header.absolute_position.to_le_bytes());
+    output.extend_from_slice(&header.logical_position.to_le_bytes());
+    output.extend_from_slice(&header.generation_state_version.to_le_bytes());
+    output.extend_from_slice(&0u32.to_le_bytes());
+    debug_assert_eq!(output.len(), FIXED_HEADER_BYTES);
+    output.extend_from_slice(&identity);
+
+    let mut offset = header_len as u64;
+    let mut seen = std::collections::BTreeSet::new();
+    for (kind, bytes) in &sections {
+        if !known_section(*kind) || !seen.insert(*kind) {
+            return Err(CheckpointError::Invalid(
+                "V2 checkpoint contains unknown or duplicate section".into(),
+            ));
+        }
+        output.extend_from_slice(&kind.to_le_bytes());
+        output.extend_from_slice(&0u16.to_le_bytes());
+        output.extend_from_slice(&0u32.to_le_bytes());
+        output.extend_from_slice(&offset.to_le_bytes());
+        output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        output.extend_from_slice(&sha256(bytes));
+        offset = offset
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| CheckpointError::Bounds("section offset overflow".into()))?;
+    }
+    if seen.len() != SECTION_COUNT {
+        return Err(CheckpointError::Invalid(
+            "V2 checkpoint is missing a section".into(),
+        ));
+    }
+    output.extend(sections.into_iter().flat_map(|(_, bytes)| bytes));
+    debug_assert_eq!(output.len(), total_len);
+    let checksum = sha256_with_zeroed_checksum(&output)?;
+    output[CHECKSUM_OFFSET..CHECKSUM_END].copy_from_slice(&checksum);
+    Ok(output)
+}
+
+struct DecodedCheckpointEnvelope<'a> {
+    header: SessionCheckpointHeader,
+    sections: Vec<(u16, &'a [u8])>,
+}
+
+fn decode_checkpoint_envelope<'a>(
+    bytes: &'a [u8],
+    expected_magic: [u8; 8],
+    expected_schema: u16,
+    expected_identity: Option<&CheckpointIdentity>,
+) -> Result<DecodedCheckpointEnvelope<'a>, CheckpointError> {
+    if bytes.len() < FIXED_HEADER_BYTES {
+        return Err(CheckpointError::Truncated);
+    }
+    if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
+        return Err(CheckpointError::Bounds(
+            "checkpoint exceeds maximum size".into(),
+        ));
+    }
+    if bytes[..8] != expected_magic {
+        return Err(CheckpointError::Corrupt("invalid checkpoint magic".into()));
+    }
+    if read_u16(bytes, 8)? != expected_schema {
+        return Err(CheckpointError::UnsupportedVersion(read_u16(bytes, 8)?));
+    }
+    if read_u16(bytes, 10)? != 0 || read_u16(bytes, 18)? != 0 || read_u32(bytes, 92)? != 0 {
+        return Err(CheckpointError::Corrupt(
+            "reserved header field is nonzero".into(),
+        ));
+    }
+    let header_len = usize::try_from(read_u32(bytes, 12)?)
+        .map_err(|_| CheckpointError::Bounds("header length does not fit usize".into()))?;
+    let section_count = usize::from(read_u16(bytes, 16)?);
+    if section_count != SECTION_COUNT {
+        return Err(CheckpointError::Corrupt("unexpected section count".into()));
+    }
+    let total_len = read_u64(bytes, 20)?;
+    if total_len != bytes.len() as u64 {
+        return if total_len > bytes.len() as u64 {
+            Err(CheckpointError::Truncated)
+        } else {
+            Err(CheckpointError::TrailingBytes)
+        };
+    }
+    let identity_len = usize::try_from(read_u32(bytes, 60)?)
+        .map_err(|_| CheckpointError::Bounds("identity length does not fit usize".into()))?;
+    let table_bytes = section_count
+        .checked_mul(SECTION_ENTRY_BYTES)
+        .ok_or_else(|| CheckpointError::Bounds("header length overflow".into()))?;
+    let minimum_header = FIXED_HEADER_BYTES
+        .checked_add(identity_len)
+        .and_then(|value| value.checked_add(table_bytes))
+        .ok_or_else(|| CheckpointError::Bounds("header length overflow".into()))?;
+    if identity_len == 0
+        || identity_len > MAX_IDENTITY_FIELD_BYTES * 8
+        || header_len != minimum_header
+        || header_len > MAX_CHECKPOINT_HEADER_BYTES
+    {
+        return Err(CheckpointError::Corrupt("invalid header length".into()));
+    }
+    if header_len > bytes.len() {
+        return Err(CheckpointError::Truncated);
+    }
+    let actual_checksum = &bytes[CHECKSUM_OFFSET..CHECKSUM_END];
+    if actual_checksum != sha256_with_zeroed_checksum(bytes)? {
+        return Err(CheckpointError::Corrupt(
+            "envelope checksum mismatch".into(),
+        ));
+    }
+    let identity_start = FIXED_HEADER_BYTES;
+    let identity_end = identity_start
+        .checked_add(identity_len)
+        .ok_or_else(|| CheckpointError::Bounds("identity range overflow".into()))?;
+    let identity = decode_identity(&bytes[identity_start..identity_end])?;
+    if let Some(expected) = expected_identity {
+        compare_identity(expected, &identity)?;
+    }
+    let token_count = read_u64(bytes, 64)?;
+    let absolute_position = read_u64(bytes, 72)?;
+    let logical_position = read_u64(bytes, 80)?;
+    let generation_state_version = read_u32(bytes, 88)?;
+    let table_start = identity_end;
+    let mut entries = Vec::with_capacity(section_count);
+    let mut seen = std::collections::BTreeSet::new();
+    for index in 0..section_count {
+        let start =
+            table_start
+                .checked_add(index.checked_mul(SECTION_ENTRY_BYTES).ok_or_else(|| {
+                    CheckpointError::Bounds("section table offset overflow".into())
+                })?)
+                .ok_or_else(|| CheckpointError::Bounds("section table offset overflow".into()))?;
+        let kind = read_u16(bytes, start)?;
+        if !known_section(kind) || !seen.insert(kind) {
+            return Err(CheckpointError::Corrupt(
+                "unknown or duplicate section".into(),
+            ));
+        }
+        if read_u16(bytes, start + 2)? != 0 || read_u32(bytes, start + 4)? != 0 {
+            return Err(CheckpointError::Corrupt(
+                "reserved section field is nonzero".into(),
+            ));
+        }
+        let offset = read_u64(bytes, start + 8)?;
+        let length = read_u64(bytes, start + 16)?;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| CheckpointError::Bounds("section range overflow".into()))?;
+        if offset < header_len as u64 || end > total_len || length > MAX_SECTION_BYTES {
+            return Err(CheckpointError::Corrupt(
+                "section range is outside envelope".into(),
+            ));
+        }
+        let digest_start = start + 24;
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&bytes[digest_start..digest_start + 32]);
+        entries.push((kind, offset, length, digest));
+    }
+    if seen.len() != SECTION_COUNT {
+        return Err(CheckpointError::Corrupt("missing section".into()));
+    }
+    entries.sort_by_key(|entry| entry.1);
+    let mut next_offset = header_len as u64;
+    let mut sections = Vec::with_capacity(section_count);
+    for (kind, offset, length, digest) in entries {
+        if offset != next_offset {
+            return if offset < next_offset {
+                Err(CheckpointError::Corrupt("overlapping sections".into()))
+            } else {
+                Err(CheckpointError::Corrupt(
+                    "gap or trailing section bytes".into(),
+                ))
+            };
+        }
+        let start = usize::try_from(offset)
+            .map_err(|_| CheckpointError::Bounds("section offset does not fit usize".into()))?;
+        let section_len = usize::try_from(length)
+            .map_err(|_| CheckpointError::Bounds("section length does not fit usize".into()))?;
+        let end = start
+            .checked_add(section_len)
+            .ok_or_else(|| CheckpointError::Bounds("section range overflow".into()))?;
+        let data = bytes.get(start..end).ok_or(CheckpointError::Truncated)?;
+        if sha256(data) != digest {
+            return Err(CheckpointError::Corrupt("section checksum mismatch".into()));
+        }
+        sections.push((kind, data));
+        next_offset = next_offset
+            .checked_add(length)
+            .ok_or_else(|| CheckpointError::Bounds("section offset overflow".into()))?;
+    }
+    if next_offset != total_len {
+        return Err(CheckpointError::TrailingBytes);
+    }
+    Ok(DecodedCheckpointEnvelope {
+        header: SessionCheckpointHeader {
+            identity,
+            token_count,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+        },
+        sections,
+    })
+}
+
+fn encode_paged_state_layers(layers: &[PagedStateImageV2]) -> Result<Vec<u8>, CheckpointError> {
+    let count = u32::try_from(layers.len())
+        .map_err(|_| CheckpointError::Bounds("too many Paged state layers".into()))?;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&count.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    for image in layers {
+        let layer = image.metadata();
+        if layer.owner != StateOwnerKindV1::Kv || layer.active_slot.is_some() {
+            return Err(CheckpointError::Invalid(
+                "V2 Paged layer metadata is not a KV layer".into(),
+            ));
+        }
+        bytes.push(state_owner_tag(layer.owner));
+        bytes.push(u8::MAX);
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&layer.layer_id.to_le_bytes());
+        bytes.extend_from_slice(&layer.published_length.to_le_bytes());
+        bytes.extend_from_slice(&layer.generation.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        encode_kv_descriptor(&mut bytes, image.paged_metadata().descriptor())?;
+
+        let metadata = image.paged_metadata();
+        if metadata.format_version() != KV_PAGED_IMAGE_METADATA_VERSION {
+            return Err(CheckpointError::Invalid(
+                "unsupported Paged metadata version".into(),
+            ));
+        }
+        bytes.extend_from_slice(&metadata.format_version().to_le_bytes());
+        bytes.extend_from_slice(&metadata.observed_length().to_le_bytes());
+        bytes.extend_from_slice(&metadata.generation().to_le_bytes());
+        bytes.extend_from_slice(&metadata.retained_start().to_le_bytes());
+        bytes.extend_from_slice(&metadata.sliding_window().to_le_bytes());
+        bytes.extend_from_slice(&metadata.physical_block_capacity().to_le_bytes());
+        for stride in metadata.plane_strides() {
+            bytes.extend_from_slice(&stride.to_le_bytes());
+        }
+        match metadata.topology() {
+            KvPagedImageTopologyV1::LogicalTable(table) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&[0u8; 3]);
+                if table.len() > MAX_CHECKPOINT_SECTIONS {
+                    return Err(CheckpointError::Bounds(
+                        "Paged logical table exceeds entry limit".into(),
+                    ));
+                }
+                let count = u32::try_from(table.len()).map_err(|_| {
+                    CheckpointError::Bounds("Paged logical table is too large".into())
+                })?;
+                bytes.extend_from_slice(&count.to_le_bytes());
+                for block in table {
+                    bytes.extend_from_slice(&block.to_le_bytes());
+                }
+            }
+            KvPagedImageTopologyV1::SlidingRing(ring) => {
+                bytes.push(2);
+                bytes.extend_from_slice(&[0u8; 3]);
+                bytes.extend_from_slice(&0u32.to_le_bytes());
+                for block in ring.block_ids() {
+                    bytes.extend_from_slice(&block.to_le_bytes());
+                }
+                for tag in ring.absolute_tags() {
+                    bytes.extend_from_slice(&tag.to_le_bytes());
+                }
+            }
+        }
+        for (index, plane) in image.planes().iter().enumerate() {
+            bytes.push(u8::try_from(index + 1).expect("six Paged planes fit u8"));
+            bytes.extend_from_slice(&[0u8; 3]);
+            let length = u64::try_from(plane.len())
+                .map_err(|_| CheckpointError::Bounds("Paged plane length exceeds u64".into()))?;
+            if length > MAX_SECTION_BYTES {
+                return Err(CheckpointError::Bounds(
+                    "Paged plane exceeds section limit".into(),
+                ));
+            }
+            bytes.extend_from_slice(&length.to_le_bytes());
+            bytes.extend_from_slice(plane);
+        }
+        if bytes.len() as u64 > MAX_SECTION_BYTES {
+            return Err(CheckpointError::Bounds(
+                "Paged state layer section exceeds limit".into(),
+            ));
+        }
+    }
+    if bytes.len() as u64 > MAX_SECTION_BYTES {
+        return Err(CheckpointError::Bounds(
+            "Paged state layers exceed section limit".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn encode_v2_linear_state_bundle(
+    layers: &[StateLayerMetadataV1],
+    planes: &[OpaqueStatePlane],
+) -> Result<Vec<u8>, CheckpointError> {
+    if layers.is_empty() && planes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let layer_bytes = encode_state_layers(layers)?;
+    let plane_bytes = encode_state_planes(planes)?;
+    let mut bytes = Vec::with_capacity(8 + layer_bytes.len() + plane_bytes.len());
+    bytes.extend_from_slice(
+        &u32::try_from(layer_bytes.len())
+            .map_err(|_| CheckpointError::Bounds("V2 linear layer section is too large".into()))?
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(
+        &u32::try_from(plane_bytes.len())
+            .map_err(|_| CheckpointError::Bounds("V2 linear plane section is too large".into()))?
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(&layer_bytes);
+    bytes.extend_from_slice(&plane_bytes);
+    if bytes.len() as u64 > MAX_SECTION_BYTES {
+        return Err(CheckpointError::Bounds(
+            "V2 linear state bundle exceeds section limit".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn decode_v2_linear_state_bundle(
+    bytes: &[u8],
+) -> Result<(Vec<StateLayerMetadataV1>, Vec<OpaqueStatePlane>), CheckpointError> {
+    if bytes.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    if bytes.len() < 8 {
+        return Err(CheckpointError::Truncated);
+    }
+    let layer_len = usize::try_from(u32::from_le_bytes(bytes[..4].try_into().unwrap()))
+        .map_err(|_| CheckpointError::Bounds("V2 linear layer length overflow".into()))?;
+    let plane_len = usize::try_from(u32::from_le_bytes(bytes[4..8].try_into().unwrap()))
+        .map_err(|_| CheckpointError::Bounds("V2 linear plane length overflow".into()))?;
+    let layer_start = 8usize;
+    let plane_start = layer_start
+        .checked_add(layer_len)
+        .ok_or_else(|| CheckpointError::Bounds("V2 linear bundle range overflow".into()))?;
+    let end = plane_start
+        .checked_add(plane_len)
+        .ok_or_else(|| CheckpointError::Bounds("V2 linear bundle range overflow".into()))?;
+    if end != bytes.len() {
+        return if end > bytes.len() {
+            Err(CheckpointError::Truncated)
+        } else {
+            Err(CheckpointError::TrailingBytes)
+        };
+    }
+    let layers = decode_state_layers(&bytes[layer_start..plane_start])?;
+    let planes = decode_state_planes(&bytes[plane_start..end])?;
+    Ok((layers, planes))
+}
+
+fn encode_kv_descriptor(
+    bytes: &mut Vec<u8>,
+    descriptor: KvStateDescriptor,
+) -> Result<(), CheckpointError> {
+    let mut flags = 0_u8;
+    let static_scales = descriptor.static_fp8_scales();
+    let block16 = descriptor.kv_fp8_block16_descriptor();
+    let mxfp8 = descriptor.kv_mxfp8_descriptor();
+    if static_scales.is_some() {
+        flags |= 1;
+    }
+    if block16.is_some() {
+        flags |= 1 << 1;
+    }
+    if mxfp8.is_some() {
+        flags |= 1 << 2;
+    }
+    if descriptor.sliding_window().is_some() {
+        flags |= 1 << 3;
+    }
+    bytes.extend_from_slice(&descriptor.layer_id().to_le_bytes());
+    bytes.extend_from_slice(&descriptor.capacity().to_le_bytes());
+    bytes.extend_from_slice(
+        &u32::try_from(descriptor.layout().heads())
+            .map_err(|_| CheckpointError::Bounds("KV head count exceeds u32".into()))?
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(
+        &u32::try_from(descriptor.layout().head_dim())
+            .map_err(|_| CheckpointError::Bounds("KV head dimension exceeds u32".into()))?
+            .to_le_bytes(),
+    );
+    bytes.push(kv_encoding_tag(descriptor.cache_encoding()));
+    bytes.push(flags);
+    bytes.extend_from_slice(&[0u8; 2]);
+    if let Some((key, value)) = static_scales {
+        bytes.extend_from_slice(&key.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+    if let Some(block16) = block16 {
+        bytes.push(block16.format_version());
+        bytes.push(block16.physical_variant().identity_tag());
+        bytes.push(block16.scale_recipe_identity_tag());
+        bytes.push(0);
+    }
+    if let Some(mxfp8) = mxfp8 {
+        bytes.push(mxfp8.format_version());
+        bytes.push(mxfp8.physical_variant().identity_tag());
+        bytes.extend_from_slice(&[0u8; 2]);
+    }
+    if let Some(window) = descriptor.sliding_window() {
+        bytes.extend_from_slice(&window.to_le_bytes());
+    }
+    Ok(())
+}
+
+fn decode_kv_descriptor(cursor: &mut Cursor<'_>) -> Result<KvStateDescriptor, CheckpointError> {
+    let layer_id = cursor.u32("KV descriptor layer ID")?;
+    let capacity = cursor.u64("KV descriptor capacity")?;
+    let heads = usize::try_from(cursor.u32("KV descriptor heads")?)
+        .map_err(|_| CheckpointError::Bounds("KV head count does not fit usize".into()))?;
+    let head_dim = usize::try_from(cursor.u32("KV descriptor head dimension")?)
+        .map_err(|_| CheckpointError::Bounds("KV head dimension does not fit usize".into()))?;
+    let encoding = decode_kv_encoding(cursor.byte("KV descriptor encoding")?)?;
+    let flags = cursor.byte("KV descriptor flags")?;
+    if flags & !0x0f != 0 {
+        return Err(CheckpointError::Corrupt(
+            "KV descriptor has unknown flags".into(),
+        ));
+    }
+    if cursor.u16("KV descriptor reserved")? != 0 {
+        return Err(CheckpointError::Corrupt(
+            "KV descriptor reserved field is nonzero".into(),
+        ));
+    }
+    let has_static = flags & 1 != 0;
+    let has_block16 = flags & (1 << 1) != 0;
+    let has_mxfp8 = flags & (1 << 2) != 0;
+    let has_sliding = flags & (1 << 3) != 0;
+    if (has_block16 && has_mxfp8) || (has_static && (has_block16 || has_mxfp8)) {
+        return Err(CheckpointError::Corrupt(
+            "KV descriptor selects incompatible physical recipes".into(),
+        ));
+    }
+
+    let static_scales = if has_static {
+        Some((
+            f32::from_bits(cursor.u32("KV static key scale")?),
+            f32::from_bits(cursor.u32("KV static value scale")?),
+        ))
+    } else {
+        None
+    };
+    let block16_recipe = if has_block16 {
+        Some((
+            cursor.byte("KV block16 format version")?,
+            cursor.byte("KV block16 physical variant")?,
+            cursor.byte("KV block16 scale recipe")?,
+            cursor.byte("KV block16 reserved")?,
+        ))
+    } else {
+        None
+    };
+    let mxfp8_recipe = if has_mxfp8 {
+        Some((
+            cursor.byte("KV MXFP8 format version")?,
+            cursor.byte("KV MXFP8 physical variant")?,
+            cursor.byte("KV MXFP8 reserved")?,
+            cursor.byte("KV MXFP8 reserved")?,
+        ))
+    } else {
+        None
+    };
+    let sliding_window = if has_sliding {
+        Some(cursor.u64("KV sliding window")?)
+    } else {
+        None
+    };
+
+    let variant = |tag: u8| match tag {
+        1 => Ok(KvFp8PhysicalVariant::OcpE4M3Fn),
+        2 => Ok(KvFp8PhysicalVariant::E4M3FnuZ),
+        3 => Ok(KvFp8PhysicalVariant::OcpE5M2),
+        _ => Err(CheckpointError::Corrupt(
+            "unknown KV physical variant".into(),
+        )),
+    };
+    let mut descriptor = if let Some((version, physical, recipe_tag, reserved)) = block16_recipe {
+        if reserved != 0 {
+            return Err(CheckpointError::Corrupt(
+                "KV block16 reserved field is nonzero".into(),
+            ));
+        }
+        let physical = variant(physical)?;
+        let descriptor = KvStateDescriptor::new_with_kv_fp8_block16(
+            layer_id, capacity, heads, head_dim, encoding, physical,
+        )
+        .map_err(|error| CheckpointError::Corrupt(error.to_string()))?;
+        let block_descriptor = descriptor.kv_fp8_block16_descriptor().expect("block16");
+        if version != block_descriptor.format_version()
+            || block_descriptor.scale_recipe_identity_tag() != recipe_tag
+        {
+            return Err(CheckpointError::Corrupt(
+                "KV block16 recipe identity differs".into(),
+            ));
+        }
+        descriptor
+    } else if let Some((version, physical, reserved0, reserved1)) = mxfp8_recipe {
+        if reserved0 != 0 || reserved1 != 0 {
+            return Err(CheckpointError::Corrupt(
+                "KV MXFP8 reserved field is nonzero".into(),
+            ));
+        }
+        let physical = variant(physical)?;
+        let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
+            layer_id, capacity, heads, head_dim, encoding, physical,
+        )
+        .map_err(|error| CheckpointError::Corrupt(error.to_string()))?;
+        let recipe = descriptor.kv_mxfp8_descriptor().expect("MXFP8");
+        if version != recipe.format_version() {
+            return Err(CheckpointError::Corrupt(
+                "KV MXFP8 recipe identity differs".into(),
+            ));
+        }
+        descriptor
+    } else if let Some((key, value)) = static_scales {
+        if encoding != KvCacheEncoding::Fp8E4M3FnStatic {
+            return Err(CheckpointError::Corrupt(
+                "static KV scales use a non-static encoding".into(),
+            ));
+        }
+        KvStateDescriptor::new_with_static_fp8(layer_id, capacity, heads, head_dim, key, value)
+            .map_err(|error| CheckpointError::Corrupt(error.to_string()))?
+    } else {
+        if matches!(
+            encoding,
+            KvCacheEncoding::Fp8E4M3FnStatic
+                | KvCacheEncoding::Fp8E4M3Block16
+                | KvCacheEncoding::Fp8E5M2Block16
+                | KvCacheEncoding::Mxfp8E4
+                | KvCacheEncoding::Mxfp8E5
+        ) {
+            return Err(CheckpointError::Corrupt(
+                "KV descriptor is missing its physical recipe".into(),
+            ));
+        }
+        KvStateDescriptor::new_with_storage(layer_id, capacity, heads, head_dim, encoding)
+            .map_err(|error| CheckpointError::Corrupt(error.to_string()))?
+    };
+    if let Some(window) = sliding_window {
+        descriptor = descriptor
+            .with_sliding_window(window)
+            .map_err(|error| CheckpointError::Corrupt(error.to_string()))?;
+    }
+    Ok(descriptor)
+}
+
+fn decode_paged_state_layers(bytes: &[u8]) -> Result<Vec<PagedStateImageV2>, CheckpointError> {
+    let mut cursor = Cursor::new(bytes);
+    let count = usize::try_from(cursor.u32("Paged state-layer count")?)
+        .map_err(|_| CheckpointError::Bounds("Paged state-layer count overflow".into()))?;
+    if count > MAX_STATE_LAYERS {
+        return Err(CheckpointError::Bounds(
+            "too many Paged state layers".into(),
+        ));
+    }
+    if cursor.u32("Paged state-layer reserved")? != 0 {
+        return Err(CheckpointError::Corrupt(
+            "Paged state-layer reserved field is nonzero".into(),
+        ));
+    }
+    let mut layers = Vec::with_capacity(count);
+    let mut seen_layers = std::collections::BTreeSet::new();
+    for _ in 0..count {
+        let owner = decode_state_owner(cursor.byte("Paged state owner")?)?;
+        let active_slot = match cursor.byte("Paged active slot")? {
+            u8::MAX => None,
+            slot => Some(slot),
+        };
+        if cursor.u16("Paged state-layer reserved")? != 0 {
+            return Err(CheckpointError::Corrupt(
+                "Paged state-layer reserved field is nonzero".into(),
+            ));
+        }
+        let layer_id = cursor.u32("Paged state layer ID")?;
+        let published_length = cursor.u64("Paged published length")?;
+        let generation = cursor.u64("Paged generation")?;
+        if cursor.u64("Paged state-layer reserved")? != 0 {
+            return Err(CheckpointError::Corrupt(
+                "Paged state-layer reserved field is nonzero".into(),
+            ));
+        }
+        if owner != StateOwnerKindV1::Kv || active_slot.is_some() || !seen_layers.insert(layer_id) {
+            return Err(CheckpointError::Corrupt(
+                "invalid or duplicate Paged state layer".into(),
+            ));
+        }
+        let descriptor = decode_kv_descriptor(&mut cursor)?;
+        if descriptor.layer_id() != layer_id {
+            return Err(CheckpointError::Corrupt(
+                "Paged descriptor layer differs from state layer".into(),
+            ));
+        }
+        let format_version = cursor.u32("Paged metadata version")?;
+        if format_version != KV_PAGED_IMAGE_METADATA_VERSION {
+            return Err(CheckpointError::UnsupportedVersion(
+                u16::try_from(format_version).unwrap_or(u16::MAX),
+            ));
+        }
+        let observed_length = cursor.u64("Paged observed length")?;
+        let metadata_generation = cursor.u64("Paged metadata generation")?;
+        let retained_start = cursor.u64("Paged retained start")?;
+        let sliding_window = cursor.u64("Paged sliding window")?;
+        let physical_block_capacity = cursor.u64("Paged physical block capacity")?;
+        let mut plane_strides = [0_u64; KV_PAGED_PLANE_COUNT];
+        for stride in &mut plane_strides {
+            *stride = cursor.u64("Paged plane stride")?;
+        }
+        let topology_kind = cursor.byte("Paged topology kind")?;
+        if cursor.take(3, "Paged topology reserved")? != [0, 0, 0] {
+            return Err(CheckpointError::Corrupt(
+                "Paged topology reserved field is nonzero".into(),
+            ));
+        }
+        let topology = match topology_kind {
+            1 => {
+                let table_len = usize::try_from(cursor.u32("Paged logical table length")?)
+                    .map_err(|_| CheckpointError::Bounds("Paged table length overflow".into()))?;
+                if table_len > MAX_CHECKPOINT_SECTIONS {
+                    return Err(CheckpointError::Bounds(
+                        "Paged logical table exceeds entry limit".into(),
+                    ));
+                }
+                let mut table = Vec::with_capacity(table_len);
+                for _ in 0..table_len {
+                    table.push(cursor.u32("Paged logical block ID")?);
+                }
+                KvPagedImageTopologyV1::LogicalTable(table)
+            }
+            2 => {
+                if cursor.u32("Paged ring reserved")? != 0 {
+                    return Err(CheckpointError::Corrupt(
+                        "Paged ring reserved field is nonzero".into(),
+                    ));
+                }
+                let mut block_ids = [0_u32; KV_PAGED_RING_SLOT_COUNT];
+                let mut absolute_tags = [0_u64; KV_PAGED_RING_SLOT_COUNT];
+                for block in &mut block_ids {
+                    *block = cursor.u32("Paged ring block ID")?;
+                }
+                for tag in &mut absolute_tags {
+                    *tag = cursor.u64("Paged ring absolute tag")?;
+                }
+                KvPagedImageTopologyV1::SlidingRing(KvPagedRingTableV1::new(
+                    block_ids,
+                    absolute_tags,
+                ))
+            }
+            _ => {
+                return Err(CheckpointError::Corrupt(
+                    "unknown Paged topology kind".into(),
+                ));
+            }
+        };
+        let paged_metadata = KvPagedImageMetadataV1::new(
+            descriptor,
+            observed_length,
+            metadata_generation,
+            retained_start,
+            sliding_window,
+            physical_block_capacity,
+            plane_strides,
+            topology,
+        )
+        .map_err(|error| CheckpointError::Corrupt(error.to_string()))?;
+        let mut planes: [Vec<u8>; KV_PAGED_PLANE_COUNT] = std::array::from_fn(|_| Vec::new());
+        let mut seen_planes = [false; KV_PAGED_PLANE_COUNT];
+        for _ in 0..KV_PAGED_PLANE_COUNT {
+            let plane = cursor.byte("Paged plane tag")?;
+            if cursor.take(3, "Paged plane reserved")? != [0, 0, 0] {
+                return Err(CheckpointError::Corrupt(
+                    "Paged plane reserved field is nonzero".into(),
+                ));
+            }
+            let index = usize::from(plane.checked_sub(1).ok_or_else(|| {
+                CheckpointError::Corrupt("Paged plane tag is out of range".into())
+            })?);
+            if index >= KV_PAGED_PLANE_COUNT || seen_planes[index] {
+                return Err(CheckpointError::Corrupt(
+                    "duplicate or invalid Paged plane tag".into(),
+                ));
+            }
+            seen_planes[index] = true;
+            let length = cursor.u64("Paged plane length")?;
+            let expected = physical_block_capacity
+                .checked_mul(plane_strides[index])
+                .ok_or_else(|| CheckpointError::Bounds("Paged plane size overflow".into()))?;
+            if length != expected || length > MAX_SECTION_BYTES {
+                return Err(CheckpointError::Corrupt(
+                    "Paged plane length differs from topology".into(),
+                ));
+            }
+            planes[index] = cursor.take_u64(length, "Paged plane")?.to_vec();
+        }
+        if seen_planes.iter().any(|seen| !seen) {
+            return Err(CheckpointError::Corrupt("Paged plane is missing".into()));
+        }
+        layers.push(
+            PagedStateImageV2::new(
+                StateLayerMetadataV1 {
+                    owner,
+                    layer_id,
+                    published_length,
+                    generation,
+                    active_slot,
+                },
+                paged_metadata,
+                planes,
+            )
+            .map_err(|error| CheckpointError::Corrupt(error.to_string()))?,
+        );
+    }
+    if !cursor.is_empty() {
+        return Err(CheckpointError::TrailingBytes);
+    }
+    Ok(layers)
 }
 
 /// State and conversation payload carried by a checkpoint.
@@ -1298,6 +2490,12 @@ impl<'a> Cursor<'a> {
         Ok(result)
     }
 
+    fn take_u64(&mut self, length: u64, name: &str) -> Result<&'a [u8], CheckpointError> {
+        let length = usize::try_from(length)
+            .map_err(|_| CheckpointError::Bounds(format!("{name} length does not fit usize")))?;
+        self.take(length, name)
+    }
+
     fn byte(&mut self, name: &str) -> Result<u8, CheckpointError> {
         Ok(*self.take(1, name)?.first().expect("one byte"))
     }
@@ -1418,6 +2616,20 @@ impl CheckpointStore {
         id: &str,
         checkpoint: &SessionCheckpoint,
     ) -> Result<PathBuf, CheckpointError> {
+        self.save_encoded(id, checkpoint.encode()?)
+    }
+
+    /// Stores an additive topology-aware Paged checkpoint using the same
+    /// owner-checked atomic replacement and quota accounting as V1.
+    pub fn save_v2(
+        &self,
+        id: &str,
+        checkpoint: &SessionCheckpointV2,
+    ) -> Result<PathBuf, CheckpointError> {
+        self.save_encoded(id, checkpoint.encode()?)
+    }
+
+    fn save_encoded(&self, id: &str, bytes: Vec<u8>) -> Result<PathBuf, CheckpointError> {
         let _guard = self
             .lock
             .lock()
@@ -1426,7 +2638,6 @@ impl CheckpointStore {
         let filename = checkpoint_filename(id)?;
         let target = self.root.join(&filename);
         validate_existing_target(&target, self.root_owner)?;
-        let bytes = checkpoint.encode()?;
         let byte_len = bytes.len() as u64;
         if byte_len > self.max_file_bytes {
             return Err(CheckpointError::QuotaExceeded {
@@ -1492,6 +2703,16 @@ impl CheckpointStore {
         Ok(checkpoint)
     }
 
+    pub fn load_v2(
+        &self,
+        id: &str,
+        expected_identity: &CheckpointIdentity,
+    ) -> Result<SessionCheckpointV2, CheckpointError> {
+        let checkpoint = self.load_v2_validated(id)?;
+        compare_identity(expected_identity, &checkpoint.header.identity)?;
+        Ok(checkpoint)
+    }
+
     /// Loads and fully validates a checkpoint envelope without binding it to
     /// a caller-provided identity. Filesystem ownership, permissions,
     /// hard-link count, configured size limits, schema, section bounds, and
@@ -1499,6 +2720,18 @@ impl CheckpointStore {
     /// header identity with their exact runtime identity before importing any
     /// opaque state bytes.
     pub fn load_validated(&self, id: &str) -> Result<SessionCheckpoint, CheckpointError> {
+        let bytes = self.load_bytes(id)?;
+        SessionCheckpoint::decode(&bytes)
+    }
+
+    /// Loads and fully validates a topology-aware Paged V2 checkpoint without
+    /// binding it to a caller-provided runtime identity.
+    pub fn load_v2_validated(&self, id: &str) -> Result<SessionCheckpointV2, CheckpointError> {
+        let bytes = self.load_bytes(id)?;
+        SessionCheckpointV2::decode(&bytes)
+    }
+
+    fn load_bytes(&self, id: &str) -> Result<Vec<u8>, CheckpointError> {
         let _guard = self
             .lock
             .lock()
@@ -1548,7 +2781,7 @@ impl CheckpointStore {
                 "checkpoint file exceeds size limit".into(),
             ));
         }
-        SessionCheckpoint::decode(&bytes)
+        Ok(bytes)
     }
 
     pub fn usage_bytes(&self) -> Result<u64, CheckpointError> {
@@ -1755,6 +2988,234 @@ mod tests {
         #[cfg(unix)]
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .expect("secure checkpoint fixture");
+    }
+
+    fn paged_image_fixture(layer_id: u32) -> PagedStateImageV2 {
+        let descriptor = crate::KvStateDescriptor::new_with_storage(
+            layer_id,
+            129,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
+        )
+        .expect("paged descriptor");
+        let strides = [131_072, 131_072, 4_096, 4_096, 0, 0];
+        let topology = crate::KvPagedImageTopologyV1::LogicalTable(vec![0, 1]);
+        let paged =
+            crate::KvPagedImageMetadataV1::new(descriptor, 129, 7, 0, 0, 4, strides, topology)
+                .expect("paged metadata");
+        let planes = [
+            vec![0; 4 * 131_072],
+            vec![0; 4 * 131_072],
+            vec![0; 4 * 4_096],
+            vec![0; 4 * 4_096],
+            Vec::new(),
+            Vec::new(),
+        ];
+        PagedStateImageV2::new(
+            StateLayerMetadataV1 {
+                owner: StateOwnerKindV1::Kv,
+                layer_id,
+                published_length: 129,
+                generation: 7,
+                active_slot: None,
+            },
+            paged,
+            planes,
+        )
+        .expect("paged image")
+    }
+
+    #[test]
+    fn paged_state_image_v2_keeps_topology_separate_from_v1_plane_tags() {
+        let image = paged_image_fixture(4);
+        assert_eq!(image.format_version(), PAGED_STATE_IMAGE_VERSION_V2);
+        assert_eq!(image.metadata().published_length, 129);
+        assert_eq!(
+            image.paged_metadata().topology().clone(),
+            crate::KvPagedImageTopologyV1::LogicalTable(vec![0, 1])
+        );
+        assert_eq!(image.planes().len(), KV_PAGED_PLANE_COUNT);
+        assert!(image.planes()[4].is_empty());
+
+        let mut wrong_planes = image.planes().clone();
+        wrong_planes[0].pop();
+        assert!(
+            PagedStateImageV2::new(
+                image.metadata().clone(),
+                image.paged_metadata().clone(),
+                wrong_planes,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn paged_checkpoint_v2_validates_duplicate_layers_without_changing_v1() {
+        let image = paged_image_fixture(4);
+        let mut payload = CheckpointPayloadV2 {
+            token_history: vec![3, 5, 8],
+            paged_state_layers: vec![image.clone(), image],
+            ..CheckpointPayloadV2::default()
+        };
+        assert!(payload.validate().is_err());
+        payload.paged_state_layers.pop();
+        let identity = CheckpointIdentity::for_tokens(
+            format!("sha256:{}", "a".repeat(64)),
+            "artifact-v1",
+            "adapter-none-v1",
+            "renderer-v1",
+            "tokenizer-v1",
+            "gfx1201",
+            "sha256:plan-v1",
+            &payload.token_history,
+            KvCacheEncoding::Mxfp8E4,
+            [2; 32],
+            [3; 32],
+        )
+        .expect("V2 identity");
+        let checkpoint =
+            SessionCheckpointV2::new(identity, 3, 3, 1, payload).expect("V2 checkpoint");
+        checkpoint.validate().expect("V2 checkpoint validates");
+    }
+
+    fn paged_checkpoint_v2_fixture() -> SessionCheckpointV2 {
+        let image = paged_image_fixture(4);
+        let tokens = vec![3, 5, 8];
+        let identity = CheckpointIdentity::for_tokens(
+            format!("sha256:{}", "a".repeat(64)),
+            "artifact-v2",
+            "adapter-none-v2",
+            "renderer-v2",
+            "tokenizer-v2",
+            "gfx1201",
+            "sha256:plan-v2",
+            &tokens,
+            KvCacheEncoding::Mxfp8E4,
+            [9; 32],
+            [10; 32],
+        )
+        .expect("V2 wire identity");
+        SessionCheckpointV2::new(
+            identity,
+            3,
+            3,
+            2,
+            CheckpointPayloadV2 {
+                token_history: tokens,
+                conversation: b"v2-conversation".to_vec(),
+                paged_state_layers: vec![image],
+                linear_state_layers: Vec::new(),
+                linear_state_planes: Vec::new(),
+                sampler_state: b"sampler".to_vec(),
+                grammar_state: b"grammar".to_vec(),
+                stop_state: b"stop".to_vec(),
+            },
+        )
+        .expect("V2 wire checkpoint")
+    }
+
+    fn refresh_v2_wire_checksums(bytes: &mut [u8], section_kind: u16) {
+        let identity_len = u32::from_le_bytes(bytes[60..64].try_into().unwrap()) as usize;
+        let table_start = FIXED_HEADER_BYTES + identity_len;
+        for index in 0..SECTION_COUNT {
+            let entry = table_start + index * SECTION_ENTRY_BYTES;
+            let kind = u16::from_le_bytes(bytes[entry..entry + 2].try_into().unwrap());
+            if kind == section_kind {
+                let offset =
+                    u64::from_le_bytes(bytes[entry + 8..entry + 16].try_into().unwrap()) as usize;
+                let length =
+                    u64::from_le_bytes(bytes[entry + 16..entry + 24].try_into().unwrap()) as usize;
+                let digest = sha256(&bytes[offset..offset + length]);
+                bytes[entry + 24..entry + 56].copy_from_slice(&digest);
+                break;
+            }
+        }
+        bytes[CHECKSUM_OFFSET..CHECKSUM_END].fill(0);
+        let checksum = sha256(bytes);
+        bytes[CHECKSUM_OFFSET..CHECKSUM_END].copy_from_slice(&checksum);
+    }
+
+    #[test]
+    fn paged_checkpoint_v2_wire_round_trip_preserves_topology_and_planes() {
+        let checkpoint = paged_checkpoint_v2_fixture();
+        let encoded = checkpoint.encode().expect("V2 wire encode");
+        assert_eq!(&encoded[..8], &CHECKPOINT_MAGIC_V2);
+        assert_eq!(
+            SessionCheckpointV2::decode(&encoded).expect("V2 wire decode"),
+            checkpoint
+        );
+        assert!(matches!(
+            SessionCheckpoint::decode(&encoded),
+            Err(CheckpointError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn paged_checkpoint_v2_wire_rejects_duplicate_ids_planes_and_truncation() {
+        let checkpoint = paged_checkpoint_v2_fixture();
+        let encoded = checkpoint.encode().expect("V2 wire encode");
+        let identity_len =
+            u32::from_le_bytes(encoded[60..64].try_into().expect("identity length")) as usize;
+        let table_start = FIXED_HEADER_BYTES + identity_len;
+        let state_entry = (0..SECTION_COUNT)
+            .map(|index| table_start + index * SECTION_ENTRY_BYTES)
+            .find(|entry| {
+                u16::from_le_bytes(encoded[*entry..*entry + 2].try_into().unwrap())
+                    == SECTION_STATE_LAYERS
+            })
+            .expect("state section");
+        let state_offset = u64::from_le_bytes(
+            encoded[state_entry + 8..state_entry + 16]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+
+        let mut duplicate_id = encoded.clone();
+        // The fixture's one layer has a 160-byte preamble followed by two
+        // logical IDs. Make the second physical ID duplicate the first.
+        duplicate_id[state_offset + 164..state_offset + 168].copy_from_slice(&0_u32.to_le_bytes());
+        refresh_v2_wire_checksums(&mut duplicate_id, SECTION_STATE_LAYERS);
+        assert!(matches!(
+            SessionCheckpointV2::decode(&duplicate_id),
+            Err(CheckpointError::Corrupt(_))
+        ));
+
+        let mut duplicate_plane = encoded.clone();
+        // First plane starts after the 176-byte topology prefix. Its payload
+        // is four blocks of 131072 bytes in the fixture.
+        let second_plane_tag = state_offset + 176 + 12 + 4 * 131_072;
+        duplicate_plane[second_plane_tag] = 1;
+        refresh_v2_wire_checksums(&mut duplicate_plane, SECTION_STATE_LAYERS);
+        assert!(matches!(
+            SessionCheckpointV2::decode(&duplicate_plane),
+            Err(CheckpointError::Corrupt(_))
+        ));
+
+        let mut truncated = encoded;
+        truncated.pop();
+        assert!(matches!(
+            SessionCheckpointV2::decode(&truncated),
+            Err(CheckpointError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn checkpoint_store_round_trips_v2_without_changing_v1_files() {
+        let root = test_directory("v2-store");
+        let checkpoint = paged_checkpoint_v2_fixture();
+        let store = CheckpointStore::new(&root, MAX_CHECKPOINT_BYTES).expect("V2 store");
+        store
+            .save_v2("paged-v2", &checkpoint)
+            .expect("save V2 checkpoint");
+        let loaded = store
+            .load_v2("paged-v2", &checkpoint.header.identity)
+            .expect("load V2 checkpoint");
+        assert_eq!(loaded, checkpoint);
+        assert!(matches!(
+            store.load_validated("paged-v2"),
+            Err(CheckpointError::Corrupt(_))
+        ));
     }
 
     #[test]

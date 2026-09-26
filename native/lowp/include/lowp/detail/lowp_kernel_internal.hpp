@@ -279,10 +279,15 @@ constexpr const char *kNvfp4W4A4SmallMVgprReuseLogicalKernelId =
     "matmul.nvfp4.w4a4.small_m.vgpr_reuse.v1";
 constexpr const char *kNvfp4W4A4SmallMVgprReuseDeviceSymbol =
     "sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1";
+// WU-12C M=5 remains a private test-only symbol.  It must not be added to
+// KernelVariant or any production selector/provider table.
+constexpr const char *kNvfp4W4A4SmallMVgprReuseM5ProbeDeviceSymbol =
+    "sllm_nvfp4_w4a4_small_m_vgpr_reuse_m5_probe_v1";
 static_assert(sizeof("matmul.nvfp4.w4a4.small_m.gfx1201.rowgrid.v1") <= 64U);
 static_assert(sizeof("sllm_nvfp4_w4a4_small_m_gfx1201_rowgrid_v1") <= 64U);
 static_assert(sizeof("matmul.nvfp4.w4a4.small_m.vgpr_reuse.v1") <= 64U);
 static_assert(sizeof("sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1") <= 64U);
+static_assert(sizeof("sllm_nvfp4_w4a4_small_m_vgpr_reuse_m5_probe_v1") <= 64U);
 static_assert(sizeof("sllm_nvfp4_w4a4_prefill_gfx1201_wmma_ordinary_v1") <=
               64U);
 static_assert(sizeof("matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x64.kahan.v1") <=
@@ -401,17 +406,40 @@ constexpr const char *kNvfp4W4A4DecodeScaleLutLogicalKernelId =
 // symbols private to the translation unit.
 constexpr const char *kNvfp4W4A4DecodeScaleLutDeviceSymbol =
     "sllm_matmul_nvfp4_w4a4_decode_scale_lut_v1";
+constexpr const char *kNvfp4W4A4DecodeScaleLutGfx1030SgprDeviceSymbol =
+    "sllm_nvfp4_w4a4_decode_scale_lut_gfx1030_sgpr_v1";
 constexpr const char
     *kNvfp4W4A4DecodeScaleLutGfx1201ActivationSharedDeviceSymbol =
         "sllm_nvfp4_w4a4_decode_scale_lut_gfx1201_actshared_v1";
+constexpr bool phase87_stage1_nvfp4_decode_gfx1030_sgpr_shape(
+    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
+  return m == 1U && ((k == UINT64_C(5120) && n == UINT64_C(17408)) ||
+                     (k == UINT64_C(17408) && n == UINT64_C(5120)));
+}
 constexpr const char *kNvfp4W4A4DecodeScaleLutEnvironment =
     "SLLM_NVFP4_W4A4_DECODE_FORCE_LDS_F32_LUT";
 constexpr uint32_t kNvfp4W4A4DecodeScaleLutWorkgroupSize = 256U;
 constexpr uint32_t kNvfp4W4A4DecodeScaleLutStaticLdsBytes = 1056U;
 static_assert(sizeof("matmul.nvfp4.w4a4.decode.scale_lut.v1") <= 64U);
 static_assert(sizeof("sllm_matmul_nvfp4_w4a4_decode_scale_lut_v1") <= 64U);
+static_assert(sizeof("sllm_nvfp4_w4a4_decode_scale_lut_gfx1030_sgpr_v1") <=
+              64U);
 static_assert(sizeof("sllm_nvfp4_w4a4_decode_scale_lut_gfx1201_actshared_v1") <=
               64U);
+static_assert(phase87_stage1_nvfp4_decode_gfx1030_sgpr_shape(1U, UINT64_C(5120),
+                                                             UINT64_C(17408)));
+static_assert(phase87_stage1_nvfp4_decode_gfx1030_sgpr_shape(1U,
+                                                             UINT64_C(17408),
+                                                             UINT64_C(5120)));
+static_assert(!phase87_stage1_nvfp4_decode_gfx1030_sgpr_shape(2U,
+                                                              UINT64_C(5120),
+                                                              UINT64_C(17408)));
+static_assert(!phase87_stage1_nvfp4_decode_gfx1030_sgpr_shape(1U,
+                                                              UINT64_C(5119),
+                                                              UINT64_C(17408)));
+static_assert(!phase87_stage1_nvfp4_decode_gfx1030_sgpr_shape(1U,
+                                                              UINT64_C(5121),
+                                                              UINT64_C(17408)));
 static_assert(kNvfp4W4A4DecodeScaleLutStaticLdsBytes == 1056U);
 static_assert(sizeof("matmul.nvfp4.w4a4.prefill.gfx1201.wmma128x64.v1") <= 64U);
 static_assert(sizeof("sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_v1") <= 64U);
@@ -1449,6 +1477,26 @@ phase78_gfx1201_nvfp4_w4a4_f16_staging_shape(const uint64_t m, const uint64_t k,
          (k % 16U) == 0U && n != 0U && n <= 17408U && (n % 16U) == 0U;
 }
 
+// Qwen3.8 MTP prefix priming keeps only fc and Q/K/V projections alive for
+// each row. Reuse the existing tiled prefill kernels on their exact matrix
+// shapes, including non-aligned final chunks, without changing body-model
+// routing or the M=1 decode path.
+constexpr bool phase87_wu3p_mtp_nvfp4_prefix_shape(const uint64_t m,
+                                                   const uint64_t k,
+                                                   const uint64_t n) noexcept {
+  return m >= 32U && m <= 1024U &&
+         ((k == 10240U && n == 5120U) ||
+          (k == 5120U && (n == 12288U || n == 1024U)));
+}
+
+static_assert(!phase87_wu3p_mtp_nvfp4_prefix_shape(31U, 5120U, 12288U));
+static_assert(phase87_wu3p_mtp_nvfp4_prefix_shape(32U, 5120U, 12288U));
+static_assert(phase87_wu3p_mtp_nvfp4_prefix_shape(33U, 5120U, 12288U));
+static_assert(phase87_wu3p_mtp_nvfp4_prefix_shape(1023U, 10240U, 5120U));
+static_assert(phase87_wu3p_mtp_nvfp4_prefix_shape(1024U, 5120U, 1024U));
+static_assert(!phase87_wu3p_mtp_nvfp4_prefix_shape(1025U, 5120U, 1024U));
+static_assert(!phase87_wu3p_mtp_nvfp4_prefix_shape(1024U, 5120U, 17408U));
+
 // Phase 83 ID89: compensated FP8-WMMA is an explicit gfx1201 candidate. Keep
 // admission to the two measured Qwen projection pairs until register pressure
 // and full-model numerical/performance evidence justify a wider family rule.
@@ -1677,7 +1725,7 @@ constexpr bool phase83_gfx1030_nvfp4_w4a4_small_m_vgpr_reuse_shape(
 constexpr bool
 phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(const uint64_t m, const uint64_t k,
                                             const uint64_t n) noexcept {
-  return m >= 2U && m <= 4U &&
+  return m >= 2U && m <= 5U &&
          phase78_nvfp4_w4a4_decode_activation_shared_shape(1U, k, n);
 }
 
@@ -1729,7 +1777,9 @@ static_assert(!phase83_gfx1030_nvfp4_w4a4_small_m_vgpr_reuse_shape(2U, 5120U,
 static_assert(phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(2U, 5120U, 17408U));
 static_assert(phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(4U, 17408U, 5120U));
 static_assert(!phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(1U, 5120U, 17408U));
-static_assert(!phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(5U, 5120U, 17408U));
+static_assert(phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(5U, 5120U, 17408U));
+static_assert(phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(5U, 17408U, 5120U));
+static_assert(!phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(6U, 5120U, 17408U));
 static_assert(!phase83_nvfp4_w4a4_small_m_vgpr_reuse_shape(2U, 5120U, 5120U));
 static_assert(nvfp4_w4a4_decode_activation_shared_lds_bytes(5120U) == 6400U);
 static_assert(nvfp4_w4a4_decode_activation_shared_lds_bytes(17408U) == 21760U);
@@ -1867,6 +1917,13 @@ select_nvfp4_w4a4_variant(const uint64_t m, const uint64_t k, const uint64_t n,
   if (force_dp4a != nullptr && std::strcmp(force_dp4a, "1") == 0 && k != 0U &&
       (k % 16U) == 0U) {
     return KernelVariant::Nvfp4W4A4PrefillDp4a64x64;
+  }
+  if (phase87_wu3p_mtp_nvfp4_prefix_shape(m, k, n) &&
+      !nvfp4_w4a4_prefill_control_present()) {
+    if (target_is(target, "gfx1030"))
+      return KernelVariant::Nvfp4W4A4PrefillDp4a64x64;
+    if (target_is(target, "gfx1201"))
+      return KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64;
   }
   if (target_is(target, "gfx1030") &&
       phase83_nvfp4_w4a4_compensated_adopted_shape(m, k, n) &&
@@ -2031,24 +2088,34 @@ select_nvfp4_w4a4_decision(const uint64_t m, const uint64_t k, const uint64_t n,
   case KernelVariant::Nvfp4W4A4PrefillDp4a64x64: {
     const bool supported =
         known_target && k != 0U && (k % 16U) == 0U && n != 0U && m > 1U;
+    const bool adopted = exact_gfx1030 &&
+                         phase87_wu3p_mtp_nvfp4_prefix_shape(m, k, n) &&
+                         !nvfp4_w4a4_prefill_control_present();
     return make_selector_decision(
         variant, supported,
-        selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A"), false,
-        supported ? kSelectorReasonForced : kSelectorReasonUnsupported);
+        adopted || selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_DP4A"),
+        adopted,
+        !supported ? kSelectorReasonUnsupported
+        : adopted  ? kSelectorReasonAdopted
+                   : kSelectorReasonForced);
   }
   case KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64: {
     const bool supported =
         exact_gfx1201 && phase78_gfx1201_nvfp4_w4a4_wmma128x64_shape(m, k, n);
+    const bool adopted = exact_gfx1201 &&
+                         phase87_wu3p_mtp_nvfp4_prefix_shape(m, k, n) &&
+                         !nvfp4_w4a4_prefill_control_present();
     const bool force_wmma =
         selector_env_is_one("SLLM_NVFP4_W4A4_PREFILL_FORCE_GFX1201_WMMA");
     const bool force_f16_staging =
         selector_env_is_one(kNvfp4W4A4PrefillGfx1201F16StagingEnvironment);
     const bool enabled =
         variant == KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64 &&
-        (force_wmma || force_f16_staging);
-    return make_selector_decision(variant, supported, enabled, false,
-                                  supported ? kSelectorReasonForcedShape
-                                            : kSelectorReasonUnsupported);
+        (adopted || force_wmma || force_f16_staging);
+    return make_selector_decision(variant, supported, enabled, adopted,
+                                  !supported ? kSelectorReasonUnsupported
+                                  : adopted  ? kSelectorReasonAdopted
+                                             : kSelectorReasonForcedShape);
   }
   case KernelVariant::Nvfp4W4A4PrefillGfx1201F16Staging: {
     const bool supported =
@@ -2947,6 +3014,11 @@ inline const char *lowp_device_symbol_for_target(const KernelVariant variant,
                                                  const uint64_t m,
                                                  const uint64_t k,
                                                  const uint64_t n) noexcept {
+  if (variant == KernelVariant::Nvfp4W4A4DecodeScaleLut &&
+      target_is(target, "gfx1030") &&
+      phase87_stage1_nvfp4_decode_gfx1030_sgpr_shape(m, k, n)) {
+    return kNvfp4W4A4DecodeScaleLutGfx1030SgprDeviceSymbol;
+  }
   if (variant == KernelVariant::Nvfp4W4A4PrefillCompensated64x64 &&
       target_is(target, "gfx1030") &&
       phase83_gfx1030_nvfp4_w4a4_compensated128x64_shape(m, k, n)) {
@@ -3515,6 +3587,17 @@ hipError_t launch_nvfp4_w4a4(
     const float *weight_tensor_scale, const float *input_tensor_scale,
     uint16_t *output, uint64_t m, uint64_t k, uint64_t n, KernelVariant variant,
     hipStream_t stream) noexcept;
+
+// Private WU-12C probe launcher. It accepts only M=5 and the two measured
+// Qwen3.8 NVFP4 projection tuples; production selectors do not call it.
+#if defined(SLLM_PHASE87_STAGE12_M5_PROBE)
+hipError_t launch_nvfp4_w4a4_small_m_m5_probe(
+    const uint8_t *packed_activation, const uint8_t *activation_block_scales,
+    const uint8_t *packed_weight, const uint8_t *weight_block_scales,
+    const float *weight_tensor_scale, const float *input_tensor_scale,
+    uint16_t *output, uint64_t m, uint64_t k, uint64_t n,
+    hipStream_t stream) noexcept;
+#endif
 
 // Private ID62 gfx1030 M=17 split-K4 candidate. The caller reserves
 // 4 * m * n * sizeof(float) bytes for partial_workspace; the launcher accepts

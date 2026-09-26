@@ -587,3 +587,5 @@ int main(const int argc, char **const argv) {
   (void)hipStreamDestroy(stream);
   return ok ? 0 : 1;
 }
+// Historical Phase 83 contiguous wave-split oracle. This source is excluded
+// from current CTest after the Paged KV migration.

@@ -23,7 +23,9 @@
 
 namespace {
 
-constexpr std::array<uint64_t, 3> kRows = {2U, 3U, 4U};
+// Exercise the lower boundary, nonaligned rows, and the newly adopted upper
+// M=5 boundary through the public ID94 launcher.
+constexpr std::array<uint64_t, 4> kRows = {2U, 3U, 4U, 5U};
 constexpr std::size_t kWarmups = 1U;
 constexpr std::size_t kMeasured = 2U;
 

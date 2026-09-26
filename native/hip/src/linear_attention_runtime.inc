@@ -343,10 +343,17 @@ hipError_t linear_checkpoint_copy(void *const destination,
 #endif
 }
 
+// The MTP width is the number of speculative rows retained before the final
+// target row.  Width two is the historical M3 contract; widths three and four
+// use the same per-row checkpoint layout and copy ordering.
+constexpr uint32_t kLinearCheckpointMinRows = 2U;
+constexpr uint32_t kLinearCheckpointMaxRows = 4U;
+
 bool linear_checkpoint_shape_supported(const LinearAttentionState *const state,
                                        const uint32_t token_count,
                                        const uint32_t rows) noexcept {
-  return state != nullptr && token_count == 3U && rows == 2U &&
+  return state != nullptr && rows >= kLinearCheckpointMinRows &&
+         rows <= kLinearCheckpointMaxRows && token_count == rows + 1U &&
          state->conv_kernel_size >= 2U && state->qkv_width != 0U &&
          state->value_heads != 0U && state->head_dim != 0U;
 }
@@ -355,10 +362,12 @@ sllm_status_t validate_linear_checkpoint_locked(
     const LinearAttentionState *const state, const uint64_t expected_start,
     const uint64_t expected_end, const uint32_t rows,
     sllm_error_sink_t *const error_sink) noexcept {
-  if (!linear_checkpoint_shape_supported(state, 3U, rows)) {
+  const uint32_t token_count =
+      rows < std::numeric_limits<uint32_t>::max() ? rows + 1U : 0U;
+  if (!linear_checkpoint_shape_supported(state, token_count, rows)) {
     return sllm_public_runtime::write_error(
         error_sink, SLLM_STATUS_UNSUPPORTED,
-        "linear attention M3 checkpoint shape is unsupported");
+        "linear attention MTP checkpoint shape is unsupported");
   }
   if (state->context->poisoned.load() || state->release_active ||
       state->transition_token != 0U) {
@@ -377,15 +386,19 @@ sllm_status_t validate_linear_checkpoint_locked(
       state->last_published_start != expected_start ||
       state->last_published_end != expected_end ||
       state->last_published_generation != state->generation ||
-      expected_start > std::numeric_limits<uint64_t>::max() - 3U ||
-      expected_end != expected_start + 3U ||
-      state->checkpoint_conv_state[0] == nullptr ||
-      state->checkpoint_conv_state[1] == nullptr ||
-      state->checkpoint_recurrent_state[0] == nullptr ||
-      state->checkpoint_recurrent_state[1] == nullptr) {
+      expected_start > std::numeric_limits<uint64_t>::max() - token_count ||
+      expected_end != expected_start + token_count) {
     return sllm_public_runtime::write_error(
         error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-        "linear attention checkpoint does not match the last M3 publication");
+        "linear attention checkpoint does not match the last MTP publication");
+  }
+  for (uint32_t index = 0U; index != rows; ++index) {
+    if (state->checkpoint_conv_state[index] == nullptr ||
+        state->checkpoint_recurrent_state[index] == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "linear attention checkpoint row storage is incomplete");
+    }
   }
   return SLLM_STATUS_OK;
 }
@@ -733,9 +746,10 @@ extern "C" sllm_status_t sllm_linear_attention_state_release(
     state->conv_state = {nullptr, nullptr};
     state->recurrent_state = {nullptr, nullptr};
     state->state_backing = nullptr;
-    state->checkpoint_conv_state = {nullptr, nullptr};
-    state->checkpoint_recurrent_state = {nullptr, nullptr};
+    state->checkpoint_conv_state = {nullptr, nullptr, nullptr, nullptr};
+    state->checkpoint_recurrent_state = {nullptr, nullptr, nullptr, nullptr};
     state->checkpoint_backing = nullptr;
+    state->checkpoint_capacity_rows = 0U;
     state->checkpoint_rows = 0U;
     state->checkpoint_start = 0U;
     state->checkpoint_end = 0U;
@@ -900,7 +914,7 @@ extern "C" sllm_status_t sllm_linear_attention_state_prepare_checkpoint(
     if (!linear_checkpoint_shape_supported(state, token_count, rows)) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_UNSUPPORTED,
-          "linear attention M3 checkpoint shape is unsupported");
+          "linear attention MTP checkpoint shape is unsupported");
     }
     if (state->context->poisoned.load() || state->release_active ||
         state->transition_token != 0U) {
@@ -922,16 +936,22 @@ extern "C" sllm_status_t sllm_linear_attention_state_prepare_checkpoint(
         static_cast<std::size_t>(state->value_heads) * state->head_dim *
         state->head_dim * sizeof(float);
     if (conv_bytes == 0U || recurrent_bytes == 0U ||
-        recurrent_bytes > std::numeric_limits<std::size_t>::max() / 2U ||
-        conv_bytes >
-            (std::numeric_limits<std::size_t>::max() - recurrent_bytes * 2U) /
-                2U) {
+        conv_bytes > std::numeric_limits<std::size_t>::max() / rows ||
+        recurrent_bytes > std::numeric_limits<std::size_t>::max() / rows) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_METADATA_OVERFLOW,
           "linear attention checkpoint plane size overflowed");
     }
+    const std::size_t conv_backing_bytes = conv_bytes * rows;
+    const std::size_t recurrent_backing_bytes = recurrent_bytes * rows;
+    if (conv_backing_bytes >
+        std::numeric_limits<std::size_t>::max() - recurrent_backing_bytes) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "linear attention checkpoint backing size overflowed");
+    }
     const std::size_t total_bytes =
-        conv_bytes * 2U + recurrent_bytes * 2U;
+        conv_backing_bytes + recurrent_backing_bytes;
     const sllm_status_t device_status =
         select_context_device(state->context, error_sink);
     if (device_status != SLLM_STATUS_OK) {
@@ -950,18 +970,39 @@ extern "C" sllm_status_t sllm_linear_attention_state_prepare_checkpoint(
          std::strcmp(arch_name, "gfx1201") != 0)) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_UNSUPPORTED,
-          "linear attention M3 checkpoint requires gfx1030 or gfx1201");
+          "linear attention MTP checkpoint requires gfx1030 or gfx1201");
     }
-    // The armed M3 kernels fully overwrite both checkpoint planes.  Do not
-    // clear the backing here: stale bytes must remain observable if capture
-    // coverage regresses.
-    if (state->checkpoint_backing != nullptr) {
-      auto *const base = static_cast<char *>(state->checkpoint_backing);
-      auto *const recurrent_base = base + conv_bytes * 2U;
-      state->checkpoint_conv_state = {base, base + conv_bytes};
-      state->checkpoint_recurrent_state = {recurrent_base,
-                                           recurrent_base + recurrent_bytes};
-    } else {
+    // The armed MTP kernels fully overwrite all active checkpoint rows.  Do
+    // not clear the backing here: stale bytes must remain observable if
+    // capture coverage regresses.  A state can be reused with another width,
+    // so retain exactly the requested number of rows and resize only while it
+    // has no graph pins or in-flight references.
+    const auto install_checkpoint_planes = [&](void *const backing) noexcept {
+      auto *const base = static_cast<char *>(backing);
+      auto *const recurrent_base = base + conv_backing_bytes;
+      for (uint32_t index = 0U; index != rows; ++index) {
+        state->checkpoint_conv_state[index] =
+            base + static_cast<std::size_t>(index) * conv_bytes;
+        state->checkpoint_recurrent_state[index] =
+            recurrent_base + static_cast<std::size_t>(index) * recurrent_bytes;
+      }
+      for (uint32_t index = rows; index != kLinearCheckpointMaxRows; ++index) {
+        state->checkpoint_conv_state[index] = nullptr;
+        state->checkpoint_recurrent_state[index] = nullptr;
+      }
+    };
+    const bool resize_checkpoint_backing =
+        state->checkpoint_backing == nullptr ||
+        state->checkpoint_capacity_rows != rows;
+    if (resize_checkpoint_backing && state->checkpoint_backing != nullptr &&
+        (state->graph_pins != 0U ||
+         state->accounting.active_submissions != 0U ||
+         state->accounting.completion_references != 0U)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "linear attention checkpoint resize requires an unpinned state");
+    }
+    if (resize_checkpoint_backing) {
       void *backing = nullptr;
       const hipError_t allocation_status =
           sllm_public_runtime::FaultInjector::consume(
@@ -972,12 +1013,30 @@ extern "C" sllm_status_t sllm_linear_attention_state_prepare_checkpoint(
         return hip_failure(error_sink, allocation_status,
                            "hipMalloc linear attention checkpoint");
       }
-      auto *const base = static_cast<char *>(backing);
-      auto *const recurrent_base = base + conv_bytes * 2U;
-      state->checkpoint_conv_state = {base, base + conv_bytes};
-      state->checkpoint_recurrent_state = {recurrent_base,
-                                           recurrent_base + recurrent_bytes};
+      void *const old_backing = state->checkpoint_backing;
+      if (old_backing != nullptr) {
+        const hipError_t old_free_status =
+            free_allocation_with_fault_injection(old_backing);
+        if (old_free_status != hipSuccess) {
+          const hipError_t rollback_status =
+              free_allocation_with_fault_injection(backing);
+          if (rollback_status != hipSuccess) {
+            orphan_owner.retain_allocation(state->context, backing);
+            poison_context_locked(state->context);
+            return hip_failure(
+                error_sink, rollback_status,
+                "linear attention checkpoint resize rollback failed");
+          }
+          return hip_failure(
+              error_sink, old_free_status,
+              "linear attention checkpoint resize could not free old backing");
+        }
+      }
       state->checkpoint_backing = backing;
+      state->checkpoint_capacity_rows = rows;
+      install_checkpoint_planes(backing);
+    } else {
+      install_checkpoint_planes(state->checkpoint_backing);
     }
     state->checkpoint_rows = rows;
     state->checkpoint_start = expected_start;
@@ -1049,13 +1108,14 @@ sllm_status_t commit_linear_attention_checkpoint_batch_locked(
         error_sink, SLLM_STATUS_PUBLIC_BUSY,
         "linear attention checkpoint commit context or queue is busy");
   }
-  if (row_index >= 2U || prefix_end <= expected_start ||
-      expected_start > std::numeric_limits<uint64_t>::max() - 2U ||
-      prefix_end > expected_start + 2U ||
+  if (row_index >= kLinearCheckpointMaxRows || prefix_end <= expected_start ||
+      expected_start > std::numeric_limits<uint64_t>::max() -
+                           static_cast<uint64_t>(row_index + 1U) ||
+      prefix_end > expected_start + static_cast<uint64_t>(row_index + 1U) ||
       prefix_end != expected_start + static_cast<uint64_t>(row_index) + 1U) {
     return sllm_public_runtime::write_error(
         error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-        "linear attention checkpoint prefix does not identify row zero or one");
+        "linear attention checkpoint prefix does not identify a retained row");
   }
 
   std::lock_guard<std::mutex> lock(context->accounting_mutex);
@@ -1073,10 +1133,16 @@ sllm_status_t commit_linear_attention_checkpoint_batch_locked(
             "linear attention checkpoint commit batch contains a duplicate state");
       }
     }
-    const sllm_status_t validation = validate_linear_checkpoint_locked(
-        state, expected_start, expected_end, 2U, error_sink);
+    const sllm_status_t validation =
+        validate_linear_checkpoint_locked(state, expected_start, expected_end,
+                                          state->checkpoint_rows, error_sink);
     if (validation != SLLM_STATUS_OK) {
       return validation;
+    }
+    if (row_index >= state->checkpoint_rows) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "linear attention checkpoint row is outside the armed width");
     }
     if (state->active_slot >= state->conv_state.size() ||
         state->conv_state[state->active_slot] == nullptr ||
@@ -1093,8 +1159,8 @@ sllm_status_t commit_linear_attention_checkpoint_batch_locked(
     return device_status;
   }
 
-  // The inactive slot still contains the pre-M3 prefix.  Restore the
-  // selected checkpoint into each currently published M3 slot and keep every
+  // The inactive slot still contains the pre-MTP prefix.  Restore the
+  // selected checkpoint into each currently published MTP slot and keep every
   // active_slot unchanged so the next rewind exposes the original prefix.
   for (LinearAttentionState *const state : states) {
     const std::size_t conv_bytes =
@@ -1470,13 +1536,15 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
             "linear attention tensor layout differs from the state layout");
       }
       if (!capture_linear && state->checkpoint_armed &&
-          (metadata.token_count != 3U ||
+          (metadata.token_count != state->checkpoint_rows + 1U ||
            metadata.start_position != state->checkpoint_start ||
            metadata.expected_length != state->checkpoint_end ||
-           state->checkpoint_rows != 2U)) {
+           state->checkpoint_rows < kLinearCheckpointMinRows ||
+           state->checkpoint_rows > kLinearCheckpointMaxRows)) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-            "linear attention execution does not match the armed M3 checkpoint");
+            "linear attention execution does not match the armed MTP "
+            "checkpoint");
       }
       if (context->next_dispatch_id == 0U) {
         return sllm_public_runtime::write_error(

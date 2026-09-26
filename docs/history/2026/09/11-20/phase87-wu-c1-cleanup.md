@@ -69,4 +69,4 @@ raw report、生成token配列、binaryは`.local-artifacts/phase87/wu-c1/`に�
 開始時のsourceとdirty状態を`.local-artifacts/phase87/wu-c1/initial-state.json`、`before/`へ保存し、
 control binaryのSHAがWU1.1最終identityと一致することを確認した。生成物・raw log・binaryはGitへ追加しない。
 
-計画: [Phase87 WU-C1](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu-c1-直近作業の不要な切替と実験経路の削除wu11の後wu2の前)
+計画: [Phase87 WU-C1](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu-c1-直近作業の不要な切替と実験経路の削除wu11の後wu2の前)

@@ -1318,6 +1318,7 @@ pub struct QwenMtpGenerationExecutorV1 {
     last_target_hidden_bf16: Vec<u16>,
     hidden_width: usize,
     draft_width: usize,
+    device_draft_width_limit: usize,
     proposal_blocks: u64,
     fixed_k20_pq_blocks: u64,
     proposed_draft_tokens: u64,
@@ -1361,6 +1362,7 @@ impl QwenMtpGenerationExecutorV1 {
             last_target_hidden_bf16: Vec::new(),
             hidden_width,
             draft_width: 2,
+            device_draft_width_limit: 3,
             proposal_blocks: 0,
             fixed_k20_pq_blocks: 0,
             proposed_draft_tokens: 0,
@@ -1398,6 +1400,7 @@ impl QwenMtpGenerationExecutorV1 {
             last_target_hidden_bf16: Vec::new(),
             hidden_width,
             draft_width,
+            device_draft_width_limit: 3,
             proposal_blocks: 0,
             fixed_k20_pq_blocks: 0,
             proposed_draft_tokens: 0,
@@ -1418,6 +1421,21 @@ impl QwenMtpGenerationExecutorV1 {
             whole_decode_selector: None,
             whole_queued_device_steps: VecDeque::new(),
         })
+    }
+
+    /// Enables a verified wider device selector for a specific caller while
+    /// retaining the existing width-three limit for other Qwen requests.
+    pub fn with_device_draft_width_limit(
+        mut self,
+        limit: usize,
+    ) -> Result<Self, GenerationServiceError> {
+        if limit != 3 && limit != 4 {
+            return Err(GenerationServiceError::Execution(
+                "MTP device draft width limit must be 3 or 4".to_owned(),
+            ));
+        }
+        self.device_draft_width_limit = limit;
+        Ok(self)
     }
 
     /// Opts this request into the fixed-sampler whole-MTP replay path.
@@ -2148,7 +2166,7 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
         let target_remaining = Self::remaining_capacity(&self.target)?;
         let mtp_remaining = Self::remaining_capacity(&self.mtp)?;
         let width = Self::device_draft_width_for_capacity(
-            self.draft_width.min(3),
+            self.draft_width.min(self.device_draft_width_limit),
             target_remaining,
             mtp_remaining,
         )?;
@@ -4750,6 +4768,21 @@ mod tests {
 
     #[test]
     fn qwen_mtp_device_width_clamps_to_target_and_mtp_capacity() {
+        assert_eq!(
+            QwenMtpGenerationExecutorV1::device_draft_width_for_capacity(4, 5, 4)
+                .expect("width four fits verify and draft state"),
+            Some(4)
+        );
+        assert_eq!(
+            QwenMtpGenerationExecutorV1::device_draft_width_for_capacity(4, 4, 4)
+                .expect("target capacity reduces width four"),
+            Some(3)
+        );
+        assert_eq!(
+            QwenMtpGenerationExecutorV1::device_draft_width_for_capacity(4, 5, 3)
+                .expect("draft capacity reduces width four"),
+            Some(3)
+        );
         assert_eq!(
             QwenMtpGenerationExecutorV1::device_draft_width_for_capacity(3, 100, 100)
                 .expect("capacity permits full width"),

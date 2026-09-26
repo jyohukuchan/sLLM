@@ -330,6 +330,11 @@ pub enum StateForkModeV1 {
     /// Immutable VMM pages are mapped into both owners. A later append must
     /// privately copy every shared tail page before it becomes writable.
     SharedReadOnlyPages,
+    /// Paged KV physical token blocks are shared through the native pool.
+    /// This accounting is intentionally separate from legacy VMM pages:
+    /// `shared_blocks` is a count of 128-token physical blocks and must never
+    /// be derived from the legacy `page_bytes` field.
+    SharedPagedBlocks,
     /// The destination owns an exact device-side byte copy. This is used for
     /// contiguous-resident providers and mutable linear/GDN state.
     DeviceCopy,
@@ -342,6 +347,8 @@ pub struct StateForkAuditV1 {
     mode: StateForkModeV1,
     published_length: u64,
     shared_pages: u64,
+    shared_blocks: u64,
+    shared_bytes: u64,
     copied_bytes: u64,
     destination_owned_bytes: u64,
 }
@@ -354,10 +361,60 @@ impl StateForkAuditV1 {
         copied_bytes: u64,
         destination_owned_bytes: u64,
     ) -> Result<Self, KvStateError> {
+        Self::new_with_shared_blocks(
+            mode,
+            published_length,
+            shared_pages,
+            0,
+            0,
+            copied_bytes,
+            destination_owned_bytes,
+        )
+    }
+
+    /// Constructs an audit with explicit paged-block accounting. Paged state
+    /// owns token blocks from a shared pool, so its resident bytes are carried
+    /// independently from the legacy VMM page count.
+    pub fn new_paged(
+        published_length: u64,
+        shared_blocks: u64,
+        shared_bytes: u64,
+        copied_bytes: u64,
+        destination_owned_bytes: u64,
+    ) -> Result<Self, KvStateError> {
+        Self::new_with_shared_blocks(
+            StateForkModeV1::SharedPagedBlocks,
+            published_length,
+            0,
+            shared_blocks,
+            shared_bytes,
+            copied_bytes,
+            destination_owned_bytes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_shared_blocks(
+        mode: StateForkModeV1,
+        published_length: u64,
+        shared_pages: u64,
+        shared_blocks: u64,
+        shared_bytes: u64,
+        copied_bytes: u64,
+        destination_owned_bytes: u64,
+    ) -> Result<Self, KvStateError> {
         if published_length == 0
             || (mode == StateForkModeV1::SharedReadOnlyPages
-                && (copied_bytes != 0 || shared_pages == 0))
-            || (mode == StateForkModeV1::DeviceCopy && shared_pages != 0)
+                && (copied_bytes != 0
+                    || shared_pages == 0
+                    || shared_blocks != 0
+                    || shared_bytes != 0))
+            || (mode == StateForkModeV1::SharedPagedBlocks
+                && (shared_pages != 0
+                    || (shared_blocks == 0) != (shared_bytes == 0)
+                    || (shared_blocks == 0 && destination_owned_bytes == 0)))
+            || (mode == StateForkModeV1::DeviceCopy
+                && (shared_pages != 0 || shared_blocks != 0 || shared_bytes != 0))
         {
             return Err(KvStateError::InvalidForkAudit);
         }
@@ -365,6 +422,8 @@ impl StateForkAuditV1 {
             mode,
             published_length,
             shared_pages,
+            shared_blocks,
+            shared_bytes,
             copied_bytes,
             destination_owned_bytes,
         })
@@ -380,6 +439,16 @@ impl StateForkAuditV1 {
 
     pub const fn shared_pages(self) -> u64 {
         self.shared_pages
+    }
+
+    pub const fn shared_blocks(self) -> u64 {
+        self.shared_blocks
+    }
+
+    /// Bytes occupied by the shared paged blocks in the native pool. Legacy
+    /// audits leave this at zero and use VMM physical metadata instead.
+    pub const fn shared_bytes(self) -> u64 {
+        self.shared_bytes
     }
 
     pub const fn copied_bytes(self) -> u64 {
@@ -566,6 +635,10 @@ pub enum KvStateError {
     LengthMismatch { expected: u64, actual: u64 },
     LengthOutOfBounds { length: u64, capacity: u64 },
     InvalidPhysicalMemory,
+    InvalidPagedPhysicalMemory,
+    InvalidPagedImageMetadata,
+    InvalidPagedImageTopology,
+    PagedImageMetadataOverflow,
     InvalidForkAudit,
     InvalidFp8Block16Variant,
     InvalidMxfp8Variant,
@@ -601,6 +674,18 @@ impl fmt::Display for KvStateError {
             Self::InvalidPhysicalMemory => formatter.write_str(
                 "KV physical-memory metadata must be page-aligned and within logical capacity",
             ),
+            Self::InvalidPagedPhysicalMemory => formatter.write_str(
+                "paged KV physical metadata has invalid block, table, pool, or plane accounting",
+            ),
+            Self::InvalidPagedImageMetadata => {
+                formatter.write_str("paged KV image metadata is inconsistent with its descriptor")
+            }
+            Self::InvalidPagedImageTopology => {
+                formatter.write_str("paged KV image topology has invalid IDs, duplicates, or tags")
+            }
+            Self::PagedImageMetadataOverflow => {
+                formatter.write_str("paged KV image metadata arithmetic overflowed")
+            }
             Self::InvalidForkAudit => formatter.write_str("invalid opaque-state fork audit"),
             Self::InvalidFp8Block16Variant => formatter.write_str(
                 "KV FP8 block16 physical variant is incompatible with its logical encoding",
@@ -883,6 +968,441 @@ pub enum KvMemoryKind {
     ContiguousResident,
 }
 
+/// Physical layout used by a KV state snapshot.
+///
+/// Legacy VMM counters and paged-pool counters have different meanings. They
+/// remain tagged so a paged state cannot be interpreted through the legacy
+/// `physical_page_bytes` or `tokens_per_page` fields.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum KvPhysicalMemoryMetadata {
+    Vmm(KvPhysicalMemorySnapshot),
+    Paged(KvPagedPhysicalMemorySnapshot),
+}
+
+pub const KV_PAGED_TOKEN_BLOCK_SIZE: u32 = 128;
+pub const KV_PAGED_PHYSICAL_LAYOUT_VERSION: u32 = 1;
+pub const KV_PAGED_PLANE_COUNT: usize = 6;
+
+/// Backend-reported physical backing for a segmented paged KV pool.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct KvPagedPhysicalMemorySnapshot {
+    token_block_size: u32,
+    physical_layout_version: u32,
+    logical_table_capacity: u64,
+    max_physical_blocks: u64,
+    allocated_physical_blocks: u64,
+    committed_bytes_per_plane: [u64; KV_PAGED_PLANE_COUNT],
+    committed_bytes_total: u64,
+}
+
+impl KvPagedPhysicalMemorySnapshot {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        capacity_tokens: u64,
+        observed_length: u64,
+        token_block_size: u32,
+        physical_layout_version: u32,
+        logical_table_capacity: u64,
+        max_physical_blocks: u64,
+        allocated_physical_blocks: u64,
+        committed_bytes_per_plane: [u64; KV_PAGED_PLANE_COUNT],
+        committed_bytes_total: u64,
+    ) -> Result<Self, KvStateError> {
+        let required_logical_blocks = paged_block_count(capacity_tokens, token_block_size)?;
+        let required_allocated_blocks = paged_block_count(observed_length, token_block_size)?;
+        let sum = committed_bytes_per_plane
+            .iter()
+            .try_fold(0_u64, |sum, bytes| sum.checked_add(*bytes))
+            .ok_or(KvStateError::InvalidPagedPhysicalMemory)?;
+        if capacity_tokens == 0
+            || observed_length > capacity_tokens
+            || token_block_size != KV_PAGED_TOKEN_BLOCK_SIZE
+            || physical_layout_version != KV_PAGED_PHYSICAL_LAYOUT_VERSION
+            || logical_table_capacity < required_logical_blocks
+            || max_physical_blocks < required_logical_blocks
+            || allocated_physical_blocks < required_allocated_blocks
+            || allocated_physical_blocks > max_physical_blocks
+            || committed_bytes_total != sum
+        {
+            return Err(KvStateError::InvalidPagedPhysicalMemory);
+        }
+        Ok(Self {
+            token_block_size,
+            physical_layout_version,
+            logical_table_capacity,
+            max_physical_blocks,
+            allocated_physical_blocks,
+            committed_bytes_per_plane,
+            committed_bytes_total,
+        })
+    }
+
+    pub const fn token_block_size(self) -> u32 {
+        self.token_block_size
+    }
+
+    pub const fn physical_layout_version(self) -> u32 {
+        self.physical_layout_version
+    }
+
+    pub const fn logical_table_capacity(self) -> u64 {
+        self.logical_table_capacity
+    }
+
+    pub const fn max_physical_blocks(self) -> u64 {
+        self.max_physical_blocks
+    }
+
+    pub const fn allocated_physical_blocks(self) -> u64 {
+        self.allocated_physical_blocks
+    }
+
+    pub const fn committed_bytes_per_plane(self) -> [u64; KV_PAGED_PLANE_COUNT] {
+        self.committed_bytes_per_plane
+    }
+
+    pub const fn committed_bytes_total(self) -> u64 {
+        self.committed_bytes_total
+    }
+}
+
+/// Version of the host-only Paged KV image topology contract.
+#[allow(dead_code)]
+pub const KV_PAGED_IMAGE_METADATA_VERSION: u32 = 1;
+/// A Paged physical block always contains 128 logical token rows.
+#[allow(dead_code)]
+pub const KV_PAGED_IMAGE_TOKEN_BLOCK_SIZE: u32 = KV_PAGED_TOKEN_BLOCK_SIZE;
+/// Sliding Paged KV uses nine ring slots so one spare slot can be used while
+/// a saturated tail is being prepared.
+#[allow(dead_code)]
+pub const KV_PAGED_RING_SLOT_COUNT: usize = 9;
+/// Sentinel used by native logical and ring tables for an unassigned block.
+#[allow(dead_code)]
+pub const KV_PAGED_INVALID_BLOCK_ID: u32 = u32::MAX;
+/// Sentinel used by native ring tags for an unassigned slot.
+#[allow(dead_code)]
+pub const KV_PAGED_INVALID_TAG: u64 = u64::MAX;
+
+/// Compact absolute-block topology for a sliding Paged KV image.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[allow(dead_code)]
+pub struct KvPagedRingTableV1 {
+    block_ids: [u32; KV_PAGED_RING_SLOT_COUNT],
+    absolute_tags: [u64; KV_PAGED_RING_SLOT_COUNT],
+}
+
+#[allow(dead_code)]
+impl KvPagedRingTableV1 {
+    pub const fn new(
+        block_ids: [u32; KV_PAGED_RING_SLOT_COUNT],
+        absolute_tags: [u64; KV_PAGED_RING_SLOT_COUNT],
+    ) -> Self {
+        Self {
+            block_ids,
+            absolute_tags,
+        }
+    }
+
+    pub const fn block_ids(self) -> [u32; KV_PAGED_RING_SLOT_COUNT] {
+        self.block_ids
+    }
+
+    pub const fn absolute_tags(self) -> [u64; KV_PAGED_RING_SLOT_COUNT] {
+        self.absolute_tags
+    }
+}
+
+/// Host checkpoint topology for one Paged KV image.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[allow(dead_code)]
+pub enum KvPagedImageTopologyV1 {
+    /// Logical block index to physical block ID. Unassigned tail entries use
+    /// [`KV_PAGED_INVALID_BLOCK_ID`].
+    LogicalTable(Vec<u32>),
+    /// Physical block IDs indexed by nine ring slots, paired with absolute
+    /// logical block tags. Unassigned slots use both sentinels.
+    SlidingRing(KvPagedRingTableV1),
+}
+
+/// Versioned, host-only Paged KV image metadata.
+///
+/// This type describes checkpoint topology and arithmetic only. It contains
+/// no device pointer, allocation handle, or serialized payload. Plane strides
+/// are the six byte sizes of one physical 128-token block in the order
+/// key/value/key-scale/value-scale/key-outer-scale/value-outer-scale.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[allow(dead_code)]
+pub struct KvPagedImageMetadataV1 {
+    descriptor: KvStateDescriptor,
+    observed_length: u64,
+    generation: u64,
+    retained_start: u64,
+    sliding_window: u64,
+    physical_block_capacity: u64,
+    plane_strides: [u64; KV_PAGED_PLANE_COUNT],
+    topology: KvPagedImageTopologyV1,
+}
+
+#[allow(dead_code)]
+impl KvPagedImageMetadataV1 {
+    pub const FORMAT_VERSION: u32 = KV_PAGED_IMAGE_METADATA_VERSION;
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        descriptor: KvStateDescriptor,
+        observed_length: u64,
+        generation: u64,
+        retained_start: u64,
+        sliding_window: u64,
+        physical_block_capacity: u64,
+        plane_strides: [u64; KV_PAGED_PLANE_COUNT],
+        topology: KvPagedImageTopologyV1,
+    ) -> Result<Self, KvStateError> {
+        validate_paged_image_metadata(
+            descriptor,
+            observed_length,
+            retained_start,
+            sliding_window,
+            physical_block_capacity,
+            plane_strides,
+            &topology,
+        )?;
+        Ok(Self {
+            descriptor,
+            observed_length,
+            generation,
+            retained_start,
+            sliding_window,
+            physical_block_capacity,
+            plane_strides,
+            topology,
+        })
+    }
+
+    pub const fn format_version(&self) -> u32 {
+        Self::FORMAT_VERSION
+    }
+
+    pub const fn descriptor(&self) -> KvStateDescriptor {
+        self.descriptor
+    }
+
+    pub const fn observed_length(&self) -> u64 {
+        self.observed_length
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub const fn retained_start(&self) -> u64 {
+        self.retained_start
+    }
+
+    pub const fn sliding_window(&self) -> u64 {
+        self.sliding_window
+    }
+
+    pub const fn physical_block_capacity(&self) -> u64 {
+        self.physical_block_capacity
+    }
+
+    pub const fn plane_strides(&self) -> [u64; KV_PAGED_PLANE_COUNT] {
+        self.plane_strides
+    }
+
+    pub const fn topology(&self) -> &KvPagedImageTopologyV1 {
+        &self.topology
+    }
+}
+
+#[allow(dead_code)]
+fn checked_paged_image_mul(lhs: u64, rhs: u64) -> Result<u64, KvStateError> {
+    lhs.checked_mul(rhs)
+        .ok_or(KvStateError::PagedImageMetadataOverflow)
+}
+
+#[allow(dead_code)]
+fn expected_paged_image_plane_strides(
+    descriptor: KvStateDescriptor,
+) -> Result<[u64; KV_PAGED_PLANE_COUNT], KvStateError> {
+    let heads = u64::try_from(descriptor.layout().heads())
+        .map_err(|_| KvStateError::PagedImageMetadataOverflow)?;
+    let head_dim = u64::try_from(descriptor.layout().head_dim())
+        .map_err(|_| KvStateError::PagedImageMetadataOverflow)?;
+    let block_tokens = u64::from(KV_PAGED_IMAGE_TOKEN_BLOCK_SIZE);
+    let (value_bytes, scale_bytes, outer_scale_bytes) = match descriptor.cache_encoding() {
+        KvCacheEncoding::Fp16 => (
+            checked_paged_image_mul(heads, head_dim)?
+                .checked_mul(2)
+                .ok_or(KvStateError::PagedImageMetadataOverflow)?,
+            0,
+            0,
+        ),
+        KvCacheEncoding::Fp8E4M3Fn => (
+            checked_paged_image_mul(heads, head_dim)?,
+            checked_paged_image_mul(heads, 4)?,
+            0,
+        ),
+        KvCacheEncoding::Fp8E4M3FnStatic => (checked_paged_image_mul(heads, head_dim)?, 0, 0),
+        KvCacheEncoding::Nvfp4 => (
+            checked_paged_image_mul(heads, head_dim.div_ceil(2))?,
+            checked_paged_image_mul(heads, head_dim.div_ceil(16))?,
+            checked_paged_image_mul(heads, 4)?,
+        ),
+        KvCacheEncoding::Fp8E4M3Block16 | KvCacheEncoding::Fp8E5M2Block16 => {
+            let blocks = head_dim.div_ceil(KV_FP8_BLOCK_SIZE as u64);
+            (
+                checked_paged_image_mul(heads, checked_paged_image_mul(blocks, 16)?)?,
+                checked_paged_image_mul(heads, blocks)?,
+                0,
+            )
+        }
+        KvCacheEncoding::Mxfp8E4 | KvCacheEncoding::Mxfp8E5 => {
+            let blocks = head_dim.div_ceil(KV_MXFP8_BLOCK_SIZE as u64);
+            (
+                checked_paged_image_mul(heads, checked_paged_image_mul(blocks, 32)?)?,
+                checked_paged_image_mul(heads, blocks)?,
+                0,
+            )
+        }
+    };
+    Ok([
+        checked_paged_image_mul(value_bytes, block_tokens)?,
+        checked_paged_image_mul(value_bytes, block_tokens)?,
+        checked_paged_image_mul(scale_bytes, block_tokens)?,
+        checked_paged_image_mul(scale_bytes, block_tokens)?,
+        checked_paged_image_mul(outer_scale_bytes, block_tokens)?,
+        checked_paged_image_mul(outer_scale_bytes, block_tokens)?,
+    ])
+}
+
+#[allow(dead_code)]
+fn validate_paged_image_metadata(
+    descriptor: KvStateDescriptor,
+    observed_length: u64,
+    retained_start: u64,
+    sliding_window: u64,
+    physical_block_capacity: u64,
+    plane_strides: [u64; KV_PAGED_PLANE_COUNT],
+    topology: &KvPagedImageTopologyV1,
+) -> Result<(), KvStateError> {
+    if observed_length > descriptor.capacity() || retained_start > observed_length {
+        return Err(KvStateError::InvalidPagedImageMetadata);
+    }
+    let descriptor_window = descriptor.sliding_window().unwrap_or(0);
+    if sliding_window != descriptor_window {
+        return Err(KvStateError::InvalidPagedImageMetadata);
+    }
+    let expected_retained_start = if sliding_window == 0 {
+        0
+    } else {
+        observed_length.saturating_sub(sliding_window)
+    };
+    if retained_start != expected_retained_start
+        || physical_block_capacity == 0
+        || physical_block_capacity >= u64::from(u32::MAX)
+        || plane_strides != expected_paged_image_plane_strides(descriptor)?
+    {
+        return Err(KvStateError::InvalidPagedImageMetadata);
+    }
+    let required_blocks =
+        paged_block_count(descriptor.capacity(), KV_PAGED_IMAGE_TOKEN_BLOCK_SIZE)?;
+    let observed_blocks = paged_block_count(observed_length, KV_PAGED_IMAGE_TOKEN_BLOCK_SIZE)?;
+    match (descriptor_window == 0, topology) {
+        (true, KvPagedImageTopologyV1::LogicalTable(table)) => {
+            if table.len() as u64 != required_blocks {
+                return Err(KvStateError::InvalidPagedImageTopology);
+            }
+            validate_paged_logical_table(table, observed_blocks, physical_block_capacity)
+        }
+        (false, KvPagedImageTopologyV1::SlidingRing(ring)) => validate_paged_ring_table(
+            ring,
+            retained_start,
+            observed_blocks,
+            physical_block_capacity,
+        ),
+        _ => Err(KvStateError::InvalidPagedImageTopology),
+    }
+}
+
+#[allow(dead_code)]
+fn validate_paged_logical_table(
+    table: &[u32],
+    observed_blocks: u64,
+    physical_block_capacity: u64,
+) -> Result<(), KvStateError> {
+    let observed_blocks =
+        usize::try_from(observed_blocks).map_err(|_| KvStateError::PagedImageMetadataOverflow)?;
+    let mut seen = Vec::with_capacity(table.len());
+    for (index, &block) in table.iter().enumerate() {
+        if index < observed_blocks && block == KV_PAGED_INVALID_BLOCK_ID {
+            return Err(KvStateError::InvalidPagedImageTopology);
+        }
+        if block != KV_PAGED_INVALID_BLOCK_ID {
+            if u64::from(block) >= physical_block_capacity || seen.contains(&block) {
+                return Err(KvStateError::InvalidPagedImageTopology);
+            }
+            seen.push(block);
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn validate_paged_ring_table(
+    ring: &KvPagedRingTableV1,
+    retained_start: u64,
+    observed_blocks: u64,
+    physical_block_capacity: u64,
+) -> Result<(), KvStateError> {
+    let first_block = retained_start / u64::from(KV_PAGED_IMAGE_TOKEN_BLOCK_SIZE);
+    let mut expected_tags = Vec::new();
+    let mut tag = first_block;
+    while tag < observed_blocks {
+        expected_tags.push(tag);
+        tag = tag
+            .checked_add(1)
+            .ok_or(KvStateError::PagedImageMetadataOverflow)?;
+    }
+    let mut seen_blocks = Vec::new();
+    let mut seen_tags = Vec::new();
+    for (&block, &absolute_tag) in ring.block_ids.iter().zip(ring.absolute_tags.iter()) {
+        let block_invalid = block == KV_PAGED_INVALID_BLOCK_ID;
+        let tag_invalid = absolute_tag == KV_PAGED_INVALID_TAG;
+        if block_invalid != tag_invalid {
+            return Err(KvStateError::InvalidPagedImageTopology);
+        }
+        if !block_invalid {
+            if u64::from(block) >= physical_block_capacity
+                || !expected_tags.contains(&absolute_tag)
+                || seen_blocks.contains(&block)
+                || seen_tags.contains(&absolute_tag)
+            {
+                return Err(KvStateError::InvalidPagedImageTopology);
+            }
+            seen_blocks.push(block);
+            seen_tags.push(absolute_tag);
+        }
+    }
+    if seen_tags.len() != expected_tags.len()
+        || expected_tags.iter().any(|tag| !seen_tags.contains(tag))
+    {
+        return Err(KvStateError::InvalidPagedImageTopology);
+    }
+    Ok(())
+}
+
+fn paged_block_count(tokens: u64, token_block_size: u32) -> Result<u64, KvStateError> {
+    if token_block_size == 0 {
+        return Err(KvStateError::InvalidPagedPhysicalMemory);
+    }
+    tokens
+        .checked_add(u64::from(token_block_size) - 1)
+        .map(|value| value / u64::from(token_block_size))
+        .ok_or(KvStateError::InvalidPagedPhysicalMemory)
+}
+
 /// Backend-reported physical backing for a KV plane.
 ///
 /// This is evidence metadata only: allocation and mapping remain owned by the
@@ -1016,6 +1536,7 @@ pub struct KvStateSnapshot {
     descriptor: KvStateDescriptor,
     length: u64,
     physical_memory: Option<KvPhysicalMemorySnapshot>,
+    physical_metadata: Option<KvPhysicalMemoryMetadata>,
 }
 
 impl KvStateSnapshot {
@@ -1039,6 +1560,7 @@ impl KvStateSnapshot {
             descriptor,
             length,
             physical_memory: None,
+            physical_metadata: None,
         })
     }
 
@@ -1071,6 +1593,35 @@ impl KvStateSnapshot {
             descriptor,
             length,
             physical_memory: Some(physical_memory),
+            physical_metadata: Some(KvPhysicalMemoryMetadata::Vmm(physical_memory)),
+        })
+    }
+
+    /// Constructs a snapshot with paged-pool accounting. The paged metadata
+    /// remains tagged and is not exposed through legacy VMM accessors.
+    pub fn new_with_paged_physical_memory(
+        session_id: ExecutionSessionId,
+        state_id: KvStateId,
+        descriptor: KvStateDescriptor,
+        length: u64,
+        physical_memory: KvPagedPhysicalMemorySnapshot,
+    ) -> Result<Self, KvStateError> {
+        if length > descriptor.capacity()
+            || physical_memory.allocated_physical_blocks()
+                < paged_block_count(length, physical_memory.token_block_size())?
+        {
+            return Err(KvStateError::LengthOutOfBounds {
+                length,
+                capacity: descriptor.capacity(),
+            });
+        }
+        Ok(Self {
+            session_id,
+            state_id,
+            descriptor,
+            length,
+            physical_memory: None,
+            physical_metadata: Some(KvPhysicalMemoryMetadata::Paged(physical_memory)),
         })
     }
 
@@ -1104,6 +1655,17 @@ impl KvStateSnapshot {
 
     pub const fn physical_memory(self) -> Option<KvPhysicalMemorySnapshot> {
         self.physical_memory
+    }
+
+    pub const fn physical_metadata(self) -> Option<KvPhysicalMemoryMetadata> {
+        self.physical_metadata
+    }
+
+    pub const fn paged_physical_memory(self) -> Option<KvPagedPhysicalMemorySnapshot> {
+        match self.physical_metadata {
+            Some(KvPhysicalMemoryMetadata::Paged(metadata)) => Some(metadata),
+            _ => None,
+        }
     }
 }
 
@@ -1441,5 +2003,247 @@ mod tests {
                 retained_length
             );
         }
+    }
+
+    #[test]
+    fn paged_image_metadata_accepts_logical_boundaries_and_sliding_ring_boundaries() {
+        let descriptor =
+            KvStateDescriptor::new_with_storage(4, 1152, 4, 256, KvCacheEncoding::Mxfp8E4).unwrap();
+        let strides = expected_paged_image_plane_strides(descriptor).unwrap();
+        for length in [127_u64, 128, 129] {
+            let mut table = vec![KV_PAGED_INVALID_BLOCK_ID; 9];
+            for block in 0..length.div_ceil(u64::from(KV_PAGED_IMAGE_TOKEN_BLOCK_SIZE)) {
+                table[block as usize] = block as u32;
+            }
+            let metadata = KvPagedImageMetadataV1::new(
+                descriptor,
+                length,
+                7,
+                0,
+                0,
+                16,
+                strides,
+                KvPagedImageTopologyV1::LogicalTable(table),
+            )
+            .unwrap();
+            assert_eq!(metadata.format_version(), KV_PAGED_IMAGE_METADATA_VERSION);
+            assert_eq!(metadata.observed_length(), length);
+            assert_eq!(metadata.generation(), 7);
+            assert_eq!(metadata.plane_strides(), strides);
+        }
+
+        let sliding =
+            KvStateDescriptor::new_with_static_fp8_sliding(4, 1152, 4, 256, 1024).unwrap();
+        let sliding_strides = expected_paged_image_plane_strides(sliding).unwrap();
+        for length in [1023_u64, 1024, 1152] {
+            let retained_start = length.saturating_sub(1024);
+            let first = retained_start / 128;
+            let blocks = length.div_ceil(128);
+            let mut ids = [KV_PAGED_INVALID_BLOCK_ID; KV_PAGED_RING_SLOT_COUNT];
+            let mut tags = [KV_PAGED_INVALID_TAG; KV_PAGED_RING_SLOT_COUNT];
+            for (slot, tag) in (first..blocks).enumerate() {
+                ids[slot] = slot as u32;
+                tags[slot] = tag;
+            }
+            let metadata = KvPagedImageMetadataV1::new(
+                sliding,
+                length,
+                9,
+                retained_start,
+                1024,
+                16,
+                sliding_strides,
+                KvPagedImageTopologyV1::SlidingRing(KvPagedRingTableV1::new(ids, tags)),
+            )
+            .unwrap();
+            assert_eq!(metadata.retained_start(), retained_start);
+            assert_eq!(metadata.sliding_window(), 1024);
+        }
+    }
+
+    #[test]
+    fn paged_image_metadata_rejects_invalid_ids_duplicate_or_stale_tags_and_overflow() {
+        let descriptor =
+            KvStateDescriptor::new_with_storage(4, 129, 4, 256, KvCacheEncoding::Mxfp8E4).unwrap();
+        let strides = expected_paged_image_plane_strides(descriptor).unwrap();
+        let mut duplicate = vec![KV_PAGED_INVALID_BLOCK_ID; 2];
+        duplicate[0] = 1;
+        duplicate[1] = 1;
+        assert_eq!(
+            KvPagedImageMetadataV1::new(
+                descriptor,
+                129,
+                0,
+                0,
+                0,
+                4,
+                strides,
+                KvPagedImageTopologyV1::LogicalTable(duplicate),
+            )
+            .unwrap_err(),
+            KvStateError::InvalidPagedImageTopology
+        );
+
+        let mut invalid_id = vec![KV_PAGED_INVALID_BLOCK_ID; 2];
+        invalid_id[0] = KV_PAGED_INVALID_BLOCK_ID;
+        assert_eq!(
+            KvPagedImageMetadataV1::new(
+                descriptor,
+                1,
+                0,
+                0,
+                0,
+                4,
+                strides,
+                KvPagedImageTopologyV1::LogicalTable(invalid_id),
+            )
+            .unwrap_err(),
+            KvStateError::InvalidPagedImageTopology
+        );
+
+        let sliding =
+            KvStateDescriptor::new_with_static_fp8_sliding(4, 1152, 4, 256, 1024).unwrap();
+        let sliding_strides = expected_paged_image_plane_strides(sliding).unwrap();
+        let mut stale_tags = [KV_PAGED_INVALID_TAG; KV_PAGED_RING_SLOT_COUNT];
+        let mut stale_ids = [KV_PAGED_INVALID_BLOCK_ID; KV_PAGED_RING_SLOT_COUNT];
+        for slot in 0..8 {
+            stale_tags[slot] = slot as u64;
+            stale_ids[slot] = slot as u32;
+        }
+        stale_tags[8] = 99;
+        stale_ids[8] = 8;
+        assert_eq!(
+            KvPagedImageMetadataV1::new(
+                sliding,
+                1024,
+                0,
+                0,
+                1024,
+                16,
+                sliding_strides,
+                KvPagedImageTopologyV1::SlidingRing(
+                    KvPagedRingTableV1::new(stale_ids, stale_tags,)
+                ),
+            )
+            .unwrap_err(),
+            KvStateError::InvalidPagedImageTopology
+        );
+
+        let overflow = KvStateDescriptor::new_with_layout(4, 1, usize::MAX, usize::MAX).unwrap();
+        assert_eq!(
+            KvPagedImageMetadataV1::new(
+                overflow,
+                0,
+                0,
+                0,
+                0,
+                1,
+                [0; KV_PAGED_PLANE_COUNT],
+                KvPagedImageTopologyV1::LogicalTable(vec![KV_PAGED_INVALID_BLOCK_ID]),
+            )
+            .unwrap_err(),
+            KvStateError::PagedImageMetadataOverflow
+        );
+    }
+
+    #[test]
+    fn paged_snapshot_keeps_pool_counts_tagged_and_checks_boundaries() {
+        let descriptor =
+            KvStateDescriptor::new_with_storage(4, 257, 4, 256, KvCacheEncoding::Mxfp8E4).unwrap();
+        for length in [0_u64, 127, 128, 129, 256, 257] {
+            let allocated = length.div_ceil(u64::from(KV_PAGED_TOKEN_BLOCK_SIZE));
+            let per_plane = [allocated * 33; KV_PAGED_PLANE_COUNT];
+            let total = per_plane.iter().sum();
+            let physical = KvPagedPhysicalMemorySnapshot::new(
+                descriptor.capacity(),
+                length,
+                KV_PAGED_TOKEN_BLOCK_SIZE,
+                KV_PAGED_PHYSICAL_LAYOUT_VERSION,
+                3,
+                4,
+                allocated,
+                per_plane,
+                total,
+            )
+            .unwrap();
+            let snapshot = KvStateSnapshot::new_with_paged_physical_memory(
+                ExecutionSessionId::new(8),
+                KvStateId::new(12),
+                descriptor,
+                length,
+                physical,
+            )
+            .unwrap();
+            assert_eq!(snapshot.physical_memory(), None);
+            assert_eq!(snapshot.paged_physical_memory(), Some(physical));
+            assert_eq!(
+                snapshot.physical_metadata(),
+                Some(KvPhysicalMemoryMetadata::Paged(physical))
+            );
+        }
+        let invalid_total = KvPagedPhysicalMemorySnapshot::new(
+            descriptor.capacity(),
+            129,
+            KV_PAGED_TOKEN_BLOCK_SIZE,
+            KV_PAGED_PHYSICAL_LAYOUT_VERSION,
+            3,
+            4,
+            2,
+            [1; KV_PAGED_PLANE_COUNT],
+            5,
+        );
+        assert_eq!(invalid_total, Err(KvStateError::InvalidPagedPhysicalMemory));
+        assert_eq!(
+            KvPagedPhysicalMemorySnapshot::new(
+                descriptor.capacity(),
+                129,
+                64,
+                KV_PAGED_PHYSICAL_LAYOUT_VERSION,
+                5,
+                5,
+                3,
+                [0; KV_PAGED_PLANE_COUNT],
+                0,
+            ),
+            Err(KvStateError::InvalidPagedPhysicalMemory)
+        );
+    }
+
+    #[test]
+    fn paged_fork_audit_keeps_shared_blocks_out_of_vmm_page_counts() {
+        let audit = StateForkAuditV1::new_paged(129, 2, 2_112, 0, 0).unwrap();
+        assert_eq!(audit.mode(), StateForkModeV1::SharedPagedBlocks);
+        assert_eq!(audit.shared_pages(), 0);
+        assert_eq!(audit.shared_blocks(), 2);
+        assert_eq!(audit.shared_bytes(), 2_112);
+        let diverged = StateForkAuditV1::new_paged(130, 0, 0, 592, 2_112).unwrap();
+        assert_eq!(diverged.shared_blocks(), 0);
+        assert_eq!(diverged.shared_pages(), 0);
+        assert_eq!(diverged.copied_bytes(), 592);
+        assert!(StateForkAuditV1::new_paged(130, 0, 0, 0, 0).is_err());
+        assert!(
+            StateForkAuditV1::new_with_shared_blocks(
+                StateForkModeV1::SharedPagedBlocks,
+                129,
+                1,
+                0,
+                1,
+                0,
+                0,
+            )
+            .is_err()
+        );
+        assert!(
+            StateForkAuditV1::new_with_shared_blocks(
+                StateForkModeV1::SharedReadOnlyPages,
+                129,
+                1,
+                1,
+                0,
+                0,
+                0,
+            )
+            .is_err()
+        );
     }
 }

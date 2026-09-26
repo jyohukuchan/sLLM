@@ -129,4 +129,4 @@ resident planeのgrow量に段階的な不備が見つかった。失敗をPASS�
 - native境界と短context: `active-width-native-gfx{1030,1201}-r1/`。
 - モデル、実行binary、raw traceはGitへ含めない。結果JSONは集約値とhashだけを保持する。
 
-[対応する計画](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)
+[対応する計画](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)

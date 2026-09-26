@@ -7,19 +7,20 @@
 //! marker so they cannot be moved or shared as thread-affine native views.
 
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ptr::NonNull;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use sllm_core::{
-    DType, Encoding, ExecutionSessionId, KvCacheEncoding, KvFp8PhysicalVariant, KvMemoryKind,
-    KvStateAppendRequest, KvStateDescriptor, KvStateId, KvStateSnapshot, StateForkAuditV1,
-    StateForkModeV1,
+    DType, Encoding, ExecutionSessionId, ExecutionStateImageV2, KV_PAGED_IMAGE_TOKEN_BLOCK_SIZE,
+    KV_PAGED_INVALID_BLOCK_ID, KV_PAGED_INVALID_TAG, KV_PAGED_PHYSICAL_LAYOUT_VERSION,
+    KV_PAGED_PLANE_COUNT, KV_PAGED_RING_SLOT_COUNT, KV_PAGED_TOKEN_BLOCK_SIZE, KvCacheEncoding,
+    KvFp8PhysicalVariant, KvPagedImageMetadataV1, KvPagedImageTopologyV1,
+    KvPagedPhysicalMemorySnapshot, KvPagedRingTableV1, KvStateAppendRequest, KvStateDescriptor,
+    KvStateId, KvStateSnapshot, StateForkAuditV1, StateLayerMetadataV1, StateOwnerKindV1,
 };
 use sllm_hip_sys as sys;
 
@@ -28,9 +29,9 @@ use crate::rmsnorm::TensorBinding;
 use crate::runtime::{
     CompletionState, Context, Queue, RuntimeError, RuntimeStatus, completion_from_opaque_token,
     enqueue_causal_completion_cleanup, enqueue_kv_completion_cleanup, enqueue_kv_state_cleanup,
-    enqueue_kv_view_cleanup, ensure_ok, finalize_completion_after, gcn_arch_matches,
-    logical_gcn_arch_name, release_causal_completion_once, release_kv_completion_once,
-    release_kv_state_once, release_kv_view_once, result_error, sink,
+    ensure_ok, finalize_completion_after, gcn_arch_matches, logical_gcn_arch_name,
+    release_causal_completion_once, release_kv_completion_once, release_kv_state_once,
+    result_error, sink,
 };
 
 const ERROR_CAPACITY: usize = 256;
@@ -59,106 +60,160 @@ fn operation_range_admitted(
             .is_some_and(|limit| start < limit && end <= limit)
 }
 
-pub(crate) fn native_kv_storage(
+#[allow(dead_code)]
+fn paged_native_storage(
+    context: &Context,
     descriptor: KvStateDescriptor,
-    expected_target: Option<&str>,
 ) -> Result<(u32, u32, u32, u32), RuntimeError> {
-    let target = expected_target.map(logical_gcn_arch_name);
-    let storage = match descriptor.cache_encoding() {
-        KvCacheEncoding::Fp16 => (
+    let target = context.expected_target().map(logical_gcn_arch_name);
+    if !matches!(target, Some("gfx1030" | "gfx1201")) {
+        return Err(RuntimeError::new(
+            RuntimeStatus::Unsupported,
+            format!(
+                "paged KV adapter requires exact gfx1030 or gfx1201 (got {})",
+                target.unwrap_or("unspecified")
+            ),
+        ));
+    }
+    if let Some(window) = descriptor.sliding_window() {
+        if window != 1024 || descriptor.cache_encoding() != KvCacheEncoding::Fp8E4M3FnStatic {
+            return Err(RuntimeError::new(
+                RuntimeStatus::Unsupported,
+                "paged sliding KV requires static FP8 E4 with a 1024-token window".to_owned(),
+            ));
+        }
+    }
+    match descriptor.cache_encoding() {
+        KvCacheEncoding::Fp16 => Ok((
             sys::SLLM_TENSOR_DTYPE_F16,
             sys::SLLM_HIP_KV_ENCODING_FP16_V1,
             0,
             0,
-        ),
-        KvCacheEncoding::Fp8E4M3Fn => (
+        )),
+        KvCacheEncoding::Fp8E4M3Fn => Ok((
             sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
             sys::SLLM_HIP_KV_ENCODING_FP8_V1,
             0,
             sys::SLLM_TENSOR_DTYPE_F32,
-        ),
-        KvCacheEncoding::Fp8E4M3FnStatic => (
-            sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
-            sys::SLLM_HIP_KV_ENCODING_FP8_STATIC_V1,
-            0,
-            sys::SLLM_TENSOR_DTYPE_F32,
-        ),
-        KvCacheEncoding::Nvfp4 => (
+        )),
+        KvCacheEncoding::Fp8E4M3FnStatic => {
+            if descriptor.static_fp8_scales().is_none() {
+                return Err(RuntimeError::new(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    "paged KV static FP8 E4 requires binary32 key/value scales".to_owned(),
+                ));
+            }
+            Ok((
+                sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                sys::SLLM_HIP_KV_ENCODING_FP8_STATIC_V1,
+                0,
+                sys::SLLM_TENSOR_DTYPE_F32,
+            ))
+        }
+        KvCacheEncoding::Nvfp4 => Ok((
             sys::SLLM_TENSOR_DTYPE_U8,
             sys::SLLM_HIP_KV_ENCODING_NVFP4_V1,
             16,
             sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
-        ),
-        KvCacheEncoding::Fp8E4M3Block16 | KvCacheEncoding::Fp8E5M2Block16 => {
-            return Err(RuntimeError::local(
-                RuntimeStatus::InvalidKvStateDescriptor,
-                "KV FP8 block16 has been retired; use standard OCP MXFP8 E4M3 or explicit FP16",
-            ));
-        }
-        KvCacheEncoding::Mxfp8E4 | KvCacheEncoding::Mxfp8E5 => {
-            let mxfp8 = descriptor.kv_mxfp8_descriptor().ok_or_else(|| {
-                RuntimeError::local(
-                    RuntimeStatus::InvalidKvStateDescriptor,
-                    "KV MXFP8 encoding is missing its physical descriptor",
-                )
-            })?;
-            let compatible = matches!(
-                (target, mxfp8.physical_variant()),
-                (None, _)
-                    | (
-                        Some("gfx1030" | "gfx1201" | "gfx942"),
-                        KvFp8PhysicalVariant::OcpE4M3Fn
-                    )
-                    | (Some("gfx1030"), KvFp8PhysicalVariant::OcpE5M2)
-            );
-            if !compatible {
+        )),
+        KvCacheEncoding::Mxfp8E4 => {
+            if !matches!(
+                descriptor.kv_mxfp8_descriptor(),
+                Some(mxfp8) if mxfp8.physical_variant() == KvFp8PhysicalVariant::OcpE4M3Fn
+            ) {
                 return Err(RuntimeError::new(
-                    RuntimeStatus::InvalidKvStateDescriptor,
-                    format!(
-                        "standard OCP MXFP8 physical variant {:?} is incompatible with target {}",
-                        mxfp8.physical_variant(),
-                        expected_target.unwrap_or("unspecified")
-                    ),
+                    RuntimeStatus::Unsupported,
+                    "paged KV MXFP8 E4 requires the standard OCP E4M3FN physical variant"
+                        .to_owned(),
                 ));
             }
-            let (dtype, encoding) = match mxfp8.physical_variant() {
-                KvFp8PhysicalVariant::OcpE4M3Fn => (
-                    sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
-                    sys::SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                ),
-                KvFp8PhysicalVariant::OcpE5M2 => (
-                    sys::SLLM_TENSOR_DTYPE_F8_E5M2,
-                    sys::SLLM_HIP_KV_ENCODING_MXFP8_E5_V1,
-                ),
-                KvFp8PhysicalVariant::E4M3FnuZ => unreachable!(),
-            };
-            (dtype, encoding, 32, sys::SLLM_TENSOR_DTYPE_U8)
+            Ok((
+                sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                sys::SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                32,
+                sys::SLLM_TENSOR_DTYPE_U8,
+            ))
         }
+        KvCacheEncoding::Mxfp8E5 => {
+            if !matches!(
+                descriptor.kv_mxfp8_descriptor(),
+                Some(mxfp8) if mxfp8.physical_variant() == KvFp8PhysicalVariant::OcpE5M2
+            ) || target != Some("gfx1030")
+            {
+                return Err(RuntimeError::new(
+                    RuntimeStatus::Unsupported,
+                    "paged KV MXFP8 E5 requires the exact gfx1030 OCP E5M2 recipe".to_owned(),
+                ));
+            }
+            Ok((
+                sys::SLLM_TENSOR_DTYPE_F8_E5M2,
+                sys::SLLM_HIP_KV_ENCODING_MXFP8_E5_V1,
+                32,
+                sys::SLLM_TENSOR_DTYPE_U8,
+            ))
+        }
+        _ => Err(RuntimeError::new(
+            RuntimeStatus::Unsupported,
+            format!(
+                "paged KV adapter does not support {} yet",
+                descriptor.cache_encoding().canonical_name()
+            ),
+        )),
+    }
+}
+
+fn paged_static_scale_bits(descriptor: KvStateDescriptor) -> (u32, u32) {
+    descriptor
+        .static_fp8_scales()
+        .map(|(key, value)| (key.to_bits(), value.to_bits()))
+        .unwrap_or((0, 0))
+}
+
+/// Reserve enough physical IDs for one parent and one child to each diverge
+/// to their full logical capacity. The native paged table stores IDs as u32,
+/// so keep the strict `UINT32_MAX` rejection in the Rust adapter as well.
+fn paged_pool_capacities(
+    capacity_tokens: u64,
+    sliding_window: bool,
+) -> Result<(u64, u64), RuntimeError> {
+    let required_logical_blocks = capacity_tokens
+        .checked_add(u64::from(KV_PAGED_TOKEN_BLOCK_SIZE) - 1)
+        .ok_or_else(|| {
+            RuntimeError::local(
+                RuntimeStatus::MetadataOverflow,
+                "paged KV logical table capacity overflowed",
+            )
+        })?
+        / u64::from(KV_PAGED_TOKEN_BLOCK_SIZE);
+    // A sliding state publishes its nine-slot ring through the same logical
+    // table capacity field used by non-sliding states.  The ring has one spare
+    // slot beyond the 1024-token retention window, so a 1024-token descriptor
+    // still needs nine addressable table entries.
+    let logical_table_capacity = if sliding_window {
+        required_logical_blocks.max(KV_PAGED_RING_SLOT_COUNT as u64)
+    } else {
+        required_logical_blocks
     };
-    Ok(storage)
+    let max_physical_blocks = logical_table_capacity.checked_mul(2).ok_or_else(|| {
+        RuntimeError::local(
+            RuntimeStatus::MetadataOverflow,
+            "paged KV parent-child physical block capacity overflowed",
+        )
+    })?;
+    if max_physical_blocks >= u64::from(u32::MAX) {
+        return Err(RuntimeError::local(
+            RuntimeStatus::KvCapacityExceeded,
+            "paged KV parent-child physical block capacity exceeds the u32 ID domain",
+        ));
+    }
+    Ok((logical_table_capacity, max_physical_blocks))
 }
 
-const RDNA_CONTIGUOUS_LONG_KV_MIN_TOKENS: u64 = 65_536;
-
-fn selected_memory_kind_for_target(expected_target: Option<&str>, capacity_tokens: u64) -> u32 {
-    // Phase83: gfx1201 VMM growth can corrupt another live state's backing
-    // after request reuse. Keep the same GPU KV layout with resident storage.
-    if matches!(expected_target, Some("gfx942" | "gfx1201"))
-        || (expected_target == Some("gfx1030")
-            && capacity_tokens >= RDNA_CONTIGUOUS_LONG_KV_MIN_TOKENS)
-    {
-        sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
-    } else {
-        sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
-    }
-}
-
-fn selected_memory_kind(context: &Context, descriptor: KvStateDescriptor) -> u32 {
-    if descriptor.sliding_window().is_some() {
-        sys::SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
-    } else {
-        selected_memory_kind_for_target(context.expected_target(), descriptor.capacity())
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+enum KvStateStorageKind {
+    Legacy,
+    Paged,
 }
 
 struct KvStateInner {
@@ -167,6 +222,7 @@ struct KvStateInner {
     session_id: ExecutionSessionId,
     state_id: KvStateId,
     descriptor: KvStateDescriptor,
+    storage_kind: KvStateStorageKind,
     last_generation: AtomicU64,
 }
 
@@ -205,7 +261,7 @@ pub(crate) struct KvStateResource {
 }
 
 impl KvStateResource {
-    pub(crate) fn create(
+    pub(crate) fn create_paged(
         context: &Context,
         session_id: ExecutionSessionId,
         state_id: KvStateId,
@@ -214,32 +270,19 @@ impl KvStateResource {
         if descriptor.capacity() > sys::SLLM_HIP_KV_MAX_CAPACITY {
             return Err(RuntimeError::local(
                 RuntimeStatus::KvCapacityExceeded,
-                "KV capacity exceeds the bounded native contract",
+                "paged KV capacity exceeds the bounded native contract",
             ));
         }
         let context_raw = context.raw_handle()?;
-        let (dtype, encoding, block_size, scale_dtype) =
-            native_kv_storage(descriptor, context.expected_target())?;
-        let static_scales = descriptor.static_fp8_scales();
-        let mut reserved = [0_u32; 4];
-        if let Some((key, value)) = static_scales {
-            reserved[0] = key.to_bits();
-            reserved[1] = value.to_bits();
-        }
-        if let Some(window) = descriptor.sliding_window() {
-            reserved[2] = window as u32;
-            reserved[3] = (window >> 32) as u32;
-        }
-        let info = sys::sllm_kv_state_create_info_v2_t {
-            struct_size: size_of::<sys::sllm_kv_state_create_info_v2_t>() as u32,
+        let (dtype, encoding, quantization_block_size, scale_dtype) =
+            paged_native_storage(context, descriptor)?;
+        let (logical_table_capacity, max_physical_blocks) =
+            paged_pool_capacities(descriptor.capacity(), descriptor.sliding_window().is_some())?;
+        let (static_key_scale_bits, static_value_scale_bits) = paged_static_scale_bits(descriptor);
+        let info = sys::sllm_kv_state_paged_create_info_t {
+            struct_size: size_of::<sys::sllm_kv_state_paged_create_info_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            create_info_version: if descriptor.sliding_window().is_some() {
-                sys::SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION
-            } else if static_scales.is_some() {
-                sys::SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION
-            } else {
-                sys::SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION
-            },
+            create_info_version: sys::SLLM_HIP_KV_PAGED_CREATE_INFO_VERSION,
             reserved0: 0,
             session_id: session_id.raw(),
             layer_id: descriptor.layer_id(),
@@ -247,19 +290,26 @@ impl KvStateResource {
             capacity_tokens: descriptor.capacity(),
             head_count: descriptor.layout().heads() as u32,
             head_dim: descriptor.layout().head_dim() as u32,
-            memory_kind: selected_memory_kind(context, descriptor),
+            memory_kind: sys::SLLM_HIP_KV_MEMORY_KIND_PAGED,
             layout: sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR,
             dtype,
             encoding,
-            block_size,
             scale_dtype,
-            reserved,
+            quantization_block_size,
+            token_block_size: KV_PAGED_TOKEN_BLOCK_SIZE,
+            physical_layout_version: KV_PAGED_PHYSICAL_LAYOUT_VERSION,
+            logical_table_capacity,
+            max_physical_blocks,
+            sliding_window_tokens: descriptor.sliding_window().unwrap_or(0),
+            static_key_scale_bits,
+            static_value_scale_bits,
+            reserved: [0; 4],
         };
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
         let mut error_sink = sink(&mut error_buffer);
         let mut raw_state = std::ptr::null_mut();
         let raw = unsafe {
-            sys::sllm_kv_state_create_v2(
+            sys::sllm_kv_state_create_paged(
                 context_raw.as_ptr(),
                 &info,
                 &mut raw_state,
@@ -270,7 +320,7 @@ impl KvStateResource {
         let raw_state = NonNull::new(raw_state).ok_or_else(|| {
             RuntimeError::local(
                 RuntimeStatus::InternalError,
-                "native KV state create returned a null handle on success",
+                "native paged KV state create returned a null handle on success",
             )
         })?;
         let resource = Self {
@@ -280,6 +330,7 @@ impl KvStateResource {
                 session_id,
                 state_id,
                 descriptor,
+                storage_kind: KvStateStorageKind::Paged,
                 last_generation: AtomicU64::new(0),
             }),
         };
@@ -307,6 +358,644 @@ impl KvStateResource {
         })
     }
 
+    #[allow(dead_code)]
+    fn ensure_paged_storage(&self, operation: &str) -> Result<(), RuntimeError> {
+        if self.inner.storage_kind != KvStateStorageKind::Paged {
+            return Err(RuntimeError::new(
+                RuntimeStatus::Unsupported,
+                format!("legacy KV state does not support paged image {operation}"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Queries the additive Paged image ABI. This is deliberately separate
+    /// from the legacy image query so callers cannot reinterpret VMM fields as
+    /// Paged topology.
+    #[allow(dead_code)]
+    pub(crate) fn paged_image_query(
+        &self,
+    ) -> Result<sys::sllm_kv_paged_image_info_t, RuntimeError> {
+        self.ensure_paged_storage("query")?;
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut info = sys::sllm_kv_paged_image_info_t {
+            struct_size: size_of::<sys::sllm_kv_paged_image_info_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            image_version: sys::SLLM_HIP_KV_PAGED_IMAGE_VERSION,
+            flags: 0,
+            byte_order: sys::SLLM_HIP_KV_PAGED_IMAGE_ENDIAN_LITTLE,
+            session_id: 0,
+            layer_id: 0,
+            dtype: 0,
+            encoding: 0,
+            head_count: 0,
+            head_dim: 0,
+            layout: 0,
+            token_block_size: 0,
+            physical_layout_version: 0,
+            capacity_tokens: 0,
+            published_length: 0,
+            generation: 0,
+            retained_start: 0,
+            retained_length: 0,
+            sliding_window_tokens: 0,
+            logical_table_capacity: 0,
+            physical_block_count: 0,
+            plane_count: 0,
+            ring_slot_count: 0,
+            table_entry_width: 0,
+            reserved0: 0,
+            plane_block_stride: [0; 6],
+            plane_bytes: [0; 6],
+            static_key_scale_bits: 0,
+            static_value_scale_bits: 0,
+            reserved: [0; 8],
+        };
+        let status = unsafe {
+            sys::sllm_kv_state_paged_image_query(
+                self.raw_handle()?.as_ptr(),
+                &mut info,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)?;
+        self.validate_paged_image_info(&info)?;
+        Ok(info)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn paged_image_section_size(
+        &self,
+        section: u32,
+        plane: u32,
+    ) -> Result<u64, RuntimeError> {
+        self.ensure_paged_storage("section query")?;
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut size_bytes = 0_u64;
+        let status = unsafe {
+            sys::sllm_kv_state_paged_image_section_size(
+                self.raw_handle()?.as_ptr(),
+                section,
+                plane,
+                &mut size_bytes,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)?;
+        Ok(size_bytes)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn paged_image_export_chunk(
+        &self,
+        section: u32,
+        plane: u32,
+        byte_offset: u64,
+        destination: &mut [u8],
+    ) -> Result<(), RuntimeError> {
+        self.ensure_paged_storage("export")?;
+        if destination.is_empty() {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "Paged image export chunk must not be empty",
+            ));
+        }
+        let byte_length = u64::try_from(destination.len()).map_err(|_| {
+            RuntimeError::local(
+                RuntimeStatus::MetadataOverflow,
+                "Paged image export chunk length does not fit u64",
+            )
+        })?;
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let chunk = sys::sllm_kv_paged_image_chunk_t {
+            struct_size: size_of::<sys::sllm_kv_paged_image_chunk_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            image_version: sys::SLLM_HIP_KV_PAGED_IMAGE_VERSION,
+            section,
+            plane,
+            reserved0: 0,
+            byte_offset,
+            byte_length,
+            host_pointer: destination.as_mut_ptr().cast(),
+            host_capacity: byte_length,
+            reserved: [0; 4],
+        };
+        let status = unsafe {
+            sys::sllm_kv_state_paged_image_export(
+                self.raw_handle()?.as_ptr(),
+                &chunk,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn paged_image_import_chunk(
+        &self,
+        section: u32,
+        plane: u32,
+        byte_offset: u64,
+        source: &[u8],
+    ) -> Result<(), RuntimeError> {
+        self.ensure_paged_storage("import")?;
+        if source.is_empty() {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "Paged image import chunk must not be empty",
+            ));
+        }
+        let byte_length = u64::try_from(source.len()).map_err(|_| {
+            RuntimeError::local(
+                RuntimeStatus::MetadataOverflow,
+                "Paged image import chunk length does not fit u64",
+            )
+        })?;
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let chunk = sys::sllm_kv_paged_image_chunk_t {
+            struct_size: size_of::<sys::sllm_kv_paged_image_chunk_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            image_version: sys::SLLM_HIP_KV_PAGED_IMAGE_VERSION,
+            section,
+            plane,
+            reserved0: 0,
+            byte_offset,
+            byte_length,
+            host_pointer: source.as_ptr().cast_mut().cast(),
+            host_capacity: byte_length,
+            reserved: [0; 4],
+        };
+        let status = unsafe {
+            sys::sllm_kv_state_paged_image_import(
+                self.raw_handle()?.as_ptr(),
+                &chunk,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn paged_image_import_finalize(
+        &self,
+        info: &sys::sllm_kv_paged_image_info_t,
+    ) -> Result<(), RuntimeError> {
+        self.ensure_paged_storage("import finalize")?;
+        self.validate_paged_image_info(info)?;
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let status = unsafe {
+            sys::sllm_kv_state_paged_image_import_finalize(
+                self.raw_handle()?.as_ptr(),
+                info,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    #[allow(dead_code)]
+    fn validate_paged_image_info(
+        &self,
+        info: &sys::sllm_kv_paged_image_info_t,
+    ) -> Result<(), RuntimeError> {
+        let descriptor = self.inner.descriptor;
+        let observed_target = self
+            .inner
+            .context
+            .expected_target()
+            .map(logical_gcn_arch_name)
+            .unwrap_or("");
+        if !matches!(observed_target, "gfx1030" | "gfx1201") {
+            return Err(RuntimeError::new(
+                RuntimeStatus::Unsupported,
+                "Paged image requires exact gfx1030 or gfx1201 target".to_owned(),
+            ));
+        }
+        let (expected_dtype, expected_encoding, _, _) =
+            paged_native_storage(&self.inner.context, descriptor)?;
+        let expected_flags = (descriptor.sliding_window().is_some() as u32
+            * sys::SLLM_HIP_KV_PAGED_IMAGE_FLAG_SLIDING)
+            | (descriptor.static_fp8_scales().is_some() as u32
+                * sys::SLLM_HIP_KV_PAGED_IMAGE_FLAG_STATIC_SCALES);
+        let expected_planes = match descriptor.cache_encoding() {
+            KvCacheEncoding::Fp16 | KvCacheEncoding::Fp8E4M3FnStatic => 2,
+            KvCacheEncoding::Fp8E4M3Fn | KvCacheEncoding::Mxfp8E4 | KvCacheEncoding::Mxfp8E5 => 4,
+            KvCacheEncoding::Nvfp4 => 6,
+            KvCacheEncoding::Fp8E4M3Block16 | KvCacheEncoding::Fp8E5M2Block16 => 0,
+        };
+        if info.struct_size != size_of::<sys::sllm_kv_paged_image_info_t>() as u32
+            || info.abi_version != sys::SLLM_HIP_ABI_VERSION
+            || info.image_version != sys::SLLM_HIP_KV_PAGED_IMAGE_VERSION
+            || info.byte_order != sys::SLLM_HIP_KV_PAGED_IMAGE_ENDIAN_LITTLE
+            || info.flags != expected_flags
+            || info.session_id != self.inner.session_id.raw()
+            || info.layer_id != descriptor.layer_id()
+            || info.dtype != expected_dtype
+            || info.encoding != expected_encoding
+            || info.head_count != descriptor.layout().heads() as u32
+            || info.head_dim != descriptor.layout().head_dim() as u32
+            || info.layout != sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR
+            || info.token_block_size != KV_PAGED_IMAGE_TOKEN_BLOCK_SIZE
+            || info.physical_layout_version != KV_PAGED_PHYSICAL_LAYOUT_VERSION
+            || info.capacity_tokens != descriptor.capacity()
+            || info.published_length > info.capacity_tokens
+            || info.plane_count != expected_planes
+            || info.table_entry_width != sys::SLLM_HIP_KV_PAGED_IMAGE_TABLE_ENTRY_U32
+            || info.reserved0 != 0
+            || info.reserved.iter().any(|value| *value != 0)
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "native Paged image metadata does not match the descriptor",
+            ));
+        }
+        if descriptor.sliding_window().is_some() {
+            if info.ring_slot_count != KV_PAGED_RING_SLOT_COUNT as u32
+                || info.sliding_window_tokens != descriptor.sliding_window().unwrap_or(0)
+            {
+                return Err(RuntimeError::local(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    "native Paged image ring metadata does not match the descriptor",
+                ));
+            }
+        } else if info.ring_slot_count != 0 || info.sliding_window_tokens != 0 {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "non-sliding Paged image contains ring metadata",
+            ));
+        }
+        if descriptor
+            .static_fp8_scales()
+            .map(|(key, value)| (key.to_bits(), value.to_bits()))
+            != Some((info.static_key_scale_bits, info.static_value_scale_bits))
+            && descriptor.static_fp8_scales().is_some()
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "native Paged image static scales differ from the descriptor",
+            ));
+        }
+        if descriptor.static_fp8_scales().is_none()
+            && (info.static_key_scale_bits != 0 || info.static_value_scale_bits != 0)
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "native Paged image has unexpected static scales",
+            ));
+        }
+        for plane in expected_planes as usize..KV_PAGED_PLANE_COUNT {
+            if info.plane_block_stride[plane] != 0 || info.plane_bytes[plane] != 0 {
+                return Err(RuntimeError::local(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    "native Paged image has bytes for an absent plane",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn paged_image_metadata(
+        &self,
+        info: &sys::sllm_kv_paged_image_info_t,
+        logical_table_bytes: Option<&[u8]>,
+        ring_table_bytes: Option<&[u8]>,
+        ring_tag_bytes: Option<&[u8]>,
+    ) -> Result<KvPagedImageMetadataV1, RuntimeError> {
+        self.validate_paged_image_info(info)?;
+        let descriptor = self.inner.descriptor;
+        let topology = if descriptor.sliding_window().is_some() {
+            let table = ring_table_bytes.ok_or_else(|| {
+                RuntimeError::local(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    "Paged image is missing the sliding ring table",
+                )
+            })?;
+            let tags = ring_tag_bytes.ok_or_else(|| {
+                RuntimeError::local(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    "Paged image is missing the sliding ring tags",
+                )
+            })?;
+            if table.len() != KV_PAGED_RING_SLOT_COUNT * 4
+                || tags.len() != KV_PAGED_RING_SLOT_COUNT * 8
+            {
+                return Err(RuntimeError::local(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    "Paged image ring section size is invalid",
+                ));
+            }
+            let mut block_ids = [KV_PAGED_INVALID_BLOCK_ID; KV_PAGED_RING_SLOT_COUNT];
+            let mut absolute_tags = [KV_PAGED_INVALID_TAG; KV_PAGED_RING_SLOT_COUNT];
+            for slot in 0..KV_PAGED_RING_SLOT_COUNT {
+                let table_start = slot * 4;
+                let tag_start = slot * 8;
+                block_ids[slot] = u32::from_le_bytes(
+                    table[table_start..table_start + 4]
+                        .try_into()
+                        .expect("ring table width"),
+                );
+                absolute_tags[slot] = u64::from_le_bytes(
+                    tags[tag_start..tag_start + 8]
+                        .try_into()
+                        .expect("ring tag width"),
+                );
+            }
+            KvPagedImageTopologyV1::SlidingRing(KvPagedRingTableV1::new(block_ids, absolute_tags))
+        } else {
+            let table = logical_table_bytes.ok_or_else(|| {
+                RuntimeError::local(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    "Paged image is missing the logical table",
+                )
+            })?;
+            let expected_len = usize::try_from(info.logical_table_capacity)
+                .ok()
+                .and_then(|count| count.checked_mul(4))
+                .ok_or_else(|| {
+                    RuntimeError::local(
+                        RuntimeStatus::MetadataOverflow,
+                        "Paged image logical table size overflowed",
+                    )
+                })?;
+            if table.len() != expected_len {
+                return Err(RuntimeError::local(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    "Paged image logical table section size is invalid",
+                ));
+            }
+            let mut entries = Vec::with_capacity(info.logical_table_capacity as usize);
+            for chunk in table.chunks_exact(4) {
+                entries.push(u32::from_le_bytes(chunk.try_into().expect("table width")));
+            }
+            KvPagedImageTopologyV1::LogicalTable(entries)
+        };
+        KvPagedImageMetadataV1::new(
+            descriptor,
+            info.published_length,
+            info.generation,
+            info.retained_start,
+            info.sliding_window_tokens,
+            info.physical_block_count,
+            info.plane_block_stride,
+            topology,
+        )
+        .map_err(|error| {
+            RuntimeError::new(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                format!("Paged image topology failed core validation: {error}"),
+            )
+        })
+    }
+
+    #[allow(dead_code)]
+    fn paged_image_export_section(
+        &self,
+        section: u32,
+        plane: u32,
+        size: u64,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let size_usize = usize::try_from(size).map_err(|_| {
+            RuntimeError::local(
+                RuntimeStatus::MetadataOverflow,
+                "Paged image section exceeds host usize",
+            )
+        })?;
+        let mut output = vec![0_u8; size_usize];
+        let chunk_limit = usize::try_from(sys::SLLM_HIP_STATE_CHUNK_MAX_BYTES).map_err(|_| {
+            RuntimeError::local(
+                RuntimeStatus::MetadataOverflow,
+                "Paged image chunk limit exceeds host usize",
+            )
+        })?;
+        let mut offset = 0usize;
+        while offset < output.len() {
+            let end = offset.saturating_add(chunk_limit).min(output.len());
+            self.paged_image_export_chunk(section, plane, offset as u64, &mut output[offset..end])?;
+            offset = end;
+        }
+        Ok(output)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn export_paged_image_v2(&self) -> Result<ExecutionStateImageV2, RuntimeError> {
+        let info = self.paged_image_query()?;
+        let logical_table = if info.ring_slot_count == 0 {
+            Some(self.paged_image_export_section(
+                sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_LOGICAL_TABLE,
+                0,
+                self.paged_image_section_size(
+                    sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_LOGICAL_TABLE,
+                    0,
+                )?,
+            )?)
+        } else {
+            None
+        };
+        let ring_tags = if info.ring_slot_count != 0 {
+            Some(self.paged_image_export_section(
+                sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_RING_TAGS,
+                0,
+                self.paged_image_section_size(sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_RING_TAGS, 0)?,
+            )?)
+        } else {
+            None
+        };
+        let ring_table = if info.ring_slot_count != 0 {
+            Some(self.paged_image_export_section(
+                sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_RING_TABLE,
+                0,
+                self.paged_image_section_size(sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_RING_TABLE, 0)?,
+            )?)
+        } else {
+            None
+        };
+        let mut planes = std::array::from_fn(|_| Vec::new());
+        for (index, plane) in planes.iter_mut().enumerate() {
+            if index < info.plane_count as usize {
+                *plane = self.paged_image_export_section(
+                    sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_PLANE,
+                    (index + 1) as u32,
+                    self.paged_image_section_size(
+                        sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_PLANE,
+                        (index + 1) as u32,
+                    )?,
+                )?;
+            }
+        }
+        let paged_metadata = self.paged_image_metadata(
+            &info,
+            logical_table.as_deref(),
+            ring_table.as_deref(),
+            ring_tags.as_deref(),
+        )?;
+        ExecutionStateImageV2::new(
+            StateLayerMetadataV1 {
+                owner: StateOwnerKindV1::Kv,
+                layer_id: info.layer_id,
+                published_length: info.published_length,
+                generation: info.generation,
+                active_slot: None,
+            },
+            paged_metadata,
+            planes,
+        )
+        .map_err(|error| {
+            RuntimeError::new(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                format!("Paged V2 image validation failed: {error}"),
+            )
+        })
+    }
+
+    #[allow(dead_code)]
+    fn paged_image_import_section(
+        &self,
+        section: u32,
+        plane: u32,
+        bytes: &[u8],
+    ) -> Result<(), RuntimeError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let chunk_limit = usize::try_from(sys::SLLM_HIP_STATE_CHUNK_MAX_BYTES).map_err(|_| {
+            RuntimeError::local(
+                RuntimeStatus::MetadataOverflow,
+                "Paged image chunk limit exceeds host usize",
+            )
+        })?;
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let end = offset.saturating_add(chunk_limit).min(bytes.len());
+            self.paged_image_import_chunk(section, plane, offset as u64, &bytes[offset..end])?;
+            offset = end;
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn import_paged_image_v2(
+        &self,
+        image: &ExecutionStateImageV2,
+    ) -> Result<(), RuntimeError> {
+        let destination = self.paged_image_query()?;
+        if destination.published_length != 0 {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "Paged V2 image import requires an empty destination",
+            ));
+        }
+        let paged_metadata = image.paged_metadata();
+        if image.metadata().layer_id != self.inner.descriptor.layer_id()
+            || paged_metadata.descriptor() != self.inner.descriptor
+            || paged_metadata.descriptor().layer_id() != destination.layer_id
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "Paged V2 image descriptor does not match the destination",
+            ));
+        }
+        let mut info = destination;
+        let descriptor = self.inner.descriptor;
+        info.flags = (u32::from(descriptor.sliding_window().is_some())
+            * sys::SLLM_HIP_KV_PAGED_IMAGE_FLAG_SLIDING)
+            | (u32::from(descriptor.static_fp8_scales().is_some())
+                * sys::SLLM_HIP_KV_PAGED_IMAGE_FLAG_STATIC_SCALES);
+        info.published_length = paged_metadata.observed_length();
+        info.generation = paged_metadata.generation();
+        info.retained_start = paged_metadata.retained_start();
+        info.retained_length = info.published_length - info.retained_start;
+        info.sliding_window_tokens = paged_metadata.sliding_window();
+        info.physical_block_count = paged_metadata.physical_block_capacity();
+        info.plane_block_stride = paged_metadata.plane_strides();
+        info.plane_bytes = std::array::from_fn(|index| image.planes()[index].len() as u64);
+        info.static_key_scale_bits = descriptor
+            .static_fp8_scales()
+            .map_or(0, |(key, _)| key.to_bits());
+        info.static_value_scale_bits = descriptor
+            .static_fp8_scales()
+            .map_or(0, |(_, value)| value.to_bits());
+        match paged_metadata.topology() {
+            KvPagedImageTopologyV1::LogicalTable(table) => {
+                let mut bytes = Vec::with_capacity(table.len() * 4);
+                for entry in table {
+                    bytes.extend_from_slice(&entry.to_le_bytes());
+                }
+                info.ring_slot_count = 0;
+                self.paged_image_import_section(
+                    sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_LOGICAL_TABLE,
+                    0,
+                    &bytes,
+                )?;
+            }
+            KvPagedImageTopologyV1::SlidingRing(ring) => {
+                let logical_capacity = descriptor
+                    .capacity()
+                    .checked_add(u64::from(KV_PAGED_TOKEN_BLOCK_SIZE) - 1)
+                    .ok_or_else(|| {
+                        RuntimeError::local(
+                            RuntimeStatus::MetadataOverflow,
+                            "Paged sliding logical table capacity overflowed",
+                        )
+                    })?
+                    / u64::from(KV_PAGED_TOKEN_BLOCK_SIZE);
+                let logical_capacity = logical_capacity.max(KV_PAGED_RING_SLOT_COUNT as u64);
+                let logical_capacity = usize::try_from(logical_capacity).map_err(|_| {
+                    RuntimeError::local(
+                        RuntimeStatus::MetadataOverflow,
+                        "Paged sliding logical table capacity exceeds host usize",
+                    )
+                })?;
+                let mut logical = vec![KV_PAGED_INVALID_BLOCK_ID; logical_capacity];
+                logical[..KV_PAGED_RING_SLOT_COUNT].copy_from_slice(&ring.block_ids());
+                let mut logical_bytes = Vec::with_capacity(logical.len() * 4);
+                for entry in logical {
+                    logical_bytes.extend_from_slice(&entry.to_le_bytes());
+                }
+                let mut table = Vec::with_capacity(KV_PAGED_RING_SLOT_COUNT * 4);
+                let mut tags = Vec::with_capacity(KV_PAGED_RING_SLOT_COUNT * 8);
+                for entry in ring.block_ids() {
+                    table.extend_from_slice(&entry.to_le_bytes());
+                }
+                for tag in ring.absolute_tags() {
+                    tags.extend_from_slice(&tag.to_le_bytes());
+                }
+                info.ring_slot_count = KV_PAGED_RING_SLOT_COUNT as u32;
+                self.paged_image_import_section(
+                    sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_LOGICAL_TABLE,
+                    0,
+                    &logical_bytes,
+                )?;
+                self.paged_image_import_section(
+                    sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_RING_TABLE,
+                    0,
+                    &table,
+                )?;
+                self.paged_image_import_section(
+                    sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_RING_TAGS,
+                    0,
+                    &tags,
+                )?;
+            }
+        }
+        for (index, plane) in image.planes().iter().enumerate() {
+            self.paged_image_import_section(
+                sys::SLLM_HIP_KV_PAGED_IMAGE_SECTION_PLANE,
+                (index + 1) as u32,
+                plane,
+            )?;
+        }
+        self.paged_image_import_finalize(&info)
+    }
+
     /// Forks the native state while preserving exact encoded planes.  Layout,
     /// encoding, and scales must match; capacity may grow for a reused prefix.
     pub(crate) fn fork(
@@ -314,6 +1003,22 @@ impl KvStateResource {
         state_id: KvStateId,
         descriptor: KvStateDescriptor,
     ) -> Result<(Self, StateForkAuditV1), RuntimeError> {
+        self.fork_paged(state_id, descriptor)
+    }
+
+    /// Fork a paged state through the additive ABI. The parent pool and its
+    /// physical blocks are shared; legacy VMM page accounting is never used.
+    fn fork_paged(
+        &self,
+        state_id: KvStateId,
+        descriptor: KvStateDescriptor,
+    ) -> Result<(Self, StateForkAuditV1), RuntimeError> {
+        if self.inner.storage_kind != KvStateStorageKind::Paged {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "legacy KV state must use the legacy fork adapter",
+            ));
+        }
         if descriptor.layer_id() != self.inner.descriptor.layer_id()
             || descriptor.layout() != self.inner.descriptor.layout()
             || descriptor.cache_encoding() != self.inner.descriptor.cache_encoding()
@@ -325,49 +1030,18 @@ impl KvStateResource {
         {
             return Err(RuntimeError::local(
                 RuntimeStatus::InvalidKvStateDescriptor,
-                "native KV fork requires an identical destination descriptor",
+                "native paged KV fork requires an identical destination recipe",
             ));
         }
-        let mut error_buffer = [0_u8; ERROR_CAPACITY];
-        let mut error_sink = sink(&mut error_buffer);
-        let mut info = sys::sllm_state_fork_info_t {
-            struct_size: size_of::<sys::sllm_state_fork_info_t>() as u32,
+        let (dtype, encoding, quantization_block_size, scale_dtype) =
+            paged_native_storage(&self.inner.context, descriptor)?;
+        let (logical_table_capacity, max_physical_blocks) =
+            paged_pool_capacities(descriptor.capacity(), descriptor.sliding_window().is_some())?;
+        let (static_key_scale_bits, static_value_scale_bits) = paged_static_scale_bits(descriptor);
+        let destination_info = sys::sllm_kv_state_paged_create_info_t {
+            struct_size: size_of::<sys::sllm_kv_state_paged_create_info_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
-            mode: 0,
-            source_state_identity: 0,
-            child_state_identity: 0,
-            source_owned_bytes: 0,
-            child_owned_bytes: 0,
-            copied_bytes: 0,
-            shared_bytes: 0,
-            published_length: 0,
-            page_bytes: 0,
-            reserved: [0; 4],
-        };
-        let mut raw_child = std::ptr::null_mut();
-        let (dtype, encoding, block_size, scale_dtype) =
-            native_kv_storage(descriptor, self.inner.context.expected_target())?;
-        let static_scales = descriptor.static_fp8_scales();
-        let mut reserved = [0_u32; 4];
-        if let Some((key, value)) = static_scales {
-            reserved[0] = key.to_bits();
-            reserved[1] = value.to_bits();
-        }
-        if let Some(window) = descriptor.sliding_window() {
-            reserved[2] = window as u32;
-            reserved[3] = (window >> 32) as u32;
-        }
-        let destination_info = sys::sllm_kv_state_create_info_v2_t {
-            struct_size: size_of::<sys::sllm_kv_state_create_info_v2_t>() as u32,
-            abi_version: sys::SLLM_HIP_ABI_VERSION,
-            create_info_version: if descriptor.sliding_window().is_some() {
-                sys::SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION
-            } else if static_scales.is_some() {
-                sys::SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION
-            } else {
-                sys::SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION
-            },
+            create_info_version: sys::SLLM_HIP_KV_PAGED_CREATE_INFO_VERSION,
             reserved0: 0,
             session_id: self.inner.session_id.raw(),
             layer_id: descriptor.layer_id(),
@@ -375,16 +1049,27 @@ impl KvStateResource {
             capacity_tokens: descriptor.capacity(),
             head_count: descriptor.layout().heads() as u32,
             head_dim: descriptor.layout().head_dim() as u32,
-            memory_kind: selected_memory_kind(&self.inner.context, descriptor),
+            memory_kind: sys::SLLM_HIP_KV_MEMORY_KIND_PAGED,
             layout: sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR,
             dtype,
             encoding,
-            block_size,
             scale_dtype,
-            reserved,
+            quantization_block_size,
+            token_block_size: KV_PAGED_TOKEN_BLOCK_SIZE,
+            physical_layout_version: KV_PAGED_PHYSICAL_LAYOUT_VERSION,
+            logical_table_capacity,
+            max_physical_blocks,
+            sliding_window_tokens: descriptor.sliding_window().unwrap_or(0),
+            static_key_scale_bits,
+            static_value_scale_bits,
+            reserved: [0; 4],
         };
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut info = empty_paged_fork_info();
+        let mut raw_child = std::ptr::null_mut();
         let status = unsafe {
-            sys::sllm_kv_state_fork(
+            sys::sllm_kv_state_fork_paged(
                 self.raw_handle()?.as_ptr(),
                 &destination_info,
                 &mut raw_child,
@@ -396,33 +1081,36 @@ impl KvStateResource {
         let raw_child = NonNull::new(raw_child).ok_or_else(|| {
             RuntimeError::local(
                 RuntimeStatus::InternalError,
-                "native KV fork returned a null child handle on success",
+                "native paged KV fork returned a null child handle on success",
             )
         })?;
-        let mode = match info.mode {
-            sys::SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES => {
-                StateForkModeV1::SharedReadOnlyPages
-            }
-            sys::SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY => StateForkModeV1::DeviceCopy,
-            _ => {
-                let mut child_handle = raw_child.as_ptr();
-                let _ = unsafe { sys::sllm_kv_state_release(&mut child_handle, &mut error_sink) };
-                return Err(RuntimeError::local(
-                    RuntimeStatus::InvalidKvStateDescriptor,
-                    "native KV fork returned an unknown mode",
-                ));
-            }
-        };
-        let shared_pages = info
-            .page_bytes
-            .checked_sub(1)
-            .and_then(|_| info.shared_bytes.checked_add(info.page_bytes - 1))
-            .map(|bytes| bytes / info.page_bytes.max(1))
-            .unwrap_or(0);
-        let audit = StateForkAuditV1::new(
-            mode,
+        let (expected_source_blocks, _) = paged_pool_capacities(
+            self.inner.descriptor.capacity(),
+            self.inner.descriptor.sliding_window().is_some(),
+        )?;
+        let valid_info = info.info_version == sys::SLLM_HIP_KV_PAGED_STATE_FORK_INFO_VERSION
+            && info.token_block_size == KV_PAGED_TOKEN_BLOCK_SIZE
+            && info.physical_layout_version == KV_PAGED_PHYSICAL_LAYOUT_VERSION
+            && info.source_logical_table_capacity == expected_source_blocks
+            && info.child_logical_table_capacity == logical_table_capacity
+            && info.source_physical_blocks == info.shared_physical_blocks
+            && info.child_physical_blocks == info.shared_physical_blocks
+            && info.copied_physical_blocks == 0
+            && info.shared_physical_blocks != 0
+            && info.published_length != 0
+            && info.source_physical_blocks <= expected_source_blocks;
+        if !valid_info {
+            let mut child_handle = raw_child.as_ptr();
+            let _ = unsafe { sys::sllm_kv_state_release(&mut child_handle, &mut error_sink) };
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "native paged KV fork returned inconsistent block accounting",
+            ));
+        }
+        let audit = StateForkAuditV1::new_paged(
             info.published_length,
-            shared_pages,
+            info.shared_physical_blocks,
+            info.shared_bytes,
             info.copied_bytes,
             info.child_owned_bytes,
         )
@@ -431,7 +1119,7 @@ impl KvStateResource {
             let _ = unsafe { sys::sllm_kv_state_release(&mut child_handle, &mut error_sink) };
             RuntimeError::new(
                 RuntimeStatus::InvalidKvStateDescriptor,
-                format!("native KV fork audit failed core validation: {error}"),
+                format!("native paged KV fork audit failed core validation: {error}"),
             )
         })?;
         let resource = Self {
@@ -441,6 +1129,7 @@ impl KvStateResource {
                 session_id: self.inner.session_id,
                 state_id,
                 descriptor,
+                storage_kind: KvStateStorageKind::Paged,
                 last_generation: AtomicU64::new(self.inner.last_generation.load(Ordering::Acquire)),
             }),
         };
@@ -460,78 +1149,83 @@ impl KvStateResource {
     }
 
     /// Re-query post-COW ownership after a child append. The native query is
-    /// authoritative for shared-page and destination-owned byte accounting.
+    /// authoritative for shared-page or shared-block and destination-owned
+    /// byte accounting.
     pub(crate) fn fork_query(&self) -> Result<StateForkAuditV1, RuntimeError> {
+        self.fork_query_paged()
+    }
+
+    fn fork_query_paged(&self) -> Result<StateForkAuditV1, RuntimeError> {
+        if self.inner.storage_kind != KvStateStorageKind::Paged {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "legacy KV state must use the legacy fork query adapter",
+            ));
+        }
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
         let mut error_sink = sink(&mut error_buffer);
-        let mut info = sys::sllm_state_fork_info_t {
-            struct_size: size_of::<sys::sllm_state_fork_info_t>() as u32,
-            abi_version: sys::SLLM_HIP_ABI_VERSION,
-            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
-            mode: 0,
-            source_state_identity: 0,
-            child_state_identity: 0,
-            source_owned_bytes: 0,
-            child_owned_bytes: 0,
-            copied_bytes: 0,
-            shared_bytes: 0,
-            published_length: 0,
-            page_bytes: 0,
-            reserved: [0; 4],
-        };
+        let mut info = empty_paged_fork_info();
         let status = unsafe {
-            sys::sllm_kv_state_fork_query(self.raw_handle()?.as_ptr(), &mut info, &mut error_sink)
+            sys::sllm_kv_state_fork_query_paged(
+                self.raw_handle()?.as_ptr(),
+                &mut info,
+                &mut error_sink,
+            )
         };
         ensure_ok(status, &error_buffer, error_sink.message_length)?;
-        let mode = match info.mode {
-            sys::SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES => {
-                StateForkModeV1::SharedReadOnlyPages
-            }
-            sys::SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY => StateForkModeV1::DeviceCopy,
-            _ => {
-                return Err(RuntimeError::local(
-                    RuntimeStatus::InvalidKvStateDescriptor,
-                    "native KV fork query returned an unknown mode",
-                ));
-            }
-        };
-        let shared_pages = if info.page_bytes == 0 {
-            0
-        } else {
-            info.shared_bytes
-                .saturating_add(info.page_bytes - 1)
-                .checked_div(info.page_bytes)
-                .unwrap_or(0)
-        };
-        StateForkAuditV1::new(
-            mode,
+        if info.info_version != sys::SLLM_HIP_KV_PAGED_STATE_FORK_INFO_VERSION
+            || info.token_block_size != KV_PAGED_TOKEN_BLOCK_SIZE
+            || info.physical_layout_version != KV_PAGED_PHYSICAL_LAYOUT_VERSION
+            || info.source_state_identity != info.child_state_identity
+            || info.source_logical_table_capacity != info.child_logical_table_capacity
+            || info.source_physical_blocks != info.child_physical_blocks
+            || info.shared_physical_blocks > info.child_physical_blocks
+            || info.shared_bytes.checked_add(info.child_owned_bytes)
+                != Some(info.source_owned_bytes)
+            || info.published_length == 0
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "native paged KV fork query returned inconsistent block accounting",
+            ));
+        }
+        StateForkAuditV1::new_paged(
             info.published_length,
-            shared_pages,
+            info.shared_physical_blocks,
+            info.shared_bytes,
             info.copied_bytes,
             info.child_owned_bytes,
         )
         .map_err(|error| {
             RuntimeError::new(
                 RuntimeStatus::InvalidKvStateDescriptor,
-                format!("native KV fork query audit failed core validation: {error}"),
+                format!("native paged KV fork query audit failed core validation: {error}"),
             )
         })
     }
 
     pub(crate) fn snapshot(&self) -> Result<KvStateSnapshot, RuntimeError> {
-        // Metadata snapshots do not need a live native view.  The state query
-        // takes the same registry/accounting locks and reports the same
-        // published metadata, while avoiding a view handle allocation and
-        // release on every transition.  Keep NativeKvSnapshotOwner for
-        // readback, where its live view is required by the evidence ABI.
+        self.paged_snapshot()
+    }
+
+    /// Queries paged-pool metadata through the additive ABI. Legacy VMM view
+    /// fields are never read for this path.
+    pub(crate) fn paged_snapshot(&self) -> Result<KvStateSnapshot, RuntimeError> {
+        if self.inner.storage_kind != KvStateStorageKind::Paged {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "legacy KV state must use the legacy snapshot adapter",
+            ));
+        }
         let state_raw = self.raw_handle()?;
-        let mut info = empty_view_info();
+        let mut info = empty_paged_view_info();
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
         let mut error_sink = sink(&mut error_buffer);
-        let status =
-            unsafe { sys::sllm_kv_state_query(state_raw.as_ptr(), &mut info, &mut error_sink) };
+        let status = unsafe {
+            sys::sllm_kv_state_query_paged(state_raw.as_ptr(), &mut info, &mut error_sink)
+        };
         ensure_ok(status, &error_buffer, error_sink.message_length)?;
-        validate_view_info(
+        validate_paged_view_info(
             &info,
             &self.inner.context,
             self.inner.raw,
@@ -542,64 +1236,40 @@ impl KvStateResource {
         if info.generation < previous {
             return Err(RuntimeError::local(
                 RuntimeStatus::InvalidKvStateDescriptor,
-                "native KV snapshot generation moved backwards",
+                "native paged KV snapshot generation moved backwards",
             ));
         }
         self.inner
             .last_generation
             .store(info.generation, Ordering::Release);
-        let memory_kind = match info.memory_kind {
-            sys::SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS => KvMemoryKind::VirtualContiguous,
-            sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT => KvMemoryKind::ContiguousResident,
-            _ => {
-                return Err(RuntimeError::local(
-                    RuntimeStatus::InvalidKvStateDescriptor,
-                    "native KV memory provider is unknown",
-                ));
-            }
-        };
-        let retained_start = u64::from(info.reserved[2]) | (u64::from(info.reserved[3]) << 32);
-        let retained_length = info.observed_length.saturating_sub(retained_start);
-        let physical_memory = if self.inner.descriptor.sliding_window().is_some() {
-            sllm_core::KvPhysicalMemorySnapshot::new_with_retention(
-                memory_kind,
-                self.inner.descriptor.capacity(),
-                info.observed_length,
-                info.physical_page_bytes,
-                info.tokens_per_page,
-                info.mapped_token_capacity,
-                info.committed_bytes_per_plane,
-                retained_start,
-                retained_length,
-            )
-        } else {
-            sllm_core::KvPhysicalMemorySnapshot::new_with_kind(
-                memory_kind,
-                self.inner.descriptor.capacity(),
-                info.observed_length,
-                info.physical_page_bytes,
-                info.tokens_per_page,
-                info.mapped_token_capacity,
-                info.committed_bytes_per_plane,
-            )
-        }
-        .map_err(|error| {
-            RuntimeError::new(
-                RuntimeStatus::InvalidKvStateDescriptor,
-                format!("native KV physical-memory metadata failed core validation: {error}"),
-            )
-        })?;
-        KvStateSnapshot::new_with_physical_memory(
-            self.inner.session_id,
-            self.inner.state_id,
-            self.inner.descriptor,
+        let physical = KvPagedPhysicalMemorySnapshot::new(
+            info.capacity_tokens,
             info.observed_length,
-            physical_memory,
+            info.token_block_size,
+            info.physical_layout_version,
+            info.logical_table_capacity,
+            info.max_physical_blocks,
+            info.allocated_physical_blocks,
+            info.committed_bytes_per_plane,
+            info.committed_bytes_total,
         )
         .map_err(|error| {
             RuntimeError::new(
                 RuntimeStatus::InvalidKvStateDescriptor,
-                format!("native KV snapshot failed core validation: {error}"),
+                format!("native paged KV physical metadata failed core validation: {error}"),
+            )
+        })?;
+        KvStateSnapshot::new_with_paged_physical_memory(
+            self.inner.session_id,
+            self.inner.state_id,
+            self.inner.descriptor,
+            info.observed_length,
+            physical,
+        )
+        .map_err(|error| {
+            RuntimeError::new(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                format!("native paged KV snapshot failed core validation: {error}"),
             )
         })
     }
@@ -622,164 +1292,16 @@ impl KvStateResource {
         ensure_ok(status, &error_buffer, error_sink.message_length)
     }
 
-    pub(crate) fn export_chunk(
-        &self,
-        plane: u32,
-        byte_offset: u64,
-        destination: &mut [u8],
-        published_length: u64,
-    ) -> Result<(), RuntimeError> {
-        if destination.is_empty() {
-            return Err(RuntimeError::local(
-                RuntimeStatus::InvalidArgument,
-                "KV export chunk must not be empty",
-            ));
-        }
-        let mut error_buffer = [0_u8; ERROR_CAPACITY];
-        let mut error_sink = sink(&mut error_buffer);
-        let sliding_window = self.inner.descriptor.sliding_window();
-        let mut reserved = [0_u32; 4];
-        if sliding_window.is_some() {
-            reserved[0] = published_length as u32;
-            reserved[1] = (published_length >> 32) as u32;
-        }
-        let chunk = sys::sllm_state_chunk_t {
-            struct_size: size_of::<sys::sllm_state_chunk_t>() as u32,
-            abi_version: sys::SLLM_HIP_ABI_VERSION,
-            info_version: if sliding_window.is_some() {
-                sys::SLLM_HIP_STATE_IMAGE_SLIDING_VERSION
-            } else {
-                sys::SLLM_HIP_STATE_FORK_INFO_VERSION
-            },
-            plane,
-            reserved0: sliding_window.unwrap_or(0) as u32,
-            reserved1: (sliding_window.unwrap_or(0) >> 32) as u32,
-            byte_offset,
-            byte_length: destination.len() as u64,
-            host_pointer: destination.as_mut_ptr().cast(),
-            host_capacity: destination.len() as u64,
-            reserved,
-        };
-        let status = unsafe {
-            sys::sllm_kv_state_export(self.raw_handle()?.as_ptr(), &chunk, &mut error_sink)
-        };
-        ensure_ok(status, &error_buffer, error_sink.message_length)
-    }
-
-    pub(crate) fn import_chunk(
-        &self,
-        plane: u32,
-        byte_offset: u64,
-        source: &[u8],
-        published_length: u64,
-    ) -> Result<(), RuntimeError> {
-        if source.is_empty() {
-            return Err(RuntimeError::local(
-                RuntimeStatus::InvalidArgument,
-                "KV import chunk must not be empty",
-            ));
-        }
-        let mut error_buffer = [0_u8; ERROR_CAPACITY];
-        let mut error_sink = sink(&mut error_buffer);
-        let sliding_window = self.inner.descriptor.sliding_window();
-        let mut reserved = [0_u32; 4];
-        if sliding_window.is_some() {
-            reserved[0] = published_length as u32;
-            reserved[1] = (published_length >> 32) as u32;
-        }
-        let chunk = sys::sllm_state_chunk_t {
-            struct_size: size_of::<sys::sllm_state_chunk_t>() as u32,
-            abi_version: sys::SLLM_HIP_ABI_VERSION,
-            info_version: if sliding_window.is_some() {
-                sys::SLLM_HIP_STATE_IMAGE_SLIDING_VERSION
-            } else {
-                sys::SLLM_HIP_STATE_FORK_INFO_VERSION
-            },
-            plane,
-            reserved0: sliding_window.unwrap_or(0) as u32,
-            reserved1: (sliding_window.unwrap_or(0) >> 32) as u32,
-            byte_offset,
-            byte_length: source.len() as u64,
-            host_pointer: source.as_ptr().cast_mut().cast(),
-            host_capacity: source.len() as u64,
-            reserved,
-        };
-        let status = unsafe {
-            sys::sllm_kv_state_import(self.raw_handle()?.as_ptr(), &chunk, &mut error_sink)
-        };
-        ensure_ok(status, &error_buffer, error_sink.message_length)
-    }
-
-    pub(crate) fn image_query(&self) -> Result<sys::sllm_state_image_info_t, RuntimeError> {
-        let mut error_buffer = [0_u8; ERROR_CAPACITY];
-        let mut error_sink = sink(&mut error_buffer);
-        let mut info = sys::sllm_state_image_info_t {
-            struct_size: size_of::<sys::sllm_state_image_info_t>() as u32,
-            abi_version: sys::SLLM_HIP_ABI_VERSION,
-            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
-            reserved0: 0,
-            session_id: 0,
-            layer_id: 0,
-            dtype: 0,
-            encoding: 0,
-            active_slot: 0,
-            capacity_tokens: 0,
-            published_length: 0,
-            generation: 0,
-            plane_count: 0,
-            reserved: [0; 7],
-        };
-        let status = unsafe {
-            sys::sllm_kv_state_image_query(self.raw_handle()?.as_ptr(), &mut info, &mut error_sink)
-        };
-        ensure_ok(status, &error_buffer, error_sink.message_length)?;
-        Ok(info)
-    }
-
-    pub(crate) fn image_plane_size(&self, plane: u32) -> Result<u64, RuntimeError> {
-        let mut error_buffer = [0_u8; ERROR_CAPACITY];
-        let mut error_sink = sink(&mut error_buffer);
-        let mut size_bytes = 0_u64;
-        let status = unsafe {
-            sys::sllm_kv_state_image_plane_size(
-                self.raw_handle()?.as_ptr(),
-                plane,
-                &mut size_bytes,
-                &mut error_sink,
-            )
-        };
-        ensure_ok(status, &error_buffer, error_sink.message_length)?;
-        Ok(size_bytes)
-    }
-
-    pub(crate) fn import_finalize(
-        &self,
-        info: &sys::sllm_state_image_info_t,
-    ) -> Result<(), RuntimeError> {
-        let mut error_buffer = [0_u8; ERROR_CAPACITY];
-        let mut error_sink = sink(&mut error_buffer);
-        let status = unsafe {
-            sys::sllm_kv_state_import_finalize(self.raw_handle()?.as_ptr(), info, &mut error_sink)
-        };
-        ensure_ok(status, &error_buffer, error_sink.message_length)
-    }
-
     pub(crate) fn readback(
         &self,
-        plane: u32,
-        byte_offset: u64,
-        destination: &mut [u8],
+        _plane: u32,
+        _byte_offset: u64,
+        _destination: &mut [u8],
     ) -> Result<(), RuntimeError> {
-        let view = NativeKvSnapshotOwner::create(self)?;
-        let info = view.query()?;
-        validate_view_info(
-            &info,
-            &self.inner.context,
-            self.inner.raw,
-            self.inner.session_id,
-            self.inner.descriptor,
-        )?;
-        view.readback(plane, byte_offset, destination)
+        Err(RuntimeError::new(
+            RuntimeStatus::Unsupported,
+            "legacy KV readback is retired; Paged KV has no V1 view adapter".to_owned(),
+        ))
     }
 
     pub(crate) fn append(
@@ -854,13 +1376,23 @@ impl KvStateResource {
             terminal: false,
             canceled: false,
         };
-        let evidence = match validate_append_info(
-            &append_info,
-            &self.inner.context,
-            request,
-            self.inner.descriptor,
-            capture_projected,
-        ) {
+        let evidence = match if self.inner.storage_kind == KvStateStorageKind::Paged {
+            validate_paged_append_info(
+                &append_info,
+                &self.inner.context,
+                request,
+                self.inner.descriptor,
+                capture_projected,
+            )
+        } else {
+            validate_append_info(
+                &append_info,
+                &self.inner.context,
+                request,
+                self.inner.descriptor,
+                capture_projected,
+            )
+        } {
             Ok(evidence) => evidence,
             Err(error) => {
                 let mut completion = completion;
@@ -960,9 +1492,10 @@ impl KvStateResource {
             state: self.clone(),
             terminal: false,
         };
-        let evidence = match validate_causal_attention_info(
+        let evidence = match validate_attention_info_for_storage(
             &dispatch_info,
             &self.inner.context,
+            self.inner.storage_kind,
             start_position,
             expected_kv_length,
             self.inner.descriptor,
@@ -1089,9 +1622,10 @@ impl KvStateResource {
             state: self.clone(),
             terminal: false,
         };
-        let evidence = match validate_causal_attention_info(
+        let evidence = match validate_attention_info_for_storage(
             &dispatch_info,
             &self.inner.context,
+            self.inner.storage_kind,
             start_position,
             expected_kv_length,
             self.inner.descriptor,
@@ -1124,123 +1658,6 @@ pub(crate) fn resource_for_evidence(session_id: u64, state_id: u64) -> Option<Kv
         .get(&(session_id, state_id))
         .and_then(Weak::upgrade)
         .map(|inner| KvStateResource { inner })
-}
-
-/// Direct native state owner. It is intentionally not Send or Sync.
-#[derive(Clone)]
-pub(crate) struct NativeKvStateOwner {
-    _resource: KvStateResource,
-    _not_send_sync: PhantomData<Rc<()>>,
-}
-
-impl NativeKvStateOwner {
-    pub(crate) fn new(resource: KvStateResource) -> Self {
-        Self {
-            _resource: resource,
-            _not_send_sync: PhantomData,
-        }
-    }
-}
-
-struct NativeKvSnapshotOwner {
-    raw: Option<NonNull<sys::sllm_kv_view_t>>,
-    context: Context,
-    _state: NativeKvStateOwner,
-    _not_send_sync: PhantomData<Rc<()>>,
-}
-
-impl NativeKvSnapshotOwner {
-    fn create(state: &KvStateResource) -> Result<Self, RuntimeError> {
-        let state_raw = state.raw_handle()?;
-        let mut error_buffer = [0_u8; ERROR_CAPACITY];
-        let mut error_sink = sink(&mut error_buffer);
-        let mut raw_view = std::ptr::null_mut();
-        let raw = unsafe {
-            sys::sllm_kv_state_snapshot(state_raw.as_ptr(), &mut raw_view, &mut error_sink)
-        };
-        ensure_ok(raw, &error_buffer, error_sink.message_length)?;
-        let raw_view = NonNull::new(raw_view).ok_or_else(|| {
-            RuntimeError::local(
-                RuntimeStatus::InternalError,
-                "native KV snapshot returned a null view on success",
-            )
-        })?;
-        Ok(Self {
-            raw: Some(raw_view),
-            context: state.inner.context.clone(),
-            _state: NativeKvStateOwner::new(state.clone()),
-            _not_send_sync: PhantomData,
-        })
-    }
-
-    fn query(&self) -> Result<sys::sllm_kv_view_info_t, RuntimeError> {
-        let raw = self.raw.ok_or_else(|| {
-            RuntimeError::local(
-                RuntimeStatus::InvalidHandle,
-                "KV snapshot view was released",
-            )
-        })?;
-        let mut info = empty_view_info();
-        let mut error_buffer = [0_u8; ERROR_CAPACITY];
-        let mut error_sink = sink(&mut error_buffer);
-        let status = unsafe { sys::sllm_kv_view_query(raw.as_ptr(), &mut info, &mut error_sink) };
-        ensure_ok(status, &error_buffer, error_sink.message_length)?;
-        Ok(info)
-    }
-
-    fn readback(
-        &self,
-        plane: u32,
-        byte_offset: u64,
-        destination: &mut [u8],
-    ) -> Result<(), RuntimeError> {
-        if destination.is_empty() {
-            return Err(RuntimeError::local(
-                RuntimeStatus::InvalidArgument,
-                "KV evidence readback destination is empty",
-            ));
-        }
-        let raw = self.raw.ok_or_else(|| {
-            RuntimeError::local(
-                RuntimeStatus::InvalidHandle,
-                "KV snapshot view was released",
-            )
-        })?;
-        let byte_length = u64::try_from(destination.len()).map_err(|_| {
-            RuntimeError::local(
-                RuntimeStatus::MetadataOverflow,
-                "KV evidence readback destination is too large",
-            )
-        })?;
-        let request = sys::evidence::sllm_hip_kv_readback_request_t {
-            struct_size: size_of::<sys::evidence::sllm_hip_kv_readback_request_t>() as u32,
-            abi_version: sys::evidence::SLLM_HIP_KV_EVIDENCE_ABI_VERSION,
-            view: raw.as_ptr(),
-            plane,
-            reserved0: 0,
-            byte_offset,
-            byte_length,
-            host_capacity: byte_length,
-            host_output: destination.as_mut_ptr(),
-            reserved: [0; 4],
-        };
-        let mut error_buffer = [0_u8; ERROR_CAPACITY];
-        let mut error_sink = sink(&mut error_buffer);
-        let status = unsafe { sys::evidence::sllm_hip_kv_view_readback(&request, &mut error_sink) };
-        ensure_ok(status, &error_buffer, error_sink.message_length)
-    }
-}
-
-impl Drop for NativeKvSnapshotOwner {
-    fn drop(&mut self) {
-        let Some(raw) = self.raw.take() else {
-            return;
-        };
-        let (status, remaining) = release_kv_view_once(raw);
-        if let Some(remaining) = remaining {
-            enqueue_kv_view_cleanup(remaining, self.context.clone(), status);
-        }
-    }
 }
 
 /// Metadata returned by one accepted native append.
@@ -1572,11 +1989,11 @@ impl Drop for KvAppendCompletion {
     }
 }
 
-fn empty_view_info() -> sys::sllm_kv_view_info_t {
-    sys::sllm_kv_view_info_t {
-        struct_size: size_of::<sys::sllm_kv_view_info_t>() as u32,
+fn empty_paged_view_info() -> sys::sllm_kv_paged_view_info_t {
+    sys::sllm_kv_paged_view_info_t {
+        struct_size: size_of::<sys::sllm_kv_paged_view_info_t>() as u32,
         abi_version: sys::SLLM_HIP_ABI_VERSION,
-        info_version: sys::SLLM_HIP_KV_VIEW_INFO_VERSION,
+        info_version: sys::SLLM_HIP_KV_PAGED_VIEW_INFO_VERSION,
         reserved0: 0,
         session_id: 0,
         layer_id: 0,
@@ -1586,18 +2003,45 @@ fn empty_view_info() -> sys::sllm_kv_view_info_t {
         head_dim: 0,
         memory_kind: 0,
         layout: 0,
+        token_block_size: 0,
+        physical_layout_version: 0,
         reserved1: 0,
         capacity_tokens: 0,
         observed_length: 0,
         generation: 0,
-        physical_page_bytes: 0,
-        tokens_per_page: 0,
-        mapped_token_capacity: 0,
-        committed_bytes_per_plane: 0,
+        logical_table_capacity: 0,
+        max_physical_blocks: 0,
+        allocated_physical_blocks: 0,
+        committed_bytes_per_plane: [0; KV_PAGED_PLANE_COUNT],
+        committed_bytes_total: 0,
         context_identity: 0,
         state_identity: 0,
-        k_stride_elements: [0; 3],
-        v_stride_elements: [0; 3],
+        reserved: [0; 4],
+    }
+}
+
+fn empty_paged_fork_info() -> sys::sllm_kv_paged_state_fork_info_t {
+    sys::sllm_kv_paged_state_fork_info_t {
+        struct_size: size_of::<sys::sllm_kv_paged_state_fork_info_t>() as u32,
+        abi_version: sys::SLLM_HIP_ABI_VERSION,
+        info_version: sys::SLLM_HIP_KV_PAGED_STATE_FORK_INFO_VERSION,
+        reserved0: 0,
+        source_state_identity: 0,
+        child_state_identity: 0,
+        source_owned_bytes: 0,
+        child_owned_bytes: 0,
+        copied_bytes: 0,
+        shared_bytes: 0,
+        published_length: 0,
+        token_block_size: 0,
+        physical_layout_version: 0,
+        source_logical_table_capacity: 0,
+        child_logical_table_capacity: 0,
+        source_physical_blocks: 0,
+        child_physical_blocks: 0,
+        copied_physical_blocks: 0,
+        shared_physical_blocks: 0,
+        committed_bytes_total: 0,
         reserved: [0; 4],
     }
 }
@@ -1654,106 +2098,75 @@ fn empty_causal_attention_info() -> sys::sllm_causal_attention_dispatch_info_t {
     }
 }
 
-fn validate_view_info(
-    info: &sys::sllm_kv_view_info_t,
+#[allow(dead_code)]
+fn validate_paged_view_info(
+    info: &sys::sllm_kv_paged_view_info_t,
     context: &Context,
     raw_state: usize,
     session_id: ExecutionSessionId,
     descriptor: KvStateDescriptor,
 ) -> Result<(), RuntimeError> {
+    let (expected_dtype, expected_encoding, _, _) = paged_native_storage(context, descriptor)?;
     let layout = descriptor.layout();
-    let logical_head_dim = layout.head_dim() as u64;
-    let physical_head_dim = match descriptor.cache_encoding() {
-        KvCacheEncoding::Fp8E4M3Block16 | KvCacheEncoding::Fp8E5M2Block16 => {
-            logical_head_dim.div_ceil(16) * 16
-        }
-        KvCacheEncoding::Mxfp8E4 | KvCacheEncoding::Mxfp8E5 => logical_head_dim.div_ceil(32) * 32,
-        _ => logical_head_dim,
-    };
-    let token_stride = (layout.heads() as u64)
-        .checked_mul(physical_head_dim)
+    let required_logical_blocks = descriptor
+        .capacity()
+        .checked_add(u64::from(KV_PAGED_TOKEN_BLOCK_SIZE) - 1)
         .ok_or_else(|| {
-            RuntimeError::local(RuntimeStatus::MetadataOverflow, "KV stride overflow")
-        })?;
-    let expected_dtype = native_kv_storage(descriptor, context.expected_target())?.0;
-    let expected_encoding = match descriptor.cache_encoding() {
-        KvCacheEncoding::Fp16 => sys::SLLM_TENSOR_ENCODING_UNQUANTIZED,
-        KvCacheEncoding::Fp8E4M3Fn | KvCacheEncoding::Fp8E4M3FnStatic => {
-            sys::SLLM_TENSOR_ENCODING_FP8_OUTER_F32
-        }
-        KvCacheEncoding::Nvfp4 => sys::SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32,
-        KvCacheEncoding::Fp8E4M3Block16 | KvCacheEncoding::Fp8E5M2Block16 => {
-            sys::SLLM_TENSOR_ENCODING_FP8_BLOCK16_E8M0
-        }
-        KvCacheEncoding::Mxfp8E4 | KvCacheEncoding::Mxfp8E5 => {
-            sys::SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0
-        }
-    };
-    let sliding_window = descriptor.sliding_window();
-    let expected_info_version = if sliding_window.is_some() {
-        sys::SLLM_HIP_KV_VIEW_INFO_SLIDING_VERSION
-    } else {
-        sys::SLLM_HIP_KV_VIEW_INFO_VERSION
-    };
-    let retained_start = info
-        .observed_length
-        .saturating_sub(sliding_window.unwrap_or(info.observed_length));
-    let expected_reserved = if let Some(window) = sliding_window {
-        [
-            window as u32,
-            (window >> 32) as u32,
-            retained_start as u32,
-            (retained_start >> 32) as u32,
-        ]
-    } else {
-        [0; 4]
-    };
-    let physical_length_valid = if let Some(window) = sliding_window {
-        info.mapped_token_capacity <= window.saturating_add(1)
-            && info.observed_length.saturating_sub(retained_start) <= info.mapped_token_capacity
-    } else {
-        info.observed_length <= info.mapped_token_capacity
-    };
-    if info.struct_size != size_of::<sys::sllm_kv_view_info_t>() as u32
+            RuntimeError::local(
+                RuntimeStatus::MetadataOverflow,
+                "paged KV logical table capacity overflowed",
+            )
+        })?
+        / u64::from(KV_PAGED_TOKEN_BLOCK_SIZE);
+    if info.struct_size != size_of::<sys::sllm_kv_paged_view_info_t>() as u32
         || info.abi_version != sys::SLLM_HIP_ABI_VERSION
-        || info.info_version != expected_info_version
+        || info.info_version != sys::SLLM_HIP_KV_PAGED_VIEW_INFO_VERSION
+        || info.reserved0 != 0
         || info.session_id != session_id.raw()
         || info.layer_id != descriptor.layer_id()
         || info.dtype != expected_dtype
         || info.encoding != expected_encoding
         || info.head_count != layout.heads() as u32
         || info.head_dim != layout.head_dim() as u32
-        || !matches!(
-            info.memory_kind,
-            sys::SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
-                | sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
-        )
+        || info.memory_kind != sys::SLLM_HIP_KV_MEMORY_KIND_PAGED
         || info.layout != sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR
+        || info.token_block_size != KV_PAGED_TOKEN_BLOCK_SIZE
+        || info.physical_layout_version != KV_PAGED_PHYSICAL_LAYOUT_VERSION
         || info.capacity_tokens != descriptor.capacity()
+        || info.observed_length > info.capacity_tokens
+        || info.logical_table_capacity < required_logical_blocks
+        || info.max_physical_blocks < info.logical_table_capacity
+        || info.allocated_physical_blocks > info.max_physical_blocks
         || info.context_identity != context.raw_handle()?.as_ptr() as usize as u64
         || info.state_identity != raw_state as u64
-        || info.k_stride_elements != [token_stride, physical_head_dim, 1]
-        || info.v_stride_elements != [token_stride, physical_head_dim, 1]
-        || info.physical_page_bytes == 0
-        || info.tokens_per_page == 0
-        || info.mapped_token_capacity > descriptor.capacity()
-        || !physical_length_valid
-        || info.committed_bytes_per_plane % info.physical_page_bytes != 0
-        || info.reserved0 != 0
         || info.reserved1 != 0
-        || info.reserved != expected_reserved
+        || info.reserved.iter().any(|value| *value != 0)
     {
         return Err(RuntimeError::local(
             RuntimeStatus::InvalidKvStateDescriptor,
-            "native KV snapshot metadata differs from the descriptor layout",
+            "native paged KV view metadata does not match the Rust descriptor",
         ));
     }
-    if info.observed_length > descriptor.capacity() {
-        return Err(RuntimeError::local(
-            RuntimeStatus::KvCapacityExceeded,
-            "native KV snapshot length exceeds capacity",
-        ));
-    }
+    // The core constructor performs the checked sum and observed-length block
+    // boundary validation. Calling it here also makes malformed native counts
+    // fail before they become an externally visible snapshot.
+    KvPagedPhysicalMemorySnapshot::new(
+        info.capacity_tokens,
+        info.observed_length,
+        info.token_block_size,
+        info.physical_layout_version,
+        info.logical_table_capacity,
+        info.max_physical_blocks,
+        info.allocated_physical_blocks,
+        info.committed_bytes_per_plane,
+        info.committed_bytes_total,
+    )
+    .map_err(|error| {
+        RuntimeError::new(
+            RuntimeStatus::InvalidKvStateDescriptor,
+            format!("native paged KV view metadata failed core validation: {error}"),
+        )
+    })?;
     Ok(())
 }
 
@@ -1801,6 +2214,141 @@ fn validate_causal_attention_binding(
         ));
     }
     Ok(())
+}
+
+fn paged_append_recipe(
+    encoding: KvCacheEncoding,
+) -> Result<(u32, &'static str, &'static str), RuntimeError> {
+    let recipe = match encoding {
+        KvCacheEncoding::Fp16 => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_F16_V1,
+            "kv_state.bf16_to_paged_f16.v1",
+            "sllm_kv_state_bf16_to_paged_f16_v1",
+        ),
+        KvCacheEncoding::Fp8E4M3Fn => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_FP8_E4_V1,
+            "kv_state.bf16_to_paged_fp8.v1",
+            "sllm_kv_state_bf16_to_paged_fp8_v1",
+        ),
+        KvCacheEncoding::Fp8E4M3FnStatic => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_FP8_STATIC_E4_V1,
+            "kv_state.bf16_to_paged_fp8_static.v1",
+            "sllm_kv_state_bf16_to_paged_fp8_static_v1",
+        ),
+        KvCacheEncoding::Nvfp4 => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_NVFP4_V1,
+            "kv_state.bf16_to_paged_nvfp4.v1",
+            "sllm_kv_state_bf16_to_paged_nvfp4_v1",
+        ),
+        KvCacheEncoding::Mxfp8E4 => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_MXFP8_E4_V1,
+            "kv_state.bf16_to_paged_mxfp8_e4.v1",
+            "sllm_kv_state_bf16_to_paged_mxfp8_e4_v1",
+        ),
+        KvCacheEncoding::Mxfp8E5 => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_MXFP8_E5_V1,
+            "kv_state.bf16_to_paged_mxfp8_e5.v1",
+            "sllm_kv_state_bf16_to_paged_mxfp8_e5_v1",
+        ),
+        KvCacheEncoding::Fp8E4M3Block16 | KvCacheEncoding::Fp8E5M2Block16 => {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvAppendDescriptor,
+                "paged KV append received a retired FP8 block16 encoding",
+            ));
+        }
+    };
+    Ok(recipe)
+}
+
+fn paged_target_matches(context: &Context, observed_target: &str) -> bool {
+    let Some(expected_target) = context.expected_target().map(logical_gcn_arch_name) else {
+        return false;
+    };
+    matches!(expected_target, "gfx1030" | "gfx1201")
+        && matches!(observed_target, "gfx1030" | "gfx1201")
+        && expected_target == observed_target
+}
+
+fn validate_paged_append_info(
+    info: &sys::sllm_kv_append_info_t,
+    context: &Context,
+    request: KvStateAppendRequest,
+    descriptor: KvStateDescriptor,
+    capture_projected: bool,
+) -> Result<KvAppendEvidence, RuntimeError> {
+    let observed_target = c_string(&info.gcn_arch_name);
+    let target = logical_gcn_arch_name(&observed_target).to_owned();
+    let (expected_kernel_id, expected_kernel, expected_device) =
+        paged_append_recipe(descriptor.cache_encoding())?;
+    let expected_rows = request
+        .token_count()
+        .checked_mul(descriptor.layout().heads() as u64)
+        .ok_or_else(|| {
+            RuntimeError::local(RuntimeStatus::MetadataOverflow, "paged KV grid overflow")
+        })?;
+    let expected_grid = if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
+        expected_rows
+            .checked_mul(descriptor.layout().head_dim() as u64)
+            .and_then(|elements| {
+                elements.checked_add(u64::from(sys::SLLM_HIP_KV_WORKGROUP_SIZE) - 1)
+            })
+            .map(|elements| elements / u64::from(sys::SLLM_HIP_KV_WORKGROUP_SIZE))
+            .and_then(|value| u32::try_from(value).ok())
+    } else {
+        u32::try_from(expected_rows).ok()
+    };
+    let target_supported = paged_target_matches(context, &observed_target)
+        && !(descriptor.cache_encoding() == KvCacheEncoding::Mxfp8E5
+            && context.expected_target().map(logical_gcn_arch_name) != Some("gfx1030"));
+    if info.struct_size != size_of::<sys::sllm_kv_append_info_t>() as u32
+        || info.abi_version != sys::SLLM_HIP_ABI_VERSION
+        || info.info_version != sys::SLLM_HIP_KV_APPEND_INFO_VERSION
+        || info.backend != sys::SLLM_BACKEND_HIP
+        || info.dispatch_id == 0
+        || info.dispatch_count != 1
+        || info.kernel_id != expected_kernel_id
+        || info.workgroup_size_x != sys::SLLM_HIP_KV_WORKGROUP_SIZE
+        || Some(info.grid_size_x) != expected_grid
+        || info.start_position != request.start_position()
+        || info.token_count != request.token_count()
+        || info.end_position != request.end_position()
+        || info.commit_allowed != 1
+        || info.fallback_allowed != 0
+        || info.fallback_used != 0
+        || c_string(&info.kernel_symbol) != expected_kernel
+        || c_string(&info.device_symbol) != expected_device
+        || info.reserved0 != 0
+        || info.reserved != [0; 8]
+        || !operation_range_admitted(
+            info.start_position,
+            info.token_count,
+            info.end_position,
+            descriptor.capacity(),
+            capture_projected,
+        )
+        || !target_supported
+    {
+        return Err(RuntimeError::local(
+            RuntimeStatus::InvalidKvAppendDescriptor,
+            "native paged KV append metadata failed exact-provider/no-fallback validation",
+        ));
+    }
+    Ok(KvAppendEvidence {
+        dispatch_id: info.dispatch_id,
+        dispatch_count: info.dispatch_count,
+        kernel_id: info.kernel_id,
+        workgroup_size_x: info.workgroup_size_x,
+        grid_size_x: info.grid_size_x,
+        start_position: info.start_position,
+        token_count: info.token_count,
+        end_position: info.end_position,
+        commit_allowed: info.commit_allowed == 1,
+        fallback_allowed: info.fallback_allowed == 1,
+        fallback_used: info.fallback_used == 1,
+        kernel_symbol: c_string(&info.kernel_symbol),
+        device_symbol: c_string(&info.device_symbol),
+        target,
+    })
 }
 
 fn validate_append_info(
@@ -2294,6 +2842,423 @@ fn validate_causal_attention_info(
         staged32_decode_opt_in.as_deref(),
         capture_projected,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_paged_attention_info(
+    info: &sys::sllm_causal_attention_dispatch_info_t,
+    context: &Context,
+    start_position: u64,
+    committed_kv_length: u64,
+    descriptor: KvStateDescriptor,
+    query_heads: u32,
+    sliding_window: Option<u64>,
+    score_scale: Option<f32>,
+    capture_projected: bool,
+) -> Result<CausalAttentionEvidence, RuntimeError> {
+    let query_count = committed_kv_length
+        .checked_sub(start_position)
+        .ok_or_else(|| {
+            RuntimeError::local(
+                RuntimeStatus::CausalAttentionLengthMismatch,
+                "paged causal attention evidence range underflowed",
+            )
+        })?;
+    let observed_target = c_string(&info.gcn_arch_name);
+    let target = logical_gcn_arch_name(&observed_target).to_owned();
+    let target_supported = paged_target_matches(context, &observed_target)
+        && !(descriptor.cache_encoding() == KvCacheEncoding::Mxfp8E5
+            && context.expected_target().map(logical_gcn_arch_name) != Some("gfx1030"));
+    let kv_heads = descriptor.layout().heads() as u32;
+    let head_dim = descriptor.layout().head_dim() as u32;
+    let mxfp8_gqa6 = descriptor.cache_encoding() == KvCacheEncoding::Mxfp8E4
+        && kv_heads == 4
+        && head_dim == 256
+        && query_heads == 24;
+    let mxfp8_gqa6_gfx1201_wave_prefill =
+        mxfp8_gqa6 && target == "gfx1201" && query_count > 5 && query_count < 128;
+    let mxfp8_gqa6_gfx1201_qtile4_prefill =
+        mxfp8_gqa6 && target == "gfx1201" && query_count >= 128 && start_position < 1024;
+    let fp16_reviewed = descriptor.cache_encoding() == KvCacheEncoding::Fp16
+        && kv_heads == 4
+        && head_dim == 256
+        && matches!(query_heads, 16 | 24);
+    let fp16_gqa4_shared_prefill =
+        fp16_reviewed && query_count >= 64 && query_heads == 16 && target_supported;
+    // Gemma4's Paged sliding provider is intentionally exact: the native
+    // ring kernel has a fixed 9-slot/1024-token contract and is reviewed only
+    // for the 16Q/8KV, head_dim=256 static-FP8 shape on these two targets.
+    let paged_sliding_static_fp8 = descriptor.cache_encoding() == KvCacheEncoding::Fp8E4M3FnStatic
+        && descriptor.static_fp8_scales() == Some((1.0, 1.0))
+        && descriptor.sliding_window() == Some(1024)
+        && sliding_window == Some(1024)
+        && score_scale == Some(1.0)
+        && kv_heads == 8
+        && head_dim == 256
+        && query_heads == 16;
+    // Gemma4 full-attention layers use the generic Paged provider with the
+    // reviewed static-FP8 16Q/2KV, head_dim=512 shape and unit score scale.
+    let paged_full_static_fp8 = descriptor.cache_encoding() == KvCacheEncoding::Fp8E4M3FnStatic
+        && descriptor.static_fp8_scales() == Some((1.0, 1.0))
+        && descriptor.sliding_window().is_none()
+        && sliding_window.is_none()
+        && score_scale == Some(1.0)
+        && kv_heads == 2
+        && head_dim == 512
+        && query_heads == 16;
+    let (
+        expected_kernel_id,
+        expected_kernel,
+        expected_device,
+        expected_dispatch_count,
+        expected_workgroup,
+        expected_grid,
+    ) = if paged_sliding_static_fp8 {
+        let grid = query_count
+            .checked_mul(u64::from(query_heads))
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                RuntimeError::local(
+                    RuntimeStatus::MetadataOverflow,
+                    "paged sliding static-FP8 grid overflowed",
+                )
+            })?;
+        (
+            sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_SLIDING_STATIC_FP8_V1,
+            "causal_attention.paged_sliding_static_fp8_ring.v1",
+            "sllm_causal_attention_paged_sliding_static_fp8_ring_v1",
+            1,
+            sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE,
+            grid,
+        )
+    } else if paged_full_static_fp8 {
+        let grid = query_count
+            .checked_mul(u64::from(query_heads))
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                RuntimeError::local(
+                    RuntimeStatus::MetadataOverflow,
+                    "paged full static-FP8 grid overflowed",
+                )
+            })?;
+        (
+            sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_GENERIC_FORMATS_V1,
+            "causal_attention.paged.generic_formats.v1",
+            "sllm_causal_attention_paged_generic_formats_v1",
+            1,
+            sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE,
+            grid,
+        )
+    } else if mxfp8_gqa6 {
+        if query_count <= 5 {
+            let splits = if committed_kv_length >= 8192 { 128 } else { 32 };
+            if query_count == 3
+                && committed_kv_length >= 8192
+                && target_supported
+                && sliding_window.is_none()
+                && score_scale.is_none()
+            {
+                let grid = 4_u64
+                    .checked_mul(splits)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| {
+                        RuntimeError::local(
+                            RuntimeStatus::MetadataOverflow,
+                            "paged GQA6 C1 decode grid overflowed",
+                        )
+                    })?;
+                (
+                    sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_GQA6_C1_M3_V1,
+                    "causal_attention.paged_decode.gqa6_c1_m3.mxfp8_e4.v1",
+                    "sllm_causal_attention_paged_decode_gqa6_c1_m3_mxfp8_e4_v1",
+                    2,
+                    192,
+                    grid,
+                )
+            } else {
+                let grid = query_count
+                    .checked_mul(if target == "gfx1030" { 4 } else { 24 })
+                    .and_then(|value| value.checked_mul(splits))
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| {
+                        RuntimeError::local(
+                            RuntimeStatus::MetadataOverflow,
+                            "paged GQA6 decode grid overflowed",
+                        )
+                    })?;
+                (
+                    sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_GQA6_V1,
+                    "causal_attention.paged_decode.gqa6_m1_m5.mxfp8_e4.v1",
+                    "sllm_causal_attention_paged_decode_gqa6_m1_m5_mxfp8_e4_v1",
+                    2,
+                    if target == "gfx1030" { 192 } else { 32 },
+                    grid,
+                )
+            }
+        } else if mxfp8_gqa6_gfx1201_wave_prefill {
+            let grid = query_count
+                .checked_mul(u64::from(query_heads))
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    RuntimeError::local(
+                        RuntimeStatus::MetadataOverflow,
+                        "paged gfx1201 GQA6 wave prefill grid overflowed",
+                    )
+                })?;
+            (
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_GQA6_V1,
+                "causal_attention.paged_prefill.gqa6_wave.gfx1201.mxfp8_e4.v1",
+                // The native symbol is 65 bytes; the ABI field retains the
+                // first 63 bytes plus the terminating NUL.
+                "sllm_causal_attention_paged_prefill_gqa6_wave_gfx1201_mxfp8_e4_",
+                1,
+                sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE,
+                grid,
+            )
+        } else if mxfp8_gqa6_gfx1201_qtile4_prefill {
+            let grid = query_count
+                .checked_mul(u64::from(query_heads))
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    RuntimeError::local(
+                        RuntimeStatus::MetadataOverflow,
+                        "paged gfx1201 GQA6 qtile4 prefill grid overflowed",
+                    )
+                })?;
+            (
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_GQA6_V1,
+                "causal_attention.paged_prefill.gqa6_qtile4.mxfp8_e4.v1",
+                "sllm_causal_attention_paged_prefill_gqa6_qtile4_mxfp8_e4_v1",
+                1,
+                sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE,
+                grid,
+            )
+        } else {
+            let grid = query_count
+                .checked_add(7)
+                .and_then(|value| (value / 8).checked_mul(4))
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    RuntimeError::local(
+                        RuntimeStatus::MetadataOverflow,
+                        "paged GQA6 prefill grid overflowed",
+                    )
+                })?;
+            (
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_GQA6_V1,
+                "causal_attention.paged_prefill.gqa6_qtile8.mxfp8_e4.v1",
+                "sllm_causal_attention_paged_prefill_gqa6_qtile8_mxfp8_e4_v1",
+                1,
+                512,
+                grid,
+            )
+        }
+    } else if fp16_gqa4_shared_prefill {
+        (
+            sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_FP16_V1,
+            "causal_attention.paged_prefill.gqa4_shared.v1",
+            "sllm_causal_attention_paged_prefill_gqa4_shared_v1",
+            1,
+            sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE,
+            query_count
+                .checked_mul(u64::from(query_heads))
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    RuntimeError::local(
+                        RuntimeStatus::MetadataOverflow,
+                        "paged FP16 GQA4 prefill grid overflowed",
+                    )
+                })?,
+        )
+    } else if fp16_reviewed {
+        if query_count <= 5 {
+            (
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_FP16_V1,
+                "causal_attention.paged_decode.fp16_gqa.v1",
+                "sllm_causal_attention_paged_decode_fp16_gqa_v1",
+                1,
+                sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE,
+                query_count
+                    .checked_mul(u64::from(query_heads))
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| {
+                        RuntimeError::local(
+                            RuntimeStatus::MetadataOverflow,
+                            "paged FP16 decode grid overflowed",
+                        )
+                    })?,
+            )
+        } else {
+            (
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_FP16_V1,
+                "causal_attention.paged_prefill.fp16_gqa.v1",
+                "sllm_causal_attention_paged_prefill_fp16_gqa_v1",
+                1,
+                sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE,
+                query_count
+                    .checked_mul(u64::from(query_heads))
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| {
+                        RuntimeError::local(
+                            RuntimeStatus::MetadataOverflow,
+                            "paged FP16 prefill grid overflowed",
+                        )
+                    })?,
+            )
+        }
+    } else {
+        let grid = query_count
+            .checked_mul(u64::from(query_heads))
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                RuntimeError::local(
+                    RuntimeStatus::MetadataOverflow,
+                    "paged generic attention grid overflowed",
+                )
+            })?;
+        (
+            sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_GENERIC_FORMATS_V1,
+            "causal_attention.paged.generic_formats.v1",
+            "sllm_causal_attention_paged_generic_formats_v1",
+            1,
+            sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE,
+            grid,
+        )
+    };
+    let (expected_scale_denominator, implicit_scale_bits, expected_reserved) =
+        if paged_sliding_static_fp8 || paged_full_static_fp8 {
+            let retained_start = committed_kv_length.saturating_sub(1024);
+            let window = if paged_sliding_static_fp8 { 1024 } else { 0 };
+            (
+                0,
+                1.0_f32.to_bits(),
+                [
+                    window,
+                    0,
+                    if paged_sliding_static_fp8 {
+                        retained_start as u32
+                    } else {
+                        0
+                    },
+                    if paged_sliding_static_fp8 {
+                        (retained_start >> 32) as u32
+                    } else {
+                        0
+                    },
+                    1.0_f32.to_bits(),
+                    1,
+                    0,
+                    0,
+                ],
+            )
+        } else {
+            implicit_attention_scale_evidence(head_dim)
+        };
+    if query_count == 0
+        || (!paged_sliding_static_fp8
+            && !paged_full_static_fp8
+            && (sliding_window.is_some() || score_scale.is_some()))
+        || !target_supported
+        || info.struct_size != size_of::<sys::sllm_causal_attention_dispatch_info_t>() as u32
+        || info.abi_version != sys::SLLM_HIP_ABI_VERSION
+        || info.info_version != sys::SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION
+        || info.backend != sys::SLLM_BACKEND_HIP
+        || info.dispatch_id == 0
+        || info.dispatch_count != expected_dispatch_count
+        || info.kernel_id != expected_kernel_id
+        || info.workgroup_size_x != expected_workgroup
+        || info.grid_size_x != expected_grid
+        || info.query_count != query_count
+        || info.start_position != start_position
+        || info.committed_kv_length != committed_kv_length
+        || info.q_heads != query_heads
+        || info.kv_heads != kv_heads
+        || info.head_dim != head_dim
+        || info.scale_denominator != expected_scale_denominator
+        || info.fallback_allowed != 0
+        || info.fallback_used != 0
+        || c_string(&info.kernel_symbol) != expected_kernel
+        || c_string(&info.device_symbol) != expected_device
+        || info.reserved != expected_reserved
+        || !operation_range_admitted(
+            start_position,
+            query_count,
+            committed_kv_length,
+            descriptor.capacity(),
+            capture_projected,
+        )
+    {
+        return Err(RuntimeError::local(
+            RuntimeStatus::InvalidCausalAttentionDescriptor,
+            "native paged causal attention metadata failed exact-provider/no-fallback validation",
+        ));
+    }
+    Ok(CausalAttentionEvidence {
+        dispatch_id: info.dispatch_id,
+        dispatch_count: info.dispatch_count,
+        kernel_id: info.kernel_id,
+        workgroup_size_x: info.workgroup_size_x,
+        grid_size_x: info.grid_size_x,
+        query_count: info.query_count,
+        start_position: info.start_position,
+        committed_kv_length: info.committed_kv_length,
+        sliding_window: if paged_sliding_static_fp8 { 1024 } else { 0 },
+        retained_start: if paged_sliding_static_fp8 {
+            committed_kv_length.saturating_sub(1024)
+        } else {
+            0
+        },
+        score_scale_bits: implicit_scale_bits,
+        explicit_score_scale: paged_sliding_static_fp8 || paged_full_static_fp8,
+        q_heads: info.q_heads,
+        kv_heads: info.kv_heads,
+        head_dim: info.head_dim,
+        scale_denominator: info.scale_denominator,
+        fallback_allowed: false,
+        fallback_used: false,
+        kernel_symbol: c_string(&info.kernel_symbol),
+        device_symbol: c_string(&info.device_symbol),
+        target,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_attention_info_for_storage(
+    info: &sys::sllm_causal_attention_dispatch_info_t,
+    context: &Context,
+    storage_kind: KvStateStorageKind,
+    start_position: u64,
+    committed_kv_length: u64,
+    descriptor: KvStateDescriptor,
+    query_heads: u32,
+    sliding_window: Option<u64>,
+    score_scale: Option<f32>,
+    capture_projected: bool,
+) -> Result<CausalAttentionEvidence, RuntimeError> {
+    match storage_kind {
+        KvStateStorageKind::Legacy => validate_causal_attention_info(
+            info,
+            context,
+            start_position,
+            committed_kv_length,
+            descriptor,
+            query_heads,
+            sliding_window,
+            score_scale,
+            capture_projected,
+        ),
+        KvStateStorageKind::Paged => validate_paged_attention_info(
+            info,
+            context,
+            start_position,
+            committed_kv_length,
+            descriptor,
+            query_heads,
+            sliding_window,
+            score_scale,
+            capture_projected,
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3289,6 +4254,190 @@ mod tests {
     use super::*;
 
     #[test]
+    fn paged_pool_capacity_allows_one_full_parent_child_divergence() {
+        assert_eq!(paged_pool_capacities(1, false).unwrap(), (1, 2));
+        assert_eq!(paged_pool_capacities(127, false).unwrap(), (1, 2));
+        assert_eq!(paged_pool_capacities(128, false).unwrap(), (1, 2));
+        assert_eq!(paged_pool_capacities(129, false).unwrap(), (2, 4));
+        assert_eq!(paged_pool_capacities(257, false).unwrap(), (3, 6));
+        assert_eq!(
+            paged_pool_capacities(u64::MAX, false).unwrap_err().status(),
+            RuntimeStatus::MetadataOverflow
+        );
+        let over_u32_parent_capacity = (u64::from(u32::MAX) / 2 + 1) * 128;
+        assert_eq!(
+            paged_pool_capacities(over_u32_parent_capacity, false)
+                .unwrap_err()
+                .status(),
+            RuntimeStatus::KvCapacityExceeded
+        );
+    }
+
+    #[test]
+    fn paged_sliding_pool_capacity_reserves_the_nine_slot_ring() {
+        for capacity in [1023_u64, 1024, 1025, 1152] {
+            assert_eq!(paged_pool_capacities(capacity, true).unwrap(), (9, 18));
+        }
+        assert_eq!(paged_pool_capacities(1024, false).unwrap(), (8, 16));
+    }
+
+    #[test]
+    fn paged_adapter_admits_native_create_recipes_including_sliding_static_fp8() {
+        let fp16 =
+            KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Fp16).unwrap();
+        let dynamic_fp8 =
+            KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Fp8E4M3Fn)
+                .unwrap();
+        let static_fp8 =
+            KvStateDescriptor::new_with_static_fp8(0, 257, 4, 256, 1.25, 0.75).unwrap();
+        let nvfp4 =
+            KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Nvfp4).unwrap();
+        let mxfp8 = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            257,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        )
+        .unwrap();
+        let mxfp8_e5 = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            257,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E5,
+            KvFp8PhysicalVariant::OcpE5M2,
+        )
+        .unwrap();
+        for target in ["gfx1030", "gfx1201"] {
+            let context = Context::test_without_native_for_target(target);
+            assert_eq!(
+                paged_native_storage(&context, fp16).unwrap(),
+                (
+                    sys::SLLM_TENSOR_DTYPE_F16,
+                    sys::SLLM_HIP_KV_ENCODING_FP16_V1,
+                    0,
+                    0
+                )
+            );
+            assert_eq!(
+                paged_native_storage(&context, dynamic_fp8).unwrap(),
+                (
+                    sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                    sys::SLLM_HIP_KV_ENCODING_FP8_V1,
+                    0,
+                    sys::SLLM_TENSOR_DTYPE_F32
+                )
+            );
+            assert_eq!(
+                paged_native_storage(&context, static_fp8).unwrap(),
+                (
+                    sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                    sys::SLLM_HIP_KV_ENCODING_FP8_STATIC_V1,
+                    0,
+                    sys::SLLM_TENSOR_DTYPE_F32
+                )
+            );
+            assert_eq!(
+                paged_static_scale_bits(static_fp8),
+                (1.25_f32.to_bits(), 0.75_f32.to_bits())
+            );
+            assert_eq!(
+                paged_native_storage(&context, nvfp4).unwrap(),
+                (
+                    sys::SLLM_TENSOR_DTYPE_U8,
+                    sys::SLLM_HIP_KV_ENCODING_NVFP4_V1,
+                    16,
+                    sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN
+                )
+            );
+            assert_eq!(
+                paged_native_storage(&context, mxfp8).unwrap(),
+                (
+                    sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                    sys::SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                    32,
+                    sys::SLLM_TENSOR_DTYPE_U8
+                )
+            );
+            let e5 = paged_native_storage(&context, mxfp8_e5);
+            if target == "gfx1030" {
+                assert_eq!(
+                    e5.unwrap(),
+                    (
+                        sys::SLLM_TENSOR_DTYPE_F8_E5M2,
+                        sys::SLLM_HIP_KV_ENCODING_MXFP8_E5_V1,
+                        32,
+                        sys::SLLM_TENSOR_DTYPE_U8
+                    )
+                );
+            } else {
+                assert_eq!(e5.unwrap_err().status(), RuntimeStatus::Unsupported);
+            }
+        }
+        for target in [Some("gfx942"), Some("gfx1030:sramecc+:xnack-"), None] {
+            let context = match target {
+                Some(target) => Context::test_without_native_for_target(target),
+                None => Context::test_without_native(),
+            };
+            assert_eq!(
+                paged_native_storage(&context, fp16).unwrap_err().status(),
+                RuntimeStatus::Unsupported
+            );
+        }
+        let unsupported = block16_descriptor(
+            KvCacheEncoding::Fp8E4M3Block16,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        );
+        assert_eq!(
+            paged_native_storage(
+                &Context::test_without_native_for_target("gfx1030"),
+                unsupported
+            )
+            .unwrap_err()
+            .status(),
+            RuntimeStatus::Unsupported
+        );
+
+        let sliding =
+            KvStateDescriptor::new_with_static_fp8_sliding(0, 2048, 4, 256, 1024).unwrap();
+        assert_eq!(
+            paged_native_storage(&Context::test_without_native_for_target("gfx1030"), sliding)
+                .unwrap(),
+            (
+                sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                sys::SLLM_HIP_KV_ENCODING_FP8_STATIC_V1,
+                0,
+                sys::SLLM_TENSOR_DTYPE_F32
+            )
+        );
+        assert_eq!(
+            paged_native_storage(&Context::test_without_native_for_target("gfx1201"), sliding)
+                .unwrap(),
+            (
+                sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                sys::SLLM_HIP_KV_ENCODING_FP8_STATIC_V1,
+                0,
+                sys::SLLM_TENSOR_DTYPE_F32
+            )
+        );
+    }
+
+    #[test]
+    fn paged_view_info_initializes_additive_counts_without_vmm_fields() {
+        let info = empty_paged_view_info();
+        assert_eq!(
+            info.struct_size,
+            size_of::<sys::sllm_kv_paged_view_info_t>() as u32
+        );
+        assert_eq!(info.info_version, sys::SLLM_HIP_KV_PAGED_VIEW_INFO_VERSION);
+        assert_eq!(info.token_block_size, 0);
+        assert_eq!(info.committed_bytes_per_plane, [0; KV_PAGED_PLANE_COUNT]);
+        assert_eq!(info.committed_bytes_total, 0);
+    }
+
+    #[test]
     fn projected_operation_range_requires_bounded_capture_admission() {
         assert!(!operation_range_admitted(20, 3, 23, 22, false));
         assert!(operation_range_admitted(20, 3, 23, 22, true));
@@ -3360,27 +4509,6 @@ mod tests {
     ) -> KvStateDescriptor {
         KvStateDescriptor::new_with_kv_fp8_block16(0, 17, 4, 257, encoding, physical_variant)
             .unwrap()
-    }
-
-    #[test]
-    fn block16_native_storage_is_retired_for_every_target() {
-        let ocp = block16_descriptor(
-            KvCacheEncoding::Fp8E4M3Block16,
-            KvFp8PhysicalVariant::OcpE4M3Fn,
-        );
-        let fnuz = block16_descriptor(
-            KvCacheEncoding::Fp8E4M3Block16,
-            KvFp8PhysicalVariant::E4M3FnuZ,
-        );
-        for (descriptor, target) in [
-            (ocp, "gfx1201"),
-            (ocp, "gfx1030"),
-            (fnuz, "gfx942:sramecc+:xnack-"),
-        ] {
-            let error = native_kv_storage(descriptor, Some(target)).unwrap_err();
-            assert_eq!(error.status(), RuntimeStatus::InvalidKvStateDescriptor);
-            assert!(error.message().contains("retired"));
-        }
     }
 
     #[test]
@@ -3513,47 +4641,6 @@ mod tests {
     }
 
     #[test]
-    fn standard_mxfp8_e4_native_storage_supports_initial_amd_targets() {
-        let e4 = KvStateDescriptor::new_with_kv_mxfp8(
-            0,
-            17,
-            4,
-            257,
-            KvCacheEncoding::Mxfp8E4,
-            KvFp8PhysicalVariant::OcpE4M3Fn,
-        )
-        .unwrap();
-        let e5 = KvStateDescriptor::new_with_kv_mxfp8(
-            0,
-            17,
-            4,
-            257,
-            KvCacheEncoding::Mxfp8E5,
-            KvFp8PhysicalVariant::OcpE5M2,
-        )
-        .unwrap();
-        for target in ["gfx1030", "gfx1201", "gfx942:sramecc+:xnack-"] {
-            assert_eq!(
-                native_kv_storage(e4, Some(target)).unwrap().0,
-                sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN
-            );
-        }
-        assert_eq!(
-            native_kv_storage(e5, Some("gfx1030")).unwrap().0,
-            sys::SLLM_TENSOR_DTYPE_F8_E5M2
-        );
-        for (descriptor, target) in [
-            (e4, "unknown"),
-            (e5, "gfx1201"),
-            (e5, "gfx942:sramecc+:xnack-"),
-        ] {
-            let error = native_kv_storage(descriptor, Some(target)).unwrap_err();
-            assert_eq!(error.status(), RuntimeStatus::InvalidKvStateDescriptor);
-            assert!(error.message().contains("standard OCP MXFP8"));
-        }
-    }
-
-    #[test]
     fn mxfp8_e4_packed_attention_metadata_accepts_chain_shape() {
         let context = Context::test_without_native();
         let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
@@ -3603,6 +4690,570 @@ mod tests {
         );
         assert!(!evidence.fallback_allowed);
         assert!(!evidence.fallback_used);
+    }
+
+    #[test]
+    fn paged_attention_metadata_requires_native_provider_identity() {
+        let context = Context::test_without_native_for_target("gfx1030");
+        let cases = [
+            (
+                KvStateDescriptor::new_with_kv_mxfp8(
+                    0,
+                    65,
+                    4,
+                    256,
+                    KvCacheEncoding::Mxfp8E4,
+                    KvFp8PhysicalVariant::OcpE4M3Fn,
+                )
+                .unwrap(),
+                24,
+                128,
+                2,
+                192,
+                "causal_attention.paged_decode.gqa6_m1_m5.mxfp8_e4.v1",
+                "sllm_causal_attention_paged_decode_gqa6_m1_m5_mxfp8_e4_v1",
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_GQA6_V1,
+            ),
+            (
+                KvStateDescriptor::new_with_storage(0, 65, 4, 256, KvCacheEncoding::Fp16).unwrap(),
+                16,
+                16,
+                1,
+                sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE,
+                "causal_attention.paged_decode.fp16_gqa.v1",
+                "sllm_causal_attention_paged_decode_fp16_gqa_v1",
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_FP16_V1,
+            ),
+            (
+                KvStateDescriptor::new_with_storage(0, 65, 4, 256, KvCacheEncoding::Fp8E4M3Fn)
+                    .unwrap(),
+                8,
+                8,
+                1,
+                sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE,
+                "causal_attention.paged.generic_formats.v1",
+                "sllm_causal_attention_paged_generic_formats_v1",
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_GENERIC_FORMATS_V1,
+            ),
+        ];
+        for (
+            descriptor,
+            query_heads,
+            grid_size,
+            dispatch_count,
+            workgroup_size,
+            kernel_symbol,
+            device_symbol,
+            kernel_id,
+        ) in cases
+        {
+            let mut info = empty_causal_attention_info();
+            info.backend = sys::SLLM_BACKEND_HIP;
+            info.dispatch_id = 1;
+            info.dispatch_count = dispatch_count;
+            info.kernel_id = kernel_id;
+            info.workgroup_size_x = workgroup_size;
+            info.grid_size_x = grid_size;
+            info.query_count = 1;
+            info.start_position = 32;
+            info.committed_kv_length = 33;
+            info.q_heads = query_heads;
+            info.kv_heads = 4;
+            info.head_dim = 256;
+            info.scale_denominator = 16;
+            set_test_c_string(&mut info.kernel_symbol, kernel_symbol);
+            set_test_c_string(&mut info.device_symbol, device_symbol);
+            set_test_c_string(&mut info.gcn_arch_name, "gfx1030");
+            let evidence = validate_attention_info_for_storage(
+                &info,
+                &context,
+                KvStateStorageKind::Paged,
+                32,
+                33,
+                descriptor,
+                query_heads,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+            assert_eq!(evidence.kernel_id, kernel_id);
+            assert_eq!(evidence.kernel_symbol, kernel_symbol);
+            assert_eq!(evidence.device_symbol, device_symbol);
+            assert!(!evidence.fallback_allowed);
+            assert!(!evidence.fallback_used);
+
+            let mut wrong_provider = info;
+            wrong_provider.kernel_id = sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2;
+            assert!(
+                validate_attention_info_for_storage(
+                    &wrong_provider,
+                    &context,
+                    KvStateStorageKind::Paged,
+                    32,
+                    33,
+                    descriptor,
+                    query_heads,
+                    None,
+                    None,
+                    false,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn paged_c1_m3_dispatch_metadata_is_exact_and_boundary_gated() {
+        let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            8193,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        )
+        .unwrap();
+        for target in ["gfx1030", "gfx1201"] {
+            let context = Context::test_without_native_for_target(target);
+            let mut info = empty_causal_attention_info();
+            info.backend = sys::SLLM_BACKEND_HIP;
+            info.dispatch_id = 118;
+            info.dispatch_count = 2;
+            info.kernel_id = sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_GQA6_C1_M3_V1;
+            info.workgroup_size_x = 192;
+            info.grid_size_x = 4 * 128;
+            info.query_count = 3;
+            info.start_position = 8190;
+            info.committed_kv_length = 8193;
+            info.q_heads = 24;
+            info.kv_heads = 4;
+            info.head_dim = 256;
+            info.scale_denominator = 16;
+            set_test_c_string(
+                &mut info.kernel_symbol,
+                "causal_attention.paged_decode.gqa6_c1_m3.mxfp8_e4.v1",
+            );
+            set_test_c_string(
+                &mut info.device_symbol,
+                "sllm_causal_attention_paged_decode_gqa6_c1_m3_mxfp8_e4_v1",
+            );
+            set_test_c_string(&mut info.gcn_arch_name, target);
+            let validate = |candidate: &sys::sllm_causal_attention_dispatch_info_t| {
+                validate_attention_info_for_storage(
+                    candidate,
+                    &context,
+                    KvStateStorageKind::Paged,
+                    candidate.start_position,
+                    candidate.committed_kv_length,
+                    descriptor,
+                    24,
+                    None,
+                    None,
+                    false,
+                )
+            };
+            assert!(validate(&info).is_ok(), "{target}");
+
+            let mut below_threshold = info;
+            below_threshold.start_position = 8188;
+            below_threshold.committed_kv_length = 8191;
+            assert!(validate(&below_threshold).is_err(), "{target}");
+
+            let mut wrong_rows = info;
+            wrong_rows.query_count = 2;
+            wrong_rows.start_position = 8191;
+            assert!(validate(&wrong_rows).is_err(), "{target}");
+
+            assert!(
+                validate_attention_info_for_storage(
+                    &info,
+                    &context,
+                    KvStateStorageKind::Paged,
+                    8190,
+                    8193,
+                    descriptor,
+                    24,
+                    None,
+                    Some(1.0 / 16.0),
+                    false,
+                )
+                .is_err(),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn paged_sliding_static_fp8_metadata_is_exact_on_reviewed_targets() {
+        let descriptor =
+            KvStateDescriptor::new_with_static_fp8_sliding(0, 262_144, 8, 256, 1024).unwrap();
+        for target in ["gfx1030", "gfx1201"] {
+            let context = Context::test_without_native_for_target(target);
+            for (start, committed) in [(0_u64, 1023_u64), (0, 1024), (1024, 1025)] {
+                let query_count = committed - start;
+                let mut info = empty_causal_attention_info();
+                info.backend = sys::SLLM_BACKEND_HIP;
+                info.dispatch_id = 23;
+                info.dispatch_count = 1;
+                info.kernel_id =
+                    sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_SLIDING_STATIC_FP8_V1;
+                info.workgroup_size_x = sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+                info.grid_size_x = u32::try_from(query_count * 16).unwrap();
+                info.query_count = query_count;
+                info.start_position = start;
+                info.committed_kv_length = committed;
+                info.q_heads = 16;
+                info.kv_heads = 8;
+                info.head_dim = 256;
+                info.scale_denominator = 0;
+                let retained_start = committed.saturating_sub(1024);
+                info.reserved = [
+                    1024,
+                    0,
+                    retained_start as u32,
+                    (retained_start >> 32) as u32,
+                    1.0_f32.to_bits(),
+                    1,
+                    0,
+                    0,
+                ];
+                set_test_c_string(
+                    &mut info.kernel_symbol,
+                    "causal_attention.paged_sliding_static_fp8_ring.v1",
+                );
+                set_test_c_string(
+                    &mut info.device_symbol,
+                    "sllm_causal_attention_paged_sliding_static_fp8_ring_v1",
+                );
+                set_test_c_string(&mut info.gcn_arch_name, target);
+
+                let evidence = validate_attention_info_for_storage(
+                    &info,
+                    &context,
+                    KvStateStorageKind::Paged,
+                    start,
+                    committed,
+                    descriptor,
+                    16,
+                    Some(1024),
+                    Some(1.0),
+                    false,
+                )
+                .unwrap_or_else(|error| panic!("{target} {start}->{committed}: {error:?}"));
+                assert_eq!(
+                    evidence.kernel_id,
+                    sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_SLIDING_STATIC_FP8_V1
+                );
+                assert_eq!(evidence.sliding_window, 1024);
+                assert_eq!(evidence.retained_start, retained_start);
+                assert_eq!(evidence.score_scale_bits, 1.0_f32.to_bits());
+                assert!(evidence.explicit_score_scale);
+                assert!(!evidence.fallback_allowed);
+                assert!(!evidence.fallback_used);
+
+                let mut wrong_scale = info;
+                wrong_scale.reserved[4] = (1.0_f32 / 16.0).to_bits();
+                assert!(
+                    validate_attention_info_for_storage(
+                        &wrong_scale,
+                        &context,
+                        KvStateStorageKind::Paged,
+                        start,
+                        committed,
+                        descriptor,
+                        16,
+                        Some(1024),
+                        Some(1.0),
+                        false,
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn paged_full_static_fp8_metadata_accepts_gemma_unit_scale() {
+        let descriptor =
+            KvStateDescriptor::new_with_static_fp8(0, 262_144, 2, 512, 1.0, 1.0).unwrap();
+        for target in ["gfx1030", "gfx1201"] {
+            let context = Context::test_without_native_for_target(target);
+            let mut info = empty_causal_attention_info();
+            info.backend = sys::SLLM_BACKEND_HIP;
+            info.dispatch_id = 31;
+            info.dispatch_count = 1;
+            info.kernel_id = sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_GENERIC_FORMATS_V1;
+            info.workgroup_size_x = sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+            info.grid_size_x = 16;
+            info.query_count = 1;
+            info.start_position = 17;
+            info.committed_kv_length = 18;
+            info.q_heads = 16;
+            info.kv_heads = 2;
+            info.head_dim = 512;
+            info.scale_denominator = 0;
+            info.reserved = [0, 0, 0, 0, 1.0_f32.to_bits(), 1, 0, 0];
+            set_test_c_string(
+                &mut info.kernel_symbol,
+                "causal_attention.paged.generic_formats.v1",
+            );
+            set_test_c_string(
+                &mut info.device_symbol,
+                "sllm_causal_attention_paged_generic_formats_v1",
+            );
+            set_test_c_string(&mut info.gcn_arch_name, target);
+            let evidence = validate_attention_info_for_storage(
+                &info,
+                &context,
+                KvStateStorageKind::Paged,
+                17,
+                18,
+                descriptor,
+                16,
+                None,
+                Some(1.0),
+                false,
+            )
+            .unwrap_or_else(|error| panic!("{target}: {error:?}"));
+            assert_eq!(evidence.kernel_id, info.kernel_id);
+            assert_eq!(evidence.score_scale_bits, 1.0_f32.to_bits());
+            assert!(evidence.explicit_score_scale);
+            assert!(!evidence.fallback_allowed);
+            assert!(!evidence.fallback_used);
+        }
+    }
+
+    #[test]
+    fn paged_full_static_fp8_nonunit_scales_use_implicit_score_metadata() {
+        let descriptor =
+            KvStateDescriptor::new_with_static_fp8(0, 262_144, 2, 512, 0.5, 0.75).unwrap();
+        let context = Context::test_without_native_for_target("gfx1201");
+        let (scale_denominator, scale_bits, reserved) = implicit_attention_scale_evidence(512);
+        let mut info = empty_causal_attention_info();
+        info.backend = sys::SLLM_BACKEND_HIP;
+        info.dispatch_id = 32;
+        info.dispatch_count = 1;
+        info.kernel_id = sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_GENERIC_FORMATS_V1;
+        info.workgroup_size_x = sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+        info.grid_size_x = 16;
+        info.query_count = 1;
+        info.start_position = 17;
+        info.committed_kv_length = 18;
+        info.q_heads = 16;
+        info.kv_heads = 2;
+        info.head_dim = 512;
+        info.scale_denominator = scale_denominator;
+        info.reserved = reserved;
+        set_test_c_string(
+            &mut info.kernel_symbol,
+            "causal_attention.paged.generic_formats.v1",
+        );
+        set_test_c_string(
+            &mut info.device_symbol,
+            "sllm_causal_attention_paged_generic_formats_v1",
+        );
+        set_test_c_string(&mut info.gcn_arch_name, "gfx1201");
+        let evidence = validate_attention_info_for_storage(
+            &info,
+            &context,
+            KvStateStorageKind::Paged,
+            17,
+            18,
+            descriptor,
+            16,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(evidence.score_scale_bits, scale_bits);
+        assert!(!evidence.explicit_score_scale);
+        assert!(!evidence.fallback_allowed);
+        assert!(!evidence.fallback_used);
+    }
+
+    #[test]
+    fn paged_gqa6_prefill_metadata_uses_target_specific_wave_provider() {
+        let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            1024,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        )
+        .unwrap();
+        for (target, workgroup, grid, kernel_symbol, device_symbol) in [
+            (
+                "gfx1030",
+                512,
+                4,
+                "causal_attention.paged_prefill.gqa6_qtile8.mxfp8_e4.v1",
+                "sllm_causal_attention_paged_prefill_gqa6_qtile8_mxfp8_e4_v1",
+            ),
+            (
+                "gfx1201",
+                256,
+                144,
+                "causal_attention.paged_prefill.gqa6_wave.gfx1201.mxfp8_e4.v1",
+                "sllm_causal_attention_paged_prefill_gqa6_wave_gfx1201_mxfp8_e4_",
+            ),
+        ] {
+            let context = Context::test_without_native_for_target(target);
+            let mut info = empty_causal_attention_info();
+            info.backend = sys::SLLM_BACKEND_HIP;
+            info.dispatch_id = 17;
+            info.dispatch_count = 1;
+            info.kernel_id = sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_GQA6_V1;
+            info.workgroup_size_x = workgroup;
+            info.grid_size_x = grid;
+            info.query_count = 6;
+            info.start_position = 128;
+            info.committed_kv_length = 134;
+            info.q_heads = 24;
+            info.kv_heads = 4;
+            info.head_dim = 256;
+            info.scale_denominator = 16;
+            set_test_c_string(&mut info.kernel_symbol, kernel_symbol);
+            set_test_c_string(&mut info.device_symbol, device_symbol);
+            set_test_c_string(&mut info.gcn_arch_name, target);
+            let evidence = validate_attention_info_for_storage(
+                &info,
+                &context,
+                KvStateStorageKind::Paged,
+                128,
+                134,
+                descriptor,
+                24,
+                None,
+                None,
+                false,
+            )
+            .unwrap_or_else(|error| panic!("target {target}: {error:?}"));
+            assert_eq!(evidence.workgroup_size_x, workgroup);
+            assert_eq!(evidence.grid_size_x, grid);
+            assert_eq!(evidence.kernel_symbol, kernel_symbol);
+            assert_eq!(evidence.device_symbol, device_symbol);
+        }
+    }
+
+    #[test]
+    fn paged_fp16_gqa4_prefill_metadata_accepts_legacy_shared_provider_shape() {
+        let descriptor =
+            KvStateDescriptor::new_with_storage(0, 512, 4, 256, KvCacheEncoding::Fp16).unwrap();
+        for target in ["gfx1030", "gfx1201"] {
+            for query_count in [65_u64, 85, 265] {
+                let context = Context::test_without_native_for_target(target);
+                let mut info = empty_causal_attention_info();
+                info.backend = sys::SLLM_BACKEND_HIP;
+                info.dispatch_id = 18;
+                info.dispatch_count = 1;
+                info.kernel_id = sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_FP16_V1;
+                info.workgroup_size_x = sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+                info.grid_size_x = (query_count * 16) as u32;
+                info.query_count = query_count;
+                info.start_position = 0;
+                info.committed_kv_length = query_count;
+                info.q_heads = 16;
+                info.kv_heads = 4;
+                info.head_dim = 256;
+                info.scale_denominator = 16;
+                set_test_c_string(
+                    &mut info.kernel_symbol,
+                    "causal_attention.paged_prefill.gqa4_shared.v1",
+                );
+                set_test_c_string(
+                    &mut info.device_symbol,
+                    "sllm_causal_attention_paged_prefill_gqa4_shared_v1",
+                );
+                set_test_c_string(&mut info.gcn_arch_name, target);
+                let evidence = validate_attention_info_for_storage(
+                    &info,
+                    &context,
+                    KvStateStorageKind::Paged,
+                    0,
+                    query_count,
+                    descriptor,
+                    16,
+                    None,
+                    None,
+                    false,
+                )
+                .unwrap_or_else(|error| panic!("target {target} M={query_count}: {error:?}"));
+                assert_eq!(
+                    evidence.kernel_symbol,
+                    "causal_attention.paged_prefill.gqa4_shared.v1"
+                );
+                assert_eq!(
+                    evidence.device_symbol,
+                    "sllm_causal_attention_paged_prefill_gqa4_shared_v1"
+                );
+                assert_eq!(evidence.grid_size_x, query_count as u32 * 16);
+            }
+        }
+    }
+
+    #[test]
+    fn paged_gfx1201_prefill_metadata_keeps_the_long_qtile_gate() {
+        let descriptor = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            2048,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        )
+        .unwrap();
+        let context = Context::test_without_native_for_target("gfx1201");
+        for (start, workgroup, grid, kernel, device) in [
+            (
+                0,
+                256,
+                128 * 24,
+                "causal_attention.paged_prefill.gqa6_qtile4.mxfp8_e4.v1",
+                "sllm_causal_attention_paged_prefill_gqa6_qtile4_mxfp8_e4_v1",
+            ),
+            (
+                1024,
+                512,
+                (128 / 8) * 4,
+                "causal_attention.paged_prefill.gqa6_qtile8.mxfp8_e4.v1",
+                "sllm_causal_attention_paged_prefill_gqa6_qtile8_mxfp8_e4_v1",
+            ),
+        ] {
+            let mut info = empty_causal_attention_info();
+            info.backend = sys::SLLM_BACKEND_HIP;
+            info.dispatch_id = 17;
+            info.dispatch_count = 1;
+            info.kernel_id = sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_GQA6_V1;
+            info.workgroup_size_x = workgroup;
+            info.grid_size_x = grid;
+            info.query_count = 128;
+            info.start_position = start;
+            info.committed_kv_length = start + 128;
+            info.q_heads = 24;
+            info.kv_heads = 4;
+            info.head_dim = 256;
+            info.scale_denominator = 16;
+            set_test_c_string(&mut info.kernel_symbol, kernel);
+            set_test_c_string(&mut info.device_symbol, device);
+            set_test_c_string(&mut info.gcn_arch_name, "gfx1201");
+            let evidence = validate_attention_info_for_storage(
+                &info,
+                &context,
+                KvStateStorageKind::Paged,
+                start,
+                start + 128,
+                descriptor,
+                24,
+                None,
+                None,
+                false,
+            )
+            .unwrap_or_else(|error| panic!("start {start}: {error:?}"));
+            assert_eq!(evidence.kernel_symbol, kernel);
+        }
     }
 
     #[test]
@@ -3896,44 +5547,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn rdna_vmm_workarounds_and_gfx942_select_contiguous_storage() {
-        assert_eq!(
-            selected_memory_kind_for_target(Some("gfx942"), 1),
-            sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
-        );
-        assert_eq!(
-            selected_memory_kind_for_target(Some("gfx1030"), 65_535),
-            sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
-        );
-        assert_eq!(
-            selected_memory_kind_for_target(Some("gfx1030"), 65_536),
-            sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
-        );
-        assert_eq!(
-            selected_memory_kind_for_target(Some("gfx1030"), 65_537),
-            sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
-        );
-        for capacity in [1, 8_191, 8_192, 8_193, 8_320, 65_535] {
-            assert_eq!(
-                selected_memory_kind_for_target(Some("gfx1201"), capacity),
-                sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
-            );
-        }
-        assert_eq!(
-            selected_memory_kind_for_target(Some("gfx1201"), 65_536),
-            sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
-        );
-        assert_eq!(
-            selected_memory_kind_for_target(Some("gfx1201"), 65_537),
-            sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
-        );
-        assert_eq!(
-            selected_memory_kind_for_target(None, 131_072),
-            sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
-        );
     }
 
     #[test]
@@ -5380,9 +6993,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_native_owners_are_not_send_or_sync() {
-        static_assertions::assert_not_impl_any!(NativeKvStateOwner: Send, Sync);
-        static_assertions::assert_not_impl_any!(NativeKvSnapshotOwner: Send, Sync);
+    fn resource_sendability_contract_is_preserved() {
         static_assertions::assert_impl_all!(KvStateResource: Send, Sync);
         static_assertions::assert_impl_all!(KvAppendCompletion: Send);
         static_assertions::assert_impl_all!(CausalAttentionCompletion: Send);
@@ -5390,12 +7001,20 @@ mod tests {
 
     #[test]
     fn abi_layout_fields_have_expected_rust_sizes() {
-        assert_eq!(size_of::<sys::sllm_kv_state_create_info_t>(), 48);
-        assert_eq!(size_of::<sys::sllm_kv_state_create_info_v2_t>(), 88);
-        assert_eq!(size_of::<sys::sllm_kv_view_info_t>(), 192);
         assert_eq!(size_of::<sys::sllm_kv_append_desc_t>(), 416);
         assert_eq!(size_of::<sys::sllm_kv_append_info_t>(), 304);
         assert_eq!(size_of::<sys::sllm_causal_attention_desc_t>(), 424);
         assert_eq!(size_of::<sys::sllm_causal_attention_dispatch_info_t>(), 312);
+        assert_eq!(size_of::<sys::sllm_kv_paged_state_fork_info_t>(), 152);
+        let info = empty_paged_fork_info();
+        assert_eq!(
+            info.struct_size as usize,
+            size_of::<sys::sllm_kv_paged_state_fork_info_t>()
+        );
+        assert_eq!(
+            info.info_version,
+            sys::SLLM_HIP_KV_PAGED_STATE_FORK_INFO_VERSION
+        );
+        assert_eq!(info.shared_physical_blocks, 0);
     }
 }

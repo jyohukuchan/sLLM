@@ -2,7 +2,7 @@
 
 2026-09-22〜24。段階7の候補C1（FP8 per-rowのproducer融合、着手時上限137 node）を評価し、
 C2（NVFP4 block16＋tensor scale）を追加評価した。C3（MXFP8 KV前処理）は上限から対象外とした。
-[段階7計画](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#段階7の着手時上限と候補2026-09-22)の
+[段階7計画](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#段階7の着手時上限と候補2026-09-22)の
 上限・打切り線・候補定義は着手時に確定済みで、本作業単位では再計算しない。
 
 ## step 1: 代表1変種のコンパイルと資源記録
@@ -66,7 +66,7 @@ registerもshared memoryも制約にならない。したがって設計変更�
 - native側の実行時統合（`public_runtime.hip.cpp`のprepare/execute dispatch、
   `graph_span_runtime.inc`のcapture gate）は2026-09-23に接続し、以下で検証した。
 
-計画: [Phase 87計画](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)
+計画: [Phase 87計画](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)
 
 ## 2026-09-23 実行時接続の途中結果
 
@@ -258,4 +258,4 @@ probeは`.local-artifacts/phase87/stage7/c2-perf/`（sourceと両gfxの結果）
 packのprequant受け入れを通常経路で使う。
 Phase 87全体の段階3・4・9などは別作業単位であり、ここでは完了扱いしない。
 
-計画: [Phase 87単一要求NVFP4計画](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)。
+計画: [Phase 87単一要求NVFP4計画](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)。

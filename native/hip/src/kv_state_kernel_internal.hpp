@@ -2,6 +2,7 @@
 #define SLLM_KV_STATE_KERNEL_INTERNAL_HPP
 
 #include "decode_control_kernel_internal.hpp"
+#include "paged_kv_device_layout.hpp"
 
 #include "sllm/hip.h"
 
@@ -11,45 +12,41 @@
 
 namespace sllm_kv_state_kernel {
 
-constexpr const char *kLogicalKernelId = "kv_state.bf16_to_f16_token_major.v2";
-constexpr const char *kDeviceSymbol =
-    "sllm_kv_state_bf16_to_f16_token_major_v2";
-constexpr const char *kFp8LogicalKernelId =
-    "kv_state.bf16_to_fp8_token_major.v1";
-constexpr const char *kFp8DeviceSymbol =
-    "sllm_kv_state_bf16_to_fp8_token_major_v1";
-constexpr const char *kFp8StaticLogicalKernelId =
-    "kv_state.bf16_to_fp8_static_token_major.v1";
-constexpr const char *kFp8StaticDeviceSymbol =
-    "sllm_kv_state_bf16_to_fp8_token_major_v1";
-constexpr const char *kNvfp4LogicalKernelId =
-    "kv_state.bf16_to_nvfp4_token_major.v1";
-constexpr const char *kNvfp4DeviceSymbol =
-    "sllm_kv_state_bf16_to_nvfp4_token_major_v1";
-constexpr const char *kFp8E4Block16LogicalKernelId =
-    "kv_state.bf16_to_fp8_e4_block16_token_major.v1";
-constexpr const char *kFp8E4Block16DeviceSymbol =
-    "sllm_kv_state_bf16_to_fp8_block16_token_major_v1";
-constexpr const char *kFp8E5Block16LogicalKernelId =
-    "kv_state.bf16_to_fp8_e5_block16_token_major.v1";
-constexpr const char *kFp8E5Block16DeviceSymbol =
-    "sllm_kv_state_bf16_to_fp8_block16_token_major_v1";
-constexpr const char *kFp8E4Block16LogicalKernelIdV2 =
-    "kv_state.bf16_to_fp8_e4_block16_token_major.v2";
-constexpr const char *kFp8E4Block16DeviceSymbolV2 =
-    "sllm_kv_state_bf16_to_fp8_e4_block16_token_major_v2";
-constexpr const char *kFp8E5Block16LogicalKernelIdV2 =
-    "kv_state.bf16_to_fp8_e5_block16_token_major.v2";
-constexpr const char *kFp8E5Block16DeviceSymbolV2 =
-    "sllm_kv_state_bf16_to_fp8_e5_block16_token_major_v2";
-constexpr const char *kMxfp8E4LogicalKernelId =
-    "kv_state.bf16_to_mxfp8_e4_token_major.v1";
-constexpr const char *kMxfp8E4DeviceSymbol =
-    "sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1";
-constexpr const char *kMxfp8E5LogicalKernelId =
-    "kv_state.bf16_to_mxfp8_e5_token_major.v1";
-constexpr const char *kMxfp8E5DeviceSymbol =
-    "sllm_kv_state_bf16_to_mxfp8_e5_token_major_v1";
+constexpr const char *kPagedFp16LogicalKernelId =
+    "kv_state.bf16_to_paged_f16.v1";
+constexpr const char *kPagedFp16DeviceSymbol =
+    "sllm_kv_state_bf16_to_paged_f16_v1";
+constexpr const char *kPagedMxfp8E4LogicalKernelId =
+    "kv_state.bf16_to_paged_mxfp8_e4.v1";
+constexpr const char *kPagedMxfp8E4DeviceSymbol =
+    "sllm_kv_state_bf16_to_paged_mxfp8_e4_v1";
+constexpr const char *kPagedFp8LogicalKernelId =
+    "kv_state.bf16_to_paged_fp8.v1";
+constexpr const char *kPagedFp8DeviceSymbol =
+    "sllm_kv_state_bf16_to_paged_fp8_v1";
+constexpr const char *kPagedFp8StaticLogicalKernelId =
+    "kv_state.bf16_to_paged_fp8_static.v1";
+constexpr const char *kPagedFp8StaticDeviceSymbol =
+    "sllm_kv_state_bf16_to_paged_fp8_static_v1";
+constexpr const char *kPagedNvfp4LogicalKernelId =
+    "kv_state.bf16_to_paged_nvfp4.v1";
+constexpr const char *kPagedNvfp4DeviceSymbol =
+    "sllm_kv_state_bf16_to_paged_nvfp4_v1";
+constexpr const char *kPagedMxfp8E5LogicalKernelId =
+    "kv_state.bf16_to_paged_mxfp8_e5.v1";
+constexpr const char *kPagedMxfp8E5DeviceSymbol =
+    "sllm_kv_state_bf16_to_paged_mxfp8_e5_v1";
+
+// Fixed-window ring entry point.  The table has nine slots and `ring_tags`
+// carries the absolute block number currently resident in each slot.  The
+// tag check is device-side so a stale slot cannot be interpreted as a valid
+// KV row after the absolute block number wraps modulo nine.
+constexpr uint32_t kSlidingRingSlots = 9U;
+constexpr uint64_t kSlidingWindowTokens = 1024U;
+constexpr const char *kPagedFp8StaticSlidingLogicalKernelId =
+    "kv_state.bf16_to_paged_fp8_static_sliding_ring.v1";
+constexpr const char *kPagedFp8StaticSlidingDeviceSymbol =
+    "sllm_kv_state_bf16_to_paged_fp8_static_sliding_ring_v1";
 
 // Private Phase 54 research ABI. These constants intentionally do not enter
 // include/sllm/hip.h: candidates are process-local evidence controls, not a
@@ -62,28 +59,53 @@ constexpr int32_t kPhase54KvResearchOk = 0;
 constexpr int32_t kPhase54KvResearchInvalidRecipe = 1;
 constexpr int32_t kPhase54KvResearchUnsupported = 2;
 
-hipError_t launch(const uint16_t *key_input, const uint16_t *value_input,
-                  void *key_output, void *value_output, void *key_scales,
-                  void *value_scales, float *key_outer_scales,
-                  float *value_outer_scales, uint32_t token_count,
-                  uint64_t capacity_tokens, uint64_t start_position,
-                  uint32_t head_count, uint32_t head_dim, uint32_t encoding,
-                  float static_key_scale, float static_value_scale,
-                  hipStream_t stream) noexcept;
+// Status values written by the paged append device path.  Zero is the
+// success value and is intentionally independent from the decode-control
+// status enum: the append status is a small, request-local device word that
+// the host can inspect before publishing a state transaction.
+constexpr uint32_t kPagedAppendStatusOk = 0U;
+constexpr uint32_t kPagedAppendStatusInvalidPosition = 1U;
+constexpr uint32_t kPagedAppendStatusInvalidTable = 2U;
+constexpr uint32_t kPagedAppendStatusInvalidDescriptor = 3U;
 
-/* Whole-decode graph append route.  The graph keeps base KV allocations and
- * reads phase_position/phase_rows from the device control at replay time;
- * unsupported legacy/static encodings fail closed instead of using a stale
- * host position. */
-hipError_t launch_device(const uint16_t *key_input, const uint16_t *value_input,
-                         void *key_output, void *value_output, void *key_scales,
-                         void *value_scales, float *key_outer_scales,
-                         float *value_outer_scales, uint32_t token_count,
-                         uint64_t capacity_tokens, uint32_t head_count,
-                         uint32_t head_dim, uint32_t encoding,
-                         float static_key_scale, float static_value_scale,
-                         sllm_decode_control::ControlV1 *control,
-                         hipStream_t stream) noexcept;
+/* Append BF16 K/V rows into a 128-token physical block table.  The descriptor
+ * and logical table pointers are device pointers.  A descriptor owns the
+ * starts of the key/value and optional scale planes for one physical block;
+ * rows inside a block are laid out token-major, then KV head, then dimension.
+ * The launcher clears device_status before dispatch and the kernel sets it on
+ * an invalid logical-table entry or descriptor. */
+hipError_t launch_paged(const uint16_t *key_input, const uint16_t *value_input,
+                        const sllm_paged_kv::BlockDescriptor *block_descriptors,
+                        const uint32_t *logical_table, uint32_t table_capacity,
+                        uint32_t descriptor_capacity, uint32_t token_count,
+                        uint64_t capacity_tokens, uint64_t start_position,
+                        uint32_t head_count, uint32_t head_dim,
+                        uint32_t encoding, uint32_t *device_status,
+                        hipStream_t stream, float static_key_scale = 1.0F,
+                        float static_value_scale = 1.0F) noexcept;
+
+/* Graph replay variant.  `control` supplies the current phase position and
+ * active row count at replay time.  token_count is the captured maximum row
+ * count; phase_rows may be any value in [1, token_count]. */
+hipError_t launch_paged_device(
+    const uint16_t *key_input, const uint16_t *value_input,
+    const sllm_paged_kv::BlockDescriptor *block_descriptors,
+    const uint32_t *logical_table, uint32_t table_capacity,
+    uint32_t descriptor_capacity, uint32_t token_count,
+    uint64_t capacity_tokens, uint32_t head_count, uint32_t head_dim,
+    uint32_t encoding, sllm_decode_control::ControlV1 *control,
+    uint32_t *device_status, hipStream_t stream, float static_key_scale = 1.0F,
+    float static_value_scale = 1.0F) noexcept;
+
+hipError_t launch_paged_sliding_static_fp8(
+    const uint16_t *key_input, const uint16_t *value_input,
+    const sllm_paged_kv::BlockDescriptor *block_descriptors,
+    const uint32_t *ring_table, const uint64_t *ring_tags,
+    uint32_t ring_slot_count, uint32_t descriptor_capacity,
+    uint32_t token_count, uint64_t retained_start, uint64_t start_position,
+    uint32_t head_count, uint32_t head_dim, float static_key_scale,
+    float static_value_scale, uint32_t *device_status,
+    hipStream_t stream) noexcept;
 
 } // namespace sllm_kv_state_kernel
 

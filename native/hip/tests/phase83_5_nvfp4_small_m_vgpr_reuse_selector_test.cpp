@@ -46,9 +46,18 @@ bool check_kahan_stage_boundary(const uint64_t m, const uint64_t k,
   using namespace sllm_matmul_kernel;
   const SelectorDecision decision =
       select_nvfp4_w4a4_decision(m, k, n, "gfx1201");
-  const char *const expected_symbol =
-      m >= 256U ? "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_stage64_v1"
-                : "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1";
+  const char *expected_symbol =
+      "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_v1";
+  if (m >= 256U) {
+    if ((m % 128U) == 0U) {
+      expected_symbol =
+          k == 5120U ? "sllm_nvfp4_gfx1201_wmma128x64_aligned_k5120n17408_v1"
+                     : "sllm_nvfp4_gfx1201_wmma128x64_aligned_k17408n5120_v1";
+    } else {
+      expected_symbol =
+          "sllm_nvfp4_w4a4_prefill_gfx1201_wmma128x64_kahan_lookahead_v1";
+    }
+  }
   return decision.variant == KernelVariant::Nvfp4W4A4PrefillGfx1201WmmaKahan &&
          decision.supported && decision.enabled && decision.adopted &&
          std::string_view(device_symbol_for_target(decision.variant, "gfx1201",
@@ -65,17 +74,18 @@ int main() {
   for (const char *const target : {"gfx1030", "gfx1201"}) {
     for (const auto &shape : {std::pair<uint64_t, uint64_t>{5120U, 17408U},
                               std::pair<uint64_t, uint64_t>{17408U, 5120U}}) {
-      for (const uint64_t m : {2U, 3U, 4U}) {
+      for (const uint64_t m : {2U, 3U, 4U, 5U}) {
         ok = ok && check_default(m, shape.first, shape.second, target);
       }
     }
   }
 
-  // The exact M and K/N boundaries stay out of ID94.
+  // The exact M and K/N boundaries stay out of ID94. M=5 is the upper
+  // production boundary; M=1 and M=6 must remain outside it.
   for (const auto &shape : {std::pair<uint64_t, uint64_t>{5120U, 17408U},
                             std::pair<uint64_t, uint64_t>{17408U, 5120U}}) {
     for (const char *const target : {"gfx1030", "gfx1201"}) {
-      for (const uint64_t m : {1U, 5U}) {
+      for (const uint64_t m : {1U, 6U}) {
         ok = ok &&
              select_nvfp4_w4a4_variant(m, shape.first, shape.second, target) !=
                  KernelVariant::Nvfp4W4A4SmallMVgprReuse;

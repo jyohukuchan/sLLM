@@ -1,0 +1,13 @@
+Review this Python helper and propose a small fix. It should emit each complete frame once, retain bytes after the delimiter for the next frame, and raise ValueError when the buffer grows past the configured limit. Keep the public function signature unchanged.
+
+```python
+def frames(chunks, delimiter=b"\n", limit=4096):
+    pending = b""
+    for chunk in chunks:
+        pending += chunk
+        while delimiter in pending:
+            frame, pending = pending.split(delimiter, 1)
+            yield frame
+    if len(pending) > limit:
+        raise ValueError("frame buffer is too large")
+```

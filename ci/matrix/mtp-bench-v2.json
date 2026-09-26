@@ -1,0 +1,278 @@
+{
+  "schema_version": "mtp-bench-v2",
+  "state": "frozen",
+  "spec": "docs/development/mtp-acceptance-benchmark.md",
+  "purpose": "Stage 12 host identity for MTP widths 2, 3 and 4; Tier A inputs are reused from the frozen v1 benchmark.",
+  "source_manifest": {
+    "path": "ci/matrix/mtp-bench-v1.json",
+    "sha256": "06ba0cebfd9b412244bebc0eb4c58c705bb20393851e4074e6152c30daeaf30a"
+  },
+  "fixture_root": "ci/fixtures/mtp-bench-v1",
+  "fixture_tree_sha256": "6c86270cc831fc443cb4c258315123ea90564a24958084e94e8b1b3a88be4e3c",
+  "fixture_reuse": {
+    "mode": "referenced",
+    "prompt_and_sequence_paths": "source_manifest.conditions and source_manifest.reference_sequence_provenance",
+    "copied_files": 0,
+    "note": "The v2 identity is invalid if the v1 manifest or any referenced fixture hash changes."
+  },
+  "runtime_contract": {
+    "mtp_widths": [
+      2,
+      3,
+      4
+    ],
+    "kv_encoding": "mxfp8-e4",
+    "sampling": "GPU fixed top-k 20, top-p 0.95, temperature 1.0 for M3; frozen reference columns for M1",
+    "target": "Qwen3.8-27B-NVFP4",
+    "exact_targets": [
+      "gfx1030",
+      "gfx1201"
+    ],
+    "hip_only": true,
+    "fallback_allowed": false,
+    "required_cleanup": 0
+  },
+  "m1_contract": {
+    "metric": "per-proposal-step expected p/q acceptance",
+    "steps": "step1..stepN for N equal to the selected width",
+    "support_transform": "top_k 20, top_p 0.95, temperature 1.0; engine selector order",
+    "cluster_count": 26,
+    "resampling_unit": "prompt"
+  },
+  "m3_contract": {
+    "warmups": 1,
+    "measured": 3,
+    "cluster_count": 26,
+    "decomposition": "draft and non-draft wall time per proposal block",
+    "whole_decode": false
+  },
+  "m4_contract": {
+    "tokens_per_block": "1 + a1 + a1*a2 + ... + a1*a2*...*aN",
+    "speed": "expected tokens per block / measured total seconds per block",
+    "output": "one row per Tier A prompt cluster"
+  },
+  "tier_a_count": 26,
+  "identity_rules": [
+    "v1 source manifest SHA-256 must match source_manifest.sha256",
+    "all Tier A prompt paths and SHA-256 values come from v1",
+    "all M1 and M3 reports in one calculation must name the same target and model",
+    "width must be exactly 2, 3 or 4 and every proposal step must be present",
+    "M1 prompt and output-prefix token hashes must equal frozen_prefix_identity for every Tier A case"
+  ],
+  "frozen_prefix_identity": {
+    "source": "Phase86 frozen 26-condition prefix file; hashes embedded so v2 validation does not depend on the ignored artifact at analysis time",
+    "source_sha256": "7d7be1a0ca3946fba592891d96eb4155c8c9235a714a448dbbb3a409f1b0c1a3",
+    "hash_contract": "SHA-256 of consecutive little-endian signed i32 token IDs",
+    "entries": {
+      "code-c-explain-ja": {
+        "prompt_token_count": 4634,
+        "prompt_tokens_le_i32_sha256": "eb8f004749a4be50c1dbd1fdc72cfbbc62e0850d1c570db6a890b4a4704501dd",
+        "output_prefix_token_count": 255,
+        "output_prefix_tokens_le_i32_sha256": "5733abc87d4ad96205aaf14ee20f1ab1fafb9fce606c6956cb24cf0f2ca037e3",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "f97343f9e767a003eaed5cc72498a8f734ca4048b95f09d215e554cf9e85971d"
+      },
+      "code-c-implement-en": {
+        "prompt_token_count": 4640,
+        "prompt_tokens_le_i32_sha256": "637093ea6456494424ea656afb74f0a87325f5f468225d953be301e882ea2663",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "682b82703a1853086f31ee3993c52b9332d7ee05b5ababf7e11f898c0c87bd5f",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "f5dd0c42c42ebc5795562992f10b4b111dc416c9330472e7994e27410e99e7cb"
+      },
+      "code-cuda-explain-ja": {
+        "prompt_token_count": 1727,
+        "prompt_tokens_le_i32_sha256": "3d7a51bab1c4e8b9de76fa104534228b955f2a4d5b555f315500e26e62577740",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "4c5e4277b2b2e6f1ef6358cbcce6aaac80e0d11005655d7885558f2acd76786e",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "358bc6d0f2c71acfacdc6c9b389f5005ec97a596a12c55e1d502639370ccc1dd"
+      },
+      "code-cuda-implement-en": {
+        "prompt_token_count": 1718,
+        "prompt_tokens_le_i32_sha256": "ee98c597674656688fa376da1ad657cdcbc94c48ea2c376215354f411f80bf58",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "0bda6e0ce7605d5397edc676f1f3be315889ec17a9ea1b05d8c3915d35d3b82b",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "e9306e089693e8667070f824d347b6be6f73312869edfd6bf2fa9494f5d7aba4"
+      },
+      "code-go-explain-ja": {
+        "prompt_token_count": 1564,
+        "prompt_tokens_le_i32_sha256": "e71c1561b9b313dfe79047f251e5cbc006b5b8badb8bc5a1daed2d8d884ca3cc",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "882bdb8acb4a6944dcf159060a9591d7a21f792768663c146c5e7d40afa79267",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "442d20fe2ef83e9062a53ea030e83346d49ab44051c87777c909b4d7ec46c920"
+      },
+      "code-go-implement-en": {
+        "prompt_token_count": 1558,
+        "prompt_tokens_le_i32_sha256": "d6ab75ff3d1646609376d340911c6649a97b8a530441f41035fa5f59b23ff653",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "e6476e29bd6796a071aff50571097fa6750c68e413b17d2298cc99640d0eb63a",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "293d1d06d842b2f6a8bc6e0af95b38285a9eb2cd054426fbe2d6725280fd0080"
+      },
+      "code-html-review-zh": {
+        "prompt_token_count": 2270,
+        "prompt_tokens_le_i32_sha256": "37ec7c2b6a83567063a787c1287ee06e397ba74465da10be775117bcfbf2d4e9",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "dbd717a5c6ac92dd9b38fe785af55f4e32309fdf1a5d97fe79e151512eed6d3f",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "b2c8390507cd0e0cc2de8ffe1cf5cf04748a825ac48f3a5996dabee48c9aaaca"
+      },
+      "code-html-test-ja": {
+        "prompt_token_count": 2287,
+        "prompt_tokens_le_i32_sha256": "37408359ad2129789a1873ebe58b867c3b91f8384e7ea9e230fd2cb2a161cde2",
+        "output_prefix_token_count": 139,
+        "output_prefix_tokens_le_i32_sha256": "1a29aaf3c95a2baf38294078a9e4844ca1ba7e7bf6819d91f2c639fa6330e6cd",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "97fec7e97071c2254d9435038358c6e60ef393f8f8c2045c889e4f5731d3099e"
+      },
+      "code-java-bugfix-zh": {
+        "prompt_token_count": 1795,
+        "prompt_tokens_le_i32_sha256": "1848b22b47be385a4a2ee348acb6d5c15d5e99142c2376742304658c092b655c",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "1580a7ae349215e6afc1e78f3e0da7dc233bf26083440610752ecdb1592b90ed",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "9dc69f58d90ef997dfb03d87d11947f19a99b477b30a26e07e7676eafda16876"
+      },
+      "code-java-refactor-en": {
+        "prompt_token_count": 1797,
+        "prompt_tokens_le_i32_sha256": "0e1495e7032575b8e88eac557c55105928917e5ec12d29944421661f2b9c0f44",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "1e679b0ac11f64fbabd5b05aff63fead3803ebe0d22ddf448518cb62dd6665cb",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "87a50cf5e9ddc793e4c159f8278ed15a8908b88144feda75c97734e0f302b90d"
+      },
+      "code-python-review-zh": {
+        "prompt_token_count": 8257,
+        "prompt_tokens_le_i32_sha256": "c6dd076bd28009ec5026e0dbe898984a87187693e50b163563b4acce8f1cecdf",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "abd075dcc91ce6117a49310e88802bc7190dd7c77a2ddfec43f91fb82391b777",
+        "reference_series": "phase86-frozen-existing-review",
+        "output_prefix_tokens_decimal_csv_sha256": "113bea567beed8fae65ff5c8e3aec2be4e607ed7f17d1288e8e0cc1401c4ef1b"
+      },
+      "code-python-test-ja": {
+        "prompt_token_count": 8271,
+        "prompt_tokens_le_i32_sha256": "7822ce773dc1cbb56b425994d44f124dd27999edd64d42a4c9d954af63bfaf5a",
+        "output_prefix_token_count": 115,
+        "output_prefix_tokens_le_i32_sha256": "7832137d3a19eb43bb72f2f053ab461da85e904e41ebf051c431fe53c9991e73",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "eabfddf5d3beedd9ba9d1f64c4788f7b0f332f64df1ab18adfe73f5339191403"
+      },
+      "code-rust-bugfix-zh": {
+        "prompt_token_count": 8284,
+        "prompt_tokens_le_i32_sha256": "b72a42b042823469d6cff29b6c3f264e1e9ab71073d7975c3fe7fc4acaa92832",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "2c6196d4c5d3002e661df7c4b7e24fb5960dc044f6e253433266d9095324ec04",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "c80226ac21984ecc55d2d86cc9319848e905254c273940958b80f14f76f30f61"
+      },
+      "code-rust-refactor-en": {
+        "prompt_token_count": 8267,
+        "prompt_tokens_le_i32_sha256": "df251f847468a571ebd2f73c210ee5e0fa23b1655e782183989bdd0e4c01ceb6",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "571865d2b184ccdb511662d265f287b3a11bde47ffab7fa4aad87153b714fc15",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "adcc7b8cb19a1fd082e29225a90f03a54d6764f2be944bd4c3389749c51785cc"
+      },
+      "code-sql-explain-ja": {
+        "prompt_token_count": 1578,
+        "prompt_tokens_le_i32_sha256": "ed7b9cff03e236dc80678a2de6a3c84640239a1c1853a0760286f71dde4d0471",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "2b61ec9769934b9b8e0a7ada5a2c0b3c9f956edd98edb2bf0e6e18ce3073437f",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "16ae1f222607f8efbac56da9931eaec480cd9c109de8947318d948120e2ac11d"
+      },
+      "code-sql-implement-en": {
+        "prompt_token_count": 1566,
+        "prompt_tokens_le_i32_sha256": "39ae44952bde8d5c87ead85150d5208e35b00dd7b30843cda85486fdd8a899a7",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "7cadee2d02c18430f7103cd6664b2f7899f640404a238f635487660d68ff1265",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "4f652d5aa8a93921539c981f387625cdfa01a260845f5175f07cc40af17ba769"
+      },
+      "code-sycl-bugfix-zh": {
+        "prompt_token_count": 1995,
+        "prompt_tokens_le_i32_sha256": "52820cd1bbccfaa1d5c634305c2394ce1644f10541f873518574698f26c1d0d8",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "10096505fc84230e04ea2bc6980f47d299dba65ab5b9c74670a46deb8fe096b9",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "d50c98efa60e3c10b1eaaf5f6dc6cff2b0d9353d9af8fb5214e182eaf8ec6be0"
+      },
+      "code-sycl-refactor-en": {
+        "prompt_token_count": 2006,
+        "prompt_tokens_le_i32_sha256": "89f467e3b0affa138cce742b59c7167d9906ec5dda8193acafe1f8bf0fcdd90f",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "4fb59f86bbd067e798f2bc19b0b29b14dd003ddda31252dbec3e0ece6fcb0b65",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "83ee351100499504162b2b23659bec1ebdf7a208dc4735d874c56272398977dc"
+      },
+      "code-typescript-review-zh": {
+        "prompt_token_count": 8260,
+        "prompt_tokens_le_i32_sha256": "1b8f83ed256446e1dddf91add7b21e1f55a1d844e6af118d0af24d3a6069a44b",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "22e1e1077b51531e26403069ab1129dcababa8ca02ea989ecff099948bbff7ce",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "a23b844a3b6790a1cf5dcae316f428a4f88f0ec6ccd3fa04bf40560e5db906b0"
+      },
+      "code-typescript-test-ja": {
+        "prompt_token_count": 8270,
+        "prompt_tokens_le_i32_sha256": "9196e4cf0cbd33579cdbe69147cfb951a29333094075c6de5320020c0cb1d062",
+        "output_prefix_token_count": 145,
+        "output_prefix_tokens_le_i32_sha256": "51ec58b45dfbf36953f27c6f8963a38d434a328c3286fbd708e9afe4ef2ff45f",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "de5afb76dc3414aa8f78149276159d1512a35cc8367de01917fe49b8a554efd0"
+      },
+      "trans-en-ja-general": {
+        "prompt_token_count": 789,
+        "prompt_tokens_le_i32_sha256": "a9af5c973d5cc7ec8b3195ae5023d9280496de703a91078f95c8423e6d63eea2",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "ad646a012a53a720435dabdabfa1042dcc415f67b37da937ff34735a32a8c588",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "31c4790cc03aa7f539223afaed53630211b33436801974cda80e7f0938dfd0fc"
+      },
+      "trans-en-ja-tech": {
+        "prompt_token_count": 1054,
+        "prompt_tokens_le_i32_sha256": "39ab074f1b64a04768975b9b54279f8f1b94ee35e97c0b81fe2ed44e60591dc7",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "01db0532ffd79226825b61e8d6ad26bbff3de6c2d45688c855a0477041151968",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "f6ae9e31bb1ef612883a80befd753317eb7c03c6170825d6755eaccb25d6df4e"
+      },
+      "trans-en-zh-tech": {
+        "prompt_token_count": 1056,
+        "prompt_tokens_le_i32_sha256": "1d60be1a1a52b9160554d1593ded64739210ba4c12c2f5c384c070a8e8ed7bb7",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "cbe2b8d49f93007cae8c484b8cc2ee8f216474475b5d30c7f56fbeb6321663e8",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "3ccfe3525adc46fbf4afb23329d5e03b5657f55fe62000c50e2c60b09bc698c8"
+      },
+      "trans-ja-en-general": {
+        "prompt_token_count": 695,
+        "prompt_tokens_le_i32_sha256": "1c20aaee7da356fc84531a1b6bf8e6fe851effdb32674165746f69d6cdc0a7eb",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "6067291f70586e7bcd0fc4253659e44e8104d54b1347232626ff62d601548b72",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "4ce966b8252f6d65a7944a746081b7e07bffb0bb6d47bcd9a947167ac90ac325"
+      },
+      "trans-ja-en-tech": {
+        "prompt_token_count": 1019,
+        "prompt_tokens_le_i32_sha256": "4a9456efb47d231e6b5880157198330fda024a656401d2de30521b44f1477e0a",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "1f0b8953408c4f575afda0df7ccc7fbd7d77f09fabdf867a52307cc5d3c9e165",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "e673ff257a1333d72d100b52fd6117651e763b15f39453a5aea9dbddafeeaa66"
+      },
+      "trans-zh-en-tech": {
+        "prompt_token_count": 765,
+        "prompt_tokens_le_i32_sha256": "d45779cbd400101606b4dd042d362a09eb9b2f158ba94bcbf5e26c82f5edf217",
+        "output_prefix_token_count": 256,
+        "output_prefix_tokens_le_i32_sha256": "00d901829ceeda71e5ab37fa51e8aedb061a06f6fd3dc9b45ff7dd0c19273445",
+        "reference_series": "bf16",
+        "output_prefix_tokens_decimal_csv_sha256": "bbfcaca391ec0bf8e521ebbd00982603e6ac739f3f9934b51efd136290203ed0"
+      }
+    },
+    "source_path": ".local-artifacts/phase86-mtp-catch-up/prefixes-26.json"
+  }
+}

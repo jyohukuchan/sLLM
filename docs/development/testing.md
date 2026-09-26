@@ -39,6 +39,35 @@ python3 ci/tools/run_host_suite.py --row h1 --output-dir .local-artifacts/ci/h1 
 python3 ci/tools/run_host_suite.py --row h2 --output-dir .local-artifacts/ci/h2 --allow-dirty-local
 ```
 
+### Local fast mode (automatic)
+
+Every run without `--strict-ci` uses the local fast mode automatically; nothing has to be enabled.
+It changes only how the registered commands are scheduled, never which commands or tests run:
+
+- commands run concurrently; commands that build with Cargo stay ordered within their target
+  directory (a development-toolchain lane and an MSRV lane that builds for an explicit `--target`);
+- the Cargo commands drop the registered `--jobs 1` and use `CARGO_BUILD_JOBS=<cpu count>` and
+  `CARGO_INCREMENTAL=1`;
+- a registered `-m unittest` command is split into at most 8 processes by test position, and the
+  summed count must equal the command's own test count;
+- the per-command and row memory bound is 64 GiB instead of the 2 GiB CI row budget.
+
+On the 128-core development host, H0 took about 31 s with no source change and about 81 s after a
+change to `sllm-core`, against about 390 s serially (2026-09-24). The report records the mode in its
+warnings. Use `--serial` to reproduce the CI scheduling and resource budget locally:
+
+```bash
+python3 ci/tools/run_host_suite.py --row h0 --output-dir .local-artifacts/ci/h0 --allow-dirty-local --serial
+```
+
+The native HIP build inside `sllm-hip-sys` follows the same rule: `build.rs` passes Cargo's job count
+(`NUM_JOBS`) to `cmake --build --parallel`, so a registered `--jobs 1` command stays serial. It stays
+at `--parallel 1` under `GITHUB_ACTIONS` and for the brokered semantic G1 builds.
+
+`--strict-ci` is always serial and keeps `--jobs 1`, `CARGO_BUILD_JOBS=2`, `CARGO_INCREMENTAL=0`, and
+the 2 GiB row budget. The network guard takes the fast-mode Cargo values only as an explicit argument
+from the runner, so the ambient environment cannot change CI resource controls.
+
 Immutable evidence requires a clean checkout and explicit equality between reviewed, tested, workflow, and checked-out SHA. The strict runner checks tracked and non-ignored untracked state both before and after the registered commands; a command that mutates the checkout produces a failed result instead of immutable `PASS` evidence:
 
 ```bash

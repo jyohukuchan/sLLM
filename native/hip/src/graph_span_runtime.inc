@@ -33,6 +33,7 @@ struct GraphKvStateBinding final {
   KvState *state;
   uint64_t initial_published_length;
   uint64_t initial_generation;
+  std::vector<sllm_paged_kv::LogicalEntryUpdate> paged_table_updates;
 };
 
 struct GraphLinearStateBinding final {
@@ -1121,6 +1122,207 @@ GraphKvStateBinding *graph_span_find_kv_state(GraphSpan *const span,
   return nullptr;
 }
 
+/* The device logical table keeps one immutable host snapshot alive while its
+ * update is in flight.  A graph preflight must never wait for that event on
+ * its successful path: the queue ordering already places the table update
+ * before the graph launch.  Cleanup is different; it is allowed to drain
+ * the queue so a speculative table entry cannot outlive its host reservation
+ * or be observed after the physical block is returned to the pool. */
+bool graph_span_poll_paged_table(KvState *const state, Queue *const queue,
+                                 const bool allow_sync,
+                                 sllm_error_sink_t *const error_sink) noexcept {
+  if (state == nullptr || queue == nullptr ||
+      state->paged_logical_table == nullptr) {
+    return false;
+  }
+  sllm_paged_kv::DeviceStatus status =
+      state->paged_logical_table->poll_pending();
+  if (status == sllm_paged_kv::DeviceStatus::Busy && allow_sync) {
+    const hipError_t sync = hipStreamSynchronize(queue->stream);
+    if (sync != hipSuccess) {
+      state->context->poisoned.store(true);
+      (void)hip_failure(error_sink, sync,
+                        "synchronize paged graph table cleanup");
+      return false;
+    }
+    status = state->paged_logical_table->poll_pending();
+  }
+  if (status == sllm_paged_kv::DeviceStatus::Ok) {
+    return true;
+  }
+  if (status == sllm_paged_kv::DeviceStatus::Busy) {
+    (void)sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_PUBLIC_BUSY,
+        "paged graph logical table update is still in flight");
+  } else {
+    state->context->poisoned.store(true);
+    (void)sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "paged graph logical table update failed or was poisoned");
+  }
+  return false;
+}
+
+bool graph_span_restore_paged_table(
+    KvState *const state, Queue *const queue,
+    const std::vector<sllm_paged_kv::LogicalEntryUpdate> &updates,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (updates.empty()) {
+    return true;
+  }
+  if (state == nullptr || queue == nullptr ||
+      state->paged_logical_table == nullptr ||
+      !graph_span_poll_paged_table(state, queue, true, error_sink)) {
+    return false;
+  }
+  const sllm_paged_kv::DeviceStatus restore =
+      state->paged_logical_table->restore_entries(updates, queue->stream);
+  if (restore != sllm_paged_kv::DeviceStatus::Ok) {
+    state->context->poisoned.store(true);
+    (void)sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "paged graph logical table restore failed");
+    return false;
+  }
+  if (!graph_span_poll_paged_table(state, queue, true, error_sink)) {
+    return false;
+  }
+  return true;
+}
+
+bool graph_span_rollback_paged_preflight(
+    KvState *const state, Queue *const queue,
+    sllm_paged_kv::State::Append &reservation,
+    const std::vector<sllm_paged_kv::LogicalEntryUpdate> &updates,
+    const bool table_update_queued,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (state == nullptr || queue == nullptr ||
+      state->paged_host_state == nullptr) {
+    return false;
+  }
+  if (table_update_queued &&
+      !graph_span_restore_paged_table(state, queue, updates, error_sink)) {
+    return false;
+  }
+  const sllm_paged_kv::Status rollback =
+      state->paged_host_state->rollback_graph_reservation(reservation);
+  if (rollback != sllm_paged_kv::Status::Ok) {
+    state->context->poisoned.store(true);
+    (void)sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "paged graph host reservation rollback failed");
+    return false;
+  }
+  return true;
+}
+
+/* Finish one staged paged state after the graph has drained.  `final_length`
+ * is allowed to be below the conservative bound, so logical entries in the
+ * unused suffix are restored on the same stream before the released blocks
+ * can be reused.  A normal publication does not synchronize; release and
+ * abort cleanup pass allow_sync=true through the table poll helper. */
+bool graph_span_finish_paged_binding(
+    GraphKvStateBinding &binding, GraphSpan *const span,
+    const uint64_t final_length, const uint64_t successful_generations,
+    const bool allow_sync, sllm_error_sink_t *const error_sink) noexcept {
+  KvState *const state = binding.state;
+  if (span == nullptr || state == nullptr || !state->paged ||
+      state->paged_host_state == nullptr ||
+      state->paged_logical_table == nullptr || span->queue == nullptr) {
+    return false;
+  }
+  if (!state->paged_host_state->graph_staged()) {
+    return binding.paged_table_updates.empty();
+  }
+  if (!graph_span_poll_paged_table(state, span->queue, allow_sync,
+                                   error_sink)) {
+    return false;
+  }
+
+  std::vector<sllm_paged_kv::LogicalEntryUpdate> trim;
+  try {
+    const uint64_t used_blocks =
+        final_length / sllm_paged_kv::kBlockTokens +
+        (final_length % sllm_paged_kv::kBlockTokens != 0U);
+    trim.reserve(binding.paged_table_updates.size());
+    for (const sllm_paged_kv::LogicalEntryUpdate &update :
+         binding.paged_table_updates) {
+      if (static_cast<uint64_t>(update.logical_block) >= used_blocks) {
+        trim.push_back(sllm_paged_kv::LogicalEntryUpdate{
+            update.logical_block, update.new_physical,
+            update.expected_physical});
+      }
+    }
+  } catch (...) {
+    return false;
+  }
+
+  const sllm_paged_kv::Status finish = state->paged_host_state->finish_graph(
+      final_length, successful_generations);
+  if (finish != sllm_paged_kv::Status::Ok) {
+    state->context->poisoned.store(true);
+    (void)sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "paged graph host state finalization failed");
+    return false;
+  }
+  if (!trim.empty()) {
+    const sllm_paged_kv::DeviceStatus update =
+        state->paged_logical_table->update_entries(trim, span->queue->stream);
+    if (update != sllm_paged_kv::DeviceStatus::Ok) {
+      state->context->poisoned.store(true);
+      (void)sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "paged graph logical table suffix trim failed");
+      return false;
+    }
+    if (allow_sync &&
+        !graph_span_poll_paged_table(state, span->queue, true, error_sink)) {
+      return false;
+    }
+  }
+  binding.paged_table_updates.clear();
+  return true;
+}
+
+bool graph_span_finish_paged_states(
+    GraphSpan *const span, const uint64_t final_length,
+    const uint64_t successful_generations, const bool allow_sync,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (span == nullptr) {
+    return false;
+  }
+  for (GraphKvStateBinding &binding : span->kv_states) {
+    if (binding.state == nullptr || !binding.state->paged) {
+      continue;
+    }
+    if (!graph_span_finish_paged_binding(binding, span, final_length,
+                                         successful_generations, allow_sync,
+                                         error_sink)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool graph_span_abort_paged_states(
+    GraphSpan *const span, sllm_error_sink_t *const error_sink) noexcept {
+  if (span == nullptr) {
+    return false;
+  }
+  for (GraphKvStateBinding &binding : span->kv_states) {
+    if (binding.state == nullptr || !binding.state->paged) {
+      continue;
+    }
+    if (!graph_span_finish_paged_binding(binding, span,
+                                         binding.initial_published_length, 0U,
+                                         true, error_sink)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 GraphLinearStateBinding *
 graph_span_find_linear_state(GraphSpan *const span,
                              LinearAttentionState *const state) noexcept {
@@ -1147,8 +1349,8 @@ bool graph_span_register_kv_state(GraphSpan *const span,
     return false;
   }
   try {
-    span->kv_states.push_back(
-        GraphKvStateBinding{state, state->published_length, state->generation});
+    span->kv_states.push_back(GraphKvStateBinding{
+        state, state->published_length, state->generation, {}});
   } catch (...) {
     return false;
   }
@@ -2394,6 +2596,182 @@ extern "C" sllm_status_t sllm_graph_span_select_linear_state(
   }
 }
 
+extern "C" sllm_status_t
+sllm_graph_span_prepare_paged_kv(sllm_graph_span_t *const raw_span,
+                                 const uint64_t conservative_end,
+                                 sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (raw_span == nullptr || conservative_end == 0U)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "graph paged KV preparation requires a span and end position");
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    GraphSpan *const span = lookup<GraphSpan>(raw_span, HandleKind::GraphSpan);
+    if (span == nullptr)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "graph paged KV preparation span is stale");
+    if (!span->whole_capture || span->capture_owner || span->release_active ||
+        span->graph_exec == nullptr || span->queue == nullptr ||
+        span->context == nullptr || span->context->poisoned.load())
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "graph paged KV preparation requires an instantiated whole graph");
+
+    const sllm_status_t device_status =
+        select_context_device(span->context, error_sink);
+    if (device_status != SLLM_STATUS_OK) {
+      return device_status;
+    }
+
+    std::lock_guard<std::mutex> accounting_lock(
+        span->context->accounting_mutex);
+    for (GraphKvStateBinding &binding : span->kv_states) {
+      KvState *const state = binding.state;
+      if (state == nullptr || !state->paged) {
+        continue;
+      }
+      if (state->context != span->context || state->release_active ||
+          state->graph_pins == 0U || state->transition_token != 0U ||
+          state->accounting.active_submissions != 0U ||
+          state->accounting.completion_references != 0U ||
+          state->published_length != binding.initial_published_length ||
+          state->generation != binding.initial_generation ||
+          state->paged_host_state == nullptr ||
+          state->paged_device_pool == nullptr ||
+          state->paged_logical_table == nullptr ||
+          state->paged_device_status == nullptr ||
+          state->paged_host_state->published_length() !=
+              state->published_length ||
+          state->paged_host_state->generation() != state->generation) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "paged graph state changed after capture binding");
+      }
+
+      const uint64_t target =
+          std::min(conservative_end, state->capacity_tokens);
+      const uint64_t staged_end =
+          state->paged_host_state->graph_staged_length();
+      if (target <= staged_end) {
+        continue;
+      }
+      const sllm_paged_kv::DeviceStatus pending =
+          state->paged_logical_table->poll_pending();
+      if (pending == sllm_paged_kv::DeviceStatus::Busy) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "paged graph logical table update is still in flight");
+      }
+      if (pending != sllm_paged_kv::DeviceStatus::Ok) {
+        state->context->poisoned.store(true);
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "paged graph logical table is poisoned");
+      }
+
+      sllm_paged_kv::State::Append reservation;
+      bool reservation_prepared = false;
+      bool table_update_queued = false;
+      std::vector<sllm_paged_kv::LogicalEntryUpdate> updates;
+      std::vector<sllm_paged_kv::LogicalEntryUpdate> combined;
+      try {
+        const sllm_paged_kv::Status prepare =
+            state->paged_host_state->prepare_graph_through(target, reservation);
+        reservation_prepared = prepare == sllm_paged_kv::Status::Ok;
+        if (!reservation_prepared) {
+          const sllm_status_t status =
+              prepare == sllm_paged_kv::Status::PoolExhausted ||
+                      prepare == sllm_paged_kv::Status::Capacity
+                  ? SLLM_STATUS_KV_CAPACITY_EXCEEDED
+              : prepare == sllm_paged_kv::Status::Busy
+                  ? SLLM_STATUS_PUBLIC_BUSY
+                  : SLLM_STATUS_INTERNAL_ERROR;
+          return sllm_public_runtime::write_error(
+              error_sink, status,
+              "paged graph conservative reservation could not be prepared");
+        }
+        updates = make_paged_table_updates(reservation);
+        combined = binding.paged_table_updates;
+        combined.reserve(combined.size() + updates.size());
+        combined.insert(combined.end(), updates.begin(), updates.end());
+
+        std::vector<uint32_t> physical_ids;
+        physical_ids.reserve(reservation.changes.size());
+        for (const sllm_paged_kv::State::Change &change : reservation.changes) {
+          if (change.new_physical != sllm_paged_kv::kInvalidBlock) {
+            physical_ids.push_back(change.new_physical);
+          }
+        }
+        const sllm_paged_kv::DeviceStatus ensure =
+            state->paged_device_pool->ensure_blocks(physical_ids,
+                                                    span->queue->stream);
+        if (ensure != sllm_paged_kv::DeviceStatus::Ok) {
+          if (state->paged_device_pool->poisoned()) {
+            state->context->poisoned.store(true);
+          }
+          throw std::runtime_error("paged graph physical slab reservation");
+        }
+        const sllm_paged_kv::DeviceStatus table =
+            state->paged_logical_table->update_entries(updates,
+                                                       span->queue->stream);
+        if (table != sllm_paged_kv::DeviceStatus::Ok) {
+          throw std::runtime_error("paged graph logical table update");
+        }
+        table_update_queued = !updates.empty();
+        const hipError_t cow =
+            copy_paged_cow_planes(state, reservation, span->queue->stream);
+        if (cow != hipSuccess) {
+          (void)hip_failure(error_sink, cow, "paged graph COW copy");
+          throw std::runtime_error("paged graph COW copy");
+        }
+        const sllm_paged_kv::Status commit =
+            state->paged_host_state->commit_graph_reservation(reservation);
+        if (commit != sllm_paged_kv::Status::Ok) {
+          throw std::runtime_error("paged graph host reservation commit");
+        }
+        reservation_prepared = false;
+        binding.paged_table_updates.swap(combined);
+      } catch (...) {
+        if (reservation_prepared &&
+            !graph_span_rollback_paged_preflight(
+                state, span->queue, reservation, updates, table_update_queued,
+                error_sink)) {
+          span->context->poisoned.store(true);
+          unregister_handle(raw_span);
+          poison_owner.retain(span);
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_INTERNAL_ERROR,
+              "paged graph preflight rollback could not be proven safe");
+        }
+        if (!reservation_prepared) {
+          /* Commit is deliberately the last fallible host operation.  Any
+           * failure after it means host and device ownership can no longer
+           * be reconciled without a queue-wide recovery protocol. */
+          if (state->paged_host_state->graph_staged() &&
+              binding.paged_table_updates.empty()) {
+            span->context->poisoned.store(true);
+            unregister_handle(raw_span);
+            poison_owner.retain(span);
+          }
+        }
+        return sllm_public_runtime::write_error(error_sink,
+                                                SLLM_STATUS_INTERNAL_ERROR,
+                                                "paged graph preflight failed");
+      }
+    }
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected graph paged KV preparation exception");
+  }
+}
+
 extern "C" sllm_status_t sllm_graph_span_publish_state_metadata(
     sllm_graph_span_t *const raw_span, const uint64_t expected_initial_position,
     const uint64_t final_position, const uint64_t successful_generations,
@@ -2449,6 +2827,21 @@ extern "C" sllm_status_t sllm_graph_span_publish_state_metadata(
             "captured KV state metadata no longer matches its initial "
             "snapshot");
       }
+      if (state->paged) {
+        if (state->paged_host_state == nullptr ||
+            state->paged_logical_table == nullptr ||
+            !state->paged_host_state->graph_staged() ||
+            final_position > state->paged_host_state->graph_staged_length() ||
+            state->paged_host_state->published_length() !=
+                state->published_length ||
+            state->paged_host_state->generation() != state->generation ||
+            state->paged_logical_table->poll_pending() !=
+                sllm_paged_kv::DeviceStatus::Ok) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_PUBLIC_BUSY,
+              "paged graph state is not ready for metadata publication");
+        }
+      }
     }
     for (const GraphLinearStateBinding &binding : span->linear_states) {
       LinearAttentionState *const state = binding.state;
@@ -2468,6 +2861,13 @@ extern "C" sllm_status_t sllm_graph_span_publish_state_metadata(
             "captured linear state metadata no longer matches its initial "
             "snapshot");
       }
+    }
+    if (!graph_span_finish_paged_states(
+            span, final_position, successful_generations, false, error_sink)) {
+      span->context->poisoned.store(true);
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "paged graph state finalization could not be completed safely");
     }
     /* Every check above is complete before the first state is mutated. */
     for (const GraphKvStateBinding &binding : span->kv_states) {
@@ -2625,6 +3025,48 @@ extern "C" sllm_status_t sllm_graph_span_begin_capture(
             "whole graph capture handle allocation failed");
       }
     }
+
+    // Paged GQA6 decode may request its P128 workspace while the queue is
+    // already inside HIP capture. Reserve the maximum five-row workspace
+    // before BeginCapture; subsequent provider selection only reuses this
+    // context-owned pointer and never calls hipMalloc during capture. This
+    // runs outside the context accounting lock held during handle setup.
+    const uint64_t max_paged_gqa6_workspace =
+        static_cast<uint64_t>(kDecodeGqa6SplitP128WorkspaceBytes) * 5U;
+    void *capture_workspace = nullptr;
+    uint64_t capture_workspace_bytes = 0U;
+    hipError_t workspace_status = hipSuccess;
+    {
+      // Keep the registry lease while the plan helper temporarily acquires
+      // the context accounting lock. This blocks state/queue release without
+      // inverting the plan-mutex -> accounting-mutex order.
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      GraphSpan *const registered = lookup<GraphSpan>(
+          reinterpret_cast<const sllm_graph_span_t *>(token),
+          HandleKind::GraphSpan);
+      if (registered != candidate.get() || context->poisoned.load() ||
+          context->release_active || queue->release_active ||
+          !queue->graph_capture_active.load(std::memory_order_acquire) ||
+          queue->completion_mode != SLLM_QUEUE_COMPLETION_MODE_DEFERRED) {
+        workspace_status = hipErrorNotReady;
+      } else {
+        workspace_status = prepare_causal_workspace_plan_for_bytes(
+            context, queue, max_paged_gqa6_workspace, &capture_workspace,
+            &capture_workspace_bytes);
+      }
+    }
+    if (workspace_status != hipSuccess) {
+      {
+        std::lock_guard<std::mutex> registry_lock(registry_mutex);
+        unregister_handle_token(token);
+      }
+      graph_span_unpin(candidate.get());
+      return hip_failure(error_sink, workspace_status,
+                         "preallocate paged GQA6 graph workspace");
+    }
+    (void)capture_workspace;
+    (void)capture_workspace_bytes;
+    candidate->causal_workspace_pins = 1U;
 
     const sllm_status_t device_status =
         select_context_device(context, error_sink);
@@ -3376,6 +3818,35 @@ sllm_graph_span_release(sllm_graph_span_t **const raw_span,
           error_sink, SLLM_STATUS_INTERNAL_ERROR,
           "whole graph capture marker finalization failed at release");
     }
+    bool paged_cleanup_failed = false;
+    {
+      std::lock_guard<std::mutex> accounting_lock(
+          span->context->accounting_mutex);
+      bool paged_staged = false;
+      for (const GraphKvStateBinding &binding : span->kv_states) {
+        if (binding.state != nullptr && binding.state->paged &&
+            binding.state->paged_host_state != nullptr &&
+            binding.state->paged_host_state->graph_staged()) {
+          paged_staged = true;
+          break;
+        }
+      }
+      if (paged_staged && !graph_span_abort_paged_states(span, error_sink)) {
+        span->release_active = false;
+        paged_cleanup_failed = true;
+      }
+    }
+    if (paged_cleanup_failed) {
+      {
+        std::lock_guard<std::mutex> registry_lock(registry_mutex);
+        unregister_handle(*raw_span);
+        *raw_span = nullptr;
+      }
+      retain_poisoned(span, span->context);
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "paged graph staged-state cleanup could not be proven safe");
+    }
     hipError_t destroy_status = hipSuccess;
     if (!graph_span_destroy_graph_checked(span, &destroy_status)) {
       {
@@ -3507,6 +3978,23 @@ extern "C" sllm_status_t sllm_graph_span_select_linear_state(
   return sllm_public_runtime::write_error(
       error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
       "linear graph state selection is unavailable in the host runtime");
+}
+
+extern "C" sllm_status_t
+sllm_graph_span_prepare_paged_kv(sllm_graph_span_t *const span,
+                                 const uint64_t conservative_end,
+                                 sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  if (span == nullptr || conservative_end == 0U)
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "graph paged KV preparation requires a span and end position");
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "graph paged KV preparation is unavailable in the host runtime");
 }
 
 extern "C" sllm_status_t sllm_graph_span_publish_state_metadata(

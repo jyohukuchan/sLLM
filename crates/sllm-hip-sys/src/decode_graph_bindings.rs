@@ -58,6 +58,11 @@ unsafe extern "C" {
         token_count: u32,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
+    pub fn sllm_graph_span_prepare_paged_kv(
+        graph: *mut sllm_graph_span_t,
+        conservative_end: u64,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
     pub fn sllm_graph_span_publish_state_metadata(
         graph: *mut sllm_graph_span_t,
         expected_initial_position: u64,

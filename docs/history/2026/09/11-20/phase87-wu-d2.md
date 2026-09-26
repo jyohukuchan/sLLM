@@ -79,4 +79,4 @@ D2中のproduction source変更はなく、採用済み最適化とGPU性能設�
 - GPU実行は全成功、Python static／compile、diff whitespace、1回の統合レビューで測定境界と限界を確認。
   WU-D3で使う一時production変更とは別の作業単位として記録した。
 
-計画: [Phase87 WU-D2](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md) ／ 後続: [WU-D3](phase87-wu-d3.md)
+計画: [Phase87 WU-D2](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md) ／ 後続: [WU-D3](phase87-wu-d3.md)

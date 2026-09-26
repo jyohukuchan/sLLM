@@ -25,7 +25,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "22d7b6ea29bfa8b9ad673a0c57544b502771e2597f101437fc2db448b57e3b90"
+        "sha256": "8980eb7b28a4efcb1288f167d8fea1307e0790d5fec066c53bd07ccf1f750ac0"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -40,7 +40,7 @@
         "sha256": "f794cd0df7eb5c7f735d61e5f58b1744fddb391c83174ed891c9760db4399bed"
       }
     ],
-    "source_set_sha256": "c741c25fa7cdc0e8cb763c7bf54902d5b8636aeebc8a3bd614a2084a338697fa"
+    "source_set_sha256": "a3eac9d587232123a1844d95eb5196ba48b0cd918218480338d157c69b6cabc1"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -168,11 +168,11 @@
       "native/lowp/src/nvfp4_prefill_wmma_compensated.inc",
       "native/lowp/src/nvfp4_small_m_vgpr_reuse.inc"
     ],
-    "source_set_sha256": "fcd0ecd7211cd0f97f2e0827b715384a41491ee90cd8ad11a741d6f464a97fee",
+    "source_set_sha256": "395dbc5637eaf86c5c448eab51bbdfbd3d48cb31039706ea849c869ea135a4b9",
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "22d7b6ea29bfa8b9ad673a0c57544b502771e2597f101437fc2db448b57e3b90"
+        "sha256": "8980eb7b28a4efcb1288f167d8fea1307e0790d5fec066c53bd07ccf1f750ac0"
       },
       {
         "path": "native/hip/src/argmax_api.cpp",
@@ -224,15 +224,15 @@
       },
       {
         "path": "native/hip/src/causal_attention_kernel.hip.cpp",
-        "sha256": "d10c03d30a670acce5e1f063d4193c6c7263921b7c6f896137fe1ffacd39cd63"
+        "sha256": "31b51dc7ccaee511d77b6e6085632ba29e49903bc76d55ffeed949e894f739a3"
       },
       {
         "path": "native/hip/src/causal_attention_kernel_internal.hpp",
-        "sha256": "b178e2fa041494641c7e222a1cde2c4bd5b61510cf3a12af9df4cb6148abe32e"
+        "sha256": "6258c89d6f9809ebf743a135904d1bf6097b20ded5caa541320e21d1927d8b98"
       },
       {
         "path": "native/hip/src/causal_attention_runtime.inc",
-        "sha256": "f9ca2dc969ae55389f357b104ede2194f83b235b483511544097fe184dea81bf"
+        "sha256": "261a738238b67a388ed3a21996a8ee5e906eab9720e2a70066a23889bb2fb644"
       },
       {
         "path": "native/hip/src/decode_control_kernel.hip.cpp",
@@ -244,7 +244,7 @@
       },
       {
         "path": "native/hip/src/decode_graph_capture_internal.hpp",
-        "sha256": "20459b4880b07bfa049c515b6d9189d4c623c99c6a7eb7d19a773eaec6f53122"
+        "sha256": "e627c77e45f36df222201f0eb5be083739f6e8384f08ba63288d561a20394213"
       },
       {
         "path": "native/hip/src/deepseek_v4_moe_route_api.cpp",
@@ -328,7 +328,7 @@
       },
       {
         "path": "native/hip/src/graph_span_runtime.inc",
-        "sha256": "24707da954e3a9c1da67e6fe3ff87324a2d7cc39b75962674f35aa22281e04ee"
+        "sha256": "cc056f1cd44ae3ee157c71a716f4007ed3f59ce102ad6521ed3b917b0cd43a36"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -336,19 +336,19 @@
       },
       {
         "path": "native/hip/src/kv_state_api.cpp",
-        "sha256": "ca20046ada191d7446c6e524f1e4cd1cd9db2a951d55f84111dfe7ec71ab89b9"
+        "sha256": "5090c5cfdc1e8e353e3ad119a1462f6331b853e400b7ca5b3ce2ce92e06e6141"
       },
       {
         "path": "native/hip/src/kv_state_api.hpp",
-        "sha256": "b18669b7bff1deddc91fc3bb6d96c9673d80833f96ccc1a43b08857f662c896f"
+        "sha256": "7e99f4043fb3962a29bf1552a20cb8b7747f0f78f25d593b9aa84b6d46bc71a3"
       },
       {
         "path": "native/hip/src/kv_state_kernel.hip.cpp",
-        "sha256": "a0247157f58608d3f4e330c45da36136e1680e3e958aa5e9528becc939fd5c5f"
+        "sha256": "bdde7975ab107b3c75d304972666bbc050aaca1d72186f3af9008a0ee0198e90"
       },
       {
         "path": "native/hip/src/kv_state_kernel_internal.hpp",
-        "sha256": "0bbe739be2eba0f28d278759c4b80772177d6520eb54e317c770be16d1774bd9"
+        "sha256": "b5fd111122c63018b4d51fe2f354be612bb2e2a3413e7ccc611f1171e65df82f"
       },
       {
         "path": "native/hip/src/linear_attention_api.cpp",
@@ -368,7 +368,7 @@
       },
       {
         "path": "native/hip/src/linear_attention_runtime.inc",
-        "sha256": "7bc63e16f452e4cabad9cdd61e6042117269750aab5a8efa99453a64b4edff7a"
+        "sha256": "8bb724efcc55cda0f8d126fdd70dfc88274968bae44002fcc5f57aff1d251e57"
       },
       {
         "path": "native/hip/src/matmul_api.cpp",
@@ -488,7 +488,7 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "79651d77a0de6dddcf4c1868f676198f662657da6cf0d7a536046ba0b7bfd64b"
+        "sha256": "8c8ae2779a27be1798b14276f97675e8a82c8107ac6c00fb3f35c747b7ca3e87"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
@@ -624,7 +624,7 @@
       },
       {
         "path": "native/lowp/include/lowp/detail/lowp_kernel_internal.hpp",
-        "sha256": "db5ad6ac4b7aaa74d3d5a756d41a518b82cfc9eeea575bf6ab53c84edcf95426"
+        "sha256": "15d3de5c44cc249eeb8456194e0a3b64077271fcc975b4dc964180823ed41a33"
       },
       {
         "path": "native/lowp/include/lowp/detail/lowp_provider_plan.hpp",
@@ -640,7 +640,7 @@
       },
       {
         "path": "native/lowp/src/lowp_kernel.hip.cpp",
-        "sha256": "bf7cbe2be211e866357622ad9276ce10d49bfab45dc684e54cf6a617d9d23dde"
+        "sha256": "fdbe0ba9661c370443479ec00f81d0a2c3d6122e9d6da60681cd5cfb4c26558c"
       },
       {
         "path": "native/lowp/src/lowp_launch.cpp",
@@ -652,7 +652,7 @@
       },
       {
         "path": "native/lowp/src/nvfp4_decode_scale_lut.inc",
-        "sha256": "e4606024ea3312a89cf057789df9d6a9934ffd84bf8be5be7552cf8718990c95"
+        "sha256": "fdfcd3b5ffe2d44017e292cc0e667131f6f9ddbf97ba3f4e67f467a3d7214a78"
       },
       {
         "path": "native/lowp/src/nvfp4_prefill_wmma_compensated.inc",
@@ -660,7 +660,7 @@
       },
       {
         "path": "native/lowp/src/nvfp4_small_m_vgpr_reuse.inc",
-        "sha256": "49f4694e9f222e8ea479c35582ea2286f23fa554903e5ee00396bddf0853150e"
+        "sha256": "c0f8f997b8ca73eb6ca4781a263904e3b3f36204e80663a16c07087d2a11f0c9"
       }
     ]
   },
@@ -714,19 +714,29 @@
     "sllm_kv_state_append",
     "sllm_kv_state_append_cancel",
     "sllm_kv_state_create",
+    "sllm_kv_state_create_paged",
     "sllm_kv_state_create_v2",
     "sllm_kv_state_export",
     "sllm_kv_state_fork",
+    "sllm_kv_state_fork_paged",
     "sllm_kv_state_fork_query",
+    "sllm_kv_state_fork_query_paged",
     "sllm_kv_state_image_plane_size",
     "sllm_kv_state_image_query",
     "sllm_kv_state_import",
     "sllm_kv_state_import_finalize",
+    "sllm_kv_state_paged_image_export",
+    "sllm_kv_state_paged_image_import",
+    "sllm_kv_state_paged_image_import_finalize",
+    "sllm_kv_state_paged_image_query",
+    "sllm_kv_state_paged_image_section_size",
     "sllm_kv_state_query",
+    "sllm_kv_state_query_paged",
     "sllm_kv_state_release",
     "sllm_kv_state_rewind_last",
     "sllm_kv_state_snapshot",
     "sllm_kv_view_query",
+    "sllm_kv_view_query_paged",
     "sllm_kv_view_release",
     "sllm_linear_attention_cancel",
     "sllm_linear_attention_execute",

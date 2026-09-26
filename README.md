@@ -8,18 +8,17 @@
   - weight/activation
   - BF16/BF16
   - FP8/FP8
-  - MXFP8/MXFP8
   - MXFP6/MXFP6
   - MXFP4/MXFP6
   - NVFP4/NVFP4
-  - EXL3(3bpw・4bpw・5bpw)/TBD
+  - EXL3(3bpw・4bpw・5bpw)/FP16
 - サポートするKV Cache量子化フォーマット
   - Key/Value
   - FP16/FP16
   - FP8/FP8
   - TQ(TurboQuant) (K3・K4)/(V3・V4)
   - NVFP4/NVFP4
-  - (MXFP8・MXFP6)/(MXFP8・MXFP6)
+  - MXFP6/MXFP6
 
 - サポートしているGPU
   - gfx1030

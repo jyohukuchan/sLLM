@@ -52,7 +52,8 @@ constexpr uint32_t kConvKernel = 4U;
 constexpr uint32_t kConvHistory = kConvKernel - 1U;
 constexpr uint32_t kQkvWidth = (2U * kQkHeads + kValueHeads) * kHeadDim;
 constexpr uint32_t kOutputWidth = kValueHeads * kHeadDim;
-constexpr uint32_t kMaxRows = 3U;
+constexpr uint32_t kMaxRows = 5U;
+constexpr uint32_t kMaxCheckpointWidth = 4U;
 constexpr uint32_t kCapacity = 16U;
 constexpr uint32_t kQkToValue = kValueHeads / kQkHeads;
 
@@ -733,6 +734,183 @@ bool execute_batch(const sllm_context_t *const context,
   return ok;
 }
 
+// Exercise the width-dependent checkpoint contract independently of the
+// historical width-two acceptance, batch, and rewind cases below.  Each
+// partial row is selected in a fresh state so row 0..width-1 all exercise the
+// runtime's row bounds and backing-plane offsets.
+bool run_width_checkpoint_case(const sllm_context_t *const context,
+                               const sllm_queue_t *const queue,
+                               const std::array<sllm_buffer_t *, 9U> &buffers,
+                               const Parameters &parameters,
+                               const uint32_t width) {
+  if (width < 2U || width > kMaxCheckpointWidth) {
+    return false;
+  }
+  const uint32_t token_count = width + 1U;
+  const uint64_t recurrent_bytes =
+      static_cast<uint64_t>(parameters.recurrent_seed.size()) * sizeof(float);
+  const uint64_t conv_bytes =
+      static_cast<uint64_t>(parameters.conv_seed.size()) * sizeof(uint16_t);
+  const Batch batch = make_batch(0U, token_count);
+  std::vector<OracleSnapshot> snapshots(token_count + 1U);
+  std::vector<std::vector<uint16_t>> row_outputs(token_count);
+  GdnOracle oracle(parameters);
+  snapshots[0] = oracle.snapshot();
+  for (uint32_t row = 0U; row != token_count; ++row) {
+    row_outputs[row] = oracle.step(batch, row);
+    snapshots[row + 1U] = oracle.snapshot();
+  }
+
+  const auto seed_state = [&](const uint64_t session_id,
+                              sllm_linear_attention_state_t **const state) {
+    bool ok = create_state(context, state, session_id);
+    Error error;
+    return ok &&
+           upload_state_plane(
+               *state, SLLM_HIP_LINEAR_STATE_PLANE_CONV_SLOT0,
+               const_cast<uint16_t *>(parameters.conv_seed.data()), conv_bytes,
+               "width checkpoint seed conv") &&
+           upload_state_plane(
+               *state, SLLM_HIP_LINEAR_STATE_PLANE_RECURRENT_SLOT0,
+               const_cast<float *>(parameters.recurrent_seed.data()),
+               recurrent_bytes, "width checkpoint seed recurrent");
+  };
+
+  bool ok = true;
+  for (uint32_t row_index = 0U; ok && row_index != width; ++row_index) {
+    sllm_linear_attention_state_t *state = nullptr;
+    Error error;
+    ok = seed_state(500U + static_cast<uint64_t>(width) * 10U + row_index,
+                    &state) &&
+         expect_status(sllm_linear_attention_state_prepare_checkpoint(
+                           state, 0U, token_count, width, &error.sink),
+                       SLLM_STATUS_OK, "width checkpoint prepare", error);
+    std::vector<uint16_t> output;
+    if (ok) {
+      ok = execute_batch(context, queue, state, buffers, parameters, batch, 0U,
+                         &output) &&
+           compare_output(
+               output,
+               [&] {
+                 std::vector<uint16_t> all;
+                 all.reserve(static_cast<std::size_t>(token_count) *
+                             kOutputWidth);
+                 for (const auto &row_output : row_outputs) {
+                   all.insert(all.end(), row_output.begin(), row_output.end());
+                 }
+                 return all;
+               }(),
+               "width checkpoint batch") &&
+           expect_status(sllm_linear_attention_state_validate_checkpoint(
+                             state, 0U, token_count, width, &error.sink),
+                         SLLM_STATUS_OK, "width checkpoint validate", error);
+    }
+    if (ok) {
+      const uint64_t prefix_end = static_cast<uint64_t>(row_index) + 1U;
+      ok = expect_status(sllm_linear_attention_state_commit_checkpoint(
+                             context, queue, state, 0U, token_count, prefix_end,
+                             row_index, &error.sink),
+                         SLLM_STATUS_OK, "width checkpoint partial commit",
+                         error) &&
+           compare_state(state, snapshots[prefix_end],
+                         "width checkpoint committed state");
+      if (ok) {
+        const Batch next = make_batch(static_cast<uint32_t>(prefix_end), 1U);
+        std::vector<uint16_t> next_output;
+        ok = execute_batch(context, queue, state, buffers, parameters, next,
+                           prefix_end, &next_output) &&
+             compare_output(next_output, row_outputs[prefix_end],
+                            "width checkpoint resumed output") &&
+             compare_state(state, snapshots[prefix_end + 1U],
+                           "width checkpoint resumed state");
+      }
+    }
+    if (state != nullptr) {
+      ok = expect_status(
+               sllm_linear_attention_state_release(&state, &error.sink),
+               SLLM_STATUS_OK, "width checkpoint row release", error) &&
+           ok;
+    }
+  }
+
+  if (ok) {
+    sllm_linear_attention_state_t *state = nullptr;
+    Error error;
+    ok = seed_state(600U + width, &state) &&
+         expect_status(sllm_linear_attention_state_prepare_checkpoint(
+                           state, 0U, token_count, width, &error.sink),
+                       SLLM_STATUS_OK, "width checkpoint discard prepare",
+                       error);
+    std::vector<uint16_t> output;
+    if (ok) {
+      std::vector<uint16_t> all;
+      all.reserve(static_cast<std::size_t>(token_count) * kOutputWidth);
+      for (const auto &row_output : row_outputs) {
+        all.insert(all.end(), row_output.begin(), row_output.end());
+      }
+      ok = execute_batch(context, queue, state, buffers, parameters, batch, 0U,
+                         &output) &&
+           compare_output(output, all, "width checkpoint discard batch") &&
+           expect_status(sllm_linear_attention_state_validate_checkpoint(
+                             state, 0U, token_count, width, &error.sink),
+                         SLLM_STATUS_OK, "width checkpoint discard validate",
+                         error) &&
+           expect_status(sllm_linear_attention_state_discard_checkpoint(
+                             state, &error.sink),
+                         SLLM_STATUS_OK, "width checkpoint discard", error);
+    }
+    if (ok) {
+      sllm_linear_attention_view_info_t view{};
+      ok = query_state(state, &view, "width checkpoint discard query") &&
+           compare_view(view, token_count, 1U,
+                        "width checkpoint discard view") &&
+           compare_state(state, snapshots[token_count],
+                         "width checkpoint discard state");
+    }
+    if (ok) {
+      // Re-arm the same state at a different width to cover both backing
+      // growth (width 3) and shrink (width 4 -> width 2).  The native
+      // allocator must account exactly for the requested row count and may
+      // resize only while this state is quiescent and unpinned.
+      const uint32_t next_width = width == 4U ? 2U : width + 1U;
+      const uint32_t next_token_count = next_width + 1U;
+      const Batch next_batch = make_batch(token_count, next_token_count);
+      std::vector<uint16_t> next_output;
+      ok = expect_status(sllm_linear_attention_state_prepare_checkpoint(
+                             state, token_count, next_token_count, next_width,
+                             &error.sink),
+                         SLLM_STATUS_OK, "width checkpoint resize prepare",
+                         error) &&
+           execute_batch(context, queue, state, buffers, parameters, next_batch,
+                         token_count, &next_output) &&
+           expect_status(sllm_linear_attention_state_validate_checkpoint(
+                             state, token_count, token_count + next_token_count,
+                             next_width, &error.sink),
+                         SLLM_STATUS_OK, "width checkpoint resize validate",
+                         error) &&
+           expect_status(sllm_linear_attention_state_discard_checkpoint(
+                             state, &error.sink),
+                         SLLM_STATUS_OK, "width checkpoint resize discard",
+                         error);
+      if (ok) {
+        sllm_linear_attention_view_info_t view{};
+        ok = query_state(state, &view, "width checkpoint resize query") &&
+             compare_view(view, token_count + next_token_count, 0U,
+                          "width checkpoint resize view");
+      }
+    }
+    if (state != nullptr) {
+      ok = expect_status(
+               sllm_linear_attention_state_release(&state, &error.sink),
+               SLLM_STATUS_OK, "width checkpoint discard release", error) &&
+           ok;
+    }
+  }
+  std::cout << "width checkpoint width=" << width
+            << " status=" << (ok ? "PASS" : "FAIL") << '\n';
+  return ok;
+}
+
 bool run_case(const sllm_context_t *const context,
               const sllm_queue_t *const queue,
               const std::array<sllm_buffer_t *, 9U> &buffers,
@@ -1292,7 +1470,9 @@ int main() {
          run_batch_commit_case(context, queue, buffers, parameters, first_batch,
                                snapshots, oracle_outputs) &&
          run_rewind_case(context, queue, buffers, parameters, first_batch,
-                         snapshots);
+                         snapshots) &&
+         run_width_checkpoint_case(context, queue, buffers, parameters, 3U) &&
+         run_width_checkpoint_case(context, queue, buffers, parameters, 4U);
   }
 
   for (auto &buffer : buffers) {

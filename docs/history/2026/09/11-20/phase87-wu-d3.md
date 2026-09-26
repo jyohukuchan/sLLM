@@ -84,4 +84,4 @@ D1/D2で分かった現象自体を修正済みとは主張しない。productio
 - [候補実装](../../../../../native/hip/tests/phase87_wud3_candidates.hpp)、[実行・検査](../../../../../ci/tools/run_phase87_wud3.py)
 - rawログ、各版probe/model binary、一時patch、復元前source: `.local-artifacts/phase87/wu-d3/`。
 
-計画: [Phase87 WU-D3](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md) ／ 前提: [WU-D2](phase87-wu-d2.md)
+計画: [Phase87 WU-D3](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md) ／ 前提: [WU-D2](phase87-wu-d2.md)

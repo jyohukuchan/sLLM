@@ -3,9 +3,27 @@
 ## 決定
 
 **2026-09-24の方針（ユーザー決定）**: vAttentionを完全に廃止し、Paged Attentionへ完全移行する。
-ただし、pagedを最適化しても性能低下が10%以上になる場合は再考する。判断材料はPhase 87のWU-P1（段階9・4の後）の試作で取り、
-問題がなければPhase 88のバッチ処理より前に本移行する。それまでは以下の決定が現行の実装を表す。
+ただし、pagedを最適化しても性能低下が10%以上になる場合は再考する。
+[Phase 87 WU-P1](../history/2026/09/21-30/phase87-wu-p1-paged-attention.md)は両GPUの
+decode／prefillで数値bitwise一致とkernel単体増加10%未満を確認した。
+Phase 87の段階10（[本移行計画](../plans/archive/2026/09/21-30/paged-kv-full-migration.md)）で
+現行memory方式をPaged KVへ変更する。以下のPhase 6〜83の連続KV方式と性能値は、
+移行前のsourceとGPU tupleに限定した履歴である。
 経緯は[paged移行の検討記録](../history/2026/09/21-30/kv-paged-migration-decision.md)。
+
+## 現行production契約（Phase 87段階10）
+
+- 現行HIP runtimeのtargetはexact `gfx1030`／`gfx1201`とする。Paged KVの実機証拠がない
+  `gfx942`は2026-09-25のユーザー決定により`unsupported`とし、起動時にGPU allocation前で拒否する。
+- 通常KVとGemma4のsliding static FP8は128-token物理blockのPaged poolを使う。
+  K/Vとscale planeは同じlogical block tableで管理し、prefix fork、共有末尾のCOW、
+  cancel、rewind、graph replayで公開lengthと物理blockの所有権を維持する。
+- 公開C ABIはPaged専用create／view／fork／imageを使う。旧VMM／resident memory kindの番号は
+  ABI予約値として残すが、旧KV create／view／fork／image入口は`UNSUPPORTED`を返す。
+  V1 checkpointの形式識別は残し、productionではPaged V2への作り直しを求める。
+- 対象モデル・形式の実機結果と残件は[段階10履歴](../history/2026/09/21-30/phase87-stage10-paged-kv.md)を正とする。
+
+## 旧方式と比較結果（履歴）
 
 
 2026-08-13時点のPhase 6初期方式は、canonical AMD Radeon Pro V620 `gfx1030`と
@@ -14,7 +32,7 @@ Radeon AI PRO R9700 `gfx1201`に限定して、HIP VMMによるvirtual-contiguou
 最大logical capacityのvirtual addressをcreate時に予約し、K/V planeのphysical pageをappend時に
 必要量だけcommitする。
 
-これはPhase 6の初期決定である。現在の自動providerは、sliding windowなしの通常KV stateについてexact `gfx1201`を
+これはPhase 6の初期決定である。移行前の自動providerは、sliding windowなしの通常KV stateについてexact `gfx1201`を
 全capacityで`contiguous-resident`へ固定する。以下のVMM memory contractはVMMを選ぶtarget、direct ABI、sliding stateに適用する。
 
 vAttentionとFlashAttentionは排他的な方式ではない。vAttentionはKVのmemory management方式で、
@@ -114,7 +132,7 @@ KV 255で1 MiB、1025で5 MiBだが、device allocationの観測VRAMはallocatio
 この表はalgorithm/interfaceの比較であり、FA3/4をAMDで動かした証拠ではない。将来AMD向けの
 FA3/4相当kernelが現れた場合も、contiguous pointerを受ける限りvAttention上で利用できる。
 
-## production契約
+## 旧production契約（Phase 6〜83の履歴）
 
 - public C ABIのKV create/view versionは2で、memory kindは
   `SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED`、`SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS`、
@@ -137,7 +155,7 @@ FA3/4相当kernelが現れた場合も、contiguous pointerを受ける限りvAt
   FP8とNVFP4は明示選択時だけ使う。10,001-token dynamic FP8はexact gfx1030/gfx1201の双方、16,385-token 2-chunk
   dynamic FP8はgfx1201でHIP-only、fallbackなし、cleanup 0をPASSした。static FP8の固定scale 1.0は実験設定であり、
   model由来calibrationやdefault policyではない。
-- 現在のRust HIP adapterの自動providerは、sliding windowなしの通常stateについてexact `gfx942`とexact `gfx1201`を
+- 移行前のRust HIP adapterの自動providerは、sliding windowなしの通常stateについてexact `gfx942`とexact `gfx1201`を
   全capacityで、exact `gfx1030`をcapacity 65,536以上で`contiguous-resident`へ固定する。それ以外は従来の
   capability-selected providerを維持する。direct native C ABIとsliding stateの境界は上記Phase 83記載に従う。
 

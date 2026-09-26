@@ -29,8 +29,9 @@ unsafe extern "C" {
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sllm_core::{
-    AllocationSnapshot, Backend, ExecutionSessionRequest, KvCacheEncoding, OsSamplingRandom,
-    QWEN35_VOCAB_SIZE, Qwen38MtpDraftVocabularyArtifact, QwenExecutionAudit, QwenExecutionRequest,
+    AllocationSnapshot, Backend, ExecutionSessionRequest, KvCacheEncoding,
+    KvPhysicalMemoryMetadata, OsSamplingRandom, QWEN35_VOCAB_SIZE,
+    Qwen38MtpDraftVocabularyArtifact, QwenExecutionAudit, QwenExecutionRequest,
     QwenRequestMemoryAudit, QwenResidentModel, SamplerChainConfigV1, SamplerChainV1,
     SamplingParametersV1, UNSLOTH_QWEN38_NVFP4_MODEL_SHA256, UNSLOTH_QWEN38_NVFP4_MODEL_SIZE,
     UNSLOTH_QWEN38_NVFP4_REPOSITORY, UNSLOTH_QWEN38_NVFP4_REVISION,
@@ -51,6 +52,8 @@ use tokenizers::Tokenizer;
 mod phase84_5_mtp_path;
 #[path = "phase86_mtp_catch_up/mod.rs"]
 mod phase86_mtp_catch_up;
+#[path = "phase87_stage3_companion_abba/mod.rs"]
+mod phase87_stage3_companion_abba;
 
 const MODEL_ENV: &str = "SLLM_PHASE78_MODEL_PATH";
 const COMPAT_MODEL_ENV: &str = "SLLM_QWEN38_NVFP4_CACHE";
@@ -81,9 +84,17 @@ const PHASE85_A16_SECONDARY_ENV: &str = "SLLM_PHASE85_A16_STAGE0_SECONDARY";
 const PHASE85_A16_SECONDARY_CASES_ENV: &str = "SLLM_PHASE85_A16_SECONDARY_CASES";
 const PHASE85_A16_SECONDARY_SEED_ENV: &str = "SLLM_PHASE85_A16_SECONDARY_SEED";
 const PHASE85_A16_SECONDARY_OUTPUT_TOKENS_ENV: &str = "SLLM_PHASE85_A16_SECONDARY_OUTPUT_TOKENS";
+const PHASE87_STAGE3_M3_ENV: &str = "SLLM_PHASE87_STAGE3_M3";
+const PHASE87_STAGE12_M1_ENV: &str = "SLLM_PHASE87_STAGE12_M1";
+const PHASE87_STAGE12_M3_ENV: &str = "SLLM_PHASE87_STAGE12_M3";
+const PHASE87_STAGE12_PROFILE_ONLY_ENV: &str = "SLLM_PHASE87_STAGE12_PROFILE_ONLY";
 const PHASE87_PROFILE_ENV: &str = "SLLM_PHASE87_PROFILE";
 const PHASE87_STAGE9_ABBA_ENV: &str = "SLLM_PHASE87_STAGE9_ABBA";
 const PHASE87_STAGE9_M1_FULL_ENV: &str = "SLLM_PHASE87_STAGE9_M1_FULL";
+const PHASE87_STAGE3_CALIBRATION_ENV: &str = "SLLM_PHASE87_STAGE3_CALIBRATION";
+const PHASE87_STAGE3_ABBA_ENV: &str = "SLLM_PHASE87_STAGE3_ABBA";
+const PHASE87_LONG_PREFILL_ENV: &str = "SLLM_PHASE87_LONG_PREFILL";
+const PHASE87_LONG_PREFILL_TOKENS_ENV: &str = "SLLM_PHASE87_LONG_PREFILL_TOKENS";
 
 const DEFAULT_WARMUPS: usize = 3;
 const DEFAULT_MEASURED: usize = 10;
@@ -94,6 +105,8 @@ const DEFAULT_CHUNK_CAPACITY: u64 = 1_024;
 const MAX_CHUNK_CAPACITY: u64 = 8_192;
 const PHASE83_PROMPT_CAPACITY: usize = 8_192;
 const PHASE83_MTP_MAX_DRAFT_WIDTH: usize = 3;
+const PHASE87_STAGE12_MAX_DRAFT_WIDTH: usize = 4;
+const LONG_PREFILL_TOKEN_COUNTS: [usize; 4] = [8_192, 32_768, 65_536, 131_072];
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(600);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const FIXTURE_SHA256: &str =
@@ -257,6 +270,7 @@ const PHASE83_ALLOWED_ROWS: [RowSpec; 3] = [
 enum PromptFixtureKind {
     Legacy,
     Coding8192,
+    LongPrefill(usize),
 }
 
 /// Internal performance comparison only; public API sampling remains fixed.
@@ -355,6 +369,7 @@ impl SamplingBench {
 struct MtpConfig {
     enabled: bool,
     draft_width: usize,
+    stage12: bool,
 }
 
 impl MtpConfig {
@@ -362,13 +377,21 @@ impl MtpConfig {
         Self {
             enabled: false,
             draft_width: 0,
+            stage12: false,
         }
     }
 
     fn from_phase83_env() -> Result<Self, String> {
         let mode = env::var(PHASE83_MTP_ENV).ok();
         let width = env::var(PHASE83_MTP_WIDTH_ENV).ok();
-        parse_mtp_config(mode.as_deref(), width.as_deref())
+        let stage12 = env::var(PHASE87_STAGE12_M1_ENV).as_deref() == Ok("1")
+            || env::var(PHASE87_STAGE12_M3_ENV).as_deref() == Ok("1")
+            || env::var(PHASE87_STAGE12_PROFILE_ONLY_ENV).as_deref() == Ok("1");
+        if stage12 {
+            parse_mtp_config_bounded(mode.as_deref(), width.as_deref(), true)
+        } else {
+            parse_mtp_config(mode.as_deref(), width.as_deref())
+        }
     }
 
     fn report(
@@ -384,7 +407,11 @@ impl MtpConfig {
             MtpReport {
                 requested: true,
                 draft_width: self.draft_width,
-                supported_draft_widths: [1, 2, 3],
+                supported_draft_widths: if self.stage12 {
+                    vec![1, 2, 3, 4]
+                } else {
+                    vec![1, 2, 3]
+                },
                 execution: "fixed_gpu_sampler_speculative",
                 contract: "Qwen3.8 companion resident and fixed GPU-selector speculative executor are active",
                 timing_contract: "prefill_ns must include target prefill and MTP prefix draft priming; decode_ns includes proposal, verify, sampling, accept/reject, replay, and commit",
@@ -395,7 +422,11 @@ impl MtpConfig {
             MtpReport {
                 requested: false,
                 draft_width: 0,
-                supported_draft_widths: [1, 2, 3],
+                supported_draft_widths: if self.stage12 {
+                    vec![1, 2, 3, 4]
+                } else {
+                    vec![1, 2, 3]
+                },
                 execution: "disabled",
                 contract: "no MTP plan, graph, resident, or executor is constructed",
                 timing_contract: "MTP timing fields are absent while the baseline path is disabled",
@@ -407,22 +438,37 @@ impl MtpConfig {
 }
 
 fn parse_mtp_config(mode: Option<&str>, width: Option<&str>) -> Result<MtpConfig, String> {
+    parse_mtp_config_bounded(mode, width, false)
+}
+
+fn parse_mtp_config_bounded(
+    mode: Option<&str>,
+    width: Option<&str>,
+    stage12: bool,
+) -> Result<MtpConfig, String> {
     let enabled = match mode.unwrap_or("off") {
         "0" | "off" => false,
         "1" | "on" => true,
         _ => return Err(format!("{PHASE83_MTP_ENV} must be off or on")),
     };
-    let draft_width = width.unwrap_or("2").parse::<usize>().map_err(|_| {
-        format!("{PHASE83_MTP_WIDTH_ENV} must be an integer in 1..={PHASE83_MTP_MAX_DRAFT_WIDTH}")
-    })?;
-    if !(1..=PHASE83_MTP_MAX_DRAFT_WIDTH).contains(&draft_width) {
+    let max_width = if stage12 {
+        PHASE87_STAGE12_MAX_DRAFT_WIDTH
+    } else {
+        PHASE83_MTP_MAX_DRAFT_WIDTH
+    };
+    let draft_width = width
+        .unwrap_or("2")
+        .parse::<usize>()
+        .map_err(|_| format!("{PHASE83_MTP_WIDTH_ENV} must be an integer in 1..={max_width}"))?;
+    if !(1..=max_width).contains(&draft_width) {
         return Err(format!(
-            "{PHASE83_MTP_WIDTH_ENV} must be in 1..={PHASE83_MTP_MAX_DRAFT_WIDTH}"
+            "{PHASE83_MTP_WIDTH_ENV} must be in 1..={max_width}"
         ));
     }
     Ok(MtpConfig {
         enabled,
         draft_width: if enabled { draft_width } else { 0 },
+        stage12,
     })
 }
 
@@ -443,9 +489,9 @@ fn build_mtp_run_report(
     committed_output_tokens: usize,
     prefix_draft_priming_included: bool,
 ) -> Result<MtpRunReport, String> {
-    if !(1..=PHASE83_MTP_MAX_DRAFT_WIDTH).contains(&draft_width) {
+    if !(1..=PHASE87_STAGE12_MAX_DRAFT_WIDTH).contains(&draft_width) {
         return Err(format!(
-            "MTP report width must be in 1..={PHASE83_MTP_MAX_DRAFT_WIDTH}"
+            "MTP report width must be in 1..={PHASE87_STAGE12_MAX_DRAFT_WIDTH}"
         ));
     }
     if accepted_draft_tokens > proposed_draft_tokens {
@@ -533,6 +579,7 @@ struct Config {
     kv_cache: KvCacheEncoding,
     mtp: MtpConfig,
     mtp_companion_path: Option<PathBuf>,
+    long_prefill_tokens: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -557,6 +604,21 @@ struct Report {
     resident_ready_memory: AllocationReport,
     rows: Vec<RowReport>,
     cleanup: CleanupReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    long_prefill: Option<LongPrefillReport>,
+}
+
+#[derive(Serialize)]
+struct LongPrefillReport {
+    prompt_tokens: usize,
+    output_tokens: usize,
+    exact_target: bool,
+    kv_cache: &'static str,
+    mtp_enabled: bool,
+    fallback_used: bool,
+    all_dispatches_hip: bool,
+    cleanup_zero: bool,
+    prefill_timing_source: &'static str,
 }
 
 #[derive(Serialize)]
@@ -645,7 +707,7 @@ struct Stage9RunReport {
 struct MtpReport {
     requested: bool,
     draft_width: usize,
-    supported_draft_widths: [usize; 3],
+    supported_draft_widths: Vec<usize>,
     execution: &'static str,
     contract: &'static str,
     timing_contract: &'static str,
@@ -844,6 +906,8 @@ struct RunReport {
     decoded_token_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     mtp: Option<MtpRunReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase87_stage3_calibration_amax: Option<BTreeMap<String, f32>>,
     stop_reason: &'static str,
     audit: AuditReport,
     request_memory: RequestMemoryReport,
@@ -980,6 +1044,18 @@ struct RequestMemoryReport {
     kv_tokens_per_page: Option<u64>,
     kv_mapped_token_capacity: Option<u64>,
     kv_committed_bytes_per_plane: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kv_paged_token_block_size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kv_paged_logical_table_capacity: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kv_paged_max_physical_blocks: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kv_paged_allocated_physical_blocks: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kv_paged_committed_bytes_per_plane: Option<[u64; 6]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kv_paged_committed_bytes_total: Option<u64>,
     kv_committed_bytes_all_layers_and_planes: u64,
     linear_attention_layers: usize,
     linear_attention_capacity_tokens: Option<u64>,
@@ -1017,6 +1093,12 @@ struct Stage0PrefixFile {
 
 #[derive(Debug, Deserialize)]
 struct Stage0Suite {
+    #[serde(default)]
+    schema: Option<String>,
+    #[serde(default)]
+    source_manifest_sha256: Option<String>,
+    #[serde(default)]
+    supported_widths: Option<Vec<usize>>,
     seeds: Vec<u64>,
     cases: Vec<Stage0SuiteCase>,
 }
@@ -1105,7 +1187,10 @@ struct Stage0SecondaryEntry {
     prompt_sha256: String,
     prompt_token_count: usize,
     output_tokens: usize,
-    run: RunReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run: Option<RunReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    m3_runs: Option<Vec<RunReport>>,
 }
 
 #[derive(Serialize)]
@@ -1131,6 +1216,8 @@ struct Stage0Report {
     model_sha256: &'static str,
     companion_encoding: Option<String>,
     companion_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draft_vocab_sha256: Option<String>,
     fixed_prefix: Option<Stage0FixedReport>,
     generation: Option<Stage0GenerationReport>,
     secondary_mtp: Option<Stage0SecondaryReport>,
@@ -1145,6 +1232,35 @@ fn main() -> ExitCode {
     }
     if env::var(phase86_mtp_catch_up::PREPARE_ONLY_ENV).as_deref() == Ok("1") {
         return emit_phase86_prepare_only();
+    }
+    if env::var(PHASE87_STAGE12_PROFILE_ONLY_ENV).as_deref() == Ok("1") {
+        if env::args_os().len() != 1 {
+            return emit_failure(
+                "Stage12 profile-only benchmark accepts environment variables only".to_owned(),
+            );
+        }
+        return emit_stage0();
+    }
+    if env::var(PHASE87_STAGE3_ABBA_ENV).as_deref() == Ok("1") {
+        if env::args_os().len() != 1 {
+            return emit_failure(
+                "Stage3 AB/BA benchmark accepts environment variables only".to_owned(),
+            );
+        }
+        return match Config::from_env().and_then(phase87_stage3_companion_abba::run) {
+            Ok(report) => {
+                let passed = report.state == "PASS";
+                if let Err(error) = emit_json(io::stdout().lock(), &report) {
+                    eprintln!("Stage3 AB/BA report serialization failed: {error}");
+                    ExitCode::from(2)
+                } else if passed {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                }
+            }
+            Err(error) => emit_failure(error),
+        };
     }
     if env::var(PHASE85_A16_STAGE0_ENV).as_deref() == Ok("1")
         || env::var(PHASE85_A16_GENERATE_ENV).as_deref() == Ok("1")
@@ -1195,6 +1311,14 @@ fn main() -> ExitCode {
 
 impl Config {
     fn from_env() -> Result<Self, String> {
+        let long_prefill = match env::var(PHASE87_LONG_PREFILL_ENV).as_deref() {
+            Err(env::VarError::NotPresent) | Ok("0") => false,
+            Ok("1") => true,
+            _ => return Err(format!("{PHASE87_LONG_PREFILL_ENV} must be 0 or 1")),
+        };
+        if long_prefill {
+            return Self::from_long_prefill_env();
+        }
         let phase83 = match env::var(PHASE83_MODE_ENV).as_deref() {
             Err(env::VarError::NotPresent) | Ok("0") | Ok("legacy") => false,
             Ok("coding8192") | Ok("1") => true,
@@ -1211,6 +1335,7 @@ impl Config {
                 || env::var_os(PHASE83_REPLAY_ENV).is_some()
                 || env::var_os(PHASE83_MTP_ENV).is_some()
                 || env::var_os(PHASE83_MTP_WIDTH_ENV).is_some()
+                || env::var_os(PHASE87_STAGE12_PROFILE_ONLY_ENV).is_some()
                 || env::var_os(PHASE84_MTP_COMPANION_PATH_ENV).is_some())
         {
             return Err(format!(
@@ -1243,9 +1368,8 @@ impl Config {
         }
         let boundary_diagnostic =
             phase83 && env::var("SLLM_PHASE87_BOUNDARY_TEST").ok().as_deref() == Some("1");
-        if chunk_capacity == 0
-            || chunk_capacity > MAX_CHUNK_CAPACITY
-            || (!boundary_diagnostic && (chunk_capacity < 512 || !chunk_capacity.is_power_of_two()))
+        if !(512..=MAX_CHUNK_CAPACITY).contains(&chunk_capacity)
+            || (!boundary_diagnostic && !chunk_capacity.is_power_of_two())
         {
             return Err(if boundary_diagnostic {
                 format!(
@@ -1350,10 +1474,114 @@ impl Config {
             kv_cache,
             mtp,
             mtp_companion_path,
+            long_prefill_tokens: None,
+        })
+    }
+
+    fn from_long_prefill_env() -> Result<Self, String> {
+        let prompt_tokens =
+            parse_long_prefill_token_count(&required_env(PHASE87_LONG_PREFILL_TOKENS_ENV)?)?;
+        for (name, value) in [
+            (PHASE83_MODE_ENV, "Phase83 mode"),
+            (PHASE83_KV_ENV, "Phase83 KV selection"),
+            (PHASE83_ROWS_ENV, "Phase83 rows"),
+            (PHASE83_SAMPLING_ENV, "Phase83 sampling"),
+            (PHASE83_REPLAY_ENV, "Phase83 replay"),
+            (PHASE83_MTP_ENV, "MTP mode"),
+            (PHASE83_MTP_WIDTH_ENV, "MTP width"),
+            (PHASE84_MTP_COMPANION_PATH_ENV, "MTP companion"),
+        ] {
+            if env::var_os(name).is_some() {
+                return Err(format!(
+                    "{PHASE87_LONG_PREFILL_ENV}=1 rejects {name} ({value}); long prefill is target-only"
+                ));
+            }
+        }
+        for (name, value) in [
+            ("SLLM_PHASE81_SAMPLING", "sampling mode"),
+            ("SLLM_PHASE81_REPLAY", "sampling replay"),
+            ("SLLM_PHASE87_OUTPUT_TOKENS", "output budget"),
+            (ROWS_ENV, "legacy rows"),
+            (STATE_CAPACITY_ENV, "state capacity"),
+        ] {
+            if env::var_os(name).is_some() {
+                return Err(format!(
+                    "{PHASE87_LONG_PREFILL_ENV}=1 rejects {name} ({value}); the diagnostic fixes this setting"
+                ));
+            }
+        }
+        let target = required_env(TARGET_ENV)?;
+        if !matches!(target.as_str(), "gfx1030" | "gfx1201") {
+            return Err(format!(
+                "{PHASE87_LONG_PREFILL_ENV}=1 requires {TARGET_ENV}=gfx1030 or gfx1201"
+            ));
+        }
+        let device_index = parse_env_or::<u32>(DEVICE_ENV, None)?;
+        let (model_root, model_env) = match env::var_os(MODEL_ENV) {
+            Some(path) => (PathBuf::from(path), MODEL_ENV),
+            None => (
+                PathBuf::from(
+                    env::var_os(COMPAT_MODEL_ENV)
+                        .ok_or_else(|| format!("{MODEL_ENV} or {COMPAT_MODEL_ENV} is required"))?,
+                ),
+                COMPAT_MODEL_ENV,
+            ),
+        };
+        let warmups = parse_env_or(WARMUPS_ENV, Some(1_usize))?;
+        let measured = parse_env_or(MEASURED_ENV, Some(3_usize))?;
+        if warmups > MAX_REPETITIONS {
+            return Err(format!("{WARMUPS_ENV} must not exceed {MAX_REPETITIONS}"));
+        }
+        if measured == 0 || measured > MAX_REPETITIONS {
+            return Err(format!("{MEASURED_ENV} must be in 1..={MAX_REPETITIONS}"));
+        }
+        let chunk_capacity = parse_env_or(CHUNK_CAPACITY_ENV, Some(MAX_CHUNK_CAPACITY))?;
+        if chunk_capacity == 0
+            || chunk_capacity > MAX_CHUNK_CAPACITY
+            || !chunk_capacity.is_power_of_two()
+        {
+            return Err(format!(
+                "{PHASE87_LONG_PREFILL_ENV}=1 requires {CHUNK_CAPACITY_ENV} to be a power of two in 512..={MAX_CHUNK_CAPACITY}"
+            ));
+        }
+        if chunk_capacity > prompt_tokens as u64 + 1 {
+            return Err(format!(
+                "{PHASE87_LONG_PREFILL_ENV}=1 requires {CHUNK_CAPACITY_ENV} to fit prompt+1 state capacity"
+            ));
+        }
+        Ok(Self {
+            target,
+            device_index,
+            model_root,
+            model_env,
+            warmups,
+            measured,
+            chunk_capacity,
+            state_capacity: (prompt_tokens as u64)
+                .checked_add(1)
+                .ok_or("long prefill state capacity overflowed")?,
+            rows: vec![RowSpec {
+                prompt_tokens,
+                output_tokens: 1,
+            }],
+            sampling: SamplingBench {
+                mode: SamplingMode::Greedy,
+                replay_inputs: false,
+                seed: 123,
+            },
+            phase83: false,
+            fixture_kind: PromptFixtureKind::LongPrefill(prompt_tokens),
+            kv_cache: KvCacheEncoding::Mxfp8E4,
+            mtp: MtpConfig::disabled(),
+            mtp_companion_path: None,
+            long_prefill_tokens: Some(prompt_tokens),
         })
     }
 
     fn mode(&self) -> &'static str {
+        if self.long_prefill_tokens.is_some() {
+            return "phase87-long-prefill-target-only";
+        }
         if self.phase83 {
             return "phase83-coding-chat-template-8192-autoregressive";
         }
@@ -1371,7 +1599,8 @@ impl Config {
     }
 
     fn is_phase78_final(&self) -> bool {
-        !self.phase83
+        self.long_prefill_tokens.is_none()
+            && !self.phase83
             && self.state_capacity == STATE_CAPACITY
             && self.sampling.mode == SamplingMode::Greedy
             && !self.sampling.replay_inputs
@@ -1423,7 +1652,13 @@ fn run(config: Config) -> Result<Report, String> {
         config.state_capacity,
         config.kv_cache,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        if config.long_prefill_tokens.is_some() {
+            format!("long-prefill preflight graph/state validation failed: {error}")
+        } else {
+            error.to_string()
+        }
+    })?;
     let graph_and_plan_ns = graph_started.elapsed().as_nanos();
 
     // Build the exact companion plan/graph only for the explicit MTP opt-in;
@@ -1479,11 +1714,10 @@ fn run(config: Config) -> Result<Report, String> {
     };
 
     let backend = HipBackend::connect().map_err(|error| error.to_string())?;
+    let session_request = ExecutionSessionRequest::new(config.device_index, config.target.clone())
+        .map_err(|error| error.to_string())?;
     let session = backend
-        .open_execution_session(
-            ExecutionSessionRequest::new(config.device_index, config.target.clone())
-                .map_err(|error| error.to_string())?,
-        )
+        .open_execution_session(session_request)
         .map_err(|error| error.to_string())?;
     let available_device_memory_bytes_before_load = session
         .available_memory_bytes()
@@ -1515,7 +1749,13 @@ fn run(config: Config) -> Result<Report, String> {
             Arc::clone(&artifact),
             COMPLETION_TIMEOUT,
         )
-        .map_err(|error| format!("model provisioning failed: {error}"))?;
+        .map_err(|error| {
+            if config.long_prefill_tokens.is_some() {
+                format!("long-prefill preflight model/VRAM placement failed: {error}")
+            } else {
+                format!("model provisioning failed: {error}")
+            }
+        })?;
         let mtp_resident = match (mtp_plan.as_ref(), mtp_graph.as_ref()) {
             (Some(plan), Some(graph)) => Some(provision_qwen38_mtp_resident(
                 &resident,
@@ -1555,7 +1795,7 @@ fn run(config: Config) -> Result<Report, String> {
                 mtp_resident.as_ref(),
                 mtp_graph.as_ref(),
                 config.mtp,
-                config.phase83,
+                config.phase83 || config.long_prefill_tokens.is_some(),
             )?);
         }
         drop(mtp_resident);
@@ -1597,10 +1837,34 @@ fn run(config: Config) -> Result<Report, String> {
         && shutdown.durable_quarantine == 0;
     let state = if cleanup_zero { "PASS" } else { "FAIL" };
     let is_phase78_final = config.is_phase78_final();
+    let long_prefill = config.long_prefill_tokens.map(|prompt_tokens| {
+        let all_dispatches_hip = row_reports
+            .iter()
+            .flat_map(|row| row.runs.iter())
+            .all(|run| run.audit.all_dispatches_hip);
+        let fallback_used = row_reports
+            .iter()
+            .flat_map(|row| row.runs.iter())
+            .any(|run| run.audit.fallback_used);
+        LongPrefillReport {
+            prompt_tokens,
+            output_tokens: 1,
+            exact_target: config.target == "gfx1030" || config.target == "gfx1201",
+            kv_cache: config.kv_cache.canonical_name(),
+            mtp_enabled: config.mtp.enabled,
+            fallback_used,
+            all_dispatches_hip,
+            cleanup_zero,
+            prefill_timing_source:
+                "rows[].runs[].timing.prefill_ns; host wall interval around request.prefill",
+        }
+    });
 
     Ok(Report {
         schema_version: if config.phase83 {
             "phase83-qwen38-resident-benchmark-v1"
+        } else if config.long_prefill_tokens.is_some() {
+            "phase87-qwen38-long-prefill-diagnostic-v1"
         } else {
             "phase78-qwen38-resident-benchmark-v3"
         },
@@ -1625,7 +1889,7 @@ fn run(config: Config) -> Result<Report, String> {
             active_requests: 1,
             parallel_requests: 1,
             batching: "disabled; rows and repetitions execute serially with one fresh request",
-            kv_cache: if config.phase83 {
+            kv_cache: if config.phase83 || config.long_prefill_tokens.is_some() {
                 config.kv_cache.canonical_name()
             } else {
                 "FP16"
@@ -1634,6 +1898,8 @@ fn run(config: Config) -> Result<Report, String> {
             prefill_chunk_capacity_tokens: config.chunk_capacity,
             mtp: if config.mtp.enabled {
                 "enabled; Qwen3.8 companion resident and fixed GPU-selector speculative executor"
+            } else if config.long_prefill_tokens.is_some() {
+                "disabled; long-prefill diagnostic rejects MTP settings and constructs no companion"
             } else if config.phase83 {
                 "disabled; Phase83 target-only baseline has no MTP resident or speculative executor"
             } else {
@@ -1642,12 +1908,16 @@ fn run(config: Config) -> Result<Report, String> {
             generation: config.sampling.generation(),
             eos_termination: config.phase83,
             stop_sequences: false,
-            termination: if config.phase83 {
+            termination: if config.long_prefill_tokens.is_some() {
+                "fixed output budget of one token; no decode transition is measured"
+            } else if config.phase83 {
                 "output budget or reviewed stop-token policy; autoregressive selected tokens"
             } else {
                 "fixed total output-token budget; generated EOS-like IDs are not inspected"
             },
-            output_accounting: if config.phase83 {
+            output_accounting: if config.long_prefill_tokens.is_some() {
+                "one selected prefill output token; decode transition count is zero"
+            } else if config.phase83 {
                 "generated_tokens contains selected tokens including a terminal stop token; visible output fields omit stop IDs per the reviewed policy"
             } else {
                 "generated_tokens contains selected tokens; sampling.replay_inputs replaces only subsequent inputs with (step*7919+17)%248320; TPOT and decode throughput count only those decode transitions"
@@ -1679,6 +1949,7 @@ fn run(config: Config) -> Result<Report, String> {
             durable_quarantine: shutdown.durable_quarantine,
             zero: cleanup_zero,
         },
+        long_prefill,
     })
 }
 
@@ -2077,6 +2348,15 @@ fn stage9_run_report(run: RunReport, variant: &'static str) -> Result<Stage9RunR
         return Err(format!(
             "Stage9 {variant} run generated {} tokens, expected 128",
             run.generated_tokens.len()
+        ));
+    }
+    if run.audit.terminal_logit_non_finite_count != 0
+        || mtp.proposal_blocks == 0
+        || mtp.fixed_k20_pq_blocks != mtp.proposal_blocks
+        || mtp.proposed_draft_tokens == 0
+    {
+        return Err(format!(
+            "Stage9/Stage3 {variant} run has nonfinite logits or incomplete fixed-K20 p/q accounting"
         ));
     }
     Ok(Stage9RunReport {
@@ -2625,11 +2905,92 @@ fn stage0_secondary_mtp(
             "{PHASE85_A16_SECONDARY_CASES_ENV} selected no cases"
         ));
     }
+    let stage3_m3 = env::var(PHASE87_STAGE3_M3_ENV).as_deref() == Ok("1");
+    let stage12_m3 = env::var(PHASE87_STAGE12_M3_ENV).as_deref() == Ok("1");
+    let stage12_profile_only = env::var(PHASE87_STAGE12_PROFILE_ONLY_ENV).as_deref() == Ok("1");
+    if stage3_m3 && stage12_m3 {
+        return Err("Phase87 Stage3 and Stage12 M3 modes are mutually exclusive".to_owned());
+    }
+    if stage12_profile_only && (stage3_m3 || stage12_m3) {
+        return Err(
+            "Stage12 profile-only mode is mutually exclusive with Stage3/Stage12 M3".to_owned(),
+        );
+    }
+    let m3_mode = stage3_m3 || stage12_m3 || stage12_profile_only;
+    if stage12_m3 || stage12_profile_only {
+        let expected_manifest_sha256 = format!(
+            "{:x}",
+            Sha256::digest(include_bytes!("../../../../ci/matrix/mtp-bench-v2.json"))
+        );
+        if suite.schema.as_deref() != Some("phase87-stage12-mtp-suite-v2")
+            || suite.source_manifest_sha256.as_deref() != Some(expected_manifest_sha256.as_str())
+            || suite.supported_widths.as_deref() != Some(&[2, 3, 4][..])
+        {
+            return Err("Stage12 suite identity differs from mtp-bench-v2".to_owned());
+        }
+        if stage12_profile_only {
+            if suite.cases.len() != 26 {
+                return Err(
+                    "Stage12 profile-only mode requires all 26 frozen Tier A suite cases"
+                        .to_owned(),
+                );
+            }
+            let manifest: serde_json::Value =
+                serde_json::from_slice(include_bytes!("../../../../ci/matrix/mtp-bench-v2.json"))
+                    .map_err(|error| {
+                    format!("decode mtp-bench-v2 for profile-only case check: {error}")
+                })?;
+            let frozen_entries = manifest
+                .get("frozen_prefix_identity")
+                .and_then(|value| value.get("entries"))
+                .and_then(serde_json::Value::as_object)
+                .ok_or("mtp-bench-v2 frozen Tier A entries are missing")?;
+            if selected_case_ids.len() != 1 || !frozen_entries.contains_key(&selected_case_ids[0]) {
+                return Err(
+                    "Stage12 profile-only mode requires exactly one frozen Tier A case".to_owned(),
+                );
+            }
+        }
+    }
     let seed = parse_env_or(PHASE85_A16_SECONDARY_SEED_ENV, Some(123_u64))?;
     let output_tokens = parse_env_or(PHASE85_A16_SECONDARY_OUTPUT_TOKENS_ENV, Some(128_usize))?;
     if output_tokens == 0 {
         return Err(format!(
             "{PHASE85_A16_SECONDARY_OUTPUT_TOKENS_ENV} must be positive"
+        ));
+    }
+    if stage3_m3
+        && (selected_case_ids.len() != 26
+            || seed != 123
+            || output_tokens != 256
+            || draft_width != 2
+            || env::var("SLLM_QWEN38_WHOLE_DECODE").as_deref() != Ok("0"))
+    {
+        return Err(format!(
+            "{PHASE87_STAGE3_M3_ENV}=1 requires 26 selected cases, seed123, output256, width2, and SLLM_QWEN38_WHOLE_DECODE=0"
+        ));
+    }
+    if stage12_m3
+        && (selected_case_ids.len() != 26
+            || seed != 123
+            || output_tokens != 256
+            || !(2..=4).contains(&draft_width)
+            || env::var("SLLM_QWEN38_WHOLE_DECODE").as_deref() != Ok("0"))
+    {
+        return Err(format!(
+            "{PHASE87_STAGE12_M3_ENV}=1 requires 26 selected cases, seed123, output256, width2/3/4, and SLLM_QWEN38_WHOLE_DECODE=0"
+        ));
+    }
+    if stage12_profile_only
+        && (selected_case_ids.len() != 1
+            || seed != 123
+            || output_tokens != 256
+            || !(2..=4).contains(&draft_width)
+            || env::var(PHASE87_PROFILE_ENV).as_deref() != Ok("1")
+            || env::var("SLLM_QWEN38_WHOLE_DECODE").as_deref() != Ok("0"))
+    {
+        return Err(format!(
+            "{PHASE87_STAGE12_PROFILE_ONLY_ENV}=1 requires profile=1, one Tier A case, seed123, output256, width2/3/4, and SLLM_QWEN38_WHOLE_DECODE=0"
         ));
     }
     let prompts = stage0_suite_prompts(artifact, &suite)?;
@@ -2642,26 +3003,48 @@ fn stage0_secondary_mtp(
         if !selected.contains(&case_id) {
             continue;
         }
-        let run = run_one_mtp(
-            session,
-            target_resident,
-            target_graph,
-            mtp_resident,
-            mtp_graph,
-            &prompt,
-            output_tokens,
-            "stage0-secondary-mtp",
-            entries.len(),
-            target,
-            &tokenizer.tokenizer,
-            SamplingBench {
-                mode: SamplingMode::GpuFixed,
-                replay_inputs: false,
-                seed,
-            },
-            None,
-            draft_width,
-        )?;
+        let samples = if m3_mode { 4 } else { 1 };
+        let mut runs = Vec::with_capacity(samples);
+        for sample_index in 0..samples {
+            let sample_kind = if m3_mode && sample_index == 0 {
+                "warmup"
+            } else {
+                "measured"
+            };
+            runs.push(run_one_mtp(
+                session,
+                target_resident,
+                target_graph,
+                mtp_resident,
+                mtp_graph,
+                &prompt,
+                output_tokens,
+                sample_kind,
+                if m3_mode {
+                    sample_index.saturating_sub(1)
+                } else {
+                    entries.len()
+                },
+                target,
+                &tokenizer.tokenizer,
+                SamplingBench {
+                    mode: SamplingMode::GpuFixed,
+                    replay_inputs: false,
+                    seed,
+                },
+                None,
+                draft_width,
+            )?);
+        }
+        let (run, m3_runs) = if m3_mode {
+            (None, Some(runs))
+        } else {
+            (runs.pop(), None)
+        };
+        let output_count = run
+            .as_ref()
+            .or_else(|| m3_runs.as_ref().and_then(|runs| runs.get(1)))
+            .map_or(0, |run| run.generated_tokens.len());
         entries.push(Stage0SecondaryEntry {
             case_id,
             task,
@@ -2669,8 +3052,9 @@ fn stage0_secondary_mtp(
             seed,
             prompt_sha256: hash_tokens(&prompt),
             prompt_token_count: prompt.len(),
-            output_tokens: run.generated_tokens.len(),
+            output_tokens: output_count,
             run,
+            m3_runs,
         });
         eprintln!(
             "[phase85-a16] secondary entry complete series={} case={} seed={} output_tokens={}",
@@ -2689,13 +3073,29 @@ fn stage0_secondary_mtp(
             entries.len()
         ));
     }
+    if stage12_profile_only && entries.len() != 1 {
+        return Err(
+            "Stage12 profile-only suite did not produce exactly one Tier A entry".to_owned(),
+        );
+    }
+    if stage12_profile_only
+        && (entries[0].output_tokens != 256
+            || entries[0].m3_runs.as_ref().is_none_or(|runs| {
+                runs.len() != 4 || runs.iter().any(|run| run.generated_tokens.len() != 256)
+            }))
+    {
+        return Err(
+            "Stage12 profile-only case did not produce one warmup plus three 256-token runs"
+                .to_owned(),
+        );
+    }
     Ok(Stage0SecondaryReport {
         suite_file: suite_path.display().to_string(),
         suite_file_sha256: format!("sha256:{:x}", Sha256::digest(suite_bytes)),
         selected_cases: selected_case_ids,
         seed,
-        warmups: 0,
-        measured: 1,
+        warmups: usize::from(m3_mode),
+        measured: if m3_mode { 3 } else { 1 },
         entries,
     })
 }
@@ -2706,6 +3106,26 @@ fn run_stage0(config: Config) -> Result<Stage0Report, String> {
             "Stage0 requires Phase83 coding mode, MTP on, and gpu-fixed sampling settings"
                 .to_owned(),
         );
+    }
+    let stage12_profile_only = env::var(PHASE87_STAGE12_PROFILE_ONLY_ENV).as_deref() == Ok("1");
+    if stage12_profile_only {
+        if env::var(PHASE87_PROFILE_ENV).as_deref() != Ok("1")
+            || env::var(PHASE85_A16_SECONDARY_ENV).as_deref() != Ok("1")
+        {
+            return Err(format!(
+                "{PHASE87_STAGE12_PROFILE_ONLY_ENV}=1 requires {PHASE87_PROFILE_ENV}=1 and {PHASE85_A16_SECONDARY_ENV}=1"
+            ));
+        }
+        if env::var_os(phase86_mtp_catch_up::MODE_ENV).is_some()
+            || env::var(PHASE87_STAGE3_M3_ENV).as_deref() == Ok("1")
+            || env::var(PHASE87_STAGE12_M1_ENV).as_deref() == Ok("1")
+            || env::var(PHASE87_STAGE12_M3_ENV).as_deref() == Ok("1")
+            || env::var(PHASE87_STAGE3_ABBA_ENV).as_deref() == Ok("1")
+        {
+            return Err(
+                "Stage12 profile-only mode is mutually exclusive with Stage3/Stage12 M1, M3, and Phase86 modes".to_owned(),
+            );
+        }
     }
     let output_dir = stage0_required_path(PHASE85_A16_OUTPUT_DIR_ENV)?;
     let artifact = Arc::new(
@@ -2750,13 +3170,30 @@ fn run_stage0(config: Config) -> Result<Stage0Report, String> {
     }
     let reduced_m1_diagnostic =
         env::var(phase86_mtp_catch_up::MODE_ENV).as_deref() == Ok("P") && !full_m1_control;
-    let mtp_draft_vocabulary = if reduced_m1_diagnostic {
-        load_qwen38_mtp_draft_vocabulary(&config.model_root)
-            .map_err(|error| format!("Qwen3.8 MTP draft vocabulary failed: {error}"))?
-            .map(Arc::new)
-    } else {
-        None
-    };
+    let stage3_m3 = env::var(PHASE87_STAGE3_M3_ENV).as_deref() == Ok("1");
+    let stage12_m3 = env::var(PHASE87_STAGE12_M3_ENV).as_deref() == Ok("1");
+    if (stage3_m3 || stage12_m3) && env::var(PHASE85_A16_SECONDARY_ENV).as_deref() != Ok("1") {
+        return Err(format!(
+            "Stage3/Stage12 M3 requires {PHASE85_A16_SECONDARY_ENV}=1"
+        ));
+    }
+    let mtp_draft_vocabulary =
+        if reduced_m1_diagnostic || stage3_m3 || stage12_m3 || stage12_profile_only {
+            load_qwen38_mtp_draft_vocabulary(&config.model_root)
+                .map_err(|error| format!("Qwen3.8 MTP draft vocabulary failed: {error}"))?
+                .map(Arc::new)
+        } else {
+            None
+        };
+    if (env::var(PHASE87_STAGE12_M1_ENV).as_deref() == Ok("1")
+        || stage12_m3
+        || stage12_profile_only)
+        && mtp_draft_vocabulary.is_none()
+    {
+        return Err(
+            "Stage12 MTP width benchmark requires the reviewed reduced draft vocabulary".to_owned(),
+        );
+    }
     let mtp_graph = build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
         &lock,
         &mtp_plan,
@@ -2807,6 +3244,9 @@ fn run_stage0(config: Config) -> Result<Stage0Report, String> {
         let secondary = env::var(PHASE85_A16_SECONDARY_ENV).as_deref() == Ok("1");
         let generation = env::var(PHASE85_A16_GENERATE_ENV).as_deref() == Ok("1");
         let phase86 = env::var_os(phase86_mtp_catch_up::MODE_ENV).is_some();
+        if stage12_profile_only && phase86 {
+            return Err("Stage12 profile-only mode cannot run with a Phase86 mode".to_owned());
+        }
         if (secondary || generation) && phase86 {
             return Err("Phase85 Stage0 and Phase86 modes are mutually exclusive".to_owned());
         }
@@ -2816,14 +3256,26 @@ fn run_stage0(config: Config) -> Result<Stage0Report, String> {
             );
         }
         let payload = if phase86 {
-            let report = phase86_mtp_catch_up::run(
-                &resident,
-                &graph,
-                &mtp_resident,
-                &mtp_graph,
-                &output_dir,
-                &config.target,
-            )?;
+            let report = if env::var(PHASE87_STAGE12_M1_ENV).as_deref() == Ok("1") {
+                phase86_mtp_catch_up::run_with_width(
+                    &resident,
+                    &graph,
+                    &mtp_resident,
+                    &mtp_graph,
+                    &output_dir,
+                    &config.target,
+                    config.mtp.draft_width,
+                )?
+            } else {
+                phase86_mtp_catch_up::run(
+                    &resident,
+                    &graph,
+                    &mtp_resident,
+                    &mtp_graph,
+                    &output_dir,
+                    &config.target,
+                )?
+            };
             (None, None, None, Some(report))
         } else if secondary {
             let suite_path = stage0_required_path(PHASE85_A16_SUITE_FILE_ENV)?;
@@ -2934,7 +3386,11 @@ fn run_stage0(config: Config) -> Result<Stage0Report, String> {
         benchmark_mode: if payload.3.is_some() {
             "phase86-mtp-forced-top1"
         } else if payload.2.is_some() {
-            "stage0-secondary-mtp"
+            if stage12_profile_only {
+                "phase87-stage12-profile-only"
+            } else {
+                "stage0-secondary-mtp"
+            }
         } else if payload.1.is_some() {
             "stage0-bf16-prefix-generation"
         } else {
@@ -2951,6 +3407,9 @@ fn run_stage0(config: Config) -> Result<Stage0Report, String> {
         companion_digest: mtp_companion
             .as_deref()
             .map(|sidecar| sidecar.combined_recipe_digest(artifact.recipe_digest())),
+        draft_vocab_sha256: mtp_draft_vocabulary
+            .as_deref()
+            .map(|vocab| vocab.vocab_sha256().to_owned()),
         fixed_prefix: payload.0,
         generation: payload.1,
         secondary_mtp: payload.2,
@@ -3461,6 +3920,7 @@ fn run_one_target(
         decoded_token_count: decoded.decoded_token_count,
         generated_tokens: generated,
         mtp: None,
+        phase87_stage3_calibration_amax: None,
         stop_reason,
         audit,
         request_memory,
@@ -3487,6 +3947,12 @@ fn run_one_mtp(
     stop_token_ids: Option<&[u32]>,
     draft_width: usize,
 ) -> Result<RunReport, String> {
+    let stage3_calibration = match env::var(PHASE87_STAGE3_CALIBRATION_ENV) {
+        Ok(value) if value == "1" => true,
+        Ok(value) if value == "0" => false,
+        Err(env::VarError::NotPresent) => false,
+        _ => return Err(format!("{PHASE87_STAGE3_CALIBRATION_ENV} must be 0 or 1")),
+    };
     if sampling.mode != SamplingMode::GpuFixed {
         return Err("MTP requires the fixed GPU sampler".to_owned());
     }
@@ -3520,6 +3986,13 @@ fn run_one_mtp(
     let mut executor =
         QwenMtpGenerationExecutorV1::new_with_draft_width(target_request, mtp_request, draft_width)
             .map_err(|error| format!("MTP executor construction failed: {error}"))?;
+    if env::var(PHASE87_STAGE12_M3_ENV).as_deref() == Ok("1")
+        || env::var(PHASE87_STAGE12_PROFILE_ONLY_ENV).as_deref() == Ok("1")
+    {
+        executor = executor
+            .with_device_draft_width_limit(4)
+            .map_err(|error| format!("Stage12 MTP device width setup failed: {error}"))?;
+    }
     if whole_decode {
         executor
             .configure_whole_decode(output_tokens as u64, stop_token_ids.unwrap_or(&[]))
@@ -3660,6 +4133,16 @@ fn run_one_mtp(
             "MTP dispatch audits are not HIP-only: target={target_audit:?} draft={draft_audit:?}"
         ));
     }
+    let phase87_stage3_calibration_amax = if stage3_calibration {
+        Some(
+            executor
+                .mtp()
+                .phase87_stage3_mtp_activation_amax()
+                .map_err(|error| format!("Stage3 BF16 MTP calibration failed: {error}"))?,
+        )
+    } else {
+        None
+    };
     let mut mtp_report = build_mtp_run_report(
         draft_width,
         executor.proposal_blocks(),
@@ -3744,6 +4227,7 @@ fn run_one_mtp(
         decoded_token_count: decoded.decoded_token_count,
         generated_tokens: generated,
         mtp: Some(mtp_report),
+        phase87_stage3_calibration_amax,
         stop_reason,
         audit,
         request_memory,
@@ -3921,15 +4405,32 @@ fn allocation_report(snapshot: AllocationSnapshot) -> AllocationReport {
 fn request_memory_report(audit: &QwenRequestMemoryAudit) -> Result<RequestMemoryReport, String> {
     let first = audit.kv_layers().first().copied();
     let physical = first.map(|layer| layer.physical());
+    let vmm = physical.and_then(|value| match value {
+        KvPhysicalMemoryMetadata::Vmm(metadata) => Some(metadata),
+        KvPhysicalMemoryMetadata::Paged(_) => None,
+    });
+    let paged = physical.and_then(|value| match value {
+        KvPhysicalMemoryMetadata::Vmm(_) => None,
+        KvPhysicalMemoryMetadata::Paged(metadata) => Some(metadata),
+    });
     Ok(RequestMemoryReport {
         kv_layers: audit.kv_layers().len(),
         kv_logical_capacity_tokens: first.map(|layer| layer.logical_capacity_tokens()),
         kv_observed_length_tokens: first.map(|layer| layer.observed_length_tokens()),
-        kv_memory_kind: physical.map(|value| format!("{:?}", value.memory_kind())),
-        kv_physical_page_bytes: physical.map(|value| value.physical_page_bytes()),
-        kv_tokens_per_page: physical.map(|value| value.tokens_per_page()),
-        kv_mapped_token_capacity: physical.map(|value| value.mapped_token_capacity()),
-        kv_committed_bytes_per_plane: physical.map(|value| value.committed_bytes_per_plane()),
+        kv_memory_kind: physical.map(|value| match value {
+            KvPhysicalMemoryMetadata::Vmm(metadata) => format!("{:?}", metadata.memory_kind()),
+            KvPhysicalMemoryMetadata::Paged(_) => "Paged".to_owned(),
+        }),
+        kv_physical_page_bytes: vmm.map(|value| value.physical_page_bytes()),
+        kv_tokens_per_page: vmm.map(|value| value.tokens_per_page()),
+        kv_mapped_token_capacity: vmm.map(|value| value.mapped_token_capacity()),
+        kv_committed_bytes_per_plane: vmm.map(|value| value.committed_bytes_per_plane()),
+        kv_paged_token_block_size: paged.map(|value| value.token_block_size()),
+        kv_paged_logical_table_capacity: paged.map(|value| value.logical_table_capacity()),
+        kv_paged_max_physical_blocks: paged.map(|value| value.max_physical_blocks()),
+        kv_paged_allocated_physical_blocks: paged.map(|value| value.allocated_physical_blocks()),
+        kv_paged_committed_bytes_per_plane: paged.map(|value| value.committed_bytes_per_plane()),
+        kv_paged_committed_bytes_total: paged.map(|value| value.committed_bytes_total()),
         kv_committed_bytes_all_layers_and_planes: audit
             .committed_kv_bytes()
             .map_err(|error| error.to_string())?,
@@ -3940,7 +4441,7 @@ fn request_memory_report(audit: &QwenRequestMemoryAudit) -> Result<RequestMemory
 }
 
 fn audit_report(audit: &QwenExecutionAudit) -> AuditReport {
-    const SELECTED_KERNELS: [(u32, &str); 37] = [
+    const SELECTED_KERNELS: [(u32, &str); 40] = [
         (3, "causal_attention.online_softmax_gqa.packed_kv.v3"),
         (3, "causal_attention.prefill.gqa6_qtile4.v1"),
         (3, "causal_attention.prefill.gqa6_qtile8_w16.mxfp8.v1"),
@@ -3996,6 +4497,12 @@ fn audit_report(audit: &QwenExecutionAudit) -> AuditReport {
         (93, "causal_attention.decode.wave32_split.staged.v1"),
         (94, "matmul.nvfp4.w4a4.small_m.vgpr_reuse.v1"),
         (103, "matmul.fp8.outer.gfx1201.dot4.v1"),
+        (106, "causal_attention.paged_decode.gqa6_m1_m5.mxfp8_e4.v1"),
+        (
+            107,
+            "causal_attention.paged_prefill.gqa6_qtile8.mxfp8_e4.v1",
+        ),
+        (118, "causal_attention.paged_decode.gqa6_c1_m3.mxfp8_e4.v1"),
     ];
     AuditReport {
         selected_backend: audit.selected_backend(),
@@ -4191,7 +4698,49 @@ fn build_prompt_fixture(
             })
         }
         PromptFixtureKind::Coding8192 => coding_prompt_fixture(artifact),
+        PromptFixtureKind::LongPrefill(prompt_tokens) => {
+            long_prefill_fixture(artifact, prompt_tokens)
+        }
     }
+}
+
+fn long_prefill_fixture(
+    artifact: &sllm_core::VerifiedUnslothQwen38Nvfp4,
+    prompt_tokens: usize,
+) -> Result<PromptFixture, String> {
+    if !LONG_PREFILL_TOKEN_COUNTS.contains(&prompt_tokens) {
+        return Err(format!(
+            "long prefill fixture length must be one of {LONG_PREFILL_TOKEN_COUNTS:?}"
+        ));
+    }
+    let coding = coding_prompt_fixture(artifact)?;
+    let mut tokens = coding.tokens;
+    for index in tokens.len()..prompt_tokens {
+        let token = ((index as u64 * 7_919 + 17) % QWEN35_VOCAB_SIZE as u64) as i32;
+        validate_token(token)?;
+        tokens.push(token);
+    }
+    let fixed_prefix_17: [i32; 17] = tokens
+        .get(..FIXED_PREFIX.len())
+        .ok_or("long prefill fixture is shorter than its prefix report")?
+        .try_into()
+        .map_err(|_| "long prefill fixture prefix conversion failed")?;
+    Ok(PromptFixture {
+        report: FixtureReport {
+            schema_version: "phase87-qwen38-long-prefill-fixture-v1",
+            construction: "Qwen3.8 coding chat-template 8192-token prefix; longer prompts extend it with deterministic valid IDs tokens[i]=(i*7919+17)%248320",
+            total_tokens: tokens.len(),
+            token_encoding: "signed-i32 token IDs; SHA-256 over concatenated little-endian i32",
+            sha256: hash_tokens(&tokens),
+            fixed_prefix_17,
+            chat_template_applied: true,
+            rendered_prompt_sha256: None,
+            message_sha256: None,
+        },
+        tokens,
+        message: None,
+        rendered_prompt: None,
+    })
 }
 
 fn coding_prompt_fixture(
@@ -4428,6 +4977,21 @@ where
     }
 }
 
+fn parse_long_prefill_token_count(value: &str) -> Result<usize, String> {
+    let prompt_tokens = value.parse::<usize>().map_err(|_| {
+        format!(
+            "{PHASE87_LONG_PREFILL_TOKENS_ENV} must be exactly one of 8192, 32768, 65536, or 131072"
+        )
+    })?;
+    if LONG_PREFILL_TOKEN_COUNTS.contains(&prompt_tokens) {
+        Ok(prompt_tokens)
+    } else {
+        Err(format!(
+            "{PHASE87_LONG_PREFILL_TOKENS_ENV} must be exactly one of 8192, 32768, 65536, or 131072"
+        ))
+    }
+}
+
 fn selector_environment() -> BTreeMap<String, Option<String>> {
     const NAMES: [&str; 73] = [
         "SLLM_NVFP4_W4A4_PREFILL_FORCE_ROW8",
@@ -4596,7 +5160,8 @@ mod tests {
             parse_mtp_config(None, None).unwrap(),
             MtpConfig {
                 enabled: false,
-                draft_width: 0
+                draft_width: 0,
+                stage12: false,
             }
         );
         assert_eq!(parse_mtp_config(Some("on"), None).unwrap().draft_width, 2);
@@ -4604,7 +5169,8 @@ mod tests {
             parse_mtp_config(Some("on"), Some("3")).unwrap(),
             MtpConfig {
                 enabled: true,
-                draft_width: 3
+                draft_width: 3,
+                stage12: false,
             }
         );
         assert!(parse_mtp_config(Some("on"), Some("0")).is_err());
@@ -4619,8 +5185,28 @@ mod tests {
                 .unwrap()
                 .report(None, "test")
                 .supported_draft_widths,
-            [1, 2, 3]
+            vec![1, 2, 3]
         );
+        let stage12 = parse_mtp_config_bounded(Some("on"), Some("4"), true).unwrap();
+        assert_eq!(stage12.draft_width, 4);
+        assert_eq!(
+            stage12.report(None, "test").supported_draft_widths,
+            vec![1, 2, 3, 4]
+        );
+        assert!(parse_mtp_config_bounded(Some("on"), Some("5"), true).is_err());
+    }
+
+    #[test]
+    fn phase83_rows_accept_the_129_boundary_diagnostic() {
+        assert_eq!(
+            parse_phase83_rows("129/17").unwrap(),
+            vec![PHASE83_DIAGNOSTIC_ROWS[1]]
+        );
+        assert_eq!(
+            parse_phase83_rows("129").unwrap(),
+            vec![PHASE83_DIAGNOSTIC_ROWS[1]]
+        );
+        assert!(parse_phase83_rows("129/128").is_err());
     }
 
     #[test]
@@ -4672,6 +5258,19 @@ mod tests {
         assert!(parse_rows("512/128").is_err());
         assert!(parse_rows("17,17/17").is_err());
         assert!(parse_rows("").is_err());
+    }
+
+    #[test]
+    fn long_prefill_parser_accepts_only_the_supported_lengths() {
+        for value in ["8192", "32768", "65536", "131072"] {
+            assert_eq!(
+                parse_long_prefill_token_count(value).unwrap(),
+                value.parse::<usize>().unwrap()
+            );
+        }
+        for value in ["8191", "8193", "32769", "131071", "131073", ""] {
+            assert!(parse_long_prefill_token_count(value).is_err(), "{value:?}");
+        }
     }
 
     #[test]

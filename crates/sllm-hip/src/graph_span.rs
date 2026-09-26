@@ -302,6 +302,19 @@ impl GraphSpan {
         &self.inner.queue
     }
 
+    pub(crate) fn prepare_paged_kv(&self, conservative_end: u64) -> Result<(), RuntimeError> {
+        let mut buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut buffer);
+        let status = unsafe {
+            sys::sllm_graph_span_prepare_paged_kv(
+                self.inner.raw.as_ptr(),
+                conservative_end,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &buffer, error_sink.message_length)
+    }
+
     pub(crate) fn publish_state_metadata(
         &self,
         expected_initial_position: u64,

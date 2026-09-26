@@ -140,4 +140,4 @@ raw sample・生成token列・binaryは`.local-artifacts/phase87/wu1-1/`へ置�
 - モデル: `ci/tools/run_phase86_mtp_catch_up.py`を再利用。exact環境・job list・binaryは各execution JSONに記録する。
 - 集約: `python3 ci/tools/summarize_phase87_wu1_1.py --root .local-artifacts/phase87/wu1-1 --output <summary.json>`。
 
-計画: [Phase87 WU1.1](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu11-decode-attentionの組合せと採用基準による再判定)
+計画: [Phase87 WU1.1](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu11-decode-attentionの組合せと採用基準による再判定)

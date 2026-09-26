@@ -485,6 +485,12 @@ impl DecodeReplayController {
     }
 
     fn enqueue_generation(&self, generation: u64) -> Result<PendingReplay, ExecutionError> {
+        // The next replay is queued before the current result is read back.
+        // Native graph append admits at most nine rows per replay, so reserve
+        // two replay windows without synchronizing on device control.
+        let conservative_end = self.control.model_position.saturating_add(18);
+        self.session
+            .prepare_graph_paged_kv(&self.graph, conservative_end)?;
         let submission = self.session.submit_graph_span(&self.graph)?;
         let fence = self.session.create_queue_fence(self.graph.queue())?;
         let slot = generation as usize % DECODE_RESULT_RING_SLOTS_V1;
@@ -828,6 +834,17 @@ mod tests {
             graph.state.log("publish");
             Ok(())
         }
+
+        fn prepare_graph_paged_kv(
+            &self,
+            access: &ExecutionAdapterAccess<'_>,
+            span: &ExecutionGraphSpan,
+            conservative_end: u64,
+        ) -> Result<(), ExecutionError> {
+            let graph = access.downcast_graph_span_payload::<FakeGraph>(span)?;
+            graph.state.log(format!("prepare_paged:{conservative_end}"));
+            Ok(())
+        }
     }
 
     impl ExecutionQueueFenceAdapter for FakeFence {
@@ -996,6 +1013,7 @@ mod tests {
         assert_eq!(audit.provider_dispatch_count(), 1);
         assert_eq!(state.published.lock().unwrap().as_slice(), &[(100, 105, 3)]);
         let log = state.log.lock().unwrap().join(",");
+        assert!(log.find("prepare_paged:118").unwrap() < log.find("submit1").unwrap());
         assert!(log.find("submit2").unwrap() < log.find("readback_wait1").unwrap());
         assert!(log.contains("submit4"));
     }

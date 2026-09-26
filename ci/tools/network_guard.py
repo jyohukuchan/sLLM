@@ -400,14 +400,30 @@ def _child_arguments(
     return result
 
 
-def _candidate_plans(parent_netns: str) -> list[IsolationPlan]:
+def _candidate_plans(
+    parent_netns: str, *, resource_overrides: dict[str, str] | None = None
+) -> list[IsolationPlan]:
+    """Build isolation plans; the Cargo resource controls stay fixed.
+
+    `resource_overrides` is passed explicitly by the host runner's local fast
+    mode only. The ambient environment can never change the fixed defaults.
+    """
     unshare = shutil.which("unshare")
     if not unshare:
         raise NetworkIsolationError("unshare is unavailable")
+    overrides = dict(resource_overrides or {})
+    unknown = set(overrides) - set(EXECUTION_ENVIRONMENT_DEFAULTS)
+    if unknown:
+        raise NetworkIsolationError(f"only fixed Cargo resource controls can be overridden: {sorted(unknown)}")
     uid = os.getuid()
     gid = os.getgid()
     environment = tuple(
-        (name, EXECUTION_ENVIRONMENT_DEFAULTS[name] if name in EXECUTION_ENVIRONMENT_DEFAULTS else os.environ[name])
+        (
+            name,
+            overrides.get(name, EXECUTION_ENVIRONMENT_DEFAULTS[name])
+            if name in EXECUTION_ENVIRONMENT_DEFAULTS
+            else os.environ[name],
+        )
         for name in EXECUTION_ENVIRONMENT_KEYS
         if name in os.environ or name in EXECUTION_ENVIRONMENT_DEFAULTS
     )
@@ -470,12 +486,14 @@ def _probe(
     return result.returncode == 0, detail
 
 
-def prepare_isolation(*, outer_deadline: float | None = None) -> IsolationPlan:
+def prepare_isolation(
+    *, outer_deadline: float | None = None, resource_overrides: dict[str, str] | None = None
+) -> IsolationPlan:
     parent_netns = current_netns()
     _check_deadline(outer_deadline)
     if os.environ.get("SLLM_NETWORK_GUARD_ACTIVE") == "1":
         raise NetworkIsolationError("network guard cannot establish a nested required boundary")
-    plans = _candidate_plans(parent_netns)
+    plans = _candidate_plans(parent_netns, resource_overrides=resource_overrides)
     _check_deadline(outer_deadline)
     failures: list[str] = []
     for plan in plans:

@@ -13,6 +13,7 @@
 #endif
 
 #include "causal_attention_kernel_internal.hpp"
+#include "paged_kv_device_layout.hpp"
 #include "sllm/hip.h"
 #include <lowp/detail/low_precision_block_codec.hpp>
 
@@ -58,6 +59,63 @@ decode_control_split_count(sllm_decode_control::ControlV1 *const control,
       control->phase_position, control->phase_rows);
 }
 
+__device__ __forceinline__ void mark_paged_attention_invalid(
+    uint32_t *const device_status,
+    sllm_decode_control::ControlV1 *const control) noexcept {
+  if (device_status != nullptr) {
+    atomicExch(device_status, 1U);
+  }
+  if (control != nullptr) {
+    atomicExch(
+        &control->status,
+        static_cast<uint32_t>(sllm_decode_control::Status::InvalidPosition));
+    atomicExch(&control->halted, 1U);
+    atomicExch(&control->phase_active, 0U);
+  }
+}
+
+// Keep the QK reduction, online softmax update, and value accumulation in one
+// device helper.  The staged decode control and the C1 row-sharing candidate
+// both call this helper so a candidate topology cannot silently change the
+// arithmetic order of the reviewed provider.
+template <uint32_t kElementsPerLane>
+__device__ __forceinline__ void accumulate_mxfp8_e4_decode_key(
+    const float *const query_values, const float (*const key_tile)[256U],
+    const float (*const value_tile)[256U], const uint32_t key_index,
+    const uint32_t lane, float *const accumulations,
+    float *const running_maximum, float *const running_denominator) noexcept {
+  constexpr uint32_t kWaveSize = 32U;
+  constexpr uint32_t kHeadDim = 256U;
+  float partial_score = 0.0F;
+#pragma unroll
+  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+    const uint32_t current = lane + index * kWaveSize;
+    partial_score += query_values[index] * key_tile[key_index][current];
+  }
+  for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
+    partial_score += __shfl_down(partial_score, offset, kWaveSize);
+  }
+  float rescale = 0.0F;
+  float contribution = 0.0F;
+  if (lane == 0U) {
+    const float current_score =
+        partial_score * rsqrtf(static_cast<float>(kHeadDim));
+    const float next_maximum = fmaxf(*running_maximum, current_score);
+    rescale = expf(*running_maximum - next_maximum);
+    contribution = expf(current_score - next_maximum);
+    *running_denominator = *running_denominator * rescale + contribution;
+    *running_maximum = next_maximum;
+  }
+  rescale = __shfl(rescale, 0U, kWaveSize);
+  contribution = __shfl(contribution, 0U, kWaveSize);
+#pragma unroll
+  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+    const uint32_t current = lane + index * kWaveSize;
+    accumulations[index] = accumulations[index] * rescale +
+                           contribution * value_tile[key_index][current];
+  }
+}
+
 __device__ float f16_to_f32(const uint16_t raw) noexcept {
 #if defined(__gfx1030__) || defined(__gfx1201__)
   // Every finite FP16 value, including subnormals and signed zero, converts
@@ -99,39 +157,8 @@ __device__ float bf16_to_f32(const uint16_t raw) noexcept {
   return __uint_as_float(static_cast<uint32_t>(raw) << 16U);
 }
 
-__device__ float2 load_bf16_pair(const uint16_t *const values) noexcept {
-  if ((reinterpret_cast<uintptr_t>(values) & 3U) == 0U) {
-    const uint32_t packed = *reinterpret_cast<const uint32_t *>(values);
-    return make_float2(bf16_to_f32(static_cast<uint16_t>(packed & 0xffffU)),
-                       bf16_to_f32(static_cast<uint16_t>(packed >> 16U)));
-  }
-  return make_float2(bf16_to_f32(values[0]), bf16_to_f32(values[1]));
-}
-
-__device__ float2 load_fp16_pair(const uint16_t *const values) noexcept {
-  if ((reinterpret_cast<uintptr_t>(values) & 3U) == 0U) {
-    const __half2 packed = *reinterpret_cast<const __half2 *>(values);
-    return __half22float2(packed);
-  }
-  return make_float2(f16_to_f32(values[0]), f16_to_f32(values[1]));
-}
-
 __device__ float e4m3fn_to_f32(const uint8_t bits) noexcept {
   return sllm_lowp::ScalarCodec<sllm_lowp::E4M3Fn>::decode(bits);
-}
-
-#if defined(__gfx942__)
-__device__ float e4m3fnuz_to_f32(const uint8_t bits) noexcept {
-  return sllm_lowp::ScalarCodec<sllm_lowp::E4M3FnuZ>::decode(bits);
-}
-#endif
-
-__device__ float e5m2_to_f32(const uint8_t bits) noexcept {
-  return sllm_lowp::ScalarCodec<sllm_lowp::E5M2>::decode(bits);
-}
-
-__device__ float e8m0_to_f32(const uint8_t bits) noexcept {
-  return sllm_lowp::ScalarCodec<sllm_lowp::E8M0>::decode(bits);
 }
 
 template <uint32_t Encoding>
@@ -151,23 +178,6 @@ load_kv_specialized(const void *const values, const void *const scales,
     return e4m3fn_to_f32(static_cast<const uint8_t *>(
                values)[row * head_dim + dimension]) *
            scale;
-  } else if constexpr (Encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
-                       Encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2) {
-    const uint64_t blocks_per_row =
-        (static_cast<uint64_t>(head_dim) + 15U) / 16U;
-    const uint64_t padded_head_dim = blocks_per_row * 16U;
-    const uint8_t value =
-        static_cast<const uint8_t *>(values)[row * padded_head_dim + dimension];
-    const float decoded = Encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
-                              ? e5m2_to_f32(value)
-#if defined(__gfx942__)
-                              : e4m3fnuz_to_f32(value);
-#else
-                              : e4m3fn_to_f32(value);
-#endif
-    const uint8_t scale = static_cast<const uint8_t *>(
-        scales)[row * blocks_per_row + dimension / 16U];
-    return decoded * e8m0_to_f32(scale);
   } else if constexpr (Encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
     const auto view =
         sllm_lowp::make_block_scaled_view<sllm_lowp::Mxfp8E4Block32>(
@@ -267,473 +277,6 @@ __device__ uint16_t f32_to_bf16_rne(const float value) noexcept {
     ++upper;
   }
   return static_cast<uint16_t>(upper);
-}
-
-#pragma clang fp contract(off)
-template <bool UseWaveProvider, uint32_t Encoding>
-__global__ __launch_bounds__(256, 1) void causal_attention_kernel(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t capacity_tokens, const uint64_t start_position,
-    const uint64_t committed_kv_length, const uint32_t q_heads,
-    const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale,
-    const uint64_t sliding_window, const float score_scale) {
-  if (blockIdx.x >= query_count * q_heads) {
-    return;
-  }
-  const uint64_t flat = blockIdx.x;
-  const uint64_t row = flat / q_heads;
-  const uint32_t query_head = static_cast<uint32_t>(flat % q_heads);
-  const uint64_t query_position = start_position + row;
-  if (query_position >= committed_kv_length) {
-    return;
-  }
-  const uint16_t *const query_row =
-      query + row * q_heads * head_dim +
-      static_cast<uint64_t>(query_head) * head_dim;
-  const uint32_t kv_head = query_head / (q_heads / kv_heads);
-  uint16_t *const output_row = output + row * q_heads * head_dim +
-                               static_cast<uint64_t>(query_head) * head_dim;
-
-  const uint32_t dimension = threadIdx.x;
-  __shared__ float reductions[SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE];
-  __shared__ float rescale;
-  __shared__ float contribution;
-  __shared__ float running_maximum;
-  __shared__ float running_denominator;
-  if (dimension == 0U) {
-    running_maximum = -std::numeric_limits<float>::infinity();
-    running_denominator = 0.0F;
-  }
-  __syncthreads();
-
-  float accumulation0 = 0.0F;
-  float accumulation1 = 0.0F;
-  const uint64_t key_begin =
-      sliding_window != 0U && query_position + 1U > sliding_window
-          ? query_position + 1U - sliding_window
-          : 0U;
-  for (uint64_t key_position = key_begin; key_position <= query_position;
-       ++key_position) {
-    const uint64_t storage_position =
-        sliding_window == 0U ? key_position : key_position % capacity_tokens;
-    const uint64_t kv_row = storage_position * kv_heads + kv_head;
-#if defined(__gfx1201__)
-    if constexpr (UseWaveProvider) {
-      float partial = 0.0F;
-      for (uint32_t current = dimension; current < head_dim;
-           current += blockDim.x) {
-        partial += bf16_to_f32(query_row[current]) *
-                   load_kv_specialized<Encoding>(
-                       key, key_scales, key_outer_scales, kv_row, current,
-                       head_dim, static_key_scale);
-      }
-      for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
-        partial += __shfl_down(partial, offset, 32U);
-      }
-      const uint32_t lane = dimension & 31U;
-      const uint32_t wave = dimension >> 5U;
-      if (lane == 0U) {
-        reductions[wave] = partial;
-      }
-      __syncthreads();
-      if (wave == 0U) {
-        float block_sum = lane < 8U ? reductions[lane] : 0.0F;
-        for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
-          block_sum += __shfl_down(block_sum, offset, 32U);
-        }
-        if (lane == 0U) {
-          const float current_score = block_sum * score_scale;
-          const float next_maximum = fmaxf(running_maximum, current_score);
-          rescale = expf(running_maximum - next_maximum);
-          contribution = expf(current_score - next_maximum);
-          running_denominator = running_denominator * rescale + contribution;
-          running_maximum = next_maximum;
-        }
-      }
-      __syncthreads();
-    } else
-#endif
-    {
-      reductions[dimension] = 0.0F;
-      for (uint32_t current = dimension; current < head_dim;
-           current += blockDim.x) {
-        reductions[dimension] += bf16_to_f32(query_row[current]) *
-                                 load_kv_specialized<Encoding>(
-                                     key, key_scales, key_outer_scales, kv_row,
-                                     current, head_dim, static_key_scale);
-      }
-      __syncthreads();
-      for (uint32_t stride = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE / 2U;
-           stride != 0U; stride >>= 1U) {
-        if (dimension < stride) {
-          reductions[dimension] += reductions[dimension + stride];
-        }
-        __syncthreads();
-      }
-      if (dimension == 0U) {
-        const float current_score = reductions[0] * score_scale;
-        const float next_maximum = fmaxf(running_maximum, current_score);
-        rescale = expf(running_maximum - next_maximum);
-        contribution = expf(current_score - next_maximum);
-        running_denominator = running_denominator * rescale + contribution;
-        running_maximum = next_maximum;
-      }
-      __syncthreads();
-    }
-    if (dimension < head_dim) {
-      accumulation0 =
-          accumulation0 * rescale +
-          contribution * load_kv_specialized<Encoding>(
-                             value, value_scales, value_outer_scales, kv_row,
-                             dimension, head_dim, static_value_scale);
-    }
-    const uint32_t second = dimension + blockDim.x;
-    if (second < head_dim) {
-      accumulation1 =
-          accumulation1 * rescale +
-          contribution * load_kv_specialized<Encoding>(
-                             value, value_scales, value_outer_scales, kv_row,
-                             second, head_dim, static_value_scale);
-    }
-    __syncthreads();
-  }
-  if (dimension < head_dim) {
-    output_row[dimension] =
-        f32_to_bf16_rne(accumulation0 / running_denominator);
-  }
-  const uint32_t second = dimension + blockDim.x;
-  if (second < head_dim) {
-    output_row[second] = f32_to_bf16_rne(accumulation1 / running_denominator);
-  }
-}
-
-// Each wave owns one contiguous KV interval and computes an independent
-// online-softmax partial. The workgroup then merges the eight partials in
-// increasing interval order. This removes the per-key workgroup barriers from
-// long M=1 attention without publishing intermediate values outside the block.
-template <bool UseQueryPreload, uint32_t Encoding>
-__global__
-__launch_bounds__(256, 1) void causal_attention_decode_wave_split_kernel(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale) {
-  constexpr uint32_t kWaveSize = 32U;
-  constexpr uint32_t kWaveCount = 8U;
-  constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-  constexpr uint32_t kDimensionsPerLane = kHeadDim / kWaveSize;
-  const uint32_t query_head = blockIdx.x;
-  if (query_head >= q_heads) {
-    return;
-  }
-  const uint32_t dimension = threadIdx.x;
-  const uint32_t lane = dimension & (kWaveSize - 1U);
-  const uint32_t wave = dimension / kWaveSize;
-  const uint32_t kv_head = query_head / (q_heads / kv_heads);
-  const uint16_t *const query_row =
-      query + static_cast<uint64_t>(query_head) * head_dim;
-  uint16_t *const output_row =
-      output + static_cast<uint64_t>(query_head) * head_dim;
-
-  __shared__ float partial_values[kWaveCount * kHeadDim];
-  __shared__ float partial_maxima[kWaveCount];
-  __shared__ float partial_denominators[kWaveCount];
-  float accumulations[kDimensionsPerLane];
-  float query_values[kDimensionsPerLane];
-#pragma unroll
-  for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-    accumulations[index] = 0.0F;
-    // The opt-in variant only hoists the immutable BF16 query conversion. It
-    // leaves the per-key product and accumulation order identical to the
-    // control kernel.
-    if constexpr (UseQueryPreload) {
-      const uint32_t current = lane + index * kWaveSize;
-      query_values[index] =
-          current < head_dim ? bf16_to_f32(query_row[current]) : 0.0F;
-    }
-  }
-  float local_maximum = -std::numeric_limits<float>::infinity();
-  float local_denominator = 0.0F;
-  const uint64_t split_begin = committed_kv_length * wave / kWaveCount;
-  const uint64_t split_end = committed_kv_length * (wave + 1U) / kWaveCount;
-  for (uint64_t key_position = split_begin; key_position < split_end;
-       ++key_position) {
-    const uint64_t kv_row = key_position * kv_heads + kv_head;
-    float partial = 0.0F;
-#pragma unroll
-    for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-      const uint32_t current = lane + index * kWaveSize;
-      if (current < head_dim) {
-        if constexpr (UseQueryPreload) {
-          partial += query_values[index] *
-                     load_kv_specialized<Encoding>(
-                         key, key_scales, key_outer_scales, kv_row, current,
-                         head_dim, static_key_scale);
-        } else {
-          partial += bf16_to_f32(query_row[current]) *
-                     load_kv_specialized<Encoding>(
-                         key, key_scales, key_outer_scales, kv_row, current,
-                         head_dim, static_key_scale);
-        }
-      }
-    }
-    for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
-      partial += __shfl_down(partial, offset, kWaveSize);
-    }
-    float rescale = 0.0F;
-    float contribution = 0.0F;
-    if (lane == 0U) {
-      const float current_score =
-          partial * rsqrtf(static_cast<float>(head_dim));
-      const float next_maximum = fmaxf(local_maximum, current_score);
-      rescale = expf(local_maximum - next_maximum);
-      contribution = expf(current_score - next_maximum);
-      local_denominator = local_denominator * rescale + contribution;
-      local_maximum = next_maximum;
-    }
-    rescale = __shfl(rescale, 0U, kWaveSize);
-    contribution = __shfl(contribution, 0U, kWaveSize);
-#pragma unroll
-    for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-      const uint32_t current = lane + index * kWaveSize;
-      if (current < head_dim) {
-        accumulations[index] =
-            accumulations[index] * rescale +
-            contribution * load_kv_specialized<Encoding>(
-                               value, value_scales, value_outer_scales, kv_row,
-                               current, head_dim, static_value_scale);
-      }
-    }
-  }
-  if (lane == 0U) {
-    partial_maxima[wave] = local_maximum;
-    partial_denominators[wave] = local_denominator;
-  }
-#pragma unroll
-  for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-    const uint32_t current = lane + index * kWaveSize;
-    if (current < head_dim) {
-      partial_values[wave * kHeadDim + current] = accumulations[index];
-    }
-  }
-  __syncthreads();
-
-  float global_maximum = partial_maxima[0];
-#pragma unroll
-  for (uint32_t split = 1U; split < kWaveCount; ++split) {
-    global_maximum = fmaxf(global_maximum, partial_maxima[split]);
-  }
-  float global_denominator = 0.0F;
-  float merged = 0.0F;
-#pragma unroll
-  for (uint32_t split = 0U; split < kWaveCount; ++split) {
-    const float scale = expf(partial_maxima[split] - global_maximum);
-    global_denominator += partial_denominators[split] * scale;
-    if (dimension < head_dim) {
-      merged += partial_values[split * kHeadDim + dimension] * scale;
-    }
-  }
-  if (dimension < head_dim) {
-    output_row[dimension] = f32_to_bf16_rne(merged / global_denominator);
-  }
-  const uint32_t second = dimension + blockDim.x;
-  if (second < head_dim) {
-    float merged_second = 0.0F;
-#pragma unroll
-    for (uint32_t split = 0U; split < kWaveCount; ++split) {
-      const float scale = expf(partial_maxima[split] - global_maximum);
-      merged_second += partial_values[split * kHeadDim + second] * scale;
-    }
-    output_row[second] = f32_to_bf16_rne(merged_second / global_denominator);
-  }
-}
-
-// Phase 83 MXFP8-E4 staged candidates for the exact gfx1030/gfx1201 Qwen
-// attention shape.  This keeps the wave-split arithmetic while making each
-// (query head, interval) a separate 32-thread block and running the ordered
-// merge in a second 256-thread block.  The interval count is a template
-// parameter (8 for the existing provider, 32 for ID93); per-interval
-// accumulation order remains unchanged.  The storage boundary moves from
-// shared memory to request-owned global workspace so all stage-1 blocks can
-// occupy the device concurrently.
-template <bool UseQueryPreload, uint32_t Encoding, uint32_t kGridWaveCount,
-          uint32_t kActiveWaveCount>
-__device__ __forceinline__ void
-causal_attention_decode_wave_split_staged_stage1_body(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    float *const workspace, const uint32_t query_count, const uint32_t q_heads,
-    const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale,
-    const uint32_t query_index, const uint32_t query_head, const uint32_t wave,
-    const uint64_t control_start_position) {
-  constexpr uint32_t kWaveSize = 32U;
-  constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-  constexpr uint32_t kDimensionsPerLane = kHeadDim / kWaveSize;
-  if (query_index >= query_count || query_head >= q_heads ||
-      head_dim != kHeadDim || kv_heads == 0U || wave >= kActiveWaveCount) {
-    return;
-  }
-  const uint32_t lane = threadIdx.x & (kWaveSize - 1U);
-  const uint32_t kv_head = query_head / (q_heads / kv_heads);
-  const uint16_t *const query_row =
-      query +
-      (static_cast<uint64_t>(query_index) * q_heads + query_head) * head_dim;
-  const uint64_t committed_kv_length =
-      control_start_position + query_index + 1U;
-  float accumulations[kDimensionsPerLane];
-  float query_values[kDimensionsPerLane];
-#if defined(__gfx1030__)
-  constexpr bool kUseFusedE4Decode =
-      kGridWaveCount == 32U && Encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1;
-#else
-  constexpr bool kUseFusedE4Decode = false;
-#endif
-#pragma unroll
-  for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-    accumulations[index] = 0.0F;
-    if constexpr (UseQueryPreload) {
-      const uint32_t current = lane + index * kWaveSize;
-      query_values[index] =
-          current < head_dim ? bf16_to_f32(query_row[current]) : 0.0F;
-    }
-  }
-  float local_maximum = -std::numeric_limits<float>::infinity();
-  float local_denominator = 0.0F;
-  const uint64_t split_begin = committed_kv_length * wave / kActiveWaveCount;
-  const uint64_t split_end = committed_kv_length *
-                             (static_cast<uint64_t>(wave) + 1U) /
-                             kActiveWaveCount;
-  for (uint64_t key_position = split_begin; key_position < split_end;
-       ++key_position) {
-    const uint64_t kv_row = key_position * kv_heads + kv_head;
-    float partial = 0.0F;
-#pragma unroll
-    for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-      const uint32_t current = lane + index * kWaveSize;
-      if (current < head_dim) {
-        if constexpr (UseQueryPreload) {
-          partial += query_values[index] *
-                     load_kv_qtile4<Encoding, kUseFusedE4Decode>(
-                         key, key_scales, key_outer_scales, kv_row, current,
-                         head_dim, static_key_scale);
-        } else {
-          partial += bf16_to_f32(query_row[current]) *
-                     load_kv_qtile4<Encoding, kUseFusedE4Decode>(
-                         key, key_scales, key_outer_scales, kv_row, current,
-                         head_dim, static_key_scale);
-        }
-      }
-    }
-    for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
-      partial += __shfl_down(partial, offset, kWaveSize);
-    }
-    float rescale = 0.0F;
-    float contribution = 0.0F;
-    if (lane == 0U) {
-      const float current_score =
-          partial * rsqrtf(static_cast<float>(head_dim));
-      const float next_maximum = fmaxf(local_maximum, current_score);
-      rescale = expf(local_maximum - next_maximum);
-      contribution = expf(current_score - next_maximum);
-      local_denominator = local_denominator * rescale + contribution;
-      local_maximum = next_maximum;
-    }
-    rescale = __shfl(rescale, 0U, kWaveSize);
-    contribution = __shfl(contribution, 0U, kWaveSize);
-#pragma unroll
-    for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-      const uint32_t current = lane + index * kWaveSize;
-      if (current < head_dim) {
-        accumulations[index] =
-            accumulations[index] * rescale +
-            contribution * load_kv_qtile4<Encoding, kUseFusedE4Decode>(
-                               value, value_scales, value_outer_scales, kv_row,
-                               current, head_dim, static_value_scale);
-      }
-    }
-  }
-  const uint64_t stride = static_cast<uint64_t>(kHeadDim) + 2U;
-  const uint64_t base =
-      ((static_cast<uint64_t>(query_index) * q_heads + query_head) *
-           kGridWaveCount +
-       wave) *
-      stride;
-  if (lane == 0U) {
-    workspace[base] = local_maximum;
-    workspace[base + 1U] = local_denominator;
-  }
-#pragma unroll
-  for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-    const uint32_t current = lane + index * kWaveSize;
-    if (current < head_dim) {
-      workspace[base + 2U + current] = accumulations[index];
-    }
-  }
-}
-
-template <bool UseQueryPreload, uint32_t Encoding, uint32_t kGridWaveCount,
-          bool DeviceControl = false>
-__global__
-__launch_bounds__(32, 1) void causal_attention_decode_wave_split_staged_stage1_kernel(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    float *const workspace, const uint32_t query_count,
-    const uint64_t start_position, const uint32_t q_heads,
-    const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale,
-    sllm_decode_control::ControlV1 *const control) {
-  const uint64_t flat = static_cast<uint64_t>(blockIdx.x);
-  const uint64_t blocks_per_query =
-      static_cast<uint64_t>(q_heads) * kGridWaveCount;
-  const uint32_t query_index = static_cast<uint32_t>(flat / blocks_per_query);
-  const uint32_t query_head =
-      static_cast<uint32_t>((flat % blocks_per_query) / kGridWaveCount);
-  const uint32_t wave = static_cast<uint32_t>(flat % kGridWaveCount);
-  if (query_index >= query_count || query_head >= q_heads ||
-      head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM || kv_heads == 0U) {
-    return;
-  }
-  if constexpr (DeviceControl) {
-    uint64_t control_start_position = start_position;
-    uint32_t control_rows = query_count;
-    if (!decode_control_phase(control, query_index, query_count,
-                              &control_start_position, &control_rows)) {
-      return;
-    }
-    const uint32_t active_splits =
-        decode_control_split_count(control, kGridWaveCount);
-    if (active_splits == 32U) {
-      causal_attention_decode_wave_split_staged_stage1_body<
-          UseQueryPreload, Encoding, kGridWaveCount, 32U>(
-          query, key, value, key_scales, value_scales, key_outer_scales,
-          value_outer_scales, workspace, query_count, q_heads, kv_heads,
-          head_dim, static_key_scale, static_value_scale, query_index,
-          query_head, wave, control_start_position);
-    } else {
-      causal_attention_decode_wave_split_staged_stage1_body<
-          UseQueryPreload, Encoding, kGridWaveCount, 128U>(
-          query, key, value, key_scales, value_scales, key_outer_scales,
-          value_outer_scales, workspace, query_count, q_heads, kv_heads,
-          head_dim, static_key_scale, static_value_scale, query_index,
-          query_head, wave, control_start_position);
-    }
-  } else {
-    causal_attention_decode_wave_split_staged_stage1_body<
-        UseQueryPreload, Encoding, kGridWaveCount, kGridWaveCount>(
-        query, key, value, key_scales, value_scales, key_outer_scales,
-        value_outer_scales, workspace, query_count, q_heads, kv_heads, head_dim,
-        static_key_scale, static_value_scale, query_index, query_head, wave,
-        start_position);
-  }
 }
 
 template <uint32_t kWaveCount, bool DeviceControl = false>
@@ -876,1393 +419,47 @@ __launch_bounds__(256, 1) void causal_attention_decode_gqa6_staged32_split_merge
   }
 }
 
-// Phase 87 WU1 C1: one 192-thread block owns one KV head and all six GQA
-// query heads.  The stage-2 workspace contract remains [M,24,32,258].
-__global__
-__launch_bounds__(192, 1) void causal_attention_decode_gqa6_staged32_stage1_kernel(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    float *const workspace, const uint32_t query_count,
-    const uint64_t start_position) {
-  constexpr uint32_t kWaveSize = 32U;
-  constexpr uint32_t kWaveCount = 6U;
-  constexpr uint32_t kKvHeads = 4U;
-  constexpr uint32_t kQHeads = 24U;
-  constexpr uint32_t kGqaRatio = 6U;
-  constexpr uint32_t kSplits = 32U;
-  constexpr uint32_t kHeadDim = 256U;
-  constexpr uint32_t kKeyTile = 8U;
-  constexpr uint32_t kWorkspaceStride = kHeadDim + 2U;
-  constexpr uint32_t kElementsPerLane = kHeadDim / kWaveSize;
-#if defined(__gfx1030__)
-  constexpr bool kUseFusedE4Decode = true;
-#else
-  constexpr bool kUseFusedE4Decode = false;
-#endif
-
-  const uint32_t block = blockIdx.x;
-  const uint32_t split = block % kSplits;
-  const uint32_t kv_head = (block / kSplits) % kKvHeads;
-  const uint32_t query_index = block / (kKvHeads * kSplits);
-  const uint32_t wave = threadIdx.x / kWaveSize;
-  const uint32_t lane = threadIdx.x & (kWaveSize - 1U);
-  const uint32_t query_head = kv_head * kGqaRatio + wave;
-
-  if (query_index >= query_count || query_head >= kQHeads ||
-      wave >= kWaveCount) {
-    return;
-  }
-
-  const uint64_t committed_kv_length =
-      start_position + static_cast<uint64_t>(query_index) + 1U;
-  const uint64_t split_begin =
-      committed_kv_length * static_cast<uint64_t>(split) / kSplits;
-  const uint64_t split_end =
-      committed_kv_length * static_cast<uint64_t>(split + 1U) / kSplits;
-  const uint16_t *const query_row =
-      query +
-      (static_cast<uint64_t>(query_index) * kQHeads + query_head) * kHeadDim;
-
-  float query_values[kElementsPerLane];
-  float accumulations[kElementsPerLane] = {};
-#pragma unroll
-  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
-    query_values[index] = bf16_to_f32(query_row[lane + index * kWaveSize]);
-  }
-
-  const uint64_t workspace_base =
-      ((static_cast<uint64_t>(query_index) * kQHeads + query_head) * kSplits +
-       split) *
-      kWorkspaceStride;
-  float *const partial = workspace + workspace_base;
-  if (split_begin >= split_end) {
-    for (uint32_t index = lane; index < kHeadDim; index += kWaveSize) {
-      partial[2U + index] = 0.0F;
-    }
-    if (lane == 0U) {
-      partial[0] = -std::numeric_limits<float>::infinity();
-      partial[1] = 0.0F;
-    }
-    return;
-  }
-
-  // Decode each encoded K/V element once per KV head, then reuse the 8-row
-  // FP32 tile across the six GQA query-head waves.
-  __shared__ float key_tile[kKeyTile][kHeadDim];
-  __shared__ float value_tile[kKeyTile][kHeadDim];
-  float local_maximum = -std::numeric_limits<float>::infinity();
-  float local_denominator = 0.0F;
-
-  for (uint64_t tile_begin = split_begin; tile_begin < split_end;
-       tile_begin += kKeyTile) {
-    const uint64_t remaining = split_end - tile_begin;
-    const uint32_t tile_count =
-        remaining < kKeyTile ? static_cast<uint32_t>(remaining) : kKeyTile;
-    for (uint32_t element = threadIdx.x; element < kKeyTile * 2U * kHeadDim;
-         element += blockDim.x) {
-      const uint32_t key_index = element / (2U * kHeadDim);
-      const uint32_t plane_dimension = element % (2U * kHeadDim);
-      if (key_index < tile_count) {
-        const uint64_t kv_row =
-            (tile_begin + static_cast<uint64_t>(key_index)) * kKvHeads +
-            kv_head;
-        if (plane_dimension < kHeadDim) {
-          key_tile[key_index][plane_dimension] =
-              load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                             kUseFusedE4Decode>(key, key_scales, nullptr,
-                                                kv_row, plane_dimension,
-                                                kHeadDim, 1.0F);
-        } else {
-          const uint32_t dimension = plane_dimension - kHeadDim;
-          value_tile[key_index][dimension] =
-              load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                             kUseFusedE4Decode>(value, value_scales, nullptr,
-                                                kv_row, dimension, kHeadDim,
-                                                1.0F);
-        }
-      }
-    }
-    __syncthreads();
-
-    for (uint32_t key_index = 0U; key_index < tile_count; ++key_index) {
-      float partial_score = 0.0F;
-#pragma unroll
-      for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
-        const uint32_t current = lane + index * kWaveSize;
-        partial_score += query_values[index] * key_tile[key_index][current];
-      }
-      for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
-        partial_score += __shfl_down(partial_score, offset, kWaveSize);
-      }
-
-      float rescale = 0.0F;
-      float contribution = 0.0F;
-      if (lane == 0U) {
-        const float current_score =
-            partial_score * rsqrtf(static_cast<float>(kHeadDim));
-        const float next_maximum = fmaxf(local_maximum, current_score);
-        rescale = expf(local_maximum - next_maximum);
-        contribution = expf(current_score - next_maximum);
-        local_denominator = local_denominator * rescale + contribution;
-        local_maximum = next_maximum;
-      }
-      rescale = __shfl(rescale, 0U, kWaveSize);
-      contribution = __shfl(contribution, 0U, kWaveSize);
-#pragma unroll
-      for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
-        const uint32_t current = lane + index * kWaveSize;
-        accumulations[index] = accumulations[index] * rescale +
-                               contribution * value_tile[key_index][current];
-      }
-    }
-    __syncthreads();
-  }
-
-  if (lane == 0U) {
-    partial[0] = local_maximum;
-    partial[1] = local_denominator;
-  }
-#pragma unroll
-  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
-    const uint32_t current = lane + index * kWaveSize;
-    partial[2U + current] = accumulations[index];
-  }
-}
-
-// WU1.1 C1×C3 candidate.  This keeps the WU1 GQA-shared arithmetic and only
-// changes the partition count.  The workspace remains [M,24,Splits,258].
-template <uint32_t kSplits, bool DeviceControl = false>
-__global__
-__launch_bounds__(192, 1) void causal_attention_decode_gqa6_staged32_split_stage1_kernel(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    float *const workspace, const uint32_t query_count,
-    const uint64_t start_position,
-    sllm_decode_control::ControlV1 *const control) {
-  constexpr uint32_t kWaveSize = 32U;
-  constexpr uint32_t kWaveCount = 6U;
-  constexpr uint32_t kKvHeads = 4U;
-  constexpr uint32_t kQHeads = 24U;
-  constexpr uint32_t kGqaRatio = 6U;
-  constexpr uint32_t kHeadDim = 256U;
-  constexpr uint32_t kKeyTile = 8U;
-  constexpr uint32_t kWorkspaceStride = kHeadDim + 2U;
-  constexpr uint32_t kElementsPerLane = kHeadDim / kWaveSize;
-  static_assert(kSplits == 64U || kSplits == 128U || kSplits == 256U);
-#if defined(__gfx1030__)
-  constexpr bool kUseFusedE4Decode = true;
-#else
-  constexpr bool kUseFusedE4Decode = false;
-#endif
-
-  const uint32_t block = static_cast<uint32_t>(blockIdx.x);
-  const uint32_t split = block % kSplits;
-  const uint32_t kv_head = (block / kSplits) % kKvHeads;
-  const uint32_t query_index = block / (kKvHeads * kSplits);
-  const uint32_t wave = threadIdx.x / kWaveSize;
-  const uint32_t lane = threadIdx.x & (kWaveSize - 1U);
-  const uint32_t query_head = kv_head * kGqaRatio + wave;
-  if (query_index >= query_count || query_head >= kQHeads ||
-      wave >= kWaveCount) {
-    return;
-  }
-  uint64_t control_start_position = start_position;
-  uint32_t control_rows = query_count;
-  if constexpr (DeviceControl) {
-    if (!decode_control_phase(control, query_index, query_count,
-                              &control_start_position, &control_rows)) {
-      return;
-    }
-  }
-
-  const uint64_t committed_kv_length =
-      control_start_position + static_cast<uint64_t>(query_index) + 1U;
-  uint64_t split_begin = 0U;
-  uint64_t split_end = 0U;
-  if constexpr (DeviceControl) {
-    const uint32_t active_splits = decode_control_split_count(control, kSplits);
-    if (split >= active_splits) {
-      return;
-    }
-    if (active_splits == 32U) {
-      split_begin = committed_kv_length * static_cast<uint64_t>(split) / 32U;
-      split_end = committed_kv_length * static_cast<uint64_t>(split + 1U) / 32U;
-    } else {
-      split_begin = committed_kv_length * static_cast<uint64_t>(split) / 128U;
-      split_end =
-          committed_kv_length * static_cast<uint64_t>(split + 1U) / 128U;
-    }
-  } else {
-    split_begin = committed_kv_length * static_cast<uint64_t>(split) / kSplits;
-    split_end =
-        committed_kv_length * static_cast<uint64_t>(split + 1U) / kSplits;
-  }
-  const uint16_t *const query_row =
-      query +
-      (static_cast<uint64_t>(query_index) * kQHeads + query_head) * kHeadDim;
-  const uint64_t workspace_base =
-      ((static_cast<uint64_t>(query_index) * kQHeads + query_head) * kSplits +
-       split) *
-      kWorkspaceStride;
-  float *const partial = workspace + workspace_base;
-
-  float query_values[kElementsPerLane];
-  float accumulations[kElementsPerLane] = {};
-#pragma unroll
-  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
-    query_values[index] = bf16_to_f32(query_row[lane + index * kWaveSize]);
-  }
-  if (split_begin >= split_end) {
-    for (uint32_t index = lane; index < kHeadDim; index += kWaveSize) {
-      partial[2U + index] = 0.0F;
-    }
-    if (lane == 0U) {
-      partial[0] = -std::numeric_limits<float>::infinity();
-      partial[1] = 0.0F;
-    }
-    return;
-  }
-
-  __shared__ float key_tile[kKeyTile][kHeadDim];
-  __shared__ float value_tile[kKeyTile][kHeadDim];
-  float local_maximum = -std::numeric_limits<float>::infinity();
-  float local_denominator = 0.0F;
-  for (uint64_t tile_begin = split_begin; tile_begin < split_end;
-       tile_begin += kKeyTile) {
-    const uint64_t remaining = split_end - tile_begin;
-    const uint32_t tile_count =
-        remaining < kKeyTile ? static_cast<uint32_t>(remaining) : kKeyTile;
-    for (uint32_t element = threadIdx.x; element < kKeyTile * 2U * kHeadDim;
-         element += blockDim.x) {
-      const uint32_t key_index = element / (2U * kHeadDim);
-      const uint32_t plane_dimension = element % (2U * kHeadDim);
-      if (key_index < tile_count) {
-        const uint64_t kv_row =
-            (tile_begin + static_cast<uint64_t>(key_index)) * kKvHeads +
-            kv_head;
-        if (plane_dimension < kHeadDim) {
-          key_tile[key_index][plane_dimension] =
-              load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                             kUseFusedE4Decode>(key, key_scales, nullptr,
-                                                kv_row, plane_dimension,
-                                                kHeadDim, 1.0F);
-        } else {
-          const uint32_t dimension = plane_dimension - kHeadDim;
-          value_tile[key_index][dimension] =
-              load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                             kUseFusedE4Decode>(value, value_scales, nullptr,
-                                                kv_row, dimension, kHeadDim,
-                                                1.0F);
-        }
-      }
-    }
-    __syncthreads();
-    for (uint32_t key_index = 0U; key_index < tile_count; ++key_index) {
-      float partial_score = 0.0F;
-#pragma unroll
-      for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
-        const uint32_t current = lane + index * kWaveSize;
-        partial_score += query_values[index] * key_tile[key_index][current];
-      }
-      for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
-        partial_score += __shfl_down(partial_score, offset, kWaveSize);
-      }
-      float rescale = 0.0F;
-      float contribution = 0.0F;
-      if (lane == 0U) {
-        const float current_score =
-            partial_score * rsqrtf(static_cast<float>(kHeadDim));
-        const float next_maximum = fmaxf(local_maximum, current_score);
-        rescale = expf(local_maximum - next_maximum);
-        contribution = expf(current_score - next_maximum);
-        local_denominator = local_denominator * rescale + contribution;
-        local_maximum = next_maximum;
-      }
-      rescale = __shfl(rescale, 0U, kWaveSize);
-      contribution = __shfl(contribution, 0U, kWaveSize);
-#pragma unroll
-      for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
-        const uint32_t current = lane + index * kWaveSize;
-        accumulations[index] = accumulations[index] * rescale +
-                               contribution * value_tile[key_index][current];
-      }
-    }
-    __syncthreads();
-  }
-  if (lane == 0U) {
-    partial[0] = local_maximum;
-    partial[1] = local_denominator;
-  }
-#pragma unroll
-  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
-    const uint32_t current = lane + index * kWaveSize;
-    partial[2U + current] = accumulations[index];
-  }
-}
-
-// FP16-only long-decode experiment.  The block/wave decomposition and merge
-// order match the measured wave-split provider, but each lane handles four
-// adjacent half2 pairs (lane*2 + segment*64).  Aligned uint32/half2 loads are
-// used for the common path, with scalar loads retained for unusual offsets.
-__global__
-__launch_bounds__(256, 1) void causal_attention_decode_wave_split_fp16_pair_kernel(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale) {
-  constexpr uint32_t kWaveSize = 32U;
-  constexpr uint32_t kWaveCount = 8U;
-  constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-  constexpr uint32_t kPairsPerLane = 4U;
-  (void)key_scales;
-  (void)value_scales;
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  (void)static_key_scale;
-  (void)static_value_scale;
-  const uint32_t dimension = threadIdx.x;
-  const uint32_t lane = dimension & (kWaveSize - 1U);
-  const uint32_t wave = dimension / kWaveSize;
-  const uint32_t query_head = blockIdx.x;
-  if (query_head >= q_heads || q_heads != 16U || kv_heads != 4U ||
-      head_dim != kHeadDim || encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
-    return;
-  }
-  const uint32_t kv_head = query_head / (q_heads / kv_heads);
-  const uint16_t *const query_row =
-      query + static_cast<uint64_t>(query_head) * head_dim;
-  uint16_t *const output_row =
-      output + static_cast<uint64_t>(query_head) * head_dim;
-
-  float query_first[kPairsPerLane];
-  float query_second[kPairsPerLane];
-  float accumulations_first[kPairsPerLane] = {};
-  float accumulations_second[kPairsPerLane] = {};
-  float key_first[kPairsPerLane];
-  float key_second[kPairsPerLane];
-  float local_maximum = -std::numeric_limits<float>::infinity();
-  float local_denominator = 0.0F;
-#pragma unroll
-  for (uint32_t segment = 0U; segment < kPairsPerLane; ++segment) {
-    const uint32_t pair_start = lane * 2U + segment * 64U;
-    const float2 pair = load_bf16_pair(query_row + pair_start);
-    query_first[segment] = pair.x;
-    query_second[segment] = pair.y;
-  }
-
-  __shared__ float partial_values[kWaveCount * kHeadDim];
-  __shared__ float partial_maxima[kWaveCount];
-  __shared__ float partial_denominators[kWaveCount];
-  const uint64_t split_begin = committed_kv_length * wave / kWaveCount;
-  const uint64_t split_end = committed_kv_length * (wave + 1U) / kWaveCount;
-  for (uint64_t key_position = split_begin; key_position < split_end;
-       ++key_position) {
-    const uint64_t kv_row = key_position * kv_heads + kv_head;
-    const uint16_t *const key_row = static_cast<const uint16_t *>(key) +
-                                    kv_row * static_cast<uint64_t>(head_dim);
-    const uint16_t *const value_row = static_cast<const uint16_t *>(value) +
-                                      kv_row * static_cast<uint64_t>(head_dim);
-#pragma unroll
-    for (uint32_t segment = 0U; segment < kPairsPerLane; ++segment) {
-      const uint32_t pair_start = lane * 2U + segment * 64U;
-      const float2 key_pair = load_fp16_pair(key_row + pair_start);
-      key_first[segment] = key_pair.x;
-      key_second[segment] = key_pair.y;
-    }
-    float partial = 0.0F;
-#pragma unroll
-    for (uint32_t segment = 0U; segment < kPairsPerLane; ++segment) {
-      partial += query_first[segment] * key_first[segment] +
-                 query_second[segment] * key_second[segment];
-    }
-    for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
-      partial += __shfl_down(partial, offset, kWaveSize);
-    }
-    float rescale = 0.0F;
-    float contribution = 0.0F;
-    if (lane == 0U) {
-      const float current_score =
-          partial * rsqrtf(static_cast<float>(head_dim));
-      const float next_maximum = fmaxf(local_maximum, current_score);
-      rescale = expf(local_maximum - next_maximum);
-      contribution = expf(current_score - next_maximum);
-      local_denominator = local_denominator * rescale + contribution;
-      local_maximum = next_maximum;
-    }
-    rescale = __shfl(rescale, 0U, kWaveSize);
-    contribution = __shfl(contribution, 0U, kWaveSize);
-#pragma unroll
-    for (uint32_t segment = 0U; segment < kPairsPerLane; ++segment) {
-      const uint32_t pair_start = lane * 2U + segment * 64U;
-      const float2 value_pair = load_fp16_pair(value_row + pair_start);
-      accumulations_first[segment] =
-          accumulations_first[segment] * rescale + contribution * value_pair.x;
-      accumulations_second[segment] =
-          accumulations_second[segment] * rescale + contribution * value_pair.y;
-    }
-  }
-  if (lane == 0U) {
-    partial_maxima[wave] = local_maximum;
-    partial_denominators[wave] = local_denominator;
-  }
-#pragma unroll
-  for (uint32_t segment = 0U; segment < kPairsPerLane; ++segment) {
-    const uint32_t pair_start = lane * 2U + segment * 64U;
-    partial_values[wave * kHeadDim + pair_start] = accumulations_first[segment];
-    partial_values[wave * kHeadDim + pair_start + 1U] =
-        accumulations_second[segment];
-  }
-  __syncthreads();
-
-  float global_maximum = partial_maxima[0];
-#pragma unroll
-  for (uint32_t split = 1U; split < kWaveCount; ++split) {
-    global_maximum = fmaxf(global_maximum, partial_maxima[split]);
-  }
-  float global_denominator = 0.0F;
-#pragma unroll
-  for (uint32_t split = 0U; split < kWaveCount; ++split) {
-    const float scale = expf(partial_maxima[split] - global_maximum);
-    global_denominator += partial_denominators[split] * scale;
-  }
-  if (wave == 0U) {
-#pragma unroll
-    for (uint32_t segment = 0U; segment < kPairsPerLane; ++segment) {
-      const uint32_t pair_start = lane * 2U + segment * 64U;
-      float merged_first = 0.0F;
-      float merged_second = 0.0F;
-#pragma unroll
-      for (uint32_t split = 0U; split < kWaveCount; ++split) {
-        const float scale = expf(partial_maxima[split] - global_maximum);
-        merged_first += partial_values[split * kHeadDim + pair_start] * scale;
-        merged_second +=
-            partial_values[split * kHeadDim + pair_start + 1U] * scale;
-      }
-      output_row[pair_start] =
-          f32_to_bf16_rne(merged_first / global_denominator);
-      output_row[pair_start + 1U] =
-          f32_to_bf16_rne(merged_second / global_denominator);
-    }
-  }
-}
-
-// Long-decode GQA4 experiment.  A block owns one KV head and one of sixteen
-// fixed KV partitions.  Its four wave32 waves process the four query heads
-// sharing that KV head.  K/V tiles are loaded into LDS once per block and then
-// reused by all four waves.  Stage 1 writes one online-softmax partial per
-// query-head/partition; stage 2 merges partitions in increasing order.
-constexpr uint32_t kDecodeGqa4SplitPartitions = 16U;
-constexpr uint32_t kDecodeGqa4SplitTileTokens = 16U;
-constexpr uint32_t kDecodeGqa4SplitWaveSize = 32U;
-constexpr uint32_t kDecodeGqa4SplitGqaRatio = 4U;
-constexpr uint32_t kDecodeGqa4SplitHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-constexpr uint32_t kDecodeGqa4SplitWorkspaceStride =
-    kDecodeGqa4SplitHeadDim + 2U;
-
-template <uint32_t kPartitions>
-__global__
-__launch_bounds__(128, 1) void causal_attention_decode_gqa4_split_stage1_kernel(
-    const uint16_t *const query, const uint16_t *const key,
-    const uint16_t *const value, uint16_t *const output,
-    const uint64_t committed_kv_length, float *const workspace) {
-  const uint32_t block = blockIdx.x;
-  const uint32_t kv_head = block / kPartitions;
-  const uint32_t partition = block % kPartitions;
-  if (kv_head >= 4U) {
-    return;
-  }
-  const uint64_t split_begin = committed_kv_length * partition / kPartitions;
-  const uint64_t split_end =
-      committed_kv_length * (partition + 1U) / kPartitions;
-  const uint32_t thread = threadIdx.x;
-  const uint32_t lane = thread & (kDecodeGqa4SplitWaveSize - 1U);
-  const uint32_t wave = thread / kDecodeGqa4SplitWaveSize;
-  const uint32_t query_head = kv_head * kDecodeGqa4SplitGqaRatio + wave;
-  const uint16_t *const query_row =
-      query + static_cast<uint64_t>(query_head) * kDecodeGqa4SplitHeadDim;
-  constexpr uint32_t kDimensionsPerLane =
-      kDecodeGqa4SplitHeadDim / kDecodeGqa4SplitWaveSize;
-  float query_values[kDimensionsPerLane];
-  float accumulations[kDimensionsPerLane] = {};
-#pragma unroll
-  for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-    query_values[index] =
-        bf16_to_f32(query_row[lane + index * kDecodeGqa4SplitWaveSize]);
-  }
-
-  const uint64_t workspace_index =
-      (static_cast<uint64_t>(query_head) * kPartitions + partition) *
-      kDecodeGqa4SplitWorkspaceStride;
-  float *const partial = workspace + workspace_index;
-  if (split_begin >= split_end) {
-    for (uint32_t index = lane; index < kDecodeGqa4SplitHeadDim;
-         index += kDecodeGqa4SplitWaveSize) {
-      partial[index] = 0.0F;
-    }
-    if (lane == 0U) {
-      partial[kDecodeGqa4SplitHeadDim] = -INFINITY;
-      partial[kDecodeGqa4SplitHeadDim + 1U] = 0.0F;
-    }
-    return;
-  }
-
-  __shared__ float key_tile[kDecodeGqa4SplitTileTokens]
-                           [kDecodeGqa4SplitHeadDim];
-  __shared__ float value_tile[kDecodeGqa4SplitTileTokens]
-                             [kDecodeGqa4SplitHeadDim];
-  float local_maximum = -INFINITY;
-  float local_denominator = 0.0F;
-  for (uint64_t tile_begin = split_begin; tile_begin < split_end;
-       tile_begin += kDecodeGqa4SplitTileTokens) {
-    const uint64_t remaining = split_end - tile_begin;
-    const uint32_t tile_count = remaining < kDecodeGqa4SplitTileTokens
-                                    ? static_cast<uint32_t>(remaining)
-                                    : kDecodeGqa4SplitTileTokens;
-    for (uint32_t element = thread;
-         element < tile_count * kDecodeGqa4SplitHeadDim; element += 128U) {
-      const uint32_t token = element / kDecodeGqa4SplitHeadDim;
-      const uint32_t dimension = element % kDecodeGqa4SplitHeadDim;
-      const uint64_t kv_row = (tile_begin + token) * 4U + kv_head;
-      key_tile[token][dimension] =
-          f16_to_f32(key[kv_row * kDecodeGqa4SplitHeadDim + dimension]);
-      value_tile[token][dimension] =
-          f16_to_f32(value[kv_row * kDecodeGqa4SplitHeadDim + dimension]);
-    }
-    __syncthreads();
-    for (uint32_t token = 0U; token < tile_count; ++token) {
-      float score_partial = 0.0F;
-#pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        score_partial +=
-            query_values[index] *
-            key_tile[token][lane + index * kDecodeGqa4SplitWaveSize];
-      }
-      for (uint32_t offset = kDecodeGqa4SplitWaveSize / 2U; offset != 0U;
-           offset >>= 1U) {
-        score_partial +=
-            __shfl_down(score_partial, offset, kDecodeGqa4SplitWaveSize);
-      }
-      float rescale = 0.0F;
-      float contribution = 0.0F;
-      if (lane == 0U) {
-        const float current_score =
-            score_partial * rsqrtf(static_cast<float>(kDecodeGqa4SplitHeadDim));
-        const float next_maximum = fmaxf(local_maximum, current_score);
-        rescale = expf(local_maximum - next_maximum);
-        contribution = expf(current_score - next_maximum);
-        local_denominator = local_denominator * rescale + contribution;
-        local_maximum = next_maximum;
-      }
-      rescale = __shfl(rescale, 0U, kDecodeGqa4SplitWaveSize);
-      contribution = __shfl(contribution, 0U, kDecodeGqa4SplitWaveSize);
-#pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        accumulations[index] =
-            accumulations[index] * rescale +
-            contribution *
-                value_tile[token][lane + index * kDecodeGqa4SplitWaveSize];
-      }
-    }
-    __syncthreads();
-  }
-#pragma unroll
-  for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-    partial[lane + index * kDecodeGqa4SplitWaveSize] = accumulations[index];
-  }
-  if (lane == 0U) {
-    partial[kDecodeGqa4SplitHeadDim] = local_maximum;
-    partial[kDecodeGqa4SplitHeadDim + 1U] = local_denominator;
-  }
-  (void)output;
-}
-
-template <uint32_t kPartitions>
-__global__
-__launch_bounds__(128, 1) void causal_attention_decode_gqa4_split_stage2_kernel(
-    const uint16_t *const query, uint16_t *const output, const uint32_t q_heads,
-    const float *const workspace) {
-  const uint32_t query_head = blockIdx.x;
-  if (query_head >= q_heads || q_heads != 16U) {
-    return;
-  }
-  const uint32_t dimension = threadIdx.x;
-  const uint64_t base = static_cast<uint64_t>(query_head) * kPartitions *
-                        kDecodeGqa4SplitWorkspaceStride;
-  __shared__ float maxima[kPartitions];
-  __shared__ float denominators[kPartitions];
-  __shared__ float global_maximum;
-  __shared__ float global_denominator;
-  if (dimension < kPartitions) {
-    maxima[dimension] =
-        workspace[base + dimension * kDecodeGqa4SplitWorkspaceStride +
-                  kDecodeGqa4SplitHeadDim];
-    denominators[dimension] =
-        workspace[base + dimension * kDecodeGqa4SplitWorkspaceStride +
-                  kDecodeGqa4SplitHeadDim + 1U];
-  }
-  __syncthreads();
-  if (dimension == 0U) {
-    float maximum = maxima[0];
-#pragma unroll
-    for (uint32_t partition = 1U; partition < kPartitions; ++partition) {
-      maximum = fmaxf(maximum, maxima[partition]);
-    }
-    float denominator = 0.0F;
-#pragma unroll
-    for (uint32_t partition = 0U; partition < kPartitions; ++partition) {
-      denominator +=
-          denominators[partition] * expf(maxima[partition] - maximum);
-    }
-    global_maximum = maximum;
-    global_denominator = denominator;
-  }
-  __syncthreads();
-  const uint16_t *const query_row =
-      query + static_cast<uint64_t>(query_head) * kDecodeGqa4SplitHeadDim;
-  uint16_t *const output_row =
-      output + static_cast<uint64_t>(query_head) * kDecodeGqa4SplitHeadDim;
-  for (uint32_t current = dimension; current < kDecodeGqa4SplitHeadDim;
-       current += 128U) {
-    float merged = 0.0F;
-#pragma unroll
-    for (uint32_t partition = 0U; partition < kPartitions; ++partition) {
-      merged += workspace[base + partition * kDecodeGqa4SplitWorkspaceStride +
-                          current] *
-                expf(maxima[partition] - global_maximum);
-    }
-    output_row[current] = f32_to_bf16_rne(merged / global_denominator);
-  }
-  (void)query_row;
-}
-
-// Qwen3.8's 24-query-head/4-KV-head decode path uses six query heads per KV
-// head. Keep this provider separate from the measured GQA4 implementation:
-// each stage-1 block owns one KV head and one P32 interval, while its six
-// wave32 waves process the six query heads and share one FP16 K/V tile in LDS.
-constexpr uint32_t kDecodeGqa6SplitP32Partitions = 32U;
-constexpr uint32_t kDecodeGqa6SplitP32TileTokens = 16U;
-constexpr uint32_t kDecodeGqa6SplitP32WaveSize = 32U;
-constexpr uint32_t kDecodeGqa6SplitP32GqaRatio = 6U;
-constexpr uint32_t kDecodeGqa6SplitP32HeadDim =
-    SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-constexpr uint32_t kDecodeGqa6SplitP32WorkgroupSize = 192U;
-constexpr uint32_t kDecodeGqa6SplitP32WorkspaceStride =
-    kDecodeGqa6SplitP32HeadDim + 2U;
-
-__global__ __launch_bounds__(
-    kDecodeGqa6SplitP32WorkgroupSize,
-    1) void causal_attention_decode_gqa6_split_p32_stage1_kernel(const uint16_t
-                                                                     *const
-                                                                         query,
-                                                                 const uint16_t
-                                                                     *const key,
-                                                                 const uint16_t
-                                                                     *const
-                                                                         value,
-                                                                 uint16_t *const
-                                                                     output,
-                                                                 const uint64_t
-                                                                     committed_kv_length,
-                                                                 float *const
-                                                                     workspace) {
-  const uint32_t block = blockIdx.x;
-  const uint32_t kv_head = block / kDecodeGqa6SplitP32Partitions;
-  const uint32_t partition = block % kDecodeGqa6SplitP32Partitions;
-  if (kv_head >= 4U) {
-    return;
-  }
-  const uint64_t split_begin =
-      committed_kv_length * partition / kDecodeGqa6SplitP32Partitions;
-  const uint64_t split_end =
-      committed_kv_length * (partition + 1U) / kDecodeGqa6SplitP32Partitions;
-  const uint32_t thread = threadIdx.x;
-  const uint32_t lane = thread & (kDecodeGqa6SplitP32WaveSize - 1U);
-  const uint32_t wave = thread / kDecodeGqa6SplitP32WaveSize;
-  const uint32_t query_head = kv_head * kDecodeGqa6SplitP32GqaRatio + wave;
-  const uint16_t *const query_row =
-      query + static_cast<uint64_t>(query_head) * kDecodeGqa6SplitP32HeadDim;
-  constexpr uint32_t kDimensionsPerLane =
-      kDecodeGqa6SplitP32HeadDim / kDecodeGqa6SplitP32WaveSize;
-  float query_values[kDimensionsPerLane];
-  float accumulations[kDimensionsPerLane] = {};
-#pragma unroll
-  for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-    query_values[index] =
-        bf16_to_f32(query_row[lane + index * kDecodeGqa6SplitP32WaveSize]);
-  }
-
-  const uint64_t workspace_index =
-      (static_cast<uint64_t>(query_head) * kDecodeGqa6SplitP32Partitions +
-       partition) *
-      kDecodeGqa6SplitP32WorkspaceStride;
-  float *const partial = workspace + workspace_index;
-  if (split_begin >= split_end) {
-    for (uint32_t index = lane; index < kDecodeGqa6SplitP32HeadDim;
-         index += kDecodeGqa6SplitP32WaveSize) {
-      partial[index] = 0.0F;
-    }
-    if (lane == 0U) {
-      partial[kDecodeGqa6SplitP32HeadDim] = -INFINITY;
-      partial[kDecodeGqa6SplitP32HeadDim + 1U] = 0.0F;
-    }
-    return;
-  }
-
-  __shared__ float key_tile[kDecodeGqa6SplitP32TileTokens]
-                           [kDecodeGqa6SplitP32HeadDim];
-  __shared__ float value_tile[kDecodeGqa6SplitP32TileTokens]
-                             [kDecodeGqa6SplitP32HeadDim];
-  float local_maximum = -INFINITY;
-  float local_denominator = 0.0F;
-  for (uint64_t tile_begin = split_begin; tile_begin < split_end;
-       tile_begin += kDecodeGqa6SplitP32TileTokens) {
-    const uint64_t remaining = split_end - tile_begin;
-    const uint32_t tile_count = remaining < kDecodeGqa6SplitP32TileTokens
-                                    ? static_cast<uint32_t>(remaining)
-                                    : kDecodeGqa6SplitP32TileTokens;
-    for (uint32_t element = thread;
-         element < tile_count * kDecodeGqa6SplitP32HeadDim;
-         element += kDecodeGqa6SplitP32WorkgroupSize) {
-      const uint32_t token = element / kDecodeGqa6SplitP32HeadDim;
-      const uint32_t dimension = element % kDecodeGqa6SplitP32HeadDim;
-      const uint64_t kv_row = (tile_begin + token) * 4U + kv_head;
-      key_tile[token][dimension] =
-          f16_to_f32(key[kv_row * kDecodeGqa6SplitP32HeadDim + dimension]);
-      value_tile[token][dimension] =
-          f16_to_f32(value[kv_row * kDecodeGqa6SplitP32HeadDim + dimension]);
-    }
-    __syncthreads();
-    for (uint32_t token = 0U; token < tile_count; ++token) {
-      float score_partial = 0.0F;
-#pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        score_partial +=
-            query_values[index] *
-            key_tile[token][lane + index * kDecodeGqa6SplitP32WaveSize];
-      }
-      for (uint32_t offset = kDecodeGqa6SplitP32WaveSize / 2U; offset != 0U;
-           offset >>= 1U) {
-        score_partial +=
-            __shfl_down(score_partial, offset, kDecodeGqa6SplitP32WaveSize);
-      }
-      float rescale = 0.0F;
-      float contribution = 0.0F;
-      if (lane == 0U) {
-        const float current_score =
-            score_partial *
-            rsqrtf(static_cast<float>(kDecodeGqa6SplitP32HeadDim));
-        const float next_maximum = fmaxf(local_maximum, current_score);
-        rescale = expf(local_maximum - next_maximum);
-        contribution = expf(current_score - next_maximum);
-        local_denominator = local_denominator * rescale + contribution;
-        local_maximum = next_maximum;
-      }
-      rescale = __shfl(rescale, 0U, kDecodeGqa6SplitP32WaveSize);
-      contribution = __shfl(contribution, 0U, kDecodeGqa6SplitP32WaveSize);
-#pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        accumulations[index] =
-            accumulations[index] * rescale +
-            contribution *
-                value_tile[token][lane + index * kDecodeGqa6SplitP32WaveSize];
-      }
-    }
-    __syncthreads();
-  }
-#pragma unroll
-  for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-    partial[lane + index * kDecodeGqa6SplitP32WaveSize] = accumulations[index];
-  }
-  if (lane == 0U) {
-    partial[kDecodeGqa6SplitP32HeadDim] = local_maximum;
-    partial[kDecodeGqa6SplitP32HeadDim + 1U] = local_denominator;
-  }
-  (void)output;
-}
-
-__global__ __launch_bounds__(
-    kDecodeGqa6SplitP32WorkgroupSize,
-    1) void causal_attention_decode_gqa6_split_p32_stage2_kernel(const uint16_t
-                                                                     *const
-                                                                         query,
-                                                                 uint16_t *const
-                                                                     output,
-                                                                 const uint32_t
-                                                                     q_heads,
-                                                                 const float *const
-                                                                     workspace) {
-  const uint32_t query_head = blockIdx.x;
-  if (query_head >= q_heads || q_heads != 24U) {
-    return;
-  }
-  const uint32_t dimension = threadIdx.x;
-  const uint64_t base = static_cast<uint64_t>(query_head) *
-                        kDecodeGqa6SplitP32Partitions *
-                        kDecodeGqa6SplitP32WorkspaceStride;
-  __shared__ float maxima[kDecodeGqa6SplitP32Partitions];
-  __shared__ float denominators[kDecodeGqa6SplitP32Partitions];
-  __shared__ float merge_scales[kDecodeGqa6SplitP32Partitions];
-  __shared__ float global_maximum;
-  __shared__ float global_denominator;
-  if (dimension < kDecodeGqa6SplitP32Partitions) {
-    maxima[dimension] =
-        workspace[base + dimension * kDecodeGqa6SplitP32WorkspaceStride +
-                  kDecodeGqa6SplitP32HeadDim];
-    denominators[dimension] =
-        workspace[base + dimension * kDecodeGqa6SplitP32WorkspaceStride +
-                  kDecodeGqa6SplitP32HeadDim + 1U];
-  }
-  __syncthreads();
-  if (dimension == 0U) {
-    float maximum = maxima[0];
-#pragma unroll
-    for (uint32_t partition = 1U; partition < kDecodeGqa6SplitP32Partitions;
-         ++partition) {
-      maximum = fmaxf(maximum, maxima[partition]);
-    }
-    global_maximum = maximum;
-  }
-  __syncthreads();
-  if (dimension < kDecodeGqa6SplitP32Partitions) {
-    merge_scales[dimension] = expf(maxima[dimension] - global_maximum);
-  }
-  __syncthreads();
-  if (dimension == 0U) {
-    float denominator = 0.0F;
-#pragma unroll
-    for (uint32_t partition = 0U; partition < kDecodeGqa6SplitP32Partitions;
-         ++partition) {
-      denominator += denominators[partition] * merge_scales[partition];
-    }
-    global_denominator = denominator;
-  }
-  __syncthreads();
-  const uint16_t *const query_row =
-      query + static_cast<uint64_t>(query_head) * kDecodeGqa6SplitP32HeadDim;
-  uint16_t *const output_row =
-      output + static_cast<uint64_t>(query_head) * kDecodeGqa6SplitP32HeadDim;
-  for (uint32_t current = dimension; current < kDecodeGqa6SplitP32HeadDim;
-       current += kDecodeGqa6SplitP32WorkgroupSize) {
-    float merged = 0.0F;
-#pragma unroll
-    for (uint32_t partition = 0U; partition < kDecodeGqa6SplitP32Partitions;
-         ++partition) {
-      merged +=
-          workspace[base + partition * kDecodeGqa6SplitP32WorkspaceStride +
-                    current] *
-          merge_scales[partition];
-    }
-    output_row[current] = f32_to_bf16_rne(merged / global_denominator);
-  }
-  (void)query_row;
-}
-
-// The P64 candidate keeps the same six-wave GQA6 mapping and LDS tile as P32,
-// but doubles the number of online-softmax partitions for long contexts.
-constexpr uint32_t kDecodeGqa6SplitP64Partitions = 64U;
-constexpr uint32_t kDecodeGqa6SplitP64TileTokens = 16U;
-constexpr uint32_t kDecodeGqa6SplitP64WaveSize = 32U;
-constexpr uint32_t kDecodeGqa6SplitP64GqaRatio = 6U;
-constexpr uint32_t kDecodeGqa6SplitP64HeadDim =
-    SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-constexpr uint32_t kDecodeGqa6SplitP64WorkgroupSize = 192U;
-constexpr uint32_t kDecodeGqa6SplitP64WorkspaceStride =
-    kDecodeGqa6SplitP64HeadDim + 2U;
-
-__global__ __launch_bounds__(
-    kDecodeGqa6SplitP64WorkgroupSize,
-    1) void causal_attention_decode_gqa6_split_p64_stage1_kernel(const uint16_t
-                                                                     *const
-                                                                         query,
-                                                                 const uint16_t
-                                                                     *const key,
-                                                                 const uint16_t
-                                                                     *const
-                                                                         value,
-                                                                 uint16_t *const
-                                                                     output,
-                                                                 const uint64_t
-                                                                     committed_kv_length,
-                                                                 float *const
-                                                                     workspace) {
-  const uint32_t block = blockIdx.x;
-  const uint32_t kv_head = block / kDecodeGqa6SplitP64Partitions;
-  const uint32_t partition = block % kDecodeGqa6SplitP64Partitions;
-  if (kv_head >= 4U) {
-    return;
-  }
-  const uint64_t split_begin =
-      committed_kv_length * partition / kDecodeGqa6SplitP64Partitions;
-  const uint64_t split_end =
-      committed_kv_length * (partition + 1U) / kDecodeGqa6SplitP64Partitions;
-  const uint32_t thread = threadIdx.x;
-  const uint32_t lane = thread & (kDecodeGqa6SplitP64WaveSize - 1U);
-  const uint32_t wave = thread / kDecodeGqa6SplitP64WaveSize;
-  const uint32_t query_head = kv_head * kDecodeGqa6SplitP64GqaRatio + wave;
-  const uint16_t *const query_row =
-      query + static_cast<uint64_t>(query_head) * kDecodeGqa6SplitP64HeadDim;
-  constexpr uint32_t kDimensionsPerLane =
-      kDecodeGqa6SplitP64HeadDim / kDecodeGqa6SplitP64WaveSize;
-  float query_values[kDimensionsPerLane];
-  float accumulations[kDimensionsPerLane] = {};
-#pragma unroll
-  for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-    query_values[index] =
-        bf16_to_f32(query_row[lane + index * kDecodeGqa6SplitP64WaveSize]);
-  }
-
-  const uint64_t workspace_index =
-      (static_cast<uint64_t>(query_head) * kDecodeGqa6SplitP64Partitions +
-       partition) *
-      kDecodeGqa6SplitP64WorkspaceStride;
-  float *const partial = workspace + workspace_index;
-  if (split_begin >= split_end) {
-    for (uint32_t index = lane; index < kDecodeGqa6SplitP64HeadDim;
-         index += kDecodeGqa6SplitP64WaveSize) {
-      partial[index] = 0.0F;
-    }
-    if (lane == 0U) {
-      partial[kDecodeGqa6SplitP64HeadDim] = -INFINITY;
-      partial[kDecodeGqa6SplitP64HeadDim + 1U] = 0.0F;
-    }
-    return;
-  }
-
-#if defined(__gfx1030__) || defined(__gfx1201__)
-  // gfx1030/gfx1201 keep the FP16 payload in LDS and perform the same exact
-  // conversion at each score/value use.  This halves the K/V tile footprint
-  // without changing the partition, reduction, or online-softmax order.
-  __shared__ uint16_t
-      key_tile[kDecodeGqa6SplitP64TileTokens][kDecodeGqa6SplitP64HeadDim];
-  __shared__ uint16_t
-      value_tile[kDecodeGqa6SplitP64TileTokens][kDecodeGqa6SplitP64HeadDim];
-#else
-  __shared__ float key_tile[kDecodeGqa6SplitP64TileTokens]
-                           [kDecodeGqa6SplitP64HeadDim];
-  __shared__ float value_tile[kDecodeGqa6SplitP64TileTokens]
-                             [kDecodeGqa6SplitP64HeadDim];
-#endif
-  float local_maximum = -INFINITY;
-  float local_denominator = 0.0F;
-  for (uint64_t tile_begin = split_begin; tile_begin < split_end;
-       tile_begin += kDecodeGqa6SplitP64TileTokens) {
-    const uint64_t remaining = split_end - tile_begin;
-    const uint32_t tile_count = remaining < kDecodeGqa6SplitP64TileTokens
-                                    ? static_cast<uint32_t>(remaining)
-                                    : kDecodeGqa6SplitP64TileTokens;
-    for (uint32_t element = thread;
-         element < tile_count * kDecodeGqa6SplitP64HeadDim;
-         element += kDecodeGqa6SplitP64WorkgroupSize) {
-      const uint32_t token = element / kDecodeGqa6SplitP64HeadDim;
-      const uint32_t dimension = element % kDecodeGqa6SplitP64HeadDim;
-      const uint64_t kv_row = (tile_begin + token) * 4U + kv_head;
-#if defined(__gfx1030__) || defined(__gfx1201__)
-      key_tile[token][dimension] =
-          key[kv_row * kDecodeGqa6SplitP64HeadDim + dimension];
-      value_tile[token][dimension] =
-          value[kv_row * kDecodeGqa6SplitP64HeadDim + dimension];
-#else
-      key_tile[token][dimension] =
-          f16_to_f32(key[kv_row * kDecodeGqa6SplitP64HeadDim + dimension]);
-      value_tile[token][dimension] =
-          f16_to_f32(value[kv_row * kDecodeGqa6SplitP64HeadDim + dimension]);
-#endif
-    }
-    __syncthreads();
-    for (uint32_t token = 0U; token < tile_count; ++token) {
-      float score_partial = 0.0F;
-#pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        score_partial +=
-            query_values[index] *
-#if defined(__gfx1030__) || defined(__gfx1201__)
-            f16_to_f32(
-                key_tile[token][lane + index * kDecodeGqa6SplitP64WaveSize]);
-#else
-            key_tile[token][lane + index * kDecodeGqa6SplitP64WaveSize];
-#endif
-      }
-      for (uint32_t offset = kDecodeGqa6SplitP64WaveSize / 2U; offset != 0U;
-           offset >>= 1U) {
-        score_partial +=
-            __shfl_down(score_partial, offset, kDecodeGqa6SplitP64WaveSize);
-      }
-      float rescale = 0.0F;
-      float contribution = 0.0F;
-      if (lane == 0U) {
-        const float current_score =
-            score_partial *
-            rsqrtf(static_cast<float>(kDecodeGqa6SplitP64HeadDim));
-        const float next_maximum = fmaxf(local_maximum, current_score);
-        rescale = expf(local_maximum - next_maximum);
-        contribution = expf(current_score - next_maximum);
-        local_denominator = local_denominator * rescale + contribution;
-        local_maximum = next_maximum;
-      }
-      rescale = __shfl(rescale, 0U, kDecodeGqa6SplitP64WaveSize);
-      contribution = __shfl(contribution, 0U, kDecodeGqa6SplitP64WaveSize);
-#pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        accumulations[index] =
-            accumulations[index] * rescale +
-            contribution *
-#if defined(__gfx1030__) || defined(__gfx1201__)
-                f16_to_f32(
-                    value_tile[token]
-                              [lane + index * kDecodeGqa6SplitP64WaveSize]);
-#else
-                value_tile[token][lane + index * kDecodeGqa6SplitP64WaveSize];
-#endif
-      }
-    }
-    __syncthreads();
-  }
-#pragma unroll
-  for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-    partial[lane + index * kDecodeGqa6SplitP64WaveSize] = accumulations[index];
-  }
-  if (lane == 0U) {
-    partial[kDecodeGqa6SplitP64HeadDim] = local_maximum;
-    partial[kDecodeGqa6SplitP64HeadDim + 1U] = local_denominator;
-  }
-  (void)output;
-}
-
-__global__ __launch_bounds__(
-    kDecodeGqa6SplitP64WorkgroupSize,
-    1) void causal_attention_decode_gqa6_split_p64_stage2_kernel(const uint16_t
-                                                                     *const
-                                                                         query,
-                                                                 uint16_t *const
-                                                                     output,
-                                                                 const uint32_t
-                                                                     q_heads,
-                                                                 const float *const
-                                                                     workspace) {
-  const uint32_t query_head = blockIdx.x;
-  if (query_head >= q_heads || q_heads != 24U) {
-    return;
-  }
-  const uint32_t dimension = threadIdx.x;
-  const uint64_t base = static_cast<uint64_t>(query_head) *
-                        kDecodeGqa6SplitP64Partitions *
-                        kDecodeGqa6SplitP64WorkspaceStride;
-  __shared__ float maxima[kDecodeGqa6SplitP64Partitions];
-  __shared__ float denominators[kDecodeGqa6SplitP64Partitions];
-  __shared__ float merge_scales[kDecodeGqa6SplitP64Partitions];
-  __shared__ float global_maximum;
-  __shared__ float global_denominator;
-  if (dimension < kDecodeGqa6SplitP64Partitions) {
-    maxima[dimension] =
-        workspace[base + dimension * kDecodeGqa6SplitP64WorkspaceStride +
-                  kDecodeGqa6SplitP64HeadDim];
-    denominators[dimension] =
-        workspace[base + dimension * kDecodeGqa6SplitP64WorkspaceStride +
-                  kDecodeGqa6SplitP64HeadDim + 1U];
-  }
-  __syncthreads();
-  if (dimension == 0U) {
-    float maximum = maxima[0];
-#pragma unroll
-    for (uint32_t partition = 1U; partition < kDecodeGqa6SplitP64Partitions;
-         ++partition) {
-      maximum = fmaxf(maximum, maxima[partition]);
-    }
-    global_maximum = maximum;
-  }
-  __syncthreads();
-  if (dimension < kDecodeGqa6SplitP64Partitions) {
-    merge_scales[dimension] = expf(maxima[dimension] - global_maximum);
-  }
-  __syncthreads();
-  if (dimension == 0U) {
-    float denominator = 0.0F;
-#pragma unroll
-    for (uint32_t partition = 0U; partition < kDecodeGqa6SplitP64Partitions;
-         ++partition) {
-      denominator += denominators[partition] * merge_scales[partition];
-    }
-    global_denominator = denominator;
-  }
-  __syncthreads();
-  const uint16_t *const query_row =
-      query + static_cast<uint64_t>(query_head) * kDecodeGqa6SplitP64HeadDim;
-  uint16_t *const output_row =
-      output + static_cast<uint64_t>(query_head) * kDecodeGqa6SplitP64HeadDim;
-  for (uint32_t current = dimension; current < kDecodeGqa6SplitP64HeadDim;
-       current += kDecodeGqa6SplitP64WorkgroupSize) {
-    float merged = 0.0F;
-#pragma unroll
-    for (uint32_t partition = 0U; partition < kDecodeGqa6SplitP64Partitions;
-         ++partition) {
-      merged +=
-          workspace[base + partition * kDecodeGqa6SplitP64WorkspaceStride +
-                    current] *
-          merge_scales[partition];
-    }
-    output_row[current] = f32_to_bf16_rne(merged / global_denominator);
-  }
-  (void)query_row;
-}
-
-// The gfx1030 P128 opt-in keeps the same six-wave mapping and LDS tile as
-// P64, but increases the number of online-softmax partitions for the longest
-// decode contexts.  It has a separate symbol so the runtime can roll back to
-// P64/P32 without changing the ABI of either existing provider.
-constexpr uint32_t kDecodeGqa6SplitP128Partitions = 128U;
-constexpr uint32_t kDecodeGqa6SplitP128TileTokens = 16U;
-constexpr uint32_t kDecodeGqa6SplitP128WaveSize = 32U;
-constexpr uint32_t kDecodeGqa6SplitP128GqaRatio = 6U;
-constexpr uint32_t kDecodeGqa6SplitP128HeadDim =
-    SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-constexpr uint32_t kDecodeGqa6SplitP128WorkgroupSize = 192U;
-constexpr uint32_t kDecodeGqa6SplitP128WorkspaceStride =
-    kDecodeGqa6SplitP128HeadDim + 2U;
-
-__global__ __launch_bounds__(
-    kDecodeGqa6SplitP128WorkgroupSize,
-    1) void causal_attention_decode_gqa6_split_p128_stage1_kernel(const uint16_t
-                                                                      *const
-                                                                          query,
-                                                                  const uint16_t
-                                                                      *const
-                                                                          key,
-                                                                  const uint16_t
-                                                                      *const
-                                                                          value,
-                                                                  uint16_t *const
-                                                                      output,
-                                                                  const uint64_t
-                                                                      committed_kv_length,
-                                                                  float *const
-                                                                      workspace) {
-  const uint32_t block = blockIdx.x;
-  const uint32_t kv_head = block / kDecodeGqa6SplitP128Partitions;
-  const uint32_t partition = block % kDecodeGqa6SplitP128Partitions;
-  if (kv_head >= 4U) {
-    return;
-  }
-  const uint64_t split_begin =
-      committed_kv_length * partition / kDecodeGqa6SplitP128Partitions;
-  const uint64_t split_end =
-      committed_kv_length * (partition + 1U) / kDecodeGqa6SplitP128Partitions;
-  const uint32_t thread = threadIdx.x;
-  const uint32_t lane = thread & (kDecodeGqa6SplitP128WaveSize - 1U);
-  const uint32_t wave = thread / kDecodeGqa6SplitP128WaveSize;
-  const uint32_t query_head = kv_head * kDecodeGqa6SplitP128GqaRatio + wave;
-  const uint16_t *const query_row =
-      query + static_cast<uint64_t>(query_head) * kDecodeGqa6SplitP128HeadDim;
-  constexpr uint32_t kDimensionsPerLane =
-      kDecodeGqa6SplitP128HeadDim / kDecodeGqa6SplitP128WaveSize;
-  float query_values[kDimensionsPerLane];
-  float accumulations[kDimensionsPerLane] = {};
-#pragma unroll
-  for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-    query_values[index] =
-        bf16_to_f32(query_row[lane + index * kDecodeGqa6SplitP128WaveSize]);
-  }
-
-  const uint64_t workspace_index =
-      (static_cast<uint64_t>(query_head) * kDecodeGqa6SplitP128Partitions +
-       partition) *
-      kDecodeGqa6SplitP128WorkspaceStride;
-  float *const partial = workspace + workspace_index;
-  if (split_begin >= split_end) {
-    for (uint32_t index = lane; index < kDecodeGqa6SplitP128HeadDim;
-         index += kDecodeGqa6SplitP128WaveSize) {
-      partial[index] = 0.0F;
-    }
-    if (lane == 0U) {
-      partial[kDecodeGqa6SplitP128HeadDim] = -INFINITY;
-      partial[kDecodeGqa6SplitP128HeadDim + 1U] = 0.0F;
-    }
-    return;
-  }
-
-  __shared__ float key_tile[kDecodeGqa6SplitP128TileTokens]
-                           [kDecodeGqa6SplitP128HeadDim];
-  __shared__ float value_tile[kDecodeGqa6SplitP128TileTokens]
-                             [kDecodeGqa6SplitP128HeadDim];
-  float local_maximum = -INFINITY;
-  float local_denominator = 0.0F;
-  for (uint64_t tile_begin = split_begin; tile_begin < split_end;
-       tile_begin += kDecodeGqa6SplitP128TileTokens) {
-    const uint64_t remaining = split_end - tile_begin;
-    const uint32_t tile_count = remaining < kDecodeGqa6SplitP128TileTokens
-                                    ? static_cast<uint32_t>(remaining)
-                                    : kDecodeGqa6SplitP128TileTokens;
-    for (uint32_t element = thread;
-         element < tile_count * kDecodeGqa6SplitP128HeadDim;
-         element += kDecodeGqa6SplitP128WorkgroupSize) {
-      const uint32_t token = element / kDecodeGqa6SplitP128HeadDim;
-      const uint32_t dimension = element % kDecodeGqa6SplitP128HeadDim;
-      const uint64_t kv_row = (tile_begin + token) * 4U + kv_head;
-      key_tile[token][dimension] =
-          f16_to_f32(key[kv_row * kDecodeGqa6SplitP128HeadDim + dimension]);
-      value_tile[token][dimension] =
-          f16_to_f32(value[kv_row * kDecodeGqa6SplitP128HeadDim + dimension]);
-    }
-    __syncthreads();
-    for (uint32_t token = 0U; token < tile_count; ++token) {
-      float score_partial = 0.0F;
-#pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        score_partial +=
-            query_values[index] *
-            key_tile[token][lane + index * kDecodeGqa6SplitP128WaveSize];
-      }
-      for (uint32_t offset = kDecodeGqa6SplitP128WaveSize / 2U; offset != 0U;
-           offset >>= 1U) {
-        score_partial +=
-            __shfl_down(score_partial, offset, kDecodeGqa6SplitP128WaveSize);
-      }
-      float rescale = 0.0F;
-      float contribution = 0.0F;
-      if (lane == 0U) {
-        const float current_score =
-            score_partial *
-            rsqrtf(static_cast<float>(kDecodeGqa6SplitP128HeadDim));
-        const float next_maximum = fmaxf(local_maximum, current_score);
-        rescale = expf(local_maximum - next_maximum);
-        contribution = expf(current_score - next_maximum);
-        local_denominator = local_denominator * rescale + contribution;
-        local_maximum = next_maximum;
-      }
-      rescale = __shfl(rescale, 0U, kDecodeGqa6SplitP128WaveSize);
-      contribution = __shfl(contribution, 0U, kDecodeGqa6SplitP128WaveSize);
-#pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        accumulations[index] =
-            accumulations[index] * rescale +
-            contribution *
-                value_tile[token][lane + index * kDecodeGqa6SplitP128WaveSize];
-      }
-    }
-    __syncthreads();
-  }
-#pragma unroll
-  for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-    partial[lane + index * kDecodeGqa6SplitP128WaveSize] = accumulations[index];
-  }
-  if (lane == 0U) {
-    partial[kDecodeGqa6SplitP128HeadDim] = local_maximum;
-    partial[kDecodeGqa6SplitP128HeadDim + 1U] = local_denominator;
-  }
-  (void)output;
-}
-
-__global__ __launch_bounds__(
-    kDecodeGqa6SplitP128WorkgroupSize,
-    1) void causal_attention_decode_gqa6_split_p128_stage2_kernel(const uint16_t
-                                                                      *const
-                                                                          query,
-                                                                  uint16_t *const
-                                                                      output,
-                                                                  const uint32_t
-                                                                      q_heads,
-                                                                  const float *const
-                                                                      workspace) {
-  const uint32_t query_head = blockIdx.x;
-  if (query_head >= q_heads || q_heads != 24U) {
-    return;
-  }
-  const uint32_t dimension = threadIdx.x;
-  const uint64_t base = static_cast<uint64_t>(query_head) *
-                        kDecodeGqa6SplitP128Partitions *
-                        kDecodeGqa6SplitP128WorkspaceStride;
-  __shared__ float maxima[kDecodeGqa6SplitP128Partitions];
-  __shared__ float denominators[kDecodeGqa6SplitP128Partitions];
-  __shared__ float merge_scales[kDecodeGqa6SplitP128Partitions];
-  __shared__ float global_maximum;
-  __shared__ float global_denominator;
-  if (dimension < kDecodeGqa6SplitP128Partitions) {
-    maxima[dimension] =
-        workspace[base + dimension * kDecodeGqa6SplitP128WorkspaceStride +
-                  kDecodeGqa6SplitP128HeadDim];
-    denominators[dimension] =
-        workspace[base + dimension * kDecodeGqa6SplitP128WorkspaceStride +
-                  kDecodeGqa6SplitP128HeadDim + 1U];
-  }
-  __syncthreads();
-  if (dimension == 0U) {
-    float maximum = maxima[0];
-#pragma unroll
-    for (uint32_t partition = 1U; partition < kDecodeGqa6SplitP128Partitions;
-         ++partition) {
-      maximum = fmaxf(maximum, maxima[partition]);
-    }
-    global_maximum = maximum;
-  }
-  __syncthreads();
-  if (dimension < kDecodeGqa6SplitP128Partitions) {
-    merge_scales[dimension] = expf(maxima[dimension] - global_maximum);
-  }
-  __syncthreads();
-  if (dimension == 0U) {
-    float denominator = 0.0F;
-#pragma unroll
-    for (uint32_t partition = 0U; partition < kDecodeGqa6SplitP128Partitions;
-         ++partition) {
-      denominator += denominators[partition] * merge_scales[partition];
-    }
-    global_denominator = denominator;
-  }
-  __syncthreads();
-  const uint16_t *const query_row =
-      query + static_cast<uint64_t>(query_head) * kDecodeGqa6SplitP128HeadDim;
-  uint16_t *const output_row =
-      output + static_cast<uint64_t>(query_head) * kDecodeGqa6SplitP128HeadDim;
-  for (uint32_t current = dimension; current < kDecodeGqa6SplitP128HeadDim;
-       current += kDecodeGqa6SplitP128WorkgroupSize) {
-    float merged = 0.0F;
-#pragma unroll
-    for (uint32_t partition = 0U; partition < kDecodeGqa6SplitP128Partitions;
-         ++partition) {
-      merged +=
-          workspace[base + partition * kDecodeGqa6SplitP128WorkspaceStride +
-                    current] *
-          merge_scales[partition];
-    }
-    output_row[current] = f32_to_bf16_rne(merged / global_denominator);
-  }
-  (void)query_row;
-}
-
-// Phase 33's one-row provider remains available as a measured control for the
-// Phase 35 provider-selection audit.
 template <uint32_t Encoding>
+__device__ __forceinline__ bool
+paged_descriptor_valid(const sllm_paged_kv::BlockDescriptor &page) noexcept;
+
+// Paged counterpart of causal_attention_prefill_gqa4_shared_kernel.  The
+// reduction tree, online-softmax update, and BF16 output conversion are kept
+// identical; only logical page resolution replaces the contiguous row base.
 __global__
-__launch_bounds__(256, 1) void causal_attention_prefill_gqa4_shared_kernel(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint32_t q_heads,
-    const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale) {
+__launch_bounds__(256, 1) void causal_attention_paged_prefill_gqa4_shared_kernel(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim) {
   constexpr uint32_t kWaveSize = 32U;
   constexpr uint32_t kWaveCount = 8U;
   constexpr uint32_t kGqaRatio = 4U;
   const uint64_t flat = blockIdx.x;
   const uint64_t row = flat / kv_heads;
   const uint32_t kv_head = static_cast<uint32_t>(flat % kv_heads);
-  if (row >= query_count) {
+  if (row >= query_count || q_heads != 16U || kv_heads != 4U ||
+      head_dim != 256U) {
     return;
   }
   const uint64_t query_position = start_position + row;
+  if (query_position >= committed_kv_length) {
+    return;
+  }
   const uint32_t dimension = threadIdx.x;
   const uint32_t lane = dimension & (kWaveSize - 1U);
   const uint32_t wave = dimension / kWaveSize;
   const uint32_t first_query_head = kv_head * kGqaRatio;
-
   __shared__ float reductions[kGqaRatio][kWaveCount];
   __shared__ float rescale[kGqaRatio];
   __shared__ float contribution[kGqaRatio];
   __shared__ float running_maximum[kGqaRatio];
   __shared__ float running_denominator[kGqaRatio];
+  __shared__ sllm_paged_kv::BlockDescriptor page;
+  __shared__ uint32_t page_valid;
   if (dimension < kGqaRatio) {
     running_maximum[dimension] = -std::numeric_limits<float>::infinity();
     running_denominator[dimension] = 0.0F;
@@ -2272,19 +469,47 @@ __launch_bounds__(256, 1) void causal_attention_prefill_gqa4_shared_kernel(
   float accumulations[kGqaRatio] = {0.0F, 0.0F, 0.0F, 0.0F};
   for (uint64_t key_position = 0U; key_position <= query_position;
        ++key_position) {
-    const uint64_t kv_row = key_position * kv_heads + kv_head;
-    const float key_value = dimension < head_dim
-                                ? load_kv_specialized<Encoding>(
-                                      key, key_scales, key_outer_scales, kv_row,
-                                      dimension, head_dim, static_key_scale)
-                                : 0.0F;
+    if (dimension == 0U) {
+      const uint64_t logical_page = key_position / 128U;
+      const uint32_t local_token = static_cast<uint32_t>(key_position % 128U);
+      (void)local_token;
+      const uint32_t physical_page = logical_page < logical_table_count
+                                         ? logical_table[logical_page]
+                                         : UINT32_MAX;
+      page_valid =
+          physical_page != UINT32_MAX && physical_page < descriptor_count ? 1U
+                                                                          : 0U;
+      if (page_valid != 0U) {
+        page = descriptor_table[physical_page];
+        page_valid = paged_descriptor_valid<SLLM_HIP_KV_ENCODING_FP16_V1>(page)
+                         ? 1U
+                         : 0U;
+      }
+      if (page_valid == 0U) {
+        atomicExch(device_status, 1U);
+      }
+    }
+    __syncthreads();
+    if (page_valid == 0U) {
+      return;
+    }
+    const uint64_t kv_row = (key_position % 128U) * kv_heads + kv_head;
+    const uint16_t *const query_row =
+        query +
+        (row * q_heads + first_query_head) * static_cast<uint64_t>(head_dim);
+    const float key_value =
+        dimension < head_dim
+            ? load_kv_specialized<SLLM_HIP_KV_ENCODING_FP16_V1>(
+                  page.key, page.key_scale,
+                  reinterpret_cast<const float *>(page.key_outer_scale), kv_row,
+                  dimension, head_dim, 1.0F)
+            : 0.0F;
 #pragma unroll
     for (uint32_t head = 0U; head < kGqaRatio; ++head) {
-      const uint16_t *const query_row =
-          query + (row * q_heads + first_query_head + head) *
-                      static_cast<uint64_t>(head_dim);
+      const uint16_t *const head_query =
+          query_row + static_cast<uint64_t>(head) * head_dim;
       float partial = dimension < head_dim
-                          ? bf16_to_f32(query_row[dimension]) * key_value
+                          ? bf16_to_f32(head_query[dimension]) * key_value
                           : 0.0F;
       for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
         partial += __shfl_down(partial, offset, kWaveSize);
@@ -2313,9 +538,10 @@ __launch_bounds__(256, 1) void causal_attention_prefill_gqa4_shared_kernel(
     __syncthreads();
     const float value_element =
         dimension < head_dim
-            ? load_kv_specialized<Encoding>(
-                  value, value_scales, value_outer_scales, kv_row, dimension,
-                  head_dim, static_value_scale)
+            ? load_kv_specialized<SLLM_HIP_KV_ENCODING_FP16_V1>(
+                  page.value, page.value_scale,
+                  reinterpret_cast<const float *>(page.value_outer_scale),
+                  kv_row, dimension, head_dim, 1.0F)
             : 0.0F;
     if (dimension < head_dim) {
 #pragma unroll
@@ -2338,219 +564,1395 @@ __launch_bounds__(256, 1) void causal_attention_prefill_gqa4_shared_kernel(
   }
 }
 
-// One block owns four adjacent query rows and one KV head. Eight waves cover
-// every (row, GQA-head) pair, so every decoded K/V row is shared across either
-// 16 GQA4 or 24 GQA6 logical queries while each query preserves causal key
-// order and an independent online-softmax state.
-template <uint32_t Encoding, uint32_t GqaRatio>
-__global__
-__launch_bounds__(256, 1) void causal_attention_prefill_gqa4_qtile4_kernel(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint32_t q_heads,
+// Phase 87 Stage10 generic paged control path.  The body deliberately mirrors
+// causal_attention_kernel<false, Encoding> in its query reduction,
+// online-softmax update, accumulation, and BF16 RNE output.  The only changed
+// operation is resolving each logical 128-token page through the descriptor
+// table before loading the K/V row.
+template <uint32_t Encoding>
+__device__ __forceinline__ bool
+paged_descriptor_valid(const sllm_paged_kv::BlockDescriptor &page) noexcept {
+  if (page.key == nullptr || page.value == nullptr) {
+    return false;
+  }
+  if constexpr (Encoding == SLLM_HIP_KV_ENCODING_FP16_V1 ||
+                Encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1) {
+    return true;
+  } else if constexpr (Encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
+                       Encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+                       Encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) {
+    return page.key_scale != nullptr && page.value_scale != nullptr;
+  } else if constexpr (Encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1) {
+    return page.key_scale != nullptr && page.value_scale != nullptr &&
+           page.key_outer_scale != nullptr && page.value_outer_scale != nullptr;
+  } else {
+    return false;
+  }
+}
+
+template <uint32_t Encoding, bool UseWaveProvider = false>
+__global__ __launch_bounds__(256, 1) void causal_attention_paged_kernel(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
     const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale) {
-  constexpr uint32_t kWaveSize = 32U;
-  constexpr uint32_t kWaveCount = 8U;
-  constexpr uint32_t kGqaRatio = GqaRatio;
-  constexpr uint32_t kQueryTile = 4U;
-  constexpr uint32_t kLogicalQueries = kGqaRatio * kQueryTile;
-  constexpr uint32_t kQueriesPerWave = kLogicalQueries / kWaveCount;
-  constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-  constexpr uint32_t kDimensionsPerLane = kHeadDim / kWaveSize;
-  static_assert(kGqaRatio == 4U || kGqaRatio == 6U);
-  static_assert(kLogicalQueries % kWaveCount == 0U);
-  const uint64_t flat = blockIdx.x;
-  const uint64_t tile = flat / kv_heads;
-  const uint32_t kv_head = static_cast<uint32_t>(flat % kv_heads);
-  const uint64_t first_row = tile * kQueryTile;
-  if (first_row >= query_count) {
+    const float static_key_scale, const float static_value_scale,
+    const float score_scale) {
+  const uint64_t flat = static_cast<uint64_t>(blockIdx.x);
+  if (flat >= static_cast<uint64_t>(query_count) * q_heads) {
     return;
   }
-  const uint32_t dimension = threadIdx.x;
-  const uint32_t lane = dimension & (kWaveSize - 1U);
-  const uint32_t wave = dimension / kWaveSize;
-  const uint32_t first_query_head = kv_head * kGqaRatio;
+  const uint64_t row = flat / q_heads;
+  const uint32_t query_head = static_cast<uint32_t>(flat % q_heads);
+  const uint64_t query_position = start_position + row;
+  if (query_position >= committed_kv_length) {
+    return;
+  }
+  const uint16_t *const query_row =
+      query + row * q_heads * head_dim +
+      static_cast<uint64_t>(query_head) * head_dim;
+  const uint32_t kv_head = query_head / (q_heads / kv_heads);
+  uint16_t *const output_row = output + row * q_heads * head_dim +
+                               static_cast<uint64_t>(query_head) * head_dim;
 
-  __shared__ float key_tile[kHeadDim];
-  __shared__ float value_tile[kHeadDim];
-  float query_values[kQueriesPerWave][kDimensionsPerLane];
-  float accumulations[kQueriesPerWave][kDimensionsPerLane] = {};
-  float running_maximum[kQueriesPerWave];
-  float running_denominator[kQueriesPerWave];
-#pragma unroll
-  for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-    running_maximum[item] = -std::numeric_limits<float>::infinity();
-    running_denominator[item] = 0.0F;
-    const uint32_t logical_query = wave * kQueriesPerWave + item;
-    const uint64_t row = first_row + logical_query / kGqaRatio;
-    const uint64_t safe_row =
-        row < query_count ? row : static_cast<uint64_t>(query_count - 1U);
-    const uint32_t query_head = first_query_head + logical_query % kGqaRatio;
-    const uint16_t *const query_row =
-        query +
-        (safe_row * q_heads + query_head) * static_cast<uint64_t>(head_dim);
-#pragma unroll
-    for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-      const uint32_t current = lane + index * kWaveSize;
-      query_values[item][index] = row < query_count && current < head_dim
-                                      ? bf16_to_f32(query_row[current])
-                                      : 0.0F;
+  const uint32_t dimension = threadIdx.x;
+  __shared__ float reductions[SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE];
+  __shared__ float rescale;
+  __shared__ float contribution;
+  __shared__ float running_maximum;
+  __shared__ float running_denominator;
+  __shared__ sllm_paged_kv::BlockDescriptor page;
+  __shared__ uint32_t page_valid;
+  if (dimension == 0U) {
+    running_maximum = -std::numeric_limits<float>::infinity();
+    running_denominator = 0.0F;
+  }
+  __syncthreads();
+
+  float accumulation0 = 0.0F;
+  float accumulation1 = 0.0F;
+  const uint64_t key_begin = 0U;
+  for (uint64_t key_position = key_begin; key_position <= query_position;
+       ++key_position) {
+    const uint64_t logical_page = key_position / 128U;
+    const uint32_t local_token = static_cast<uint32_t>(key_position % 128U);
+    if (dimension == 0U) {
+      const uint32_t physical_page = logical_page < logical_table_count
+                                         ? logical_table[logical_page]
+                                         : UINT32_MAX;
+      page_valid =
+          physical_page != UINT32_MAX && physical_page < descriptor_count ? 1U
+                                                                          : 0U;
+      if (page_valid != 0U) {
+        page = descriptor_table[physical_page];
+        page_valid = paged_descriptor_valid<Encoding>(page) ? 1U : 0U;
+      }
+      if (page_valid == 0U) {
+        atomicExch(device_status, 1U);
+      }
+    }
+    __syncthreads();
+    if (page_valid == 0U) {
+      return;
+    }
+    const uint64_t kv_row =
+        static_cast<uint64_t>(local_token) * kv_heads + kv_head;
+#if defined(__gfx1201__)
+    if constexpr (UseWaveProvider && Encoding == SLLM_HIP_KV_ENCODING_FP16_V1) {
+      float partial = 0.0F;
+      for (uint32_t current = dimension; current < head_dim;
+           current += blockDim.x) {
+        partial += bf16_to_f32(query_row[current]) *
+                   load_kv_specialized<Encoding>(
+                       page.key, page.key_scale,
+                       reinterpret_cast<const float *>(page.key_outer_scale),
+                       kv_row, current, head_dim, static_key_scale);
+      }
+      for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+        partial += __shfl_down(partial, offset, 32U);
+      }
+      const uint32_t lane = dimension & 31U;
+      const uint32_t wave = dimension >> 5U;
+      if (lane == 0U) {
+        reductions[wave] = partial;
+      }
+      __syncthreads();
+      if (wave == 0U) {
+        float block_sum = lane < 8U ? reductions[lane] : 0.0F;
+        for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+          block_sum += __shfl_down(block_sum, offset, 32U);
+        }
+        if (lane == 0U) {
+          const float current_score = block_sum * score_scale;
+          const float next_maximum = fmaxf(running_maximum, current_score);
+          rescale = expf(running_maximum - next_maximum);
+          contribution = expf(current_score - next_maximum);
+          running_denominator = running_denominator * rescale + contribution;
+          running_maximum = next_maximum;
+        }
+      }
+      __syncthreads();
+    } else
+#endif
+    {
+      reductions[dimension] = 0.0F;
+      for (uint32_t current = dimension; current < head_dim;
+           current += blockDim.x) {
+        reductions[dimension] +=
+            bf16_to_f32(query_row[current]) *
+            load_kv_specialized<Encoding>(
+                page.key, page.key_scale,
+                reinterpret_cast<const float *>(page.key_outer_scale), kv_row,
+                current, head_dim, static_key_scale);
+      }
+      __syncthreads();
+      for (uint32_t stride = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE / 2U;
+           stride != 0U; stride >>= 1U) {
+        if (dimension < stride) {
+          reductions[dimension] += reductions[dimension + stride];
+        }
+        __syncthreads();
+      }
+      if (dimension == 0U) {
+        const float current_score = reductions[0] * score_scale;
+        const float next_maximum = fmaxf(running_maximum, current_score);
+        rescale = expf(running_maximum - next_maximum);
+        contribution = expf(current_score - next_maximum);
+        running_denominator = running_denominator * rescale + contribution;
+        running_maximum = next_maximum;
+      }
+      __syncthreads();
+    }
+    if (dimension < head_dim) {
+      accumulation0 =
+          accumulation0 * rescale +
+          contribution *
+              load_kv_specialized<Encoding>(
+                  page.value, page.value_scale,
+                  reinterpret_cast<const float *>(page.value_outer_scale),
+                  kv_row, dimension, head_dim, static_value_scale);
+    }
+    const uint32_t second = dimension + blockDim.x;
+    if (second < head_dim) {
+      accumulation1 =
+          accumulation1 * rescale +
+          contribution *
+              load_kv_specialized<Encoding>(
+                  page.value, page.value_scale,
+                  reinterpret_cast<const float *>(page.value_outer_scale),
+                  kv_row, second, head_dim, static_value_scale);
+    }
+    __syncthreads();
+  }
+  if (dimension < head_dim) {
+    output_row[dimension] =
+        f32_to_bf16_rne(accumulation0 / running_denominator);
+  }
+  const uint32_t second = dimension + blockDim.x;
+  if (second < head_dim) {
+    output_row[second] = f32_to_bf16_rne(accumulation1 / running_denominator);
+  }
+}
+
+// Capture-stable FP16 paged decode. ControlV1 supplies the phase position and
+// active row count at replay time; all table and descriptor pointers remain
+// stable across graph execution.
+__global__
+__launch_bounds__(256, 1) void causal_attention_paged_fp16_device_kernel(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint32_t q_heads, const uint32_t kv_heads,
+    const uint32_t head_dim, sllm_decode_control::ControlV1 *const control) {
+  const uint64_t flat = static_cast<uint64_t>(blockIdx.x);
+  if (flat >= static_cast<uint64_t>(query_count) * q_heads || q_heads == 0U ||
+      kv_heads == 0U || q_heads % kv_heads != 0U) {
+    return;
+  }
+  const uint64_t row = flat / q_heads;
+  const uint32_t query_head = static_cast<uint32_t>(flat % q_heads);
+  uint64_t effective_start = 0U;
+  uint32_t phase_rows = query_count;
+  if (!decode_control_phase(control, static_cast<uint32_t>(row), query_count,
+                            &effective_start, &phase_rows)) {
+    return;
+  }
+  if (effective_start > UINT64_MAX - static_cast<uint64_t>(row)) {
+    mark_paged_attention_invalid(device_status, control);
+    return;
+  }
+  const uint64_t query_position = effective_start + row;
+  const uint64_t committed_length = effective_start + phase_rows;
+  if (query_position >= committed_length) {
+    return;
+  }
+  const uint16_t *const query_row =
+      query + row * q_heads * head_dim +
+      static_cast<uint64_t>(query_head) * head_dim;
+  const uint32_t kv_head = query_head / (q_heads / kv_heads);
+  uint16_t *const output_row = output + row * q_heads * head_dim +
+                               static_cast<uint64_t>(query_head) * head_dim;
+  const uint32_t dimension = threadIdx.x;
+  __shared__ float reductions[SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE];
+  __shared__ float rescale;
+  __shared__ float contribution;
+  __shared__ float running_maximum;
+  __shared__ float running_denominator;
+  __shared__ sllm_paged_kv::BlockDescriptor page;
+  __shared__ uint32_t page_valid;
+  if (dimension == 0U) {
+    running_maximum = -std::numeric_limits<float>::infinity();
+    running_denominator = 0.0F;
+  }
+  __syncthreads();
+  float accumulation0 = 0.0F;
+  float accumulation1 = 0.0F;
+  for (uint64_t key_position = 0U;; ++key_position) {
+    if (key_position > query_position)
+      break;
+    const uint64_t logical_page = key_position / 128U;
+    const uint32_t local_token = static_cast<uint32_t>(key_position % 128U);
+    if (dimension == 0U) {
+      const uint32_t physical_page = logical_page < logical_table_count
+                                         ? logical_table[logical_page]
+                                         : UINT32_MAX;
+      page_valid =
+          physical_page != UINT32_MAX && physical_page < descriptor_count ? 1U
+                                                                          : 0U;
+      if (page_valid != 0U) {
+        page = descriptor_table[physical_page];
+        page_valid = page.key != nullptr && page.value != nullptr ? 1U : 0U;
+      }
+      if (page_valid == 0U)
+        mark_paged_attention_invalid(device_status, control);
+    }
+    __syncthreads();
+    if (page_valid == 0U)
+      return;
+    const uint64_t kv_row = static_cast<uint64_t>(local_token) * kv_heads +
+                            static_cast<uint64_t>(kv_head);
+    reductions[dimension] = 0.0F;
+    for (uint32_t current = dimension; current < head_dim;
+         current += blockDim.x) {
+      reductions[dimension] +=
+          bf16_to_f32(query_row[current]) *
+          load_kv_specialized<SLLM_HIP_KV_ENCODING_FP16_V1>(
+              page.key, nullptr, nullptr, kv_row, current, head_dim, 1.0F);
+    }
+    __syncthreads();
+    for (uint32_t stride = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE / 2U;
+         stride != 0U; stride >>= 1U) {
+      if (dimension < stride)
+        reductions[dimension] += reductions[dimension + stride];
+      __syncthreads();
+    }
+    if (dimension == 0U) {
+      const float current_score =
+          reductions[0] * rsqrtf(static_cast<float>(head_dim));
+      const float next_maximum = fmaxf(running_maximum, current_score);
+      rescale = expf(running_maximum - next_maximum);
+      contribution = expf(current_score - next_maximum);
+      running_denominator = running_denominator * rescale + contribution;
+      running_maximum = next_maximum;
+    }
+    __syncthreads();
+    if (dimension < head_dim) {
+      accumulation0 =
+          accumulation0 * rescale +
+          contribution * load_kv_specialized<SLLM_HIP_KV_ENCODING_FP16_V1>(
+                             page.value, nullptr, nullptr, kv_row, dimension,
+                             head_dim, 1.0F);
+    }
+    const uint32_t second = dimension + blockDim.x;
+    if (second < head_dim) {
+      accumulation1 =
+          accumulation1 * rescale +
+          contribution *
+              load_kv_specialized<SLLM_HIP_KV_ENCODING_FP16_V1>(
+                  page.value, nullptr, nullptr, kv_row, second, head_dim, 1.0F);
+    }
+    __syncthreads();
+    if (key_position == query_position)
+      break;
+  }
+  if (dimension < head_dim)
+    output_row[dimension] =
+        f32_to_bf16_rne(accumulation0 / running_denominator);
+  const uint32_t second = dimension + blockDim.x;
+  if (second < head_dim)
+    output_row[second] = f32_to_bf16_rne(accumulation1 / running_denominator);
+}
+
+// Static FP8 attention for the nine-slot absolute ring.  The ordinary
+// paged kernel indexes a monotonically growing logical table; this variant
+// resolves every key through the absolute block tag before touching the
+// descriptor.  `retained_start` is supplied by the host ring state and is
+// applied together with the fixed 1024-token causal window.
+__global__
+__launch_bounds__(256, 1) void causal_attention_paged_sliding_static_fp8_ring_kernel(
+    const uint16_t *const query, const uint32_t *const ring_table,
+    const uint64_t *const ring_tags,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t ring_slot_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint64_t retained_start,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    const float static_key_scale, const float static_value_scale,
+    const float score_scale) {
+  const uint64_t flat = static_cast<uint64_t>(blockIdx.x);
+  if (flat >= static_cast<uint64_t>(query_count) * q_heads) {
+    return;
+  }
+  const uint64_t row = flat / q_heads;
+  const uint32_t query_head = static_cast<uint32_t>(flat % q_heads);
+  const uint64_t query_position = start_position + row;
+  if (query_position >= committed_kv_length) {
+    return;
+  }
+  const uint16_t *const query_row =
+      query + row * q_heads * head_dim +
+      static_cast<uint64_t>(query_head) * head_dim;
+  const uint32_t kv_head = query_head / (q_heads / kv_heads);
+  uint16_t *const output_row = output + row * q_heads * head_dim +
+                               static_cast<uint64_t>(query_head) * head_dim;
+
+  const uint32_t dimension = threadIdx.x;
+  __shared__ float reductions[SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE];
+  __shared__ float rescale;
+  __shared__ float contribution;
+  __shared__ float running_maximum;
+  __shared__ float running_denominator;
+  __shared__ sllm_paged_kv::BlockDescriptor page;
+  __shared__ uint32_t page_valid;
+  if (dimension == 0U) {
+    running_maximum = -std::numeric_limits<float>::infinity();
+    running_denominator = 0.0F;
+  }
+  __syncthreads();
+
+  float accumulation0 = 0.0F;
+  float accumulation1 = 0.0F;
+  const uint64_t lower_by_window =
+      query_position + 1U > kPagedSlidingWindowTokens
+          ? query_position + 1U - kPagedSlidingWindowTokens
+          : 0U;
+  const uint64_t key_begin =
+      retained_start > lower_by_window ? retained_start : lower_by_window;
+  if (key_begin > query_position || ring_slot_count != kPagedSlidingRingSlots) {
+    if (dimension == 0U) {
+      atomicExch(device_status, 1U);
+    }
+    return;
+  }
+  for (uint64_t key_position = key_begin;; ++key_position) {
+    const uint64_t absolute_block = key_position / 128U;
+    const uint32_t ring_slot = static_cast<uint32_t>(
+        absolute_block % static_cast<uint64_t>(ring_slot_count));
+    if (dimension == 0U) {
+      page_valid = ring_tags[ring_slot] == absolute_block ? 1U : 0U;
+      if (page_valid != 0U) {
+        const uint32_t physical_block = ring_table[ring_slot];
+        page_valid = physical_block < descriptor_count ? 1U : 0U;
+        if (page_valid != 0U) {
+          page = descriptor_table[physical_block];
+          page_valid = page.key != nullptr && page.value != nullptr ? 1U : 0U;
+        }
+      }
+      if (page_valid == 0U) {
+        atomicExch(device_status, 1U);
+      }
+    }
+    __syncthreads();
+    if (page_valid == 0U) {
+      return;
+    }
+    const uint32_t local_token = static_cast<uint32_t>(key_position % 128U);
+    const uint64_t kv_row = static_cast<uint64_t>(local_token) * kv_heads +
+                            static_cast<uint64_t>(kv_head);
+    reductions[dimension] = 0.0F;
+    for (uint32_t current = dimension; current < head_dim;
+         current += blockDim.x) {
+      reductions[dimension] +=
+          bf16_to_f32(query_row[current]) *
+          load_kv_specialized<SLLM_HIP_KV_ENCODING_FP8_STATIC_V1>(
+              page.key, nullptr, nullptr, kv_row, current, head_dim,
+              static_key_scale);
+    }
+    __syncthreads();
+    for (uint32_t stride = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE / 2U;
+         stride != 0U; stride >>= 1U) {
+      if (dimension < stride) {
+        reductions[dimension] += reductions[dimension + stride];
+      }
+      __syncthreads();
+    }
+    if (dimension == 0U) {
+      const float current_score = reductions[0] * score_scale;
+      const float next_maximum = fmaxf(running_maximum, current_score);
+      rescale = expf(running_maximum - next_maximum);
+      contribution = expf(current_score - next_maximum);
+      running_denominator = running_denominator * rescale + contribution;
+      running_maximum = next_maximum;
+    }
+    __syncthreads();
+    if (dimension < head_dim) {
+      accumulation0 =
+          accumulation0 * rescale +
+          contribution *
+              load_kv_specialized<SLLM_HIP_KV_ENCODING_FP8_STATIC_V1>(
+                  page.value, nullptr, nullptr, kv_row, dimension, head_dim,
+                  static_value_scale);
+    }
+    const uint32_t second = dimension + blockDim.x;
+    if (second < head_dim) {
+      accumulation1 =
+          accumulation1 * rescale +
+          contribution *
+              load_kv_specialized<SLLM_HIP_KV_ENCODING_FP8_STATIC_V1>(
+                  page.value, nullptr, nullptr, kv_row, second, head_dim,
+                  static_value_scale);
+    }
+    __syncthreads();
+    if (key_position == query_position) {
+      break;
+    }
+  }
+  if (dimension < head_dim) {
+    output_row[dimension] =
+        f32_to_bf16_rne(accumulation0 / running_denominator);
+  }
+  const uint32_t second = dimension + blockDim.x;
+  if (second < head_dim) {
+    output_row[second] = f32_to_bf16_rne(accumulation1 / running_denominator);
+  }
+}
+
+// Phase 87 Stage10 production paged decode.  This is the WU-P1 GQA-shared
+// stage-1 arithmetic with only the physical-row lookup changed to a fixed
+// descriptor table.  The existing split merge kernel is deliberately reused
+// so the workspace layout and reduction order stay identical to the contiguous
+// control path.
+template <uint32_t kSplits, uint32_t kWorkspaceSplits = kSplits,
+          bool DeviceControl = false>
+__global__
+__launch_bounds__(192, 1) void causal_attention_paged_decode_gqa6_stage1_kernel(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, float *const workspace,
+    const uint32_t query_count, const uint64_t start_position,
+    sllm_decode_control::ControlV1 *const control) {
+  constexpr uint32_t kWaveSize = 32U;
+  constexpr uint32_t kWaveCount = 6U;
+  constexpr uint32_t kKvHeads = 4U;
+  constexpr uint32_t kQHeads = 24U;
+  constexpr uint32_t kGqaRatio = 6U;
+  constexpr uint32_t kHeadDim = 256U;
+  constexpr uint32_t kKeyTile = 8U;
+  constexpr uint32_t kWorkspaceStride = kHeadDim + 2U;
+  constexpr uint32_t kElementsPerLane = kHeadDim / kWaveSize;
+  static_assert(kSplits == 32U || kSplits == 128U);
+#if defined(__gfx1030__)
+  constexpr bool kUseFusedE4Decode = true;
+#else
+  constexpr bool kUseFusedE4Decode = false;
+#endif
+
+  const uint32_t block = static_cast<uint32_t>(blockIdx.x);
+  const uint32_t split = block % kSplits;
+  const uint32_t kv_head = (block / kSplits) % kKvHeads;
+  const uint32_t query_index = block / (kKvHeads * kSplits);
+  const uint32_t wave = threadIdx.x / kWaveSize;
+  const uint32_t lane = threadIdx.x & (kWaveSize - 1U);
+  const uint32_t query_head = kv_head * kGqaRatio + wave;
+  if (query_index >= query_count || query_head >= kQHeads ||
+      wave >= kWaveCount) {
+    return;
+  }
+
+  uint64_t effective_start_position = start_position;
+  if constexpr (DeviceControl) {
+    uint32_t control_rows = query_count;
+    if (!decode_control_phase(control, query_index, query_count,
+                              &effective_start_position, &control_rows) ||
+        decode_control_split_count(control, kSplits) != kSplits) {
+      return;
+    }
+    if (effective_start_position >
+        UINT64_MAX - static_cast<uint64_t>(query_index) - 1U) {
+      mark_paged_attention_invalid(device_status, control);
+      return;
     }
   }
 
-  const uint64_t tile_end = first_row + kQueryTile;
-  const uint64_t last_row =
-      (tile_end < query_count ? tile_end : query_count) - 1U;
-  const uint64_t last_query_position = start_position + last_row;
-  for (uint64_t key_position = 0U; key_position <= last_query_position;
-       ++key_position) {
-    const uint64_t kv_row = key_position * kv_heads + kv_head;
-    if (dimension < head_dim) {
-      key_tile[dimension] =
-          load_kv_qtile4<Encoding>(key, key_scales, key_outer_scales, kv_row,
-                                   dimension, head_dim, static_key_scale);
-      value_tile[dimension] = load_kv_qtile4<Encoding>(
-          value, value_scales, value_outer_scales, kv_row, dimension, head_dim,
-          static_value_scale);
+  const uint64_t committed_kv_length =
+      effective_start_position + static_cast<uint64_t>(query_index) + 1U;
+  const uint64_t split_begin =
+      committed_kv_length * static_cast<uint64_t>(split) / kSplits;
+  const uint64_t split_end =
+      committed_kv_length * static_cast<uint64_t>(split + 1U) / kSplits;
+  const uint16_t *const query_row =
+      query +
+      (static_cast<uint64_t>(query_index) * kQHeads + query_head) * kHeadDim;
+  const uint64_t workspace_base =
+      ((static_cast<uint64_t>(query_index) * kQHeads + query_head) *
+           kWorkspaceSplits +
+       split) *
+      kWorkspaceStride;
+  float *const partial = workspace + workspace_base;
+
+  float query_values[kElementsPerLane];
+  float accumulations[kElementsPerLane] = {};
+#pragma unroll
+  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+    query_values[index] = bf16_to_f32(query_row[lane + index * kWaveSize]);
+  }
+  if (split_begin >= split_end) {
+    for (uint32_t index = lane; index < kHeadDim; index += kWaveSize) {
+      partial[2U + index] = 0.0F;
+    }
+    if (lane == 0U) {
+      partial[0] = -std::numeric_limits<float>::infinity();
+      partial[1] = 0.0F;
+    }
+    return;
+  }
+
+  float local_maximum = -std::numeric_limits<float>::infinity();
+  float local_denominator = 0.0F;
+  __shared__ float key_tile[kKeyTile][kHeadDim];
+  __shared__ float value_tile[kKeyTile][kHeadDim];
+  __shared__ sllm_paged_kv::BlockDescriptor page;
+  __shared__ uint32_t page_valid;
+  const uint64_t first_page = split_begin / 128U;
+  const uint64_t page_count = (split_end - 1U) / 128U + 1U;
+  for (uint64_t logical_page = first_page; logical_page < page_count;
+       ++logical_page) {
+    if (threadIdx.x == 0U) {
+      const uint32_t physical_page = logical_page < logical_table_count
+                                         ? logical_table[logical_page]
+                                         : UINT32_MAX;
+      page_valid =
+          physical_page != UINT32_MAX && physical_page < descriptor_count ? 1U
+                                                                          : 0U;
+      if (page_valid != 0U) {
+        page = descriptor_table[physical_page];
+        page_valid = page.key != nullptr && page.value != nullptr &&
+                             page.key_scale != nullptr &&
+                             page.value_scale != nullptr
+                         ? 1U
+                         : 0U;
+      }
+      if (page_valid == 0U) {
+        if constexpr (DeviceControl) {
+          mark_paged_attention_invalid(device_status, control);
+        } else {
+          atomicExch(device_status, 1U);
+        }
+      }
     }
     __syncthreads();
+    if (page_valid == 0U) {
+      return;
+    }
+    const uint64_t page_begin = logical_page * 128U;
+    const uint64_t segment_begin =
+        split_begin > page_begin ? split_begin : page_begin;
+    const uint64_t page_end =
+        page_begin > UINT64_MAX - 128U ? UINT64_MAX : page_begin + 128U;
+    const uint64_t segment_end = split_end < page_end ? split_end : page_end;
+    for (uint64_t tile_begin = segment_begin; tile_begin < segment_end;
+         tile_begin += kKeyTile) {
+      const uint64_t remaining = segment_end - tile_begin;
+      const uint32_t tile_count =
+          remaining < kKeyTile ? static_cast<uint32_t>(remaining) : kKeyTile;
+      for (uint32_t element = threadIdx.x; element < kKeyTile * 2U * kHeadDim;
+           element += blockDim.x) {
+        const uint32_t key_index = element / (2U * kHeadDim);
+        const uint32_t plane_dimension = element % (2U * kHeadDim);
+        if (key_index < tile_count) {
+          const uint64_t local_token =
+              tile_begin + static_cast<uint64_t>(key_index) - page_begin;
+          const uint64_t kv_row = local_token * kKvHeads + kv_head;
+          if (plane_dimension < kHeadDim) {
+            key_tile[key_index][plane_dimension] =
+                load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                               kUseFusedE4Decode>(
+                    page.key, page.key_scale, nullptr, kv_row, plane_dimension,
+                    kHeadDim, 1.0F);
+          } else {
+            const uint32_t dimension = plane_dimension - kHeadDim;
+            value_tile[key_index][dimension] =
+                load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                               kUseFusedE4Decode>(page.value, page.value_scale,
+                                                  nullptr, kv_row, dimension,
+                                                  kHeadDim, 1.0F);
+          }
+        }
+      }
+      __syncthreads();
+      for (uint32_t key_index = 0U; key_index < tile_count; ++key_index) {
+        accumulate_mxfp8_e4_decode_key<kElementsPerLane>(
+            query_values, key_tile, value_tile, key_index, lane, accumulations,
+            &local_maximum, &local_denominator);
+      }
+      __syncthreads();
+    }
+  }
+
+  if (lane == 0U) {
+    partial[0] = local_maximum;
+    partial[1] = local_denominator;
+  }
+#pragma unroll
+  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+    const uint32_t current = lane + index * kWaveSize;
+    partial[2U + current] = accumulations[index];
+  }
+}
+
+// Stage 11 C1 candidate: group two or three adjacent query rows under one
+// block. The K/V tile is loaded once, then each row keeps its own QK,
+// online-softmax, and value accumulation state. Workspace layout and the
+// existing stage-2 merge are unchanged so the control remains bitwise.
+template <uint32_t kRowsPerGroup, uint32_t kSplits,
+          uint32_t kWorkspaceSplits = kSplits, bool DeviceControl = false>
+__global__
+__launch_bounds__(192, 1) void causal_attention_paged_decode_gqa6_c1_stage1_kernel(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, float *const workspace,
+    const uint32_t query_count, const uint64_t start_position,
+    sllm_decode_control::ControlV1 *const control) {
+  static_assert(kRowsPerGroup == 2U || kRowsPerGroup == 3U);
+  static_assert(kSplits == 32U || kSplits == 128U);
+  static_assert(kWorkspaceSplits >= kSplits);
+  constexpr uint32_t kWaveSize = 32U;
+  constexpr uint32_t kWaveCount = 6U;
+  constexpr uint32_t kKvHeads = 4U;
+  constexpr uint32_t kQHeads = 24U;
+  constexpr uint32_t kGqaRatio = 6U;
+  constexpr uint32_t kHeadDim = 256U;
+  constexpr uint32_t kKeyTile = 8U;
+  constexpr uint32_t kElementsPerLane = kHeadDim / kWaveSize;
+  constexpr uint32_t kWorkspaceStride = kHeadDim + 2U;
+#if defined(__gfx1030__)
+  constexpr bool kUseFusedE4Decode = true;
+#else
+  constexpr bool kUseFusedE4Decode = false;
+#endif
+
+  const uint32_t block = static_cast<uint32_t>(blockIdx.x);
+  const uint32_t groups = (query_count + kRowsPerGroup - 1U) / kRowsPerGroup;
+  const uint32_t group = block / (kKvHeads * kSplits);
+  const uint32_t remainder = block % (kKvHeads * kSplits);
+  const uint32_t split = remainder % kSplits;
+  const uint32_t kv_head = remainder / kSplits;
+  const uint32_t wave = threadIdx.x / kWaveSize;
+  const uint32_t lane = threadIdx.x & (kWaveSize - 1U);
+  const uint32_t query_head = kv_head * kGqaRatio + wave;
+  if (group >= groups || kv_head >= kKvHeads || wave >= kWaveCount) {
+    return;
+  }
+
+  uint64_t effective_start_position = start_position;
+  uint32_t phase_rows = query_count;
+  if constexpr (DeviceControl) {
+    if (!decode_control_phase(control, group * kRowsPerGroup, query_count,
+                              &effective_start_position, &phase_rows) ||
+        decode_control_split_count(control, kSplits) != kSplits) {
+      return;
+    }
+  }
+  const uint32_t group_begin = group * kRowsPerGroup;
+  if (group_begin >= query_count || group_begin >= phase_rows) {
+    return;
+  }
+  const uint32_t active_rows = min(
+      kRowsPerGroup, min(query_count - group_begin, phase_rows - group_begin));
+
+  // ControlV1 can change the effective position after the host launcher has
+  // validated its ordinary arguments.  Check the extra +1 used for the
+  // committed length before any row arithmetic so a replay cannot wrap to a
+  // small KV range.  All threads take the same fail-closed path.
+  bool valid_position = true;
+#pragma unroll
+  for (uint32_t row = 0U; row < kRowsPerGroup; ++row) {
+    const uint32_t query_index = group_begin + row;
+    if (row < active_rows &&
+        effective_start_position >
+            UINT64_MAX - static_cast<uint64_t>(query_index) - 1U) {
+      valid_position = false;
+    }
+  }
+  if (!valid_position) {
+    if (threadIdx.x == 0U) {
+      mark_paged_attention_invalid(device_status,
+                                   DeviceControl ? control : nullptr);
+    }
+    return;
+  }
+
+  uint64_t row_begin[kRowsPerGroup];
+  uint64_t row_end[kRowsPerGroup];
+  float query_values[kRowsPerGroup][kElementsPerLane];
+  float accumulations[kRowsPerGroup][kElementsPerLane] = {};
+  float running_maximum[kRowsPerGroup];
+  float running_denominator[kRowsPerGroup];
+#pragma unroll
+  for (uint32_t row = 0U; row < kRowsPerGroup; ++row) {
+    running_maximum[row] = -std::numeric_limits<float>::infinity();
+    running_denominator[row] = 0.0F;
+    const uint32_t query_index = group_begin + row;
+    const uint32_t safe_query_index = row < active_rows ? query_index : 0U;
+    const uint64_t query_position =
+        effective_start_position + static_cast<uint64_t>(query_index);
+    const uint64_t committed = query_position + 1U;
+    row_begin[row] = committed * static_cast<uint64_t>(split) / kSplits;
+    row_end[row] = committed * static_cast<uint64_t>(split + 1U) / kSplits;
+    const uint16_t *const query_row =
+        query +
+        (static_cast<uint64_t>(safe_query_index) * kQHeads + query_head) *
+            kHeadDim;
+#pragma unroll
+    for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+      const uint32_t current = lane + index * kWaveSize;
+      query_values[row][index] =
+          row < active_rows ? bf16_to_f32(query_row[current]) : 0.0F;
+    }
+  }
+
+  const uint64_t union_begin = row_begin[0];
+  const uint64_t union_end = row_end[active_rows - 1U];
+  __shared__ float key_tile[kKeyTile][kHeadDim];
+  __shared__ float value_tile[kKeyTile][kHeadDim];
+  __shared__ sllm_paged_kv::BlockDescriptor page;
+  __shared__ uint32_t page_valid;
+  for (uint64_t page_begin = (union_begin / 128U) * 128U;
+       page_begin < union_end; page_begin += 128U) {
+    if (threadIdx.x == 0U) {
+      const uint64_t logical_page = page_begin / 128U;
+      const uint32_t physical = logical_page < logical_table_count
+                                    ? logical_table[logical_page]
+                                    : UINT32_MAX;
+      page_valid = physical != UINT32_MAX && physical < descriptor_count;
+      if (page_valid != 0U) {
+        page = descriptor_table[physical];
+        page_valid = page.key != nullptr && page.value != nullptr &&
+                             page.key_scale != nullptr &&
+                             page.value_scale != nullptr
+                         ? 1U
+                         : 0U;
+      }
+      if (page_valid == 0U) {
+        mark_paged_attention_invalid(device_status,
+                                     DeviceControl ? control : nullptr);
+      }
+    }
+    __syncthreads();
+    if (page_valid == 0U) {
+      return;
+    }
+    const uint64_t page_end =
+        min(union_end, page_begin + static_cast<uint64_t>(128U));
+    for (uint64_t tile_begin = max(union_begin, page_begin);
+         tile_begin < page_end; tile_begin += kKeyTile) {
+      const uint32_t tile_count = static_cast<uint32_t>(
+          min(page_end - tile_begin, static_cast<uint64_t>(kKeyTile)));
+      for (uint32_t element = threadIdx.x; element < kKeyTile * 2U * kHeadDim;
+           element += blockDim.x) {
+        const uint32_t key_index = element / (2U * kHeadDim);
+        const uint32_t plane_dimension = element % (2U * kHeadDim);
+        if (key_index < tile_count) {
+          const uint64_t local_token = tile_begin + key_index - page_begin;
+          const uint64_t kv_row = local_token * kKvHeads + kv_head;
+          if (plane_dimension < kHeadDim) {
+            key_tile[key_index][plane_dimension] =
+                load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                               kUseFusedE4Decode>(
+                    page.key, page.key_scale, nullptr, kv_row, plane_dimension,
+                    kHeadDim, 1.0F);
+          } else {
+            const uint32_t dimension = plane_dimension - kHeadDim;
+            value_tile[key_index][dimension] =
+                load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                               kUseFusedE4Decode>(page.value, page.value_scale,
+                                                  nullptr, kv_row, dimension,
+                                                  kHeadDim, 1.0F);
+          }
+        }
+      }
+      __syncthreads();
 
 #pragma unroll
-    for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-      const uint32_t logical_query = wave * kQueriesPerWave + item;
-      const uint64_t row = first_row + logical_query / kGqaRatio;
-      const bool active =
-          row < query_count && key_position <= start_position + row;
-      float products[kDimensionsPerLane];
-#pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        const uint32_t current = lane + index * kWaveSize;
-        products[index] = active && current < head_dim
-                              ? query_values[item][index] * key_tile[current]
-                              : 0.0F;
+      for (uint32_t row = 0U; row < kRowsPerGroup; ++row) {
+        if (row >= active_rows) {
+          continue;
+        }
+        for (uint32_t key_index = 0U; key_index < tile_count; ++key_index) {
+          const uint64_t key_position = tile_begin + key_index;
+          if (key_position < row_begin[row] || key_position >= row_end[row]) {
+            continue;
+          }
+          accumulate_mxfp8_e4_decode_key<kElementsPerLane>(
+              query_values[row], key_tile, value_tile, key_index, lane,
+              accumulations[row], &running_maximum[row],
+              &running_denominator[row]);
+        }
       }
-      const float pair0 = products[0] + products[1];
-      const float pair1 = products[2] + products[3];
-      const float pair2 = products[4] + products[5];
-      const float pair3 = products[6] + products[7];
-      float partial = (pair0 + pair1) + (pair2 + pair3);
+      __syncthreads();
+    }
+  }
+
+#pragma unroll
+  for (uint32_t row = 0U; row < kRowsPerGroup; ++row) {
+    if (row >= active_rows) {
+      continue;
+    }
+    const uint32_t query_index = group_begin + row;
+    const uint64_t base =
+        (static_cast<uint64_t>(query_index) * kQHeads + query_head) *
+            kWorkspaceSplits * kWorkspaceStride +
+        static_cast<uint64_t>(split) * kWorkspaceStride;
+    if (lane == 0U) {
+      workspace[base] = running_maximum[row];
+      workspace[base + 1U] = running_denominator[row];
+    }
+#pragma unroll
+    for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+      const uint32_t current = lane + index * kWaveSize;
+      workspace[base + 2U + current] = accumulations[row][index];
+    }
+  }
+}
+
+// gfx1201 uses one wave per (query head, split), matching the reviewed WU-P1
+// wave-split provider. Keeping this as a separate kernel avoids changing the
+// register/LDS contract of the gfx1030 GQA-shared path.
+template <uint32_t kSplits, uint32_t kWorkspaceSplits = kSplits,
+          bool DeviceControl = false>
+__global__
+__launch_bounds__(32, 1) void causal_attention_paged_decode_wave_split_stage1_kernel(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, float *const workspace,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    sllm_decode_control::ControlV1 *const control) {
+  constexpr uint32_t kWaveSize = 32U;
+  constexpr uint32_t kHeadDim = 256U;
+  constexpr uint32_t kElementsPerLane = kHeadDim / kWaveSize;
+  const uint64_t flat = static_cast<uint64_t>(blockIdx.x);
+  const uint64_t blocks_per_query = static_cast<uint64_t>(q_heads) * kSplits;
+  const uint32_t query_index = static_cast<uint32_t>(flat / blocks_per_query);
+  const uint32_t query_head =
+      static_cast<uint32_t>((flat % blocks_per_query) / kSplits);
+  const uint32_t split = static_cast<uint32_t>(flat % kSplits);
+  if (query_index >= query_count || query_head >= q_heads || q_heads != 24U ||
+      kv_heads != 4U || head_dim != kHeadDim) {
+    return;
+  }
+  uint64_t effective_start_position = start_position;
+  if constexpr (DeviceControl) {
+    uint32_t control_rows = query_count;
+    if (!decode_control_phase(control, query_index, query_count,
+                              &effective_start_position, &control_rows) ||
+        decode_control_split_count(control, kSplits) != kSplits) {
+      return;
+    }
+    if (effective_start_position >
+        UINT64_MAX - static_cast<uint64_t>(query_index) - 1U) {
+      mark_paged_attention_invalid(device_status, control);
+      return;
+    }
+  }
+  const uint32_t lane = threadIdx.x & (kWaveSize - 1U);
+  const uint32_t kv_head = query_head / (q_heads / kv_heads);
+  const uint16_t *const query_row =
+      query +
+      (static_cast<uint64_t>(query_index) * q_heads + query_head) * head_dim;
+  const uint64_t committed_kv_length =
+      effective_start_position + static_cast<uint64_t>(query_index) + 1U;
+  const uint64_t split_begin =
+      committed_kv_length * static_cast<uint64_t>(split) / kSplits;
+  const uint64_t split_end =
+      committed_kv_length * static_cast<uint64_t>(split + 1U) / kSplits;
+  const uint64_t base =
+      ((static_cast<uint64_t>(query_index) * q_heads + query_head) *
+           kWorkspaceSplits +
+       split) *
+      (kHeadDim + 2U);
+
+  float accumulations[kElementsPerLane] = {};
+  float query_values[kElementsPerLane];
+#pragma unroll
+  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+    const uint32_t current = lane + index * kWaveSize;
+    query_values[index] = bf16_to_f32(query_row[current]);
+  }
+  if (split_begin >= split_end) {
+    for (uint32_t index = lane; index < head_dim; index += kWaveSize) {
+      workspace[base + 2U + index] = 0.0F;
+    }
+    if (lane == 0U) {
+      workspace[base] = -std::numeric_limits<float>::infinity();
+      workspace[base + 1U] = 0.0F;
+    }
+    return;
+  }
+
+  float local_maximum = -std::numeric_limits<float>::infinity();
+  float local_denominator = 0.0F;
+  __shared__ sllm_paged_kv::BlockDescriptor page;
+  __shared__ uint32_t page_valid;
+  const uint64_t first_page = split_begin / 128U;
+  const uint64_t page_count = (split_end - 1U) / 128U + 1U;
+  for (uint64_t logical_page = first_page; logical_page < page_count;
+       ++logical_page) {
+    if (lane == 0U) {
+      const uint32_t physical_page = logical_page < logical_table_count
+                                         ? logical_table[logical_page]
+                                         : UINT32_MAX;
+      page_valid =
+          physical_page != UINT32_MAX && physical_page < descriptor_count ? 1U
+                                                                          : 0U;
+      if (page_valid != 0U) {
+        page = descriptor_table[physical_page];
+        page_valid = page.key != nullptr && page.value != nullptr &&
+                             page.key_scale != nullptr &&
+                             page.value_scale != nullptr
+                         ? 1U
+                         : 0U;
+      }
+      if (page_valid == 0U) {
+        if constexpr (DeviceControl) {
+          mark_paged_attention_invalid(device_status, control);
+        } else {
+          atomicExch(device_status, 1U);
+        }
+      }
+    }
+    __syncthreads();
+    if (page_valid == 0U) {
+      return;
+    }
+    const uint64_t page_begin = logical_page * 128U;
+    const uint64_t segment_begin =
+        split_begin > page_begin ? split_begin : page_begin;
+    const uint64_t page_end =
+        page_begin > UINT64_MAX - 128U ? UINT64_MAX : page_begin + 128U;
+    const uint64_t segment_end = split_end < page_end ? split_end : page_end;
+    for (uint64_t key_position = segment_begin; key_position < segment_end;
+         ++key_position) {
+      const uint64_t local_token = key_position - page_begin;
+      const uint64_t kv_row = local_token * kv_heads + kv_head;
+      float partial = 0.0F;
+#pragma unroll
+      for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+        const uint32_t current = lane + index * kWaveSize;
+        partial += query_values[index] *
+                   load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, false>(
+                       page.key, page.key_scale, nullptr, kv_row, current,
+                       head_dim, 1.0F);
+      }
       for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
         partial += __shfl_down(partial, offset, kWaveSize);
       }
-      float rescale = 1.0F;
+      float rescale = 0.0F;
       float contribution = 0.0F;
-      float next_maximum = running_maximum[item];
       if (lane == 0U) {
-        if (active) {
-          const float current_score =
-              partial * rsqrtf(static_cast<float>(head_dim));
-          next_maximum = fmaxf(running_maximum[item], current_score);
-          rescale = expf(running_maximum[item] - next_maximum);
-          contribution = expf(current_score - next_maximum);
-        }
+        const float current_score =
+            partial * rsqrtf(static_cast<float>(head_dim));
+        const float next_maximum = fmaxf(local_maximum, current_score);
+        rescale = expf(local_maximum - next_maximum);
+        contribution = expf(current_score - next_maximum);
+        local_denominator = local_denominator * rescale + contribution;
+        local_maximum = next_maximum;
       }
       rescale = __shfl(rescale, 0U, kWaveSize);
       contribution = __shfl(contribution, 0U, kWaveSize);
-      next_maximum = __shfl(next_maximum, 0U, kWaveSize);
+#pragma unroll
+      for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+        const uint32_t current = lane + index * kWaveSize;
+        accumulations[index] =
+            accumulations[index] * rescale +
+            contribution *
+                load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, false>(
+                    page.value, page.value_scale, nullptr, kv_row, current,
+                    head_dim, 1.0F);
+      }
+    }
+  }
+  if (lane == 0U) {
+    workspace[base] = local_maximum;
+    workspace[base + 1U] = local_denominator;
+  }
+#pragma unroll
+  for (uint32_t index = 0U; index < kElementsPerLane; ++index) {
+    const uint32_t current = lane + index * kWaveSize;
+    workspace[base + 2U + current] = accumulations[index];
+  }
+}
+
+// The long-prefill counterpart keeps the qtile8/w16 query, reduction, and
+// online-softmax order of the contiguous provider. A descriptor is loaded
+// once for each logical 128-token page; the six plane pointers are then used
+// for all rows in that page. This is deliberately an exact MXFP8-E4/GQA6
+// provider, rather than a new generic attention selector.
+// gfx1201's contiguous MXFP8 provider uses one 256-thread block per
+// (query-row, query-head) and the wave-provider reduction in
+// causal_attention_kernel<true>. Keep that arithmetic for Paged prefill and
+// change only the K/V row lookup through the logical page table. This avoids
+// changing BF16 rounding at a Qwen prompt boundary while gfx1030 retains the
+// measured qtile8 path below.
+__global__
+__launch_bounds__(256, 1) void causal_attention_paged_prefill_gfx1201_wave_kernel(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    const float score_scale) {
+  const uint64_t flat = static_cast<uint64_t>(blockIdx.x);
+  if (flat >= static_cast<uint64_t>(query_count) * q_heads || q_heads != 24U ||
+      kv_heads != 4U || head_dim != 256U) {
+    return;
+  }
+  const uint64_t row = flat / q_heads;
+  const uint32_t query_head = static_cast<uint32_t>(flat % q_heads);
+  const uint64_t query_position = start_position + row;
+  const uint16_t *const query_row =
+      query + row * static_cast<uint64_t>(q_heads) * head_dim +
+      static_cast<uint64_t>(query_head) * head_dim;
+  uint16_t *const output_row = output +
+                               row * static_cast<uint64_t>(q_heads) * head_dim +
+                               static_cast<uint64_t>(query_head) * head_dim;
+  const uint32_t dimension = threadIdx.x;
+  __shared__ float reductions[SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE];
+  __shared__ float rescale;
+  __shared__ float contribution;
+  __shared__ float running_maximum;
+  __shared__ float running_denominator;
+  __shared__ sllm_paged_kv::BlockDescriptor page;
+  __shared__ uint32_t page_valid;
+  if (dimension == 0U) {
+    running_maximum = -std::numeric_limits<float>::infinity();
+    running_denominator = 0.0F;
+  }
+  __syncthreads();
+
+  float accumulation0 = 0.0F;
+  float accumulation1 = 0.0F;
+  const uint32_t kv_head = query_head / (q_heads / kv_heads);
+  uint64_t previous_page = UINT64_MAX;
+  for (uint64_t key_position = 0U; key_position <= query_position;
+       ++key_position) {
+    const uint64_t logical_page = key_position / 128U;
+    if (logical_page != previous_page) {
+      previous_page = logical_page;
+      if (dimension == 0U) {
+        const uint32_t physical_page = logical_page < logical_table_count
+                                           ? logical_table[logical_page]
+                                           : UINT32_MAX;
+        page_valid =
+            physical_page != UINT32_MAX && physical_page < descriptor_count
+                ? 1U
+                : 0U;
+        if (page_valid != 0U) {
+          page = descriptor_table[physical_page];
+          page_valid = page.key != nullptr && page.value != nullptr &&
+                               page.key_scale != nullptr &&
+                               page.value_scale != nullptr
+                           ? 1U
+                           : 0U;
+        }
+        if (page_valid == 0U)
+          atomicExch(device_status, 1U);
+      }
+    }
+    __syncthreads();
+    if (page_valid == 0U)
+      return;
+    const uint64_t kv_row = (key_position % 128U) * kv_heads + kv_head;
+#if defined(__gfx1201__)
+    float partial = 0.0F;
+    for (uint32_t current = dimension; current < head_dim;
+         current += blockDim.x) {
+      partial += bf16_to_f32(query_row[current]) *
+                 load_kv_specialized<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1>(
+                     page.key, page.key_scale, nullptr, kv_row, current,
+                     head_dim, 1.0F);
+    }
+    for (uint32_t offset = 16U; offset != 0U; offset >>= 1U)
+      partial += __shfl_down(partial, offset, 32U);
+    const uint32_t lane = dimension & 31U;
+    const uint32_t wave = dimension >> 5U;
+    if (lane == 0U)
+      reductions[wave] = partial;
+    __syncthreads();
+    if (wave == 0U) {
+      float block_sum = lane < 8U ? reductions[lane] : 0.0F;
+      for (uint32_t offset = 16U; offset != 0U; offset >>= 1U)
+        block_sum += __shfl_down(block_sum, offset, 32U);
+      if (lane == 0U) {
+        const float current_score = block_sum * score_scale;
+        const float next_maximum = fmaxf(running_maximum, current_score);
+        rescale = expf(running_maximum - next_maximum);
+        contribution = expf(current_score - next_maximum);
+        running_denominator = running_denominator * rescale + contribution;
+        running_maximum = next_maximum;
+      }
+    }
+    __syncthreads();
+#else
+    reductions[dimension] = 0.0F;
+    for (uint32_t current = dimension; current < head_dim;
+         current += blockDim.x) {
+      reductions[dimension] +=
+          bf16_to_f32(query_row[current]) *
+          load_kv_specialized<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1>(
+              page.key, page.key_scale, nullptr, kv_row, current, head_dim,
+              1.0F);
+    }
+    __syncthreads();
+    for (uint32_t stride = blockDim.x / 2U; stride != 0U; stride >>= 1U) {
+      if (dimension < stride)
+        reductions[dimension] += reductions[dimension + stride];
+      __syncthreads();
+    }
+    if (dimension == 0U) {
+      const float current_score = reductions[0] * score_scale;
+      const float next_maximum = fmaxf(running_maximum, current_score);
+      rescale = expf(running_maximum - next_maximum);
+      contribution = expf(current_score - next_maximum);
+      running_denominator = running_denominator * rescale + contribution;
+      running_maximum = next_maximum;
+    }
+    __syncthreads();
+#endif
+    if (dimension < head_dim) {
+      accumulation0 =
+          accumulation0 * rescale +
+          contribution * load_kv_specialized<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1>(
+                             page.value, page.value_scale, nullptr, kv_row,
+                             dimension, head_dim, 1.0F);
+    }
+    const uint32_t second = dimension + blockDim.x;
+    if (second < head_dim) {
+      accumulation1 =
+          accumulation1 * rescale +
+          contribution * load_kv_specialized<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1>(
+                             page.value, page.value_scale, nullptr, kv_row,
+                             second, head_dim, 1.0F);
+    }
+    __syncthreads();
+  }
+  if (dimension < head_dim)
+    output_row[dimension] =
+        f32_to_bf16_rne(accumulation0 / running_denominator);
+  const uint32_t second = dimension + blockDim.x;
+  if (second < head_dim)
+    output_row[second] = f32_to_bf16_rne(accumulation1 / running_denominator);
+}
+
+// Paged counterpart of the contiguous qtile4 GQA6 provider.  It preserves
+// the qtile4 reduction tree and changes only page resolution.
+__global__
+__launch_bounds__(256, 1) void causal_attention_paged_prefill_gqa6_qtile4_kernel(
+    const uint16_t *query, const uint32_t *logical_table,
+    const sllm_paged_kv::BlockDescriptor *descriptor_table,
+    uint32_t logical_table_count, uint32_t descriptor_count,
+    uint32_t *device_status, uint16_t *output, uint32_t query_count,
+    uint64_t start_position, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim) {
+  constexpr uint32_t kWave = 32U;
+  constexpr uint32_t kRatio = 6U;
+  constexpr uint32_t kTile = 4U;
+  constexpr uint32_t kItems = 3U;
+  const uint64_t flat = static_cast<uint64_t>(blockIdx.x);
+  const uint64_t tile = flat / kv_heads;
+  const uint32_t kv_head = static_cast<uint32_t>(flat % kv_heads);
+  const uint64_t first_row = tile * kTile;
+  if (first_row >= query_count || q_heads != 24U || kv_heads != 4U ||
+      head_dim != 256U)
+    return;
+  const uint32_t thread = threadIdx.x;
+  const uint32_t lane = thread & (kWave - 1U);
+  const uint32_t wave = thread / kWave;
+  const uint32_t first_head = kv_head * kRatio;
+  __shared__ float key_tile[256U];
+  __shared__ float value_tile[256U];
+  __shared__ sllm_paged_kv::BlockDescriptor page;
+  __shared__ uint32_t page_valid;
+  float query_values[kItems][8U];
+  float accumulations[kItems][8U] = {};
+  float running_maximum[kItems];
+  float running_denominator[kItems];
+#pragma unroll
+  for (uint32_t item = 0U; item < kItems; ++item) {
+    running_maximum[item] = -std::numeric_limits<float>::infinity();
+    running_denominator[item] = 0.0F;
+    const uint32_t logical = wave * kItems + item;
+    const uint64_t row = first_row + logical / kRatio;
+    const uint64_t safe = row < query_count ? row : query_count - 1U;
+    const uint32_t head = first_head + logical % kRatio;
+    const uint16_t *row_ptr = query + (safe * q_heads + head) * head_dim;
+#pragma unroll
+    for (uint32_t index = 0U; index < 8U; ++index) {
+      const uint32_t current = lane + index * kWave;
+      query_values[item][index] =
+          row < query_count ? bf16_to_f32(row_ptr[current]) : 0.0F;
+    }
+  }
+  const uint64_t last_row =
+      (first_row + kTile < query_count ? first_row + kTile : query_count) - 1U;
+  const uint64_t last_position = start_position + last_row;
+  uint64_t previous_page = UINT64_MAX;
+  for (uint64_t key_position = 0U; key_position <= last_position;
+       ++key_position) {
+    const uint64_t logical_page = key_position / 128U;
+    if (logical_page != previous_page) {
+      previous_page = logical_page;
+      if (thread == 0U) {
+        const uint32_t physical = logical_page < logical_table_count
+                                      ? logical_table[logical_page]
+                                      : UINT32_MAX;
+        page_valid = physical != UINT32_MAX && physical < descriptor_count;
+        if (page_valid != 0U) {
+          page = descriptor_table[physical];
+          page_valid = page.key != nullptr && page.value != nullptr &&
+                       page.key_scale != nullptr && page.value_scale != nullptr;
+        }
+        if (page_valid == 0U)
+          atomicExch(device_status, 1U);
+      }
+    }
+    __syncthreads();
+    if (page_valid == 0U)
+      return;
+    const uint64_t row = (key_position % 128U) * kv_heads + kv_head;
+    if (thread < head_dim) {
+      key_tile[thread] = load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1>(
+          page.key, page.key_scale, nullptr, row, thread, head_dim, 1.0F);
+      value_tile[thread] = load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1>(
+          page.value, page.value_scale, nullptr, row, thread, head_dim, 1.0F);
+    }
+    __syncthreads();
+#pragma unroll
+    for (uint32_t item = 0U; item < kItems; ++item) {
+      const uint32_t logical = wave * kItems + item;
+      const uint64_t query_row = first_row + logical / kRatio;
+      const bool active =
+          query_row < query_count && key_position <= start_position + query_row;
+      float products[8U];
+#pragma unroll
+      for (uint32_t index = 0U; index < 8U; ++index) {
+        const uint32_t current = lane + index * kWave;
+        products[index] =
+            active ? query_values[item][index] * key_tile[current] : 0.0F;
+      }
+      float partial =
+          ((products[0] + products[1]) + (products[2] + products[3])) +
+          ((products[4] + products[5]) + (products[6] + products[7]));
+      for (uint32_t offset = kWave / 2U; offset != 0U; offset >>= 1U)
+        partial += __shfl_down(partial, offset, kWave);
+      float rescale = 1.0F;
+      float contribution = 0.0F;
+      float next = running_maximum[item];
+      if (lane == 0U && active) {
+        const float score = partial * rsqrtf(static_cast<float>(head_dim));
+        next = fmaxf(running_maximum[item], score);
+        rescale = expf(running_maximum[item] - next);
+        contribution = expf(score - next);
+      }
+      rescale = __shfl(rescale, 0U, kWave);
+      contribution = __shfl(contribution, 0U, kWave);
+      next = __shfl(next, 0U, kWave);
       running_denominator[item] =
           running_denominator[item] * rescale + contribution;
-      running_maximum[item] = next_maximum;
+      running_maximum[item] = next;
 #pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        const uint32_t current = lane + index * kWaveSize;
-        if (active && current < head_dim) {
+      for (uint32_t index = 0U; index < 8U; ++index) {
+        const uint32_t current = lane + index * kWave;
+        if (active)
           accumulations[item][index] = accumulations[item][index] * rescale +
                                        contribution * value_tile[current];
-        }
       }
     }
     __syncthreads();
   }
-
 #pragma unroll
-  for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-    const uint32_t logical_query = wave * kQueriesPerWave + item;
-    const uint64_t row = first_row + logical_query / kGqaRatio;
-    const uint32_t query_head = first_query_head + logical_query % kGqaRatio;
+  for (uint32_t item = 0U; item < kItems; ++item) {
+    const uint32_t logical = wave * kItems + item;
+    const uint64_t row = first_row + logical / kRatio;
+    const uint32_t head = first_head + logical % kRatio;
     if (row < query_count) {
-      uint16_t *const output_row = output + (row * q_heads + query_head) *
-                                                static_cast<uint64_t>(head_dim);
+      uint16_t *out = output + (row * q_heads + head) * head_dim;
 #pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        const uint32_t current = lane + index * kWaveSize;
-        if (current < head_dim) {
-          output_row[current] = f32_to_bf16_rne(accumulations[item][index] /
-                                                running_denominator[item]);
-        }
+      for (uint32_t index = 0U; index < 8U; ++index) {
+        const uint32_t current = lane + index * kWave;
+        out[current] = f32_to_bf16_rne(accumulations[item][index] /
+                                       running_denominator[item]);
       }
     }
   }
 }
 
-// MXFP8 E4 GQA6 long-prefix candidate.  A block owns eight adjacent query
-// rows and one KV head (48 logical query/head pairs). Sixteen wave32 waves
-// process three pairs each. K and V are loaded by disjoint halves of the
-// 512-thread block, then the same per-pair query order, reduction tree, and
-// online-softmax update used by qtile4 are retained. This keeps numerical
-// accumulation order independent of the LDS traffic reduction.
-template <uint32_t Encoding, uint32_t GqaRatio, bool WaveLocalKv = false>
+template <bool WaveLocalKv = false>
 __global__
-__launch_bounds__(512, 1) void causal_attention_prefill_gqa6_qtile8_w16_kernel(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint32_t q_heads,
-    const uint32_t kv_heads, const uint32_t head_dim,
+__launch_bounds__(512, 1) void causal_attention_paged_prefill_gqa6_qtile8_kernel(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
     const float static_key_scale, const float static_value_scale) {
   constexpr uint32_t kWaveSize = 32U;
   constexpr uint32_t kWaveCount = 16U;
-  constexpr uint32_t kGqaRatio = GqaRatio;
+  constexpr uint32_t kGqaRatio = 6U;
   constexpr uint32_t kQueryTile = 8U;
   constexpr uint32_t kLogicalQueries = kGqaRatio * kQueryTile;
   constexpr uint32_t kQueriesPerWave = kLogicalQueries / kWaveCount;
-  constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
+  constexpr uint32_t kHeadDim = 256U;
   constexpr uint32_t kDimensionsPerLane = kHeadDim / kWaveSize;
-  static_assert(kGqaRatio == 6U);
-  static_assert(kLogicalQueries % kWaveCount == 0U);
   static_assert(kQueriesPerWave == 3U);
+#if defined(__gfx1030__)
+  constexpr uint32_t kKeyTile = 4U;
+  __shared__ float key_tile[kKeyTile][kHeadDim];
+  __shared__ float value_tile[kKeyTile][kHeadDim];
+#endif
+  __shared__ sllm_paged_kv::BlockDescriptor page;
+  __shared__ uint32_t page_valid;
+
   const uint64_t flat = blockIdx.x;
   const uint64_t tile = flat / kv_heads;
   const uint32_t kv_head = static_cast<uint32_t>(flat % kv_heads);
   const uint64_t first_row = tile * kQueryTile;
-  if (first_row >= query_count) {
+  if (first_row >= query_count || q_heads != 24U || kv_heads != 4U ||
+      head_dim != kHeadDim) {
     return;
   }
-
   const uint32_t dimension = threadIdx.x;
   const uint32_t lane = dimension & (kWaveSize - 1U);
   const uint32_t wave = dimension / kWaveSize;
   const uint32_t first_query_head = kv_head * kGqaRatio;
-  // All three logical items in a wave share one row because
-  // kQueriesPerWave=3 and kGqaRatio=6. Preserve the original short-circuit
-  // behavior for invalid rows by guarding the causal-limit addition.
   const uint64_t wave_row =
       first_row + (static_cast<uint64_t>(wave) * kQueriesPerWave) / kGqaRatio;
   const bool wave_row_valid = wave_row < query_count;
   const uint64_t wave_causal_limit =
       wave_row_valid ? start_position + wave_row : 0U;
 
-#if defined(__gfx1030__)
-  // Scratch qtile-kv4-r14 mapping: four complete K/V rows are staged by the
-  // same 512 threads, then consumed in ascending key order.  This is the
-  // measured V620 path; gfx1201 retains the original one-row staging below.
-  constexpr uint32_t kKeyTile = 4U;
-  __shared__ float key_tile[kKeyTile][kHeadDim];
-  __shared__ float value_tile[kKeyTile][kHeadDim];
-#endif
   float query_values[kQueriesPerWave][kDimensionsPerLane];
   float accumulations[kQueriesPerWave][kDimensionsPerLane] = {};
-  // Lane 0/1/2 owns one query each.  Keep the online-softmax state only in
-  // that owner lane; value updates and final normalization consume it via
-  // wave shuffles.
   float own_running_maximum = -std::numeric_limits<float>::infinity();
   float own_running_denominator = 0.0F;
 #pragma unroll
@@ -2576,271 +1978,300 @@ __launch_bounds__(512, 1) void causal_attention_prefill_gqa6_qtile8_w16_kernel(
   const uint64_t last_row =
       (tile_end < query_count ? tile_end : query_count) - 1U;
   const uint64_t last_query_position = start_position + last_row;
+  for (uint64_t page_begin = 0U; page_begin <= last_query_position;
+       page_begin += 128U) {
+    if (threadIdx.x == 0U) {
+      const uint64_t logical_page = page_begin / 128U;
+      const uint32_t physical_page = logical_page < logical_table_count
+                                         ? logical_table[logical_page]
+                                         : UINT32_MAX;
+      page_valid =
+          physical_page != UINT32_MAX && physical_page < descriptor_count ? 1U
+                                                                          : 0U;
+      if (page_valid != 0U) {
+        page = descriptor_table[physical_page];
+        page_valid = page.key != nullptr && page.value != nullptr &&
+                             page.key_scale != nullptr &&
+                             page.value_scale != nullptr
+                         ? 1U
+                         : 0U;
+      }
+      if (page_valid == 0U) {
+        atomicExch(device_status, 1U);
+      }
+    }
+    __syncthreads();
+    if (page_valid == 0U) {
+      return;
+    }
+    const uint64_t remaining = last_query_position - page_begin + 1U;
+    const uint64_t page_end =
+        remaining > 128U ? page_begin + 128U : last_query_position + 1U;
 #if defined(__gfx1030__)
-  for (uint64_t key_begin = 0U; key_begin <= last_query_position;
-       key_begin += kKeyTile) {
-    const uint64_t remaining = last_query_position - key_begin + 1U;
-    const uint32_t key_count =
-        remaining < kKeyTile ? static_cast<uint32_t>(remaining) : kKeyTile;
-    for (uint32_t element = dimension; element < kKeyTile * 2U * kHeadDim;
-         element += 512U) {
-      const uint32_t key_index = element / (2U * kHeadDim);
-      const uint32_t plane_dimension = element % (2U * kHeadDim);
-      if (key_index < key_count) {
-        const uint64_t kv_row = (key_begin + key_index) * kv_heads + kv_head;
-        if (plane_dimension < head_dim) {
-          key_tile[key_index][plane_dimension] = load_kv_qtile4<Encoding>(
-              key, key_scales, key_outer_scales, kv_row, plane_dimension,
-              head_dim, static_key_scale);
-        } else {
-          const uint32_t value_dimension = plane_dimension - head_dim;
-          value_tile[key_index][value_dimension] = load_kv_qtile4<Encoding>(
-              value, value_scales, value_outer_scales, kv_row, value_dimension,
-              head_dim, static_value_scale);
-        }
-      }
-    }
-    __syncthreads();
-
-    for (uint32_t key_index = 0U; key_index < key_count; ++key_index) {
-      const uint64_t key_position = key_begin + key_index;
-      float own_score = 0.0F;
-      uint32_t own_active = 0U;
-#pragma unroll
-      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-        const bool item_active =
-            wave_row_valid && key_position <= wave_causal_limit;
-        float products[kDimensionsPerLane];
-#pragma unroll
-        for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-          const uint32_t current = lane + index * kWaveSize;
-          products[index] =
-              item_active && current < head_dim
-                  ? query_values[item][index] * key_tile[key_index][current]
-                  : 0.0F;
-        }
-        const float pair0 = products[0] + products[1];
-        const float pair1 = products[2] + products[3];
-        const float pair2 = products[4] + products[5];
-        const float pair3 = products[6] + products[7];
-        float partial = (pair0 + pair1) + (pair2 + pair3);
-        for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
-          partial += __shfl_down(partial, offset, kWaveSize);
-        }
-        const float reduced_score = __shfl(partial, 0U, kWaveSize);
-        if (lane == item) {
-          own_score = reduced_score;
-          own_active = item_active ? 1U : 0U;
-        }
-      }
-
-      if (lane < kQueriesPerWave && own_active != 0U) {
-        own_score *= rsqrtf(static_cast<float>(head_dim));
-      }
-
-      float own_rescale = 1.0F;
-      float own_contribution = 0.0F;
-      if (lane < kQueriesPerWave && own_active != 0U) {
-        const float own_next_maximum = fmaxf(own_running_maximum, own_score);
-        own_rescale = expf(own_running_maximum - own_next_maximum);
-        own_contribution = expf(own_score - own_next_maximum);
-        own_running_denominator =
-            own_running_denominator * own_rescale + own_contribution;
-        own_running_maximum = own_next_maximum;
-      }
-#pragma unroll
-      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-        const float rescale = __shfl(own_rescale, static_cast<int>(item),
-                                     static_cast<int>(kWaveSize));
-        const float contribution =
-            __shfl(own_contribution, static_cast<int>(item),
-                   static_cast<int>(kWaveSize));
-        const bool item_active =
-            wave_row_valid && key_position <= wave_causal_limit;
-#pragma unroll
-        for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-          const uint32_t current = lane + index * kWaveSize;
-          if (item_active && current < head_dim) {
-            accumulations[item][index] =
-                accumulations[item][index] * rescale +
-                contribution * value_tile[key_index][current];
+    for (uint64_t key_begin = page_begin; key_begin < page_end;
+         key_begin += kKeyTile) {
+      const uint64_t tile_remaining = page_end - key_begin;
+      const uint32_t key_count = tile_remaining < kKeyTile
+                                     ? static_cast<uint32_t>(tile_remaining)
+                                     : kKeyTile;
+      for (uint32_t element = dimension; element < kKeyTile * 2U * kHeadDim;
+           element += 512U) {
+        const uint32_t key_index = element / (2U * kHeadDim);
+        const uint32_t plane_dimension = element % (2U * kHeadDim);
+        if (key_index < key_count) {
+          const uint64_t local_token =
+              key_begin + static_cast<uint64_t>(key_index) - page_begin;
+          const uint64_t kv_row = local_token * kv_heads + kv_head;
+          if (plane_dimension < head_dim) {
+            key_tile[key_index][plane_dimension] =
+                load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, false>(
+                    page.key, page.key_scale, nullptr, kv_row, plane_dimension,
+                    head_dim, static_key_scale);
+          } else {
+            const uint32_t value_dimension = plane_dimension - head_dim;
+            value_tile[key_index][value_dimension] =
+                load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, false>(
+                    page.value, page.value_scale, nullptr, kv_row,
+                    value_dimension, head_dim, static_value_scale);
           }
         }
       }
+      __syncthreads();
+      for (uint32_t key_index = 0U; key_index < key_count; ++key_index) {
+        const uint64_t key_position = key_begin + key_index;
+        float own_score = 0.0F;
+        uint32_t own_active = 0U;
+#pragma unroll
+        for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+          const bool item_active =
+              wave_row_valid && key_position <= wave_causal_limit;
+          float products[kDimensionsPerLane];
+#pragma unroll
+          for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+            const uint32_t current = lane + index * kWaveSize;
+            products[index] =
+                item_active && current < head_dim
+                    ? query_values[item][index] * key_tile[key_index][current]
+                    : 0.0F;
+          }
+          const float pair0 = products[0] + products[1];
+          const float pair1 = products[2] + products[3];
+          const float pair2 = products[4] + products[5];
+          const float pair3 = products[6] + products[7];
+          float partial = (pair0 + pair1) + (pair2 + pair3);
+          for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
+            partial += __shfl_down(partial, offset, kWaveSize);
+          }
+          const float reduced_score = __shfl(partial, 0U, kWaveSize);
+          if (lane == item) {
+            own_score = reduced_score;
+            own_active = item_active ? 1U : 0U;
+          }
+        }
+        if (lane < kQueriesPerWave && own_active != 0U) {
+          own_score *= rsqrtf(static_cast<float>(head_dim));
+        }
+        float own_rescale = 1.0F;
+        float own_contribution = 0.0F;
+        if (lane < kQueriesPerWave && own_active != 0U) {
+          const float own_next_maximum = fmaxf(own_running_maximum, own_score);
+          own_rescale = expf(own_running_maximum - own_next_maximum);
+          own_contribution = expf(own_score - own_next_maximum);
+          own_running_denominator =
+              own_running_denominator * own_rescale + own_contribution;
+          own_running_maximum = own_next_maximum;
+        }
+#pragma unroll
+        for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+          const float rescale =
+              __shfl(own_rescale, static_cast<int>(item), kWaveSize);
+          const float contribution =
+              __shfl(own_contribution, static_cast<int>(item), kWaveSize);
+          const bool item_active =
+              wave_row_valid && key_position <= wave_causal_limit;
+#pragma unroll
+          for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+            const uint32_t current = lane + index * kWaveSize;
+            if (item_active && current < head_dim) {
+              accumulations[item][index] =
+                  accumulations[item][index] * rescale +
+                  contribution * value_tile[key_index][current];
+            }
+          }
+        }
+      }
+      __syncthreads();
     }
-    __syncthreads();
-  }
 #else
-  if constexpr (WaveLocalKv) {
-    // gfx1201 M=2048 path: each wave loads its own K/V lane slice, removing
-    // the per-key LDS staging and barriers while preserving key order and the
-    // existing QK/softmax/value arithmetic.
-    for (uint64_t key_position = 0U; key_position <= last_query_position;
-         ++key_position) {
-      const uint64_t kv_row = key_position * kv_heads + kv_head;
-      float key_register[kDimensionsPerLane];
-#pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        const uint32_t current = lane + index * kWaveSize;
-        key_register[index] =
-            load_kv_qtile4<Encoding>(key, key_scales, key_outer_scales, kv_row,
-                                     current, head_dim, static_key_scale);
-      }
-
-      float own_score = 0.0F;
-      uint32_t own_active = 0U;
-#pragma unroll
-      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-        const bool item_active =
-            wave_row_valid && key_position <= wave_causal_limit;
-        float products[kDimensionsPerLane];
+    if constexpr (WaveLocalKv) {
+      for (uint64_t key_position = page_begin; key_position < page_end;
+           ++key_position) {
+        const uint64_t local_token = key_position - page_begin;
+        const uint64_t kv_row = local_token * kv_heads + kv_head;
+        float key_register[kDimensionsPerLane];
 #pragma unroll
         for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
           const uint32_t current = lane + index * kWaveSize;
-          products[index] =
-              item_active && current < head_dim
-                  ? query_values[item][index] * key_register[index]
-                  : 0.0F;
+          key_register[index] =
+              load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, false>(
+                  page.key, page.key_scale, nullptr, kv_row, current, head_dim,
+                  static_key_scale);
         }
-        const float pair0 = products[0] + products[1];
-        const float pair1 = products[2] + products[3];
-        const float pair2 = products[4] + products[5];
-        const float pair3 = products[6] + products[7];
-        float partial = (pair0 + pair1) + (pair2 + pair3);
-        for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
-          partial += __shfl_down(partial, offset, kWaveSize);
-        }
-        const float reduced_score = __shfl(partial, 0U, kWaveSize);
-        if (lane == item) {
-          own_score = reduced_score;
-          own_active = item_active ? 1U : 0U;
-        }
-      }
-
-      if (lane < kQueriesPerWave && own_active != 0U) {
-        own_score *= rsqrtf(static_cast<float>(head_dim));
-      }
-
-      float own_rescale = 1.0F;
-      float own_contribution = 0.0F;
-      if (lane < kQueriesPerWave && own_active != 0U) {
-        const float own_next_maximum = fmaxf(own_running_maximum, own_score);
-        own_rescale = expf(own_running_maximum - own_next_maximum);
-        own_contribution = expf(own_score - own_next_maximum);
-        own_running_denominator =
-            own_running_denominator * own_rescale + own_contribution;
-        own_running_maximum = own_next_maximum;
-      }
-      float value_register[kDimensionsPerLane];
+        float own_score = 0.0F;
+        uint32_t own_active = 0U;
 #pragma unroll
-      for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-        const uint32_t current = lane + index * kWaveSize;
-        value_register[index] = load_kv_qtile4<Encoding>(
-            value, value_scales, value_outer_scales, kv_row, current, head_dim,
-            static_value_scale);
-      }
+        for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+          const bool item_active =
+              wave_row_valid && key_position <= wave_causal_limit;
+          float products[kDimensionsPerLane];
 #pragma unroll
-      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-        const float rescale = __shfl(own_rescale, static_cast<int>(item),
-                                     static_cast<int>(kWaveSize));
-        const float contribution =
-            __shfl(own_contribution, static_cast<int>(item),
-                   static_cast<int>(kWaveSize));
-        const bool item_active =
-            wave_row_valid && key_position <= wave_causal_limit;
+          for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+            const uint32_t current = lane + index * kWaveSize;
+            products[index] =
+                item_active && current < head_dim
+                    ? query_values[item][index] * key_register[index]
+                    : 0.0F;
+          }
+          const float pair0 = products[0] + products[1];
+          const float pair1 = products[2] + products[3];
+          const float pair2 = products[4] + products[5];
+          const float pair3 = products[6] + products[7];
+          float partial = (pair0 + pair1) + (pair2 + pair3);
+          for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
+            partial += __shfl_down(partial, offset, kWaveSize);
+          }
+          const float reduced_score = __shfl(partial, 0U, kWaveSize);
+          if (lane == item) {
+            own_score = reduced_score;
+            own_active = item_active ? 1U : 0U;
+          }
+        }
+        if (lane < kQueriesPerWave && own_active != 0U) {
+          own_score *= rsqrtf(static_cast<float>(head_dim));
+        }
+        float own_rescale = 1.0F;
+        float own_contribution = 0.0F;
+        if (lane < kQueriesPerWave && own_active != 0U) {
+          const float own_next_maximum = fmaxf(own_running_maximum, own_score);
+          own_rescale = expf(own_running_maximum - own_next_maximum);
+          own_contribution = expf(own_score - own_next_maximum);
+          own_running_denominator =
+              own_running_denominator * own_rescale + own_contribution;
+          own_running_maximum = own_next_maximum;
+        }
+        float value_register[kDimensionsPerLane];
 #pragma unroll
         for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
           const uint32_t current = lane + index * kWaveSize;
-          if (item_active && current < head_dim) {
-            accumulations[item][index] = accumulations[item][index] * rescale +
-                                         contribution * value_register[index];
+          value_register[index] =
+              load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, false>(
+                  page.value, page.value_scale, nullptr, kv_row, current,
+                  head_dim, static_value_scale);
+        }
+#pragma unroll
+        for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+          const float rescale =
+              __shfl(own_rescale, static_cast<int>(item), kWaveSize);
+          const float contribution =
+              __shfl(own_contribution, static_cast<int>(item), kWaveSize);
+          const bool item_active =
+              wave_row_valid && key_position <= wave_causal_limit;
+#pragma unroll
+          for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+            const uint32_t current = lane + index * kWaveSize;
+            if (item_active && current < head_dim) {
+              accumulations[item][index] =
+                  accumulations[item][index] * rescale +
+                  contribution * value_register[index];
+            }
           }
         }
       }
-    }
-  } else {
-    __shared__ float key_tile[kHeadDim];
-    __shared__ float value_tile[kHeadDim];
-    for (uint64_t key_position = 0U; key_position <= last_query_position;
-         ++key_position) {
-      const uint64_t kv_row = key_position * kv_heads + kv_head;
-      if (dimension < head_dim) {
-        key_tile[dimension] =
-            load_kv_qtile4<Encoding>(key, key_scales, key_outer_scales, kv_row,
-                                     dimension, head_dim, static_key_scale);
-      } else if (dimension < 2U * head_dim) {
-        const uint32_t value_dimension = dimension - head_dim;
-        value_tile[value_dimension] = load_kv_qtile4<Encoding>(
-            value, value_scales, value_outer_scales, kv_row, value_dimension,
-            head_dim, static_value_scale);
-      }
-      __syncthreads();
-
-      float own_score = 0.0F;
-      uint32_t own_active = 0U;
-#pragma unroll
-      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-        const bool item_active =
-            wave_row_valid && key_position <= wave_causal_limit;
-        float products[kDimensionsPerLane];
-#pragma unroll
-        for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-          const uint32_t current = lane + index * kWaveSize;
-          products[index] = item_active && current < head_dim
-                                ? query_values[item][index] * key_tile[current]
-                                : 0.0F;
+    } else {
+      __shared__ float key_tile[kHeadDim];
+      __shared__ float value_tile[kHeadDim];
+      for (uint64_t key_position = page_begin; key_position < page_end;
+           ++key_position) {
+        const uint64_t local_token = key_position - page_begin;
+        const uint64_t kv_row = local_token * kv_heads + kv_head;
+        if (dimension < head_dim) {
+          key_tile[dimension] =
+              load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, false>(
+                  page.key, page.key_scale, nullptr, kv_row, dimension,
+                  head_dim, static_key_scale);
+        } else if (dimension < 2U * head_dim) {
+          const uint32_t value_dimension = dimension - head_dim;
+          value_tile[value_dimension] =
+              load_kv_qtile4<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, false>(
+                  page.value, page.value_scale, nullptr, kv_row,
+                  value_dimension, head_dim, static_value_scale);
         }
-        const float pair0 = products[0] + products[1];
-        const float pair1 = products[2] + products[3];
-        const float pair2 = products[4] + products[5];
-        const float pair3 = products[6] + products[7];
-        float partial = (pair0 + pair1) + (pair2 + pair3);
-        for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
-          partial += __shfl_down(partial, offset, kWaveSize);
-        }
-        const float reduced_score = __shfl(partial, 0U, kWaveSize);
-        if (lane == item) {
-          own_score = reduced_score;
-          own_active = item_active ? 1U : 0U;
-        }
-      }
-
-      if (lane < kQueriesPerWave && own_active != 0U) {
-        own_score *= rsqrtf(static_cast<float>(head_dim));
-      }
-
-      float own_rescale = 1.0F;
-      float own_contribution = 0.0F;
-      if (lane < kQueriesPerWave && own_active != 0U) {
-        const float own_next_maximum = fmaxf(own_running_maximum, own_score);
-        own_rescale = expf(own_running_maximum - own_next_maximum);
-        own_contribution = expf(own_score - own_next_maximum);
-        own_running_denominator =
-            own_running_denominator * own_rescale + own_contribution;
-        own_running_maximum = own_next_maximum;
-      }
+        __syncthreads();
+        float own_score = 0.0F;
+        uint32_t own_active = 0U;
 #pragma unroll
-      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-        const float rescale = __shfl(own_rescale, static_cast<int>(item),
-                                     static_cast<int>(kWaveSize));
-        const float contribution =
-            __shfl(own_contribution, static_cast<int>(item),
-                   static_cast<int>(kWaveSize));
-        const bool item_active =
-            wave_row_valid && key_position <= wave_causal_limit;
+        for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+          const bool item_active =
+              wave_row_valid && key_position <= wave_causal_limit;
+          float products[kDimensionsPerLane];
 #pragma unroll
-        for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
-          const uint32_t current = lane + index * kWaveSize;
-          if (item_active && current < head_dim) {
-            accumulations[item][index] = accumulations[item][index] * rescale +
-                                         contribution * value_tile[current];
+          for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+            const uint32_t current = lane + index * kWaveSize;
+            products[index] =
+                item_active && current < head_dim
+                    ? query_values[item][index] * key_tile[current]
+                    : 0.0F;
+          }
+          const float pair0 = products[0] + products[1];
+          const float pair1 = products[2] + products[3];
+          const float pair2 = products[4] + products[5];
+          const float pair3 = products[6] + products[7];
+          float partial = (pair0 + pair1) + (pair2 + pair3);
+          for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
+            partial += __shfl_down(partial, offset, kWaveSize);
+          }
+          const float reduced_score = __shfl(partial, 0U, kWaveSize);
+          if (lane == item) {
+            own_score = reduced_score;
+            own_active = item_active ? 1U : 0U;
           }
         }
+        if (lane < kQueriesPerWave && own_active != 0U) {
+          own_score *= rsqrtf(static_cast<float>(head_dim));
+        }
+        float own_rescale = 1.0F;
+        float own_contribution = 0.0F;
+        if (lane < kQueriesPerWave && own_active != 0U) {
+          const float own_next_maximum = fmaxf(own_running_maximum, own_score);
+          own_rescale = expf(own_running_maximum - own_next_maximum);
+          own_contribution = expf(own_score - own_next_maximum);
+          own_running_denominator =
+              own_running_denominator * own_rescale + own_contribution;
+          own_running_maximum = own_next_maximum;
+        }
+#pragma unroll
+        for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
+          const float rescale =
+              __shfl(own_rescale, static_cast<int>(item), kWaveSize);
+          const float contribution =
+              __shfl(own_contribution, static_cast<int>(item), kWaveSize);
+          const bool item_active =
+              wave_row_valid && key_position <= wave_causal_limit;
+#pragma unroll
+          for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
+            const uint32_t current = lane + index * kWaveSize;
+            if (item_active && current < head_dim) {
+              accumulations[item][index] =
+                  accumulations[item][index] * rescale +
+                  contribution * value_tile[current];
+            }
+          }
+        }
+        __syncthreads();
       }
-      __syncthreads();
     }
-  }
 #endif
+  }
 
 #pragma unroll
   for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
@@ -2851,8 +2282,7 @@ __launch_bounds__(512, 1) void causal_attention_prefill_gqa6_qtile8_w16_kernel(
       uint16_t *const output_row = output + (row * q_heads + query_head) *
                                                 static_cast<uint64_t>(head_dim);
       const float denominator =
-          __shfl(own_running_denominator, static_cast<int>(item),
-                 static_cast<int>(kWaveSize));
+          __shfl(own_running_denominator, static_cast<int>(item), kWaveSize);
 #pragma unroll
       for (uint32_t index = 0U; index < kDimensionsPerLane; ++index) {
         const uint32_t current = lane + index * kWaveSize;
@@ -2865,2808 +2295,684 @@ __launch_bounds__(512, 1) void causal_attention_prefill_gqa6_qtile8_w16_kernel(
   }
 }
 
-// FP16-only GQA6 prefill candidates.  A block owns four adjacent query rows
-// and one KV head (24 logical query/head pairs).  Each wave processes three
-// pairs while the block cooperatively stages KeyTile complete FP16 K/V rows
-// in LDS.  The K/V tile is reused by every pair and the online-softmax state
-// remains per pair, preserving causal order and the BF16 output contract.
-// This family intentionally does not accept packed/scaled KV: the raw half2
-// loads are the optimization being measured.  The selector chooses exactly
-// one KeyTile (K4, K8, K16, or K32) for a request.
-template <uint32_t KeyTile>
-__global__
-__launch_bounds__(256, 1) void causal_attention_prefill_gqa6_qtile4_fp16_kernel(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint32_t q_heads,
-    const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale) {
-  constexpr uint32_t kWaveSize = 32U;
-  constexpr uint32_t kWaveCount = 8U;
-  constexpr uint32_t kGqaRatio = 6U;
-  constexpr uint32_t kQueryTile = 4U;
-  constexpr uint32_t kKeyTile = KeyTile;
-  constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-  constexpr uint32_t kLogicalQueries = kGqaRatio * kQueryTile;
-  constexpr uint32_t kQueriesPerWave = kLogicalQueries / kWaveCount;
-  constexpr uint32_t kPairsPerLane = kHeadDim / kWaveSize / 2U;
-  static_assert(kLogicalQueries == 24U);
-  static_assert(kQueriesPerWave == 3U);
-  static_assert(kPairsPerLane == 4U);
-  static_assert(kKeyTile == 4U || kKeyTile == 8U || kKeyTile == 16U ||
-                kKeyTile == 32U);
-  (void)key_scales;
-  (void)value_scales;
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  (void)static_key_scale;
-  (void)static_value_scale;
+} // namespace
 
-  const uint64_t flat = blockIdx.x;
-  const uint64_t query_tile = flat / kv_heads;
-  const uint32_t kv_head = static_cast<uint32_t>(flat % kv_heads);
-  const uint64_t first_row = query_tile * kQueryTile;
-  if (first_row >= query_count || q_heads != 24U || kv_heads != 4U ||
-      head_dim != kHeadDim) {
-    return;
-  }
-  const uint32_t thread = threadIdx.x;
-  const uint32_t lane = thread & (kWaveSize - 1U);
-  const uint32_t wave = thread / kWaveSize;
-  const uint32_t first_query_head = kv_head * kGqaRatio;
-  const uint16_t *const key_fp16 = static_cast<const uint16_t *>(key);
-  const uint16_t *const value_fp16 = static_cast<const uint16_t *>(value);
-
-  // 32 * 256 * 2 bytes per plane, exactly 32KiB for K and V together.
-  __shared__ uint16_t key_tile[kKeyTile][kHeadDim];
-  __shared__ uint16_t value_tile[kKeyTile][kHeadDim];
-  float2 query_values[kQueriesPerWave][kPairsPerLane];
-  float2 accumulations[kQueriesPerWave][kPairsPerLane] = {};
-  float running_maximum[kQueriesPerWave];
-  float running_denominator[kQueriesPerWave];
-
-#pragma unroll
-  for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-    running_maximum[item] = -INFINITY;
-    running_denominator[item] = 0.0F;
-    const uint32_t logical_query = wave * kQueriesPerWave + item;
-    const uint64_t row = first_row + logical_query / kGqaRatio;
-    const uint32_t query_head = first_query_head + logical_query % kGqaRatio;
-    const uint64_t safe_row = row < query_count ? row : query_count - 1U;
-    const uint16_t *const query_row =
-        query +
-        (safe_row * q_heads + query_head) * static_cast<uint64_t>(head_dim);
-    for (uint32_t pair = 0U; pair < kPairsPerLane; ++pair) {
-      const uint32_t dimension = lane * 2U + pair * kWaveSize * 2U;
-      query_values[item][pair] = row < query_count
-                                     ? load_bf16_pair(query_row + dimension)
-                                     : make_float2(0.0F, 0.0F);
-    }
-  }
-
-  const uint64_t tile_end = first_row + kQueryTile;
-  const uint64_t last_row =
-      (tile_end < query_count ? tile_end : query_count) - 1U;
-  const uint64_t last_query_position = start_position + last_row;
-  for (uint64_t key_begin = 0U; key_begin <= last_query_position;
-       key_begin += kKeyTile) {
-    const uint64_t remaining = last_query_position - key_begin + 1U;
-    const uint32_t key_count =
-        remaining < kKeyTile ? static_cast<uint32_t>(remaining) : kKeyTile;
-    for (uint32_t element = thread; element < kKeyTile * kHeadDim;
-         element += blockDim.x) {
-      const uint32_t key_index = element / kHeadDim;
-      const uint32_t dimension = element % kHeadDim;
-      if (key_index < key_count) {
-        const uint64_t kv_row = (key_begin + key_index) * kv_heads + kv_head;
-        key_tile[key_index][dimension] =
-            key_fp16[kv_row * static_cast<uint64_t>(head_dim) + dimension];
-        value_tile[key_index][dimension] =
-            value_fp16[kv_row * static_cast<uint64_t>(head_dim) + dimension];
-      }
-    }
-    __syncthreads();
-
-    for (uint32_t key_index = 0U; key_index < key_count; ++key_index) {
-      const uint64_t key_position = key_begin + key_index;
-      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-        const uint32_t logical_query = wave * kQueriesPerWave + item;
-        const uint64_t row = first_row + logical_query / kGqaRatio;
-        const bool active =
-            row < query_count && key_position <= start_position + row;
-        float partial = 0.0F;
-#pragma unroll
-        for (uint32_t pair = 0U; pair < kPairsPerLane; ++pair) {
-          const uint32_t dimension = lane * 2U + pair * kWaveSize * 2U;
-          const float2 q = query_values[item][pair];
-          const float2 k = load_fp16_pair(key_tile[key_index] + dimension);
-          partial += active ? q.x * k.x + q.y * k.y : 0.0F;
-        }
-        for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
-          partial += __shfl_down(partial, offset, kWaveSize);
-        }
-        float rescale = 1.0F;
-        float contribution = 0.0F;
-        float next_maximum = running_maximum[item];
-        if (lane == 0U && active) {
-          const float current_score =
-              partial * rsqrtf(static_cast<float>(head_dim));
-          next_maximum = fmaxf(running_maximum[item], current_score);
-          rescale = expf(running_maximum[item] - next_maximum);
-          contribution = expf(current_score - next_maximum);
-        }
-        rescale = __shfl(rescale, 0U, kWaveSize);
-        contribution = __shfl(contribution, 0U, kWaveSize);
-        next_maximum = __shfl(next_maximum, 0U, kWaveSize);
-        running_denominator[item] =
-            running_denominator[item] * rescale + contribution;
-        running_maximum[item] = next_maximum;
-#pragma unroll
-        for (uint32_t pair = 0U; pair < kPairsPerLane; ++pair) {
-          const uint32_t dimension = lane * 2U + pair * kWaveSize * 2U;
-          if (active) {
-            const float2 v = load_fp16_pair(value_tile[key_index] + dimension);
-            accumulations[item][pair].x =
-                accumulations[item][pair].x * rescale + contribution * v.x;
-            accumulations[item][pair].y =
-                accumulations[item][pair].y * rescale + contribution * v.y;
-          }
-        }
-      }
-    }
-    // Do not overwrite the shared K/V tile until all eight waves have
-    // consumed every valid token in this tile.
-    __syncthreads();
-  }
-
-#pragma unroll
-  for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-    const uint32_t logical_query = wave * kQueriesPerWave + item;
-    const uint64_t row = first_row + logical_query / kGqaRatio;
-    const uint32_t query_head = first_query_head + logical_query % kGqaRatio;
-    if (row < query_count) {
-      uint16_t *const output_row = output + (row * q_heads + query_head) *
-                                                static_cast<uint64_t>(head_dim);
-#pragma unroll
-      for (uint32_t pair = 0U; pair < kPairsPerLane; ++pair) {
-        const uint32_t dimension = lane * 2U + pair * kWaveSize * 2U;
-        const float denominator = running_denominator[item];
-        const float2 result =
-            make_float2(accumulations[item][pair].x / denominator,
-                        accumulations[item][pair].y / denominator);
-        output_row[dimension] = f32_to_bf16_rne(result.x);
-        output_row[dimension + 1U] = f32_to_bf16_rne(result.y);
-      }
-    }
-  }
-}
-
-// Blockwise FP16-KV GQA6 candidate. A query tile still owns one KV head, but
-// each key tile is scored into LDS before the tile maximum, exp probabilities,
-// denominator, and value contribution are folded into the online state. This
-// avoids synchronizing softmax state once per key and keeps causal masking
-// exact for every query row in the four-row tile.
-template <uint32_t KeyTile>
-__global__
-__launch_bounds__(256, 1) void causal_attention_prefill_gqa6_blocksoftmax_fp16_kernel(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint32_t q_heads,
-    const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale) {
-  constexpr uint32_t kWaveSize = 32U;
-  constexpr uint32_t kWaveCount = 8U;
-  constexpr uint32_t kGqaRatio = 6U;
-  constexpr uint32_t kQueryTile = 4U;
-  constexpr uint32_t kLogicalQueries = kGqaRatio * kQueryTile;
-  constexpr uint32_t kQueriesPerWave = kLogicalQueries / kWaveCount;
-  constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-  constexpr uint32_t kPairsPerLane = kHeadDim / kWaveSize / 2U;
-  static_assert(KeyTile == 8U || KeyTile == 32U);
-  static_assert(kQueriesPerWave == 3U);
-  static_assert(kPairsPerLane == 4U);
-  (void)key_scales;
-  (void)value_scales;
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  (void)static_key_scale;
-  (void)static_value_scale;
-
-  const uint64_t flat = blockIdx.x;
-  const uint64_t query_tile = flat / kv_heads;
-  const uint32_t kv_head = static_cast<uint32_t>(flat % kv_heads);
-  const uint64_t first_row = query_tile * kQueryTile;
-  if (first_row >= query_count || q_heads != 24U || kv_heads != 4U ||
-      head_dim != kHeadDim) {
-    return;
-  }
-  const uint32_t thread = threadIdx.x;
-  const uint32_t lane = thread & (kWaveSize - 1U);
-  const uint32_t wave = thread / kWaveSize;
-  const uint32_t first_query_head = kv_head * kGqaRatio;
-  const uint16_t *const key_fp16 = static_cast<const uint16_t *>(key);
-  const uint16_t *const value_fp16 = static_cast<const uint16_t *>(value);
-
-  __shared__ uint16_t key_tile[KeyTile][kHeadDim];
-  __shared__ uint16_t value_tile[KeyTile][kHeadDim];
-  __shared__ float score_tile[KeyTile][kLogicalQueries];
-  __shared__ float tile_maximum[kLogicalQueries];
-  __shared__ float tile_denominator[kLogicalQueries];
-  float2 query_values[kQueriesPerWave][kPairsPerLane];
-  float2 accumulations[kQueriesPerWave][kPairsPerLane] = {};
-  float running_maximum[kQueriesPerWave];
-  float running_denominator[kQueriesPerWave];
-
-  for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-    running_maximum[item] = -INFINITY;
-    running_denominator[item] = 0.0F;
-    const uint32_t logical_query = wave * kQueriesPerWave + item;
-    const uint64_t row = first_row + logical_query / kGqaRatio;
-    const uint32_t query_head = first_query_head + logical_query % kGqaRatio;
-    const uint64_t safe_row = row < query_count ? row : query_count - 1U;
-    const uint16_t *const query_row =
-        query +
-        (safe_row * q_heads + query_head) * static_cast<uint64_t>(head_dim);
-    for (uint32_t pair = 0U; pair < kPairsPerLane; ++pair) {
-      const uint32_t dimension = lane * 2U + pair * kWaveSize * 2U;
-      query_values[item][pair] = row < query_count
-                                     ? load_bf16_pair(query_row + dimension)
-                                     : make_float2(0.0F, 0.0F);
-    }
-  }
-
-  const uint64_t tile_end = first_row + kQueryTile;
-  const uint64_t last_row =
-      (tile_end < query_count ? tile_end : query_count) - 1U;
-  const uint64_t last_query_position = start_position + last_row;
-  for (uint64_t key_begin = 0U; key_begin <= last_query_position;
-       key_begin += KeyTile) {
-    const uint64_t remaining = last_query_position - key_begin + 1U;
-    const uint32_t key_count =
-        remaining < KeyTile ? static_cast<uint32_t>(remaining) : KeyTile;
-    for (uint32_t element = thread; element < KeyTile * kHeadDim;
-         element += blockDim.x) {
-      const uint32_t key_index = element / kHeadDim;
-      const uint32_t dimension = element % kHeadDim;
-      if (key_index < key_count) {
-        const uint64_t kv_row = (key_begin + key_index) * kv_heads + kv_head;
-        key_tile[key_index][dimension] =
-            key_fp16[kv_row * static_cast<uint64_t>(head_dim) + dimension];
-        value_tile[key_index][dimension] =
-            value_fp16[kv_row * static_cast<uint64_t>(head_dim) + dimension];
-      }
-    }
-    __syncthreads();
-
-    for (uint32_t key_index = 0U; key_index < key_count; ++key_index) {
-      const uint64_t key_position = key_begin + key_index;
-      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-        const uint32_t logical_query = wave * kQueriesPerWave + item;
-        const uint64_t row = first_row + logical_query / kGqaRatio;
-        const bool active =
-            row < query_count && key_position <= start_position + row;
-        float partial = 0.0F;
-        for (uint32_t pair = 0U; pair < kPairsPerLane; ++pair) {
-          const uint32_t dimension = lane * 2U + pair * kWaveSize * 2U;
-          const float2 q = query_values[item][pair];
-          const float2 k = load_fp16_pair(key_tile[key_index] + dimension);
-          partial += active ? q.x * k.x + q.y * k.y : 0.0F;
-        }
-        for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
-          partial += __shfl_down(partial, offset, kWaveSize);
-        }
-        if (lane == 0U) {
-          score_tile[key_index][logical_query] =
-              active ? partial * rsqrtf(static_cast<float>(head_dim))
-                     : -INFINITY;
-        }
-      }
-    }
-    __syncthreads();
-
-    for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-      const uint32_t logical_query = wave * kQueriesPerWave + item;
-      const uint64_t row = first_row + logical_query / kGqaRatio;
-      if (lane == 0U) {
-        float maximum = -INFINITY;
-        if (row < query_count) {
-          for (uint32_t key_index = 0U; key_index < KeyTile; ++key_index) {
-            if (key_index < key_count) {
-              maximum = fmaxf(maximum, score_tile[key_index][logical_query]);
-            }
-          }
-        }
-        tile_maximum[logical_query] = maximum;
-      }
-    }
-    __syncthreads();
-    for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-      const uint32_t logical_query = wave * kQueriesPerWave + item;
-      const uint64_t row = first_row + logical_query / kGqaRatio;
-      if (lane == 0U) {
-        float denominator = 0.0F;
-        if (row < query_count) {
-          for (uint32_t key_index = 0U; key_index < KeyTile; ++key_index) {
-            if (key_index < key_count) {
-              // Reuse the normalized tile probability for the value pass.
-              // Invalid/causally masked scores become exactly zero here.
-              const float probability =
-                  expf(score_tile[key_index][logical_query] -
-                       tile_maximum[logical_query]);
-              score_tile[key_index][logical_query] = probability;
-              denominator += probability;
-            }
-          }
-        }
-        tile_denominator[logical_query] = denominator;
-      }
-    }
-    __syncthreads();
-
-    for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-      const uint32_t logical_query = wave * kQueriesPerWave + item;
-      const uint64_t row = first_row + logical_query / kGqaRatio;
-      float rescale = 1.0F;
-      float tile_scale = 0.0F;
-      float next_maximum = running_maximum[item];
-      if (lane == 0U && row < query_count) {
-        next_maximum =
-            fmaxf(running_maximum[item], tile_maximum[logical_query]);
-        rescale = expf(running_maximum[item] - next_maximum);
-        tile_scale = expf(tile_maximum[logical_query] - next_maximum);
-        running_denominator[item] =
-            running_denominator[item] * rescale +
-            tile_denominator[logical_query] * tile_scale;
-        running_maximum[item] = next_maximum;
-      }
-      rescale = __shfl(rescale, 0U, kWaveSize);
-      tile_scale = __shfl(tile_scale, 0U, kWaveSize);
-      next_maximum = __shfl(next_maximum, 0U, kWaveSize);
-      running_maximum[item] = next_maximum;
-      running_denominator[item] =
-          __shfl(running_denominator[item], 0U, kWaveSize);
-      if (row < query_count) {
-        for (uint32_t pair = 0U; pair < kPairsPerLane; ++pair) {
-          float2 tile_accumulation = make_float2(0.0F, 0.0F);
-          for (uint32_t key_index = 0U; key_index < KeyTile; ++key_index) {
-            if (key_index < key_count) {
-              const float probability =
-                  score_tile[key_index][logical_query] * tile_scale;
-              const uint32_t dimension = lane * 2U + pair * kWaveSize * 2U;
-              const float2 value_pair =
-                  load_fp16_pair(value_tile[key_index] + dimension);
-              tile_accumulation.x += probability * value_pair.x;
-              tile_accumulation.y += probability * value_pair.y;
-            }
-          }
-          accumulations[item][pair].x =
-              accumulations[item][pair].x * rescale + tile_accumulation.x;
-          accumulations[item][pair].y =
-              accumulations[item][pair].y * rescale + tile_accumulation.y;
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-  for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-    const uint32_t logical_query = wave * kQueriesPerWave + item;
-    const uint64_t row = first_row + logical_query / kGqaRatio;
-    const uint32_t query_head = first_query_head + logical_query % kGqaRatio;
-    if (row < query_count) {
-      uint16_t *const output_row = output + (row * q_heads + query_head) *
-                                                static_cast<uint64_t>(head_dim);
-      for (uint32_t pair = 0U; pair < kPairsPerLane; ++pair) {
-        const uint32_t dimension = lane * 2U + pair * kWaveSize * 2U;
-        const float denominator = running_denominator[item];
-        const float2 result =
-            make_float2(accumulations[item][pair].x / denominator,
-                        accumulations[item][pair].y / denominator);
-        output_row[dimension] = f32_to_bf16_rne(result.x);
-        output_row[dimension + 1U] = f32_to_bf16_rne(result.y);
-      }
-    }
-  }
-}
-
-// gfx1201-only QTile8 blockwise FP16-KV GQA6 candidate. Eight adjacent query
-// rows share one KV tile and each wave owns six logical queries (one query
-// head per item for the six-way GQA ratio). The score tile is retained in LDS
-// as 32 x 48 FP32 values, so each key is exponentiated once and reused by the
-// denominator and value passes. K/V (32 KiB), scores (6 KiB), and online
-// softmax metadata remain below the 64 KiB LDS limit.
-__global__
-__launch_bounds__(256, 1) void causal_attention_prefill_gqa6_blocksoftmax_q8_fp16_kernel(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint32_t q_heads,
-    const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale) {
-  constexpr uint32_t kWaveSize = 32U;
-  constexpr uint32_t kWaveCount = 8U;
-  constexpr uint32_t kGqaRatio = 6U;
-  constexpr uint32_t kQueryTile = 8U;
-  constexpr uint32_t kKeyTile = 32U;
-  constexpr uint32_t kLogicalQueries = kGqaRatio * kQueryTile;
-  constexpr uint32_t kQueriesPerWave = kLogicalQueries / kWaveCount;
-  constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-  constexpr uint32_t kPairsPerLane = kHeadDim / kWaveSize / 2U;
-  static_assert(kQueriesPerWave == 6U);
-  static_assert(kPairsPerLane == 4U);
-  (void)key_scales;
-  (void)value_scales;
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  (void)static_key_scale;
-  (void)static_value_scale;
-
-  const uint64_t flat = blockIdx.x;
-  const uint64_t query_tile = flat / kv_heads;
-  const uint32_t kv_head = static_cast<uint32_t>(flat % kv_heads);
-  const uint64_t first_row = query_tile * kQueryTile;
-  if (first_row >= query_count || q_heads != 24U || kv_heads != 4U ||
-      head_dim != kHeadDim) {
-    return;
-  }
-  const uint32_t thread = threadIdx.x;
-  const uint32_t lane = thread & (kWaveSize - 1U);
-  const uint32_t wave = thread / kWaveSize;
-  const uint32_t first_query_head = kv_head * kGqaRatio;
-  const uint16_t *const key_fp16 = static_cast<const uint16_t *>(key);
-  const uint16_t *const value_fp16 = static_cast<const uint16_t *>(value);
-
-  __shared__ uint16_t key_tile[kKeyTile][kHeadDim];
-  __shared__ uint16_t value_tile[kKeyTile][kHeadDim];
-  __shared__ float score_tile[kKeyTile][kLogicalQueries];
-  __shared__ float tile_maximum[kLogicalQueries];
-  __shared__ float tile_denominator[kLogicalQueries];
-  float2 query_values[kQueriesPerWave][kPairsPerLane];
-  float2 accumulations[kQueriesPerWave][kPairsPerLane] = {};
-  float running_maximum[kQueriesPerWave];
-  float running_denominator[kQueriesPerWave];
-
-  for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-    running_maximum[item] = -INFINITY;
-    running_denominator[item] = 0.0F;
-    const uint32_t logical_query = wave * kQueriesPerWave + item;
-    const uint64_t row = first_row + logical_query / kGqaRatio;
-    const uint32_t query_head = first_query_head + logical_query % kGqaRatio;
-    const uint64_t safe_row = row < query_count ? row : query_count - 1U;
-    const uint16_t *const query_row =
-        query +
-        (safe_row * q_heads + query_head) * static_cast<uint64_t>(head_dim);
-    for (uint32_t pair = 0U; pair < kPairsPerLane; ++pair) {
-      const uint32_t dimension = lane * 2U + pair * kWaveSize * 2U;
-      query_values[item][pair] = row < query_count
-                                     ? load_bf16_pair(query_row + dimension)
-                                     : make_float2(0.0F, 0.0F);
-    }
-  }
-
-  const uint64_t tile_end = first_row + kQueryTile;
-  const uint64_t last_row =
-      (tile_end < query_count ? tile_end : query_count) - 1U;
-  const uint64_t last_query_position = start_position + last_row;
-  for (uint64_t key_begin = 0U; key_begin <= last_query_position;
-       key_begin += kKeyTile) {
-    const uint64_t remaining = last_query_position - key_begin + 1U;
-    const uint32_t key_count =
-        remaining < kKeyTile ? static_cast<uint32_t>(remaining) : kKeyTile;
-    for (uint32_t element = thread; element < kKeyTile * kHeadDim;
-         element += blockDim.x) {
-      const uint32_t key_index = element / kHeadDim;
-      const uint32_t dimension = element % kHeadDim;
-      if (key_index < key_count) {
-        const uint64_t kv_row = (key_begin + key_index) * kv_heads + kv_head;
-        key_tile[key_index][dimension] =
-            key_fp16[kv_row * static_cast<uint64_t>(head_dim) + dimension];
-        value_tile[key_index][dimension] =
-            value_fp16[kv_row * static_cast<uint64_t>(head_dim) + dimension];
-      }
-    }
-    __syncthreads();
-
-    for (uint32_t key_index = 0U; key_index < key_count; ++key_index) {
-      const uint64_t key_position = key_begin + key_index;
-      for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-        const uint32_t logical_query = wave * kQueriesPerWave + item;
-        const uint64_t row = first_row + logical_query / kGqaRatio;
-        const bool active =
-            row < query_count && key_position <= start_position + row;
-        float partial = 0.0F;
-        for (uint32_t pair = 0U; pair < kPairsPerLane; ++pair) {
-          const uint32_t dimension = lane * 2U + pair * kWaveSize * 2U;
-          const float2 q = query_values[item][pair];
-          const float2 k = load_fp16_pair(key_tile[key_index] + dimension);
-          partial += active ? q.x * k.x + q.y * k.y : 0.0F;
-        }
-        for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
-          partial += __shfl_down(partial, offset, kWaveSize);
-        }
-        if (lane == 0U) {
-          score_tile[key_index][logical_query] =
-              active ? partial * rsqrtf(static_cast<float>(head_dim))
-                     : -INFINITY;
-        }
-      }
-    }
-    __syncthreads();
-
-    for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-      const uint32_t logical_query = wave * kQueriesPerWave + item;
-      const uint64_t row = first_row + logical_query / kGqaRatio;
-      if (lane == 0U) {
-        float maximum = -INFINITY;
-        if (row < query_count) {
-          for (uint32_t key_index = 0U; key_index < kKeyTile; ++key_index) {
-            if (key_index < key_count) {
-              maximum = fmaxf(maximum, score_tile[key_index][logical_query]);
-            }
-          }
-        }
-        tile_maximum[logical_query] = maximum;
-      }
-    }
-    __syncthreads();
-    for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-      const uint32_t logical_query = wave * kQueriesPerWave + item;
-      const uint64_t row = first_row + logical_query / kGqaRatio;
-      if (lane == 0U) {
-        float denominator = 0.0F;
-        if (row < query_count) {
-          for (uint32_t key_index = 0U; key_index < kKeyTile; ++key_index) {
-            if (key_index < key_count) {
-              // Convert in place so the value pass reuses this one expf.
-              const float probability =
-                  expf(score_tile[key_index][logical_query] -
-                       tile_maximum[logical_query]);
-              score_tile[key_index][logical_query] = probability;
-              denominator += probability;
-            }
-          }
-        }
-        tile_denominator[logical_query] = denominator;
-      }
-    }
-    __syncthreads();
-
-    for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-      const uint32_t logical_query = wave * kQueriesPerWave + item;
-      const uint64_t row = first_row + logical_query / kGqaRatio;
-      float rescale = 1.0F;
-      float tile_scale = 0.0F;
-      float next_maximum = running_maximum[item];
-      if (lane == 0U && row < query_count) {
-        next_maximum =
-            fmaxf(running_maximum[item], tile_maximum[logical_query]);
-        rescale = expf(running_maximum[item] - next_maximum);
-        tile_scale = expf(tile_maximum[logical_query] - next_maximum);
-        running_denominator[item] =
-            running_denominator[item] * rescale +
-            tile_denominator[logical_query] * tile_scale;
-        running_maximum[item] = next_maximum;
-      }
-      rescale = __shfl(rescale, 0U, kWaveSize);
-      tile_scale = __shfl(tile_scale, 0U, kWaveSize);
-      next_maximum = __shfl(next_maximum, 0U, kWaveSize);
-      running_maximum[item] = next_maximum;
-      running_denominator[item] =
-          __shfl(running_denominator[item], 0U, kWaveSize);
-      if (row < query_count) {
-        for (uint32_t pair = 0U; pair < kPairsPerLane; ++pair) {
-          float2 tile_accumulation = make_float2(0.0F, 0.0F);
-          for (uint32_t key_index = 0U; key_index < kKeyTile; ++key_index) {
-            if (key_index < key_count) {
-              const float probability =
-                  score_tile[key_index][logical_query] * tile_scale;
-              const uint32_t dimension = lane * 2U + pair * kWaveSize * 2U;
-              const float2 value_pair =
-                  load_fp16_pair(value_tile[key_index] + dimension);
-              tile_accumulation.x += probability * value_pair.x;
-              tile_accumulation.y += probability * value_pair.y;
-            }
-          }
-          accumulations[item][pair].x =
-              accumulations[item][pair].x * rescale + tile_accumulation.x;
-          accumulations[item][pair].y =
-              accumulations[item][pair].y * rescale + tile_accumulation.y;
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-  for (uint32_t item = 0U; item < kQueriesPerWave; ++item) {
-    const uint32_t logical_query = wave * kQueriesPerWave + item;
-    const uint64_t row = first_row + logical_query / kGqaRatio;
-    const uint32_t query_head = first_query_head + logical_query % kGqaRatio;
-    if (row < query_count) {
-      uint16_t *const output_row = output + (row * q_heads + query_head) *
-                                                static_cast<uint64_t>(head_dim);
-      for (uint32_t pair = 0U; pair < kPairsPerLane; ++pair) {
-        const uint32_t dimension = lane * 2U + pair * kWaveSize * 2U;
-        const float denominator = running_denominator[item];
-        const float2 result =
-            make_float2(accumulations[item][pair].x / denominator,
-                        accumulations[item][pair].y / denominator);
-        output_row[dimension] = f32_to_bf16_rne(result.x);
-        output_row[dimension + 1U] = f32_to_bf16_rne(result.y);
-      }
-    }
-  }
-}
-
-// The scaled prefill prototype keeps the public BF16-Q/FP16-KV storage
-// contract while doing all GEMM operands in FP16.  Each query row/head gets a
-// power-of-two scale before narrowing, and the inverse scale is applied only
-// to the FP32 score during softmax.  This preserves large (2^20) and tiny
-// BF16 values without changing the public tensor representation.
-__device__ uint16_t scaled_f32_to_f16_rne(const float value) noexcept {
-  const uint32_t bits = __float_as_uint(value);
-  const uint16_t sign = static_cast<uint16_t>((bits >> 16U) & 0x8000U);
-  const uint32_t exponent = (bits >> 23U) & 0xffU;
-  const uint32_t fraction = bits & 0x007fffffU;
-  if (exponent == 0xffU) {
-    return static_cast<uint16_t>(sign | (fraction == 0U ? 0x7c00U : 0x7e00U));
-  }
-  int32_t unbiased = static_cast<int32_t>(exponent) - 127;
-  uint32_t normalized_fraction = fraction;
-  if (exponent == 0U && fraction != 0U) {
-    // BF16 subnormals arrive as FP32 subnormals after conversion.  Normalize
-    // them before applying the FP16 exponent/subnormal boundary logic.
-    unbiased = -126;
-    while ((normalized_fraction & 0x00800000U) == 0U) {
-      normalized_fraction <<= 1U;
-      --unbiased;
-    }
-    normalized_fraction &= 0x007fffffU;
-  }
-  if (unbiased > 15) {
-    return static_cast<uint16_t>(sign | 0x7c00U);
-  }
-  if (unbiased >= -14) {
-    uint32_t rounded = normalized_fraction + 0x1000U;
-    uint32_t half_exponent = static_cast<uint32_t>(unbiased + 15);
-    if (rounded > 0x7fffffU) {
-      rounded = 0U;
-      ++half_exponent;
-    }
-    if (half_exponent >= 0x1fU) {
-      return static_cast<uint16_t>(sign | 0x7c00U);
-    }
-    return static_cast<uint16_t>(sign | (half_exponent << 10U) |
-                                 ((rounded >> 13U) & 0x03ffU));
-  }
-  if (unbiased < -24) {
-    return sign;
-  }
-  const uint32_t mantissa = normalized_fraction | 0x00800000U;
-  const uint32_t shift = static_cast<uint32_t>(-unbiased - 14);
-  const uint32_t rounding_shift = shift + 13U;
-  uint32_t rounded = mantissa >> rounding_shift;
-  const uint32_t remainder_mask = (UINT32_C(1) << rounding_shift) - 1U;
-  const uint32_t remainder = mantissa & remainder_mask;
-  const uint32_t halfway = UINT32_C(1) << (rounding_shift - 1U);
-  if (remainder > halfway || (remainder == halfway && (rounded & 1U) != 0U)) {
-    ++rounded;
-  }
-  if (rounded >= 0x0400U) {
-    return static_cast<uint16_t>(sign | 0x0400U);
-  }
-  return static_cast<uint16_t>(sign | (rounded & 0x03ffU));
-}
-
-// Probabilities are non-negative.  Keep the representable FP16 part below
-// the F32 value so the omitted mass can be carried by the residual pass.
-__device__ uint16_t scaled_f32_to_f16_floor(const float value) noexcept {
-  if (!(value > 0.0F) || !isfinite(value)) {
-    return value == INFINITY ? UINT16_C(0x7c00) : UINT16_C(0);
-  }
-  uint16_t rounded = scaled_f32_to_f16_rne(value);
-  if (rounded != 0U && f16_to_f32(rounded) > value) {
-    --rounded;
-  }
-  return rounded;
-}
-
-__device__ int scaled_unbiased_exponent(const float value) noexcept {
-  const uint32_t bits = __float_as_uint(value);
-  const uint32_t exponent = (bits >> 23U) & 0xffU;
-  if (exponent != 0U) {
-    return static_cast<int>(exponent) - 127;
-  }
-  uint32_t fraction = bits & 0x007fffffU;
-  int unbiased = -126;
-  while (fraction != 0U && (fraction & 0x00800000U) == 0U) {
-    fraction <<= 1U;
-    --unbiased;
-  }
-  return unbiased;
-}
-
-__global__ __launch_bounds__(256, 1) void scaled_prefill_pack_query_kernel(
-    const uint16_t *const query, uint16_t *const packed, float *const scales,
-    const uint32_t rows, const uint32_t q_heads, const uint32_t head_dim,
-    const uint32_t kv_head, const uint32_t q_group, const uint32_t row_offset) {
-  const uint32_t packed_row = blockIdx.x;
-  const uint32_t packed_rows = rows * q_group;
-  if (packed_row >= packed_rows) {
-    return;
-  }
-  const uint32_t row = packed_row / q_group;
-  const uint32_t local_head = packed_row % q_group;
-  const uint32_t query_head = kv_head * q_group + local_head;
-  const uint64_t source_row = static_cast<uint64_t>(row_offset) + row;
-  __shared__ float maximums[256];
-  __shared__ uint32_t nan_flags[256];
-  const uint32_t dimension = threadIdx.x;
-  float value = 0.0F;
-  uint32_t nan = 0U;
-  if (dimension < head_dim) {
-    value = bf16_to_f32(
-        query[(source_row * q_heads + query_head) * head_dim + dimension]);
-    nan = isnan(value) ? 1U : 0U;
-  }
-  maximums[dimension] = nan != 0U ? 0.0F : fabsf(value);
-  nan_flags[dimension] = nan;
-  __syncthreads();
-  for (uint32_t stride = 128U; stride != 0U; stride >>= 1U) {
-    if (dimension < stride) {
-      maximums[dimension] =
-          fmaxf(maximums[dimension], maximums[dimension + stride]);
-      nan_flags[dimension] |= nan_flags[dimension + stride];
-    }
-    __syncthreads();
-  }
-  float scale = 1.0F;
-  if (nan_flags[0] == 0U && isfinite(maximums[0]) && maximums[0] != 0.0F) {
-    int scale_exponent = 15 - scaled_unbiased_exponent(maximums[0]);
-    scale_exponent = max(-127, min(127, scale_exponent));
-    scale = ldexpf(1.0F, scale_exponent);
-  }
-  if (dimension == 0U) {
-    scales[packed_row] = scale;
-  }
-  __syncthreads();
-  if (dimension < head_dim) {
-    packed[static_cast<uint64_t>(packed_row) * head_dim + dimension] =
-        scaled_f32_to_f16_rne(value * scale);
-  }
-}
+namespace {
 
 template <uint32_t Encoding>
-__global__ __launch_bounds__(256, 1) void scaled_prefill_pack_kv_kernel(
-    const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const key_pack, uint16_t *const value_pack,
-    uint64_t *const special_first, const uint64_t key_length,
-    const uint32_t kv_heads, const uint32_t head_dim, const uint32_t kv_head,
-    const float static_key_scale, const float static_value_scale) {
-  const uint64_t index =
-      static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const uint64_t elements = key_length * static_cast<uint64_t>(head_dim);
-  if (index >= elements) {
-    return;
+hipError_t launch_paged_attention_impl(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim,
+    const float static_key_scale, const float static_value_scale,
+    const float score_scale, const hipStream_t stream) noexcept {
+  if (query == nullptr || logical_table == nullptr ||
+      descriptor_table == nullptr || device_status == nullptr ||
+      output == nullptr || query_count == 0U || q_heads == 0U ||
+      kv_heads == 0U || q_heads % kv_heads != 0U || head_dim == 0U ||
+      head_dim > SLLM_HIP_KV_MAX_HEAD_DIM ||
+      start_position > UINT64_MAX - static_cast<uint64_t>(query_count) ||
+      start_position + query_count != committed_kv_length ||
+      committed_kv_length == 0U || logical_table_count == 0U ||
+      descriptor_count == 0U ||
+      logical_table_count < committed_kv_length / 128U +
+                                (committed_kv_length % 128U != 0U ? 1U : 0U) ||
+      !std::isfinite(score_scale) || score_scale <= 0.0F ||
+      (Encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 &&
+       (!std::isfinite(static_key_scale) || static_key_scale <= 0.0F ||
+        !std::isfinite(static_value_scale) || static_value_scale <= 0.0F))) {
+    return hipErrorInvalidValue;
   }
-  const uint64_t token = index / head_dim;
-  const uint32_t dimension = static_cast<uint32_t>(index % head_dim);
-  const uint64_t source_row = token * kv_heads + kv_head;
-  uint16_t key_raw = 0U;
-  uint16_t value_raw = 0U;
-  if constexpr (Encoding == SLLM_HIP_KV_ENCODING_FP16_V1) {
-    const uint64_t source =
-        source_row * static_cast<uint64_t>(head_dim) + dimension;
-    key_raw = static_cast<const uint16_t *>(key)[source];
-    value_raw = static_cast<const uint16_t *>(value)[source];
+  const uint64_t block_count =
+      static_cast<uint64_t>(query_count) * static_cast<uint64_t>(q_heads);
+  if (block_count > std::numeric_limits<uint32_t>::max()) {
+    return hipErrorInvalidValue;
+  }
+  hipError_t status =
+      hipMemsetAsync(device_status, 0, sizeof(uint32_t), stream);
+  if (status != hipSuccess) {
+    return status;
+  }
+  if (Encoding == SLLM_HIP_KV_ENCODING_FP16_V1 &&
+      (query_count == 1U || query_count >= 32U)) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(causal_attention_paged_kernel<Encoding, true>),
+        dim3(static_cast<uint32_t>(block_count)),
+        dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query,
+        logical_table, descriptor_table, logical_table_count, descriptor_count,
+        device_status, output, query_count, start_position, committed_kv_length,
+        q_heads, kv_heads, head_dim, static_key_scale, static_value_scale,
+        score_scale);
   } else {
-    key_raw = scaled_f32_to_f16_rne(load_kv_specialized<Encoding>(
-        key, key_scales, key_outer_scales, source_row, dimension, head_dim,
-        static_key_scale));
-    value_raw = scaled_f32_to_f16_rne(load_kv_specialized<Encoding>(
-        value, value_scales, value_outer_scales, source_row, dimension,
-        head_dim, static_value_scale));
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(causal_attention_paged_kernel<Encoding, false>),
+        dim3(static_cast<uint32_t>(block_count)),
+        dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query,
+        logical_table, descriptor_table, logical_table_count, descriptor_count,
+        device_status, output, query_count, start_position, committed_kv_length,
+        q_heads, kv_heads, head_dim, static_key_scale, static_value_scale,
+        score_scale);
   }
-  key_pack[index] = key_raw;
-  const uint32_t value_bits = static_cast<uint32_t>(value_raw);
-  const uint32_t exponent = (value_bits >> 10U) & 0x1fU;
-  const uint32_t fraction = value_bits & 0x03ffU;
-  if (exponent == 0x1fU) {
-    const uint32_t kind =
-        fraction != 0U ? 0U : ((value_bits & 0x8000U) != 0U ? 2U : 1U);
-    const uint64_t flag =
-        (static_cast<uint64_t>(kv_head) * head_dim + dimension) * 3U + kind;
-    atomicMin(reinterpret_cast<unsigned long long *>(special_first + flag),
-              static_cast<unsigned long long>(token));
-    value_pack[index] = 0U;
-  } else {
-    value_pack[index] = value_raw;
-  }
-}
-
-__global__ __launch_bounds__(256, 1) void scaled_prefill_softmax_fp16_kernel(
-    float *const scores, uint16_t *const probabilities,
-    uint16_t *const residuals, const uint32_t rows, const uint64_t key_length,
-    const uint64_t start_position, const uint32_t row_offset,
-    const uint32_t q_group, const float *const scales, const float scale) {
-  const uint32_t packed_row = blockIdx.x;
-  if (packed_row >= rows || q_group == 0U) {
-    return;
-  }
-  const uint32_t row = packed_row / q_group;
-  const uint64_t requested_end = start_position + row_offset + row + 1U;
-  const uint64_t causal_end =
-      requested_end < key_length ? requested_end : key_length;
-  __shared__ float reduction[256];
-  __shared__ uint32_t nan_scores[256];
-  const float inverse_query_scale = 1.0F / scales[packed_row];
-  float local_maximum = -INFINITY;
-  uint32_t local_nan = 0U;
-  for (uint64_t key = threadIdx.x; key < causal_end; key += blockDim.x) {
-    const float score =
-        scores[static_cast<uint64_t>(packed_row) * key_length + key] *
-        inverse_query_scale * scale;
-    local_nan |= isnan(score) ? 1U : 0U;
-    local_maximum = fmaxf(local_maximum, score);
-  }
-  reduction[threadIdx.x] = local_maximum;
-  nan_scores[threadIdx.x] = local_nan;
-  __syncthreads();
-  for (uint32_t stride = 128U; stride != 0U; stride >>= 1U) {
-    if (threadIdx.x < stride) {
-      reduction[threadIdx.x] =
-          fmaxf(reduction[threadIdx.x], reduction[threadIdx.x + stride]);
-      nan_scores[threadIdx.x] |= nan_scores[threadIdx.x + stride];
-    }
-    __syncthreads();
-  }
-  const float maximum = reduction[0];
-  float local_denominator = 0.0F;
-  for (uint64_t key = threadIdx.x; key < causal_end; key += blockDim.x) {
-    local_denominator +=
-        expf(scores[static_cast<uint64_t>(packed_row) * key_length + key] *
-                 inverse_query_scale * scale -
-             maximum);
-  }
-  reduction[threadIdx.x] = local_denominator;
-  __syncthreads();
-  for (uint32_t stride = 128U; stride != 0U; stride >>= 1U) {
-    if (threadIdx.x < stride) {
-      reduction[threadIdx.x] += reduction[threadIdx.x + stride];
-    }
-    __syncthreads();
-  }
-  const float denominator = reduction[0];
-  constexpr float kResidualScale = 1024.0F;
-  for (uint64_t key = threadIdx.x; key < key_length; key += blockDim.x) {
-    if (nan_scores[0] != 0U) {
-      probabilities[static_cast<uint64_t>(packed_row) * key_length + key] =
-          UINT16_C(0x7e00);
-      residuals[static_cast<uint64_t>(packed_row) * key_length + key] =
-          UINT16_C(0x7e00);
-      continue;
-    }
-    float probability = 0.0F;
-    if (key < causal_end) {
-      probability =
-          expf(scores[static_cast<uint64_t>(packed_row) * key_length + key] *
-                   inverse_query_scale * scale -
-               maximum) /
-          denominator;
-    }
-    const uint16_t high = scaled_f32_to_f16_floor(probability);
-    const float residual =
-        fmaxf(0.0F, probability - f16_to_f32(high)) * kResidualScale;
-    probabilities[static_cast<uint64_t>(packed_row) * key_length + key] = high;
-    residuals[static_cast<uint64_t>(packed_row) * key_length + key] =
-        scaled_f32_to_f16_floor(residual);
-  }
-}
-
-template <uint32_t Encoding>
-__global__ __launch_bounds__(256, 1) void scaled_prefill_combine_kernel(
-    float *const output, const float *const residual_output,
-    const uint16_t *const probabilities, const uint16_t *const residuals,
-    const uint64_t *const special_first, const void *const value,
-    const void *const value_scales, const float *const value_outer_scales,
-    const uint32_t rows, const uint32_t kv_heads, const uint64_t key_length,
-    const uint64_t start_position, const uint32_t row_offset,
-    const uint32_t q_group, const uint32_t head_dim, const uint32_t kv_head,
-    const float static_value_scale) {
-  constexpr float kResidualScale = 1024.0F;
-  const uint64_t index =
-      static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const uint64_t elements = static_cast<uint64_t>(rows) * q_group * head_dim;
-  if (index >= elements || q_group == 0U) {
-    return;
-  }
-  const uint32_t packed_row = static_cast<uint32_t>(index / head_dim);
-  const uint32_t dimension = static_cast<uint32_t>(index % head_dim);
-  const uint32_t row = packed_row / q_group;
-  const uint64_t requested_end = start_position + row_offset + row + 1U;
-  const uint64_t causal_end =
-      requested_end < key_length ? requested_end : key_length;
-  output[index] += residual_output[index] / kResidualScale;
-  const uint64_t probability_row =
-      static_cast<uint64_t>(packed_row) * key_length;
-  const auto positive_probability = [&](const uint64_t token) {
-    return token < causal_end &&
-           f16_to_f32(probabilities[probability_row + token]) +
-                   f16_to_f32(residuals[probability_row + token]) /
-                       kResidualScale >
-               0.0F;
-  };
-  const uint64_t base =
-      (static_cast<uint64_t>(kv_head) * head_dim + dimension) * 3U;
-  const bool has_special = special_first[base] != UINT64_MAX ||
-                           special_first[base + 1U] != UINT64_MAX ||
-                           special_first[base + 2U] != UINT64_MAX;
-  if (has_special) {
-    bool nan_visible = false;
-    bool positive_visible = false;
-    bool negative_visible = false;
-    for (uint64_t token = 0U; token < causal_end; ++token) {
-      if (!positive_probability(token)) {
-        continue;
-      }
-      const float raw = load_kv_specialized<Encoding>(
-          value, value_scales, value_outer_scales, token * kv_heads + kv_head,
-          dimension, head_dim, static_value_scale);
-      if (isfinite(raw)) {
-        continue;
-      }
-      if (isnan(raw)) {
-        nan_visible = true;
-      } else if (signbit(raw)) {
-        negative_visible = true;
-      } else {
-        positive_visible = true;
-      }
-    }
-    if (nan_visible || (positive_visible && negative_visible)) {
-      output[index] = __int_as_float(UINT32_C(0x7fc00000));
-    } else if (positive_visible) {
-      output[index] = INFINITY;
-    } else if (negative_visible) {
-      output[index] = -INFINITY;
-    }
-  }
-}
-
-__global__ __launch_bounds__(256, 1) void scaled_prefill_scatter_kernel(
-    const float *const input, uint16_t *const output, const uint32_t rows,
-    const uint32_t q_heads, const uint32_t head_dim, const uint32_t kv_head,
-    const uint32_t q_group, const uint32_t row_offset) {
-  const uint64_t index =
-      static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const uint64_t elements = static_cast<uint64_t>(rows) * q_group * head_dim;
-  if (index >= elements) {
-    return;
-  }
-  const uint32_t packed_row = static_cast<uint32_t>(index / head_dim);
-  const uint32_t dimension = static_cast<uint32_t>(index % head_dim);
-  const uint32_t row = packed_row / q_group;
-  const uint32_t local_head = packed_row % q_group;
-  const uint32_t query_head = kv_head * q_group + local_head;
-  output[((static_cast<uint64_t>(row_offset) + row) * q_heads + query_head) *
-             head_dim +
-         dimension] = f32_to_bf16_rne(input[index]);
+  return hipGetLastError();
 }
 
 } // namespace
 
-hipError_t launch_decode_wave_split_fp16_pair(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale, const hipStream_t stream) noexcept {
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || query_count != 1U || q_heads != 16U ||
-      kv_heads != 4U || head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM ||
-      encoding != SLLM_HIP_KV_ENCODING_FP16_V1 ||
-      start_position + 1U != committed_kv_length ||
-      committed_kv_length < 1024U) {
+hipError_t launch_paged_attention(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim, const uint32_t encoding,
+    const float static_key_scale, const float static_value_scale,
+    const float score_scale, const hipStream_t stream) noexcept {
+#define SLLM_LAUNCH_PAGED_FORMAT(EncodingValue)                                \
+  return launch_paged_attention_impl<EncodingValue>(                           \
+      query, logical_table, descriptor_table, logical_table_count,             \
+      descriptor_count, device_status, output, query_count, start_position,    \
+      committed_kv_length, q_heads, kv_heads, head_dim, static_key_scale,      \
+      static_value_scale, score_scale, stream)
+  switch (encoding) {
+  case SLLM_HIP_KV_ENCODING_FP16_V1:
+    SLLM_LAUNCH_PAGED_FORMAT(SLLM_HIP_KV_ENCODING_FP16_V1);
+  case SLLM_HIP_KV_ENCODING_FP8_V1:
+    SLLM_LAUNCH_PAGED_FORMAT(SLLM_HIP_KV_ENCODING_FP8_V1);
+  case SLLM_HIP_KV_ENCODING_FP8_STATIC_V1:
+    SLLM_LAUNCH_PAGED_FORMAT(SLLM_HIP_KV_ENCODING_FP8_STATIC_V1);
+  case SLLM_HIP_KV_ENCODING_NVFP4_V1:
+    SLLM_LAUNCH_PAGED_FORMAT(SLLM_HIP_KV_ENCODING_NVFP4_V1);
+  case SLLM_HIP_KV_ENCODING_MXFP8_E4_V1:
+    SLLM_LAUNCH_PAGED_FORMAT(SLLM_HIP_KV_ENCODING_MXFP8_E4_V1);
+  case SLLM_HIP_KV_ENCODING_MXFP8_E5_V1:
+    SLLM_LAUNCH_PAGED_FORMAT(SLLM_HIP_KV_ENCODING_MXFP8_E5_V1);
+  default:
     return hipErrorInvalidValue;
   }
-  hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(causal_attention_decode_wave_split_fp16_pair_kernel),
-      dim3(q_heads), dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream,
-      query, key, value, key_scales, value_scales, key_outer_scales,
-      value_outer_scales, output, committed_kv_length, q_heads, kv_heads,
-      head_dim, encoding, static_key_scale, static_value_scale);
-  return hipGetLastError();
+#undef SLLM_LAUNCH_PAGED_FORMAT
 }
 
-template <bool UseQueryPreload, uint32_t Encoding, uint32_t kWaveCount,
-          bool DeviceControl = false>
-hipError_t launch_decode_wave_split_staged_impl(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
+hipError_t launch_paged_sliding_static_fp8_attention(
+    const uint16_t *const query, const uint32_t *const ring_table,
+    const uint64_t *const ring_tags,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t ring_slot_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint64_t retained_start,
     const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale, void *const workspace,
-    const uint64_t workspace_bytes, const bool use_gqa_shared,
-    const bool use_split128, sllm_decode_control::ControlV1 *const control,
-    const hipStream_t stream) noexcept {
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  constexpr uint32_t kWaveSize = 32U;
-  constexpr uint32_t kMaxQueryCount = 9U;
-  constexpr uint32_t kHeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-  constexpr uint64_t kBytesPerQuery32 =
-      UINT64_C(24) * kWaveCount * (kHeadDim + 2U) * sizeof(float);
-  constexpr uint64_t kBytesPerQuery128 =
-      UINT64_C(24) * 128U * (kHeadDim + 2U) * sizeof(float);
-  const uint64_t required_workspace_bytes =
-      use_split128 ? kBytesPerQuery128 : kBytesPerQuery32;
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      key_scales == nullptr || value_scales == nullptr || output == nullptr ||
-      workspace == nullptr || query_count == 0U ||
-      query_count > kMaxQueryCount || q_heads != 24U || kv_heads != 4U ||
-      head_dim != kHeadDim || encoding != Encoding ||
-      start_position > UINT64_MAX - query_count ||
+    const float static_key_scale, const float static_value_scale,
+    const float score_scale, const hipStream_t stream) noexcept {
+  if (query == nullptr || ring_table == nullptr || ring_tags == nullptr ||
+      descriptor_table == nullptr || device_status == nullptr ||
+      output == nullptr || ring_slot_count != kPagedSlidingRingSlots ||
+      descriptor_count == 0U || query_count == 0U || q_heads == 0U ||
+      kv_heads == 0U || q_heads % kv_heads != 0U || head_dim == 0U ||
+      head_dim > SLLM_HIP_KV_MAX_HEAD_DIM ||
+      start_position > UINT64_MAX - static_cast<uint64_t>(query_count) ||
       start_position + query_count != committed_kv_length ||
-      committed_kv_length == 0U ||
-      workspace_bytes < required_workspace_bytes * query_count ||
-      (use_gqa_shared &&
-       (kWaveCount != 32U || !UseQueryPreload || query_count > 3U ||
-        q_heads != 24U || kv_heads != 4U || head_dim != kHeadDim ||
-        encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1)) ||
-      (use_split128 &&
-       (kWaveCount != 32U || !UseQueryPreload ||
-        (control == nullptr && query_count > 3U) ||
-        (control == nullptr && committed_kv_length < 8192U) || q_heads != 24U ||
-        kv_heads != 4U || head_dim != kHeadDim ||
-        encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1))) {
+      retained_start > committed_kv_length || committed_kv_length == 0U ||
+      !std::isfinite(static_key_scale) || static_key_scale <= 0.0F ||
+      !std::isfinite(static_value_scale) || static_value_scale <= 0.0F ||
+      !std::isfinite(score_scale) || score_scale <= 0.0F) {
     return hipErrorInvalidValue;
   }
-  if (use_split128) {
-    if (use_gqa_shared) {
-      hipLaunchKernelGGL(
-          HIP_KERNEL_NAME(
-              causal_attention_decode_gqa6_staged32_split_stage1_kernel<
-                  128U, DeviceControl>),
-          dim3(query_count * 4U * 128U), dim3(192U), 0U, stream, query, key,
-          value, key_scales, value_scales, static_cast<float *>(workspace),
-          query_count, start_position, control);
-    } else {
-      hipLaunchKernelGGL(
-          HIP_KERNEL_NAME(
-              causal_attention_decode_wave_split_staged_stage1_kernel<
-                  UseQueryPreload, Encoding, 128U, DeviceControl>),
-          dim3(query_count * q_heads * 128U), dim3(kWaveSize), 0U, stream,
-          query, key, value, key_scales, value_scales, key_outer_scales,
-          value_outer_scales, static_cast<float *>(workspace), query_count,
-          start_position, q_heads, kv_heads, head_dim, static_key_scale,
-          static_value_scale, control);
-    }
-  } else if (use_gqa_shared) {
-    hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(causal_attention_decode_gqa6_staged32_stage1_kernel),
-        dim3(query_count * 4U * 32U), dim3(192U), 0U, stream, query, key, value,
-        key_scales, value_scales, static_cast<float *>(workspace), query_count,
-        start_position);
-  } else {
-    hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(causal_attention_decode_wave_split_staged_stage1_kernel<
-                        UseQueryPreload, Encoding, kWaveCount, DeviceControl>),
-        dim3(query_count * q_heads * kWaveCount), dim3(kWaveSize), 0U, stream,
-        query, key, value, key_scales, value_scales, key_outer_scales,
-        value_outer_scales, static_cast<float *>(workspace), query_count,
-        start_position, q_heads, kv_heads, head_dim, static_key_scale,
-        static_value_scale, control);
+  const uint64_t block_count =
+      static_cast<uint64_t>(query_count) * static_cast<uint64_t>(q_heads);
+  if (block_count == 0U || block_count > UINT32_MAX) {
+    return hipErrorInvalidValue;
   }
-  hipError_t status = hipGetLastError();
+  hipError_t status =
+      hipMemsetAsync(device_status, 0, sizeof(uint32_t), stream);
   if (status != hipSuccess) {
     return status;
   }
-  if (use_split128) {
+  hipLaunchKernelGGL(causal_attention_paged_sliding_static_fp8_ring_kernel,
+                     dim3(static_cast<uint32_t>(block_count)),
+                     dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream,
+                     query, ring_table, ring_tags, descriptor_table,
+                     ring_slot_count, descriptor_count, device_status, output,
+                     query_count, start_position, committed_kv_length,
+                     retained_start, q_heads, kv_heads, head_dim,
+                     static_key_scale, static_value_scale, score_scale);
+  return hipGetLastError();
+}
+
+hipError_t launch_paged_decode_fp16(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim,
+    const hipStream_t stream) noexcept {
+  if (query_count > 5U) {
+    return hipErrorInvalidValue;
+  }
+  return launch_paged_attention(
+      query, logical_table, descriptor_table, logical_table_count,
+      descriptor_count, device_status, output, query_count, start_position,
+      committed_kv_length, q_heads, kv_heads, head_dim,
+      SLLM_HIP_KV_ENCODING_FP16_V1, 1.0F, 1.0F,
+      1.0F / std::sqrt(static_cast<float>(head_dim)), stream);
+}
+
+hipError_t launch_paged_decode_fp16_device(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint32_t q_heads, const uint32_t kv_heads,
+    const uint32_t head_dim, sllm_decode_control::ControlV1 *const control,
+    const hipStream_t stream) noexcept {
+  if (query == nullptr || logical_table == nullptr ||
+      descriptor_table == nullptr || device_status == nullptr ||
+      output == nullptr || control == nullptr || query_count == 0U ||
+      query_count > 5U || q_heads == 0U || kv_heads == 0U ||
+      q_heads % kv_heads != 0U || head_dim == 0U ||
+      head_dim > SLLM_HIP_KV_MAX_HEAD_DIM || logical_table_count == 0U ||
+      descriptor_count == 0U) {
+    return hipErrorInvalidValue;
+  }
+  const uint64_t blocks =
+      static_cast<uint64_t>(query_count) * static_cast<uint64_t>(q_heads);
+  if (blocks > UINT32_MAX)
+    return hipErrorInvalidValue;
+  hipError_t status =
+      hipMemsetAsync(device_status, 0, sizeof(uint32_t), stream);
+  if (status != hipSuccess)
+    return status;
+  hipLaunchKernelGGL(causal_attention_paged_fp16_device_kernel,
+                     dim3(static_cast<uint32_t>(blocks)),
+                     dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream,
+                     query, logical_table, descriptor_table,
+                     logical_table_count, descriptor_count, device_status,
+                     output, query_count, q_heads, kv_heads, head_dim, control);
+  return hipGetLastError();
+}
+
+hipError_t launch_paged_prefill_fp16(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim,
+    const hipStream_t stream) noexcept {
+  return launch_paged_attention(
+      query, logical_table, descriptor_table, logical_table_count,
+      descriptor_count, device_status, output, query_count, start_position,
+      committed_kv_length, q_heads, kv_heads, head_dim,
+      SLLM_HIP_KV_ENCODING_FP16_V1, 1.0F, 1.0F,
+      1.0F / std::sqrt(static_cast<float>(head_dim)), stream);
+}
+
+hipError_t launch_paged_prefill_gqa4(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim,
+    const hipStream_t stream) noexcept {
+  if (query == nullptr || logical_table == nullptr ||
+      descriptor_table == nullptr || device_status == nullptr ||
+      output == nullptr || query_count < 64U ||
+      query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M || q_heads != 16U ||
+      kv_heads != 4U || head_dim != 256U || logical_table_count == 0U ||
+      descriptor_count == 0U || committed_kv_length == 0U ||
+      start_position > UINT64_MAX - query_count ||
+      start_position + query_count > committed_kv_length) {
+    return hipErrorInvalidValue;
+  }
+  const uint64_t blocks = static_cast<uint64_t>(query_count) * kv_heads;
+  if (blocks > UINT32_MAX) {
+    return hipErrorInvalidValue;
+  }
+  hipError_t status =
+      hipMemsetAsync(device_status, 0, sizeof(uint32_t), stream);
+  if (status != hipSuccess) {
+    return status;
+  }
+  hipLaunchKernelGGL(
+      HIP_KERNEL_NAME(causal_attention_paged_prefill_gqa4_shared_kernel),
+      dim3(static_cast<uint32_t>(blocks)),
+      dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query,
+      logical_table, descriptor_table, logical_table_count, descriptor_count,
+      device_status, output, query_count, start_position, committed_kv_length,
+      q_heads, kv_heads, head_dim);
+  return hipGetLastError();
+}
+
+hipError_t launch_paged_decode_gqa6(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, float *const workspace,
+    const uint64_t workspace_bytes, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim, const uint32_t encoding,
+    const bool use_gqa_shared, const hipStream_t stream) noexcept {
+  constexpr uint32_t kMaxQueryCount = 5U;
+  constexpr uint32_t kQHeads = 24U;
+  constexpr uint32_t kKvHeads = 4U;
+  constexpr uint32_t kHeadDim = 256U;
+  constexpr uint32_t kStride = kHeadDim + 2U;
+  if (query == nullptr || logical_table == nullptr ||
+      descriptor_table == nullptr || device_status == nullptr ||
+      workspace == nullptr || output == nullptr || query_count == 0U ||
+      query_count > kMaxQueryCount || logical_table_count == 0U ||
+      descriptor_count == 0U || q_heads != kQHeads || kv_heads != kKvHeads ||
+      head_dim != kHeadDim || encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+      start_position > UINT64_MAX - query_count ||
+      start_position + query_count != committed_kv_length ||
+      committed_kv_length == 0U ||
+      logical_table_count < committed_kv_length / 128U +
+                                (committed_kv_length % 128U != 0U ? 1U : 0U)) {
+    return hipErrorInvalidValue;
+  }
+  const uint32_t splits = committed_kv_length >= 8192U ? 128U : 32U;
+  const uint64_t required_workspace = static_cast<uint64_t>(query_count) *
+                                      kQHeads * splits * kStride *
+                                      sizeof(float);
+  if (workspace_bytes < required_workspace) {
+    return hipErrorInvalidValue;
+  }
+  hipError_t status =
+      hipMemsetAsync(device_status, 0, sizeof(uint32_t), stream);
+  if (status != hipSuccess) {
+    return status;
+  }
+  if (use_gqa_shared) {
+    if (splits == 128U) {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(
+              causal_attention_paged_decode_gqa6_stage1_kernel<128U>),
+          dim3(query_count * kKvHeads * 128U), dim3(192U), 0U, stream, query,
+          logical_table, descriptor_table, logical_table_count,
+          descriptor_count, device_status, workspace, query_count,
+          start_position, nullptr);
+    } else {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(
+              causal_attention_paged_decode_gqa6_stage1_kernel<32U>),
+          dim3(query_count * kKvHeads * 32U), dim3(192U), 0U, stream, query,
+          logical_table, descriptor_table, logical_table_count,
+          descriptor_count, device_status, workspace, query_count,
+          start_position, nullptr);
+    }
+  } else if (splits == 128U) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(
+            causal_attention_paged_decode_wave_split_stage1_kernel<128U>),
+        dim3(query_count * kQHeads * 128U), dim3(32U), 0U, stream, query,
+        logical_table, descriptor_table, logical_table_count, descriptor_count,
+        device_status, workspace, query_count, start_position, q_heads,
+        kv_heads, head_dim, nullptr);
+  } else {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(
+            causal_attention_paged_decode_wave_split_stage1_kernel<32U>),
+        dim3(query_count * kQHeads * 32U), dim3(32U), 0U, stream, query,
+        logical_table, descriptor_table, logical_table_count, descriptor_count,
+        device_status, workspace, query_count, start_position, q_heads,
+        kv_heads, head_dim, nullptr);
+  }
+  status = hipGetLastError();
+  if (status != hipSuccess) {
+    return status;
+  }
+  if (splits == 128U) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(
+            causal_attention_decode_gqa6_staged32_split_merge_kernel<128U>),
+        dim3(query_count * kQHeads), dim3(256U), 0U, stream, workspace, output,
+        query_count, nullptr);
+  } else {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(
+            causal_attention_decode_wave_split_staged_stage2_kernel<32U>),
+        dim3(query_count * kQHeads), dim3(256U), 0U, stream, workspace, output,
+        query_count, kQHeads, kKvHeads, kHeadDim, nullptr);
+  }
+  return hipGetLastError();
+}
+
+hipError_t launch_paged_decode_gqa6_device(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, float *const workspace,
+    const uint64_t workspace_bytes, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim, const uint32_t encoding,
+    const bool use_gqa_shared, sllm_decode_control::ControlV1 *const control,
+    const hipStream_t stream) noexcept {
+  constexpr uint32_t kMaxQueryCount = 5U;
+  constexpr uint32_t kQHeads = 24U;
+  constexpr uint32_t kKvHeads = 4U;
+  constexpr uint32_t kHeadDim = 256U;
+  constexpr uint32_t kWorkspaceSplits = 128U;
+  constexpr uint32_t kWorkspaceStride = kHeadDim + 2U;
+  constexpr uint64_t kBytesPerQuery = static_cast<uint64_t>(kQHeads) *
+                                      kWorkspaceSplits * kWorkspaceStride *
+                                      sizeof(float);
+  if (query == nullptr || logical_table == nullptr ||
+      descriptor_table == nullptr || device_status == nullptr ||
+      workspace == nullptr || output == nullptr || control == nullptr ||
+      query_count == 0U || query_count > kMaxQueryCount ||
+      logical_table_count == 0U || descriptor_count == 0U ||
+      q_heads != kQHeads || kv_heads != kKvHeads || head_dim != kHeadDim ||
+      encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+      start_position > UINT64_MAX - static_cast<uint64_t>(query_count) ||
+      start_position + query_count != committed_kv_length ||
+      committed_kv_length == 0U ||
+      logical_table_count < committed_kv_length / 128U +
+                                (committed_kv_length % 128U != 0U ? 1U : 0U) ||
+      workspace_bytes < kBytesPerQuery * query_count) {
+    return hipErrorInvalidValue;
+  }
+
+  hipError_t status =
+      hipMemsetAsync(device_status, 0, sizeof(uint32_t), stream);
+  if (status != hipSuccess) {
+    return status;
+  }
+
+  // Both stage-1 nodes are captured with fixed pointers.  Each node checks
+  // ControlV1.phase_position/phase_rows and exits unless its compile-time
+  // split count is active.  The merge node below always uses the P128 layout
+  // and consumes only the active P32 prefix when the control selects P32.
+  if (use_gqa_shared) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(
+            causal_attention_paged_decode_gqa6_stage1_kernel<32U, 128U, true>),
+        dim3(query_count * kKvHeads * 32U), dim3(192U), 0U, stream, query,
+        logical_table, descriptor_table, logical_table_count, descriptor_count,
+        device_status, workspace, query_count, start_position, control);
+    status = hipGetLastError();
+    if (status != hipSuccess) {
+      return status;
+    }
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(
+            causal_attention_paged_decode_gqa6_stage1_kernel<128U, 128U, true>),
+        dim3(query_count * kKvHeads * 128U), dim3(192U), 0U, stream, query,
+        logical_table, descriptor_table, logical_table_count, descriptor_count,
+        device_status, workspace, query_count, start_position, control);
+  } else {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(
+            causal_attention_paged_decode_wave_split_stage1_kernel<32U, 128U,
+                                                                   true>),
+        dim3(query_count * kQHeads * 32U), dim3(32U), 0U, stream, query,
+        logical_table, descriptor_table, logical_table_count, descriptor_count,
+        device_status, workspace, query_count, start_position, q_heads,
+        kv_heads, head_dim, control);
+    status = hipGetLastError();
+    if (status != hipSuccess) {
+      return status;
+    }
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(
+            causal_attention_paged_decode_wave_split_stage1_kernel<128U, 128U,
+                                                                   true>),
+        dim3(query_count * kQHeads * 128U), dim3(32U), 0U, stream, query,
+        logical_table, descriptor_table, logical_table_count, descriptor_count,
+        device_status, workspace, query_count, start_position, q_heads,
+        kv_heads, head_dim, control);
+  }
+  status = hipGetLastError();
+  if (status != hipSuccess) {
+    return status;
+  }
+  hipLaunchKernelGGL(
+      HIP_KERNEL_NAME(
+          causal_attention_decode_gqa6_staged32_split_merge_kernel<128U, true>),
+      dim3(query_count * kQHeads), dim3(256U), 0U, stream, workspace, output,
+      query_count, control);
+  return hipGetLastError();
+}
+
+template <uint32_t kRowsPerGroup, uint32_t kSplits, uint32_t kWorkspaceSplits,
+          bool DeviceControl>
+hipError_t launch_paged_decode_gqa6_c1_impl(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, float *const workspace,
+    const uint64_t workspace_bytes, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim,
+    sllm_decode_control::ControlV1 *const control,
+    const hipStream_t stream) noexcept {
+  constexpr uint32_t kQHeads = 24U;
+  constexpr uint32_t kKvHeads = 4U;
+  constexpr uint32_t kHeadDim = 256U;
+  constexpr uint32_t kWorkspaceStride = kHeadDim + 2U;
+  if (query == nullptr || logical_table == nullptr ||
+      descriptor_table == nullptr || device_status == nullptr ||
+      workspace == nullptr || output == nullptr || query_count < 2U ||
+      query_count > 3U || logical_table_count == 0U || descriptor_count == 0U ||
+      q_heads != kQHeads || kv_heads != kKvHeads || head_dim != kHeadDim ||
+      committed_kv_length == 0U ||
+      start_position > UINT64_MAX - static_cast<uint64_t>(query_count) ||
+      start_position + query_count != committed_kv_length ||
+      logical_table_count < committed_kv_length / 128U +
+                                (committed_kv_length % 128U != 0U ? 1U : 0U) ||
+      workspace_bytes < static_cast<uint64_t>(query_count) * kQHeads *
+                            kWorkspaceSplits * kWorkspaceStride *
+                            sizeof(float) ||
+      (DeviceControl && control == nullptr)) {
+    return hipErrorInvalidValue;
+  }
+  const uint32_t groups = (query_count + kRowsPerGroup - 1U) / kRowsPerGroup;
+  const uint64_t grid = static_cast<uint64_t>(groups) * kKvHeads * kSplits;
+  if (grid > UINT32_MAX) {
+    return hipErrorInvalidValue;
+  }
+  hipError_t status =
+      hipMemsetAsync(device_status, 0, sizeof(uint32_t), stream);
+  if (status != hipSuccess) {
+    return status;
+  }
+  hipLaunchKernelGGL(
+      (causal_attention_paged_decode_gqa6_c1_stage1_kernel<
+          kRowsPerGroup, kSplits, kWorkspaceSplits, DeviceControl>),
+      dim3(static_cast<uint32_t>(grid)), dim3(192U), 0U, stream, query,
+      logical_table, descriptor_table, logical_table_count, descriptor_count,
+      device_status, workspace, query_count, start_position, control);
+  status = hipGetLastError();
+  if (status != hipSuccess) {
+    return status;
+  }
+  if constexpr (kSplits == 128U) {
     hipLaunchKernelGGL(
         HIP_KERNEL_NAME(
             causal_attention_decode_gqa6_staged32_split_merge_kernel<
                 128U, DeviceControl>),
-        dim3(query_count * q_heads),
-        dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream,
-        static_cast<const float *>(workspace), output, query_count, control);
+        dim3(query_count * kQHeads), dim3(256U), 0U, stream, workspace, output,
+        query_count, control);
   } else {
     hipLaunchKernelGGL(
         HIP_KERNEL_NAME(causal_attention_decode_wave_split_staged_stage2_kernel<
-                        kWaveCount, DeviceControl>),
-        dim3(query_count * q_heads),
-        dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream,
-        static_cast<const float *>(workspace), output, query_count, q_heads,
-        kv_heads, head_dim, control);
+                        32U, DeviceControl>),
+        dim3(query_count * kQHeads), dim3(256U), 0U, stream, workspace, output,
+        query_count, kQHeads, kKvHeads, kHeadDim, control);
   }
   return hipGetLastError();
 }
 
-hipError_t launch_decode_wave_split_staged(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale, void *const workspace,
-    const uint64_t workspace_bytes, const bool use_query_preload,
+hipError_t launch_paged_decode_gqa6_c1(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, float *const workspace,
+    const uint64_t workspace_bytes, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim, const uint32_t encoding,
     const hipStream_t stream) noexcept {
-  if (encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
+  if (encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 || query_count < 2U ||
+      query_count > 3U) {
     return hipErrorInvalidValue;
   }
-  return use_query_preload
-             ? launch_decode_wave_split_staged_impl<
-                   true, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 8U>(
-                   query, key, value, key_scales, value_scales,
-                   key_outer_scales, value_outer_scales, output, query_count,
-                   start_position, committed_kv_length, q_heads, kv_heads,
-                   head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, false, false, nullptr, stream)
-             : launch_decode_wave_split_staged_impl<
-                   false, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 8U>(
-                   query, key, value, key_scales, value_scales,
-                   key_outer_scales, value_outer_scales, output, query_count,
-                   start_position, committed_kv_length, q_heads, kv_heads,
-                   head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, false, false, nullptr, stream);
+  if (committed_kv_length >= 8192U) {
+    return query_count == 2U
+               ? launch_paged_decode_gqa6_c1_impl<2U, 128U, 128U, false>(
+                     query, logical_table, descriptor_table,
+                     logical_table_count, descriptor_count, device_status,
+                     workspace, workspace_bytes, output, query_count,
+                     start_position, committed_kv_length, q_heads, kv_heads,
+                     head_dim, nullptr, stream)
+               : launch_paged_decode_gqa6_c1_impl<3U, 128U, 128U, false>(
+                     query, logical_table, descriptor_table,
+                     logical_table_count, descriptor_count, device_status,
+                     workspace, workspace_bytes, output, query_count,
+                     start_position, committed_kv_length, q_heads, kv_heads,
+                     head_dim, nullptr, stream);
+  }
+  return query_count == 2U
+             ? launch_paged_decode_gqa6_c1_impl<2U, 32U, 32U, false>(
+                   query, logical_table, descriptor_table, logical_table_count,
+                   descriptor_count, device_status, workspace, workspace_bytes,
+                   output, query_count, start_position, committed_kv_length,
+                   q_heads, kv_heads, head_dim, nullptr, stream)
+             : launch_paged_decode_gqa6_c1_impl<3U, 32U, 32U, false>(
+                   query, logical_table, descriptor_table, logical_table_count,
+                   descriptor_count, device_status, workspace, workspace_bytes,
+                   output, query_count, start_position, committed_kv_length,
+                   q_heads, kv_heads, head_dim, nullptr, stream);
 }
 
-hipError_t launch_decode_wave_split_staged32(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale, void *const workspace,
-    const uint64_t workspace_bytes, const bool use_query_preload,
-    const bool use_gqa_shared, const bool use_split128,
+hipError_t launch_paged_decode_gqa6_c1_device(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, float *const workspace,
+    const uint64_t workspace_bytes, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim, const uint32_t encoding,
+    sllm_decode_control::ControlV1 *const control,
     const hipStream_t stream) noexcept {
-  if (encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
+  if (encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 || control == nullptr ||
+      query_count < 2U || query_count > 3U) {
     return hipErrorInvalidValue;
   }
-  return use_query_preload
-             ? launch_decode_wave_split_staged_impl<
-                   true, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U, false>(
-                   query, key, value, key_scales, value_scales,
-                   key_outer_scales, value_outer_scales, output, query_count,
-                   start_position, committed_kv_length, q_heads, kv_heads,
-                   head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, use_gqa_shared, use_split128,
-                   nullptr, stream)
-             : launch_decode_wave_split_staged_impl<
-                   false, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U, false>(
-                   query, key, value, key_scales, value_scales,
-                   key_outer_scales, value_outer_scales, output, query_count,
-                   start_position, committed_kv_length, q_heads, kv_heads,
-                   head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, use_gqa_shared, use_split128,
-                   nullptr, stream);
+  if (committed_kv_length >= 8192U) {
+    return query_count == 2U
+               ? launch_paged_decode_gqa6_c1_impl<2U, 128U, 128U, true>(
+                     query, logical_table, descriptor_table,
+                     logical_table_count, descriptor_count, device_status,
+                     workspace, workspace_bytes, output, query_count,
+                     start_position, committed_kv_length, q_heads, kv_heads,
+                     head_dim, control, stream)
+               : launch_paged_decode_gqa6_c1_impl<3U, 128U, 128U, true>(
+                     query, logical_table, descriptor_table,
+                     logical_table_count, descriptor_count, device_status,
+                     workspace, workspace_bytes, output, query_count,
+                     start_position, committed_kv_length, q_heads, kv_heads,
+                     head_dim, control, stream);
+  }
+  return query_count == 2U
+             ? launch_paged_decode_gqa6_c1_impl<2U, 32U, 128U, true>(
+                   query, logical_table, descriptor_table, logical_table_count,
+                   descriptor_count, device_status, workspace, workspace_bytes,
+                   output, query_count, start_position, committed_kv_length,
+                   q_heads, kv_heads, head_dim, control, stream)
+             : launch_paged_decode_gqa6_c1_impl<3U, 32U, 128U, true>(
+                   query, logical_table, descriptor_table, logical_table_count,
+                   descriptor_count, device_status, workspace, workspace_bytes,
+                   output, query_count, start_position, committed_kv_length,
+                   q_heads, kv_heads, head_dim, control, stream);
 }
 
-hipError_t launch_decode_wave_split_staged32_device(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale, void *const workspace,
-    const uint64_t workspace_bytes, const bool use_query_preload,
-    const bool use_gqa_shared, sllm_decode_control::ControlV1 *const control,
-    const hipStream_t stream) noexcept {
-  if (control == nullptr || encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
-    return hipErrorInvalidValue;
-  }
-  // Capture the largest workspace/grid once. The stage-1 and merge kernels
-  // select the active P32 prefix from ControlV1 on every graph replay.
-  return use_query_preload
-             ? launch_decode_wave_split_staged_impl<
-                   true, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U, true>(
-                   query, key, value, key_scales, value_scales,
-                   key_outer_scales, value_outer_scales, output, query_count,
-                   start_position, committed_kv_length, q_heads, kv_heads,
-                   head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, use_gqa_shared, true, control,
-                   stream)
-             : launch_decode_wave_split_staged_impl<
-                   false, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U, true>(
-                   query, key, value, key_scales, value_scales,
-                   key_outer_scales, value_outer_scales, output, query_count,
-                   start_position, committed_kv_length, q_heads, kv_heads,
-                   head_dim, encoding, static_key_scale, static_value_scale,
-                   workspace, workspace_bytes, use_gqa_shared, true, control,
-                   stream);
-}
-
-template <uint32_t kPartitions>
-hipError_t launch_decode_gqa4_split_impl(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale, void *const workspace,
-    const uint64_t workspace_bytes, const hipStream_t stream) noexcept {
-  (void)key_scales;
-  (void)value_scales;
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  (void)static_key_scale;
-  (void)static_value_scale;
-  constexpr uint64_t kRequiredBytes =
-      static_cast<uint64_t>(16U) * kPartitions * (256U + 2U) * sizeof(float);
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || workspace == nullptr || query_count != 1U ||
-      start_position + 1U != committed_kv_length || q_heads != 16U ||
-      kv_heads != 4U || head_dim != 256U ||
-      encoding != SLLM_HIP_KV_ENCODING_FP16_V1 ||
-      workspace_bytes < kRequiredBytes) {
-    return hipErrorInvalidValue;
-  }
-  const auto *const key_fp16 = static_cast<const uint16_t *>(key);
-  const auto *const value_fp16 = static_cast<const uint16_t *>(value);
-  hipLaunchKernelGGL(
-      causal_attention_decode_gqa4_split_stage1_kernel<kPartitions>,
-      dim3(kv_heads * kPartitions), dim3(128U), 0U, stream, query, key_fp16,
-      value_fp16, output, committed_kv_length, static_cast<float *>(workspace));
-  hipError_t status = hipGetLastError();
-  if (status != hipSuccess) {
-    return status;
-  }
-  hipLaunchKernelGGL(
-      causal_attention_decode_gqa4_split_stage2_kernel<kPartitions>,
-      dim3(q_heads), dim3(128U), 0U, stream, query, output, q_heads,
-      static_cast<const float *>(workspace));
-  return hipGetLastError();
-}
-
-hipError_t launch_decode_gqa4_split(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale, void *const workspace,
-    const uint64_t workspace_bytes, const hipStream_t stream) noexcept {
-  return launch_decode_gqa4_split_impl<kDecodeGqa4SplitPartitions>(
-      query, key, value, key_scales, value_scales, key_outer_scales,
-      value_outer_scales, output, query_count, start_position,
-      committed_kv_length, q_heads, kv_heads, head_dim, encoding,
-      static_key_scale, static_value_scale, workspace, workspace_bytes, stream);
-}
-
-hipError_t launch_decode_gqa4_split_p32(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale, void *const workspace,
-    const uint64_t workspace_bytes, const hipStream_t stream) noexcept {
-  return launch_decode_gqa4_split_impl<32U>(
-      query, key, value, key_scales, value_scales, key_outer_scales,
-      value_outer_scales, output, query_count, start_position,
-      committed_kv_length, q_heads, kv_heads, head_dim, encoding,
-      static_key_scale, static_value_scale, workspace, workspace_bytes, stream);
-}
-
-hipError_t launch_decode_gqa6_split_p32(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale, void *const workspace,
-    const uint64_t workspace_bytes, const hipStream_t stream) noexcept {
-  (void)key_scales;
-  (void)value_scales;
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  (void)static_key_scale;
-  (void)static_value_scale;
-  constexpr uint64_t kRequiredBytes =
-      static_cast<uint64_t>(24U) * kDecodeGqa6SplitP32Partitions *
-      (kDecodeGqa6SplitP32HeadDim + 2U) * sizeof(float);
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || workspace == nullptr || query_count != 1U ||
-      start_position + 1U != committed_kv_length || q_heads != 24U ||
-      kv_heads != 4U || head_dim != kDecodeGqa6SplitP32HeadDim ||
-      encoding != SLLM_HIP_KV_ENCODING_FP16_V1 ||
-      workspace_bytes < kRequiredBytes) {
-    return hipErrorInvalidValue;
-  }
-  const auto *const key_fp16 = static_cast<const uint16_t *>(key);
-  const auto *const value_fp16 = static_cast<const uint16_t *>(value);
-  hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(causal_attention_decode_gqa6_split_p32_stage1_kernel),
-      dim3(kv_heads * kDecodeGqa6SplitP32Partitions),
-      dim3(kDecodeGqa6SplitP32WorkgroupSize), 0U, stream, query, key_fp16,
-      value_fp16, output, committed_kv_length, static_cast<float *>(workspace));
-  hipError_t status = hipGetLastError();
-  if (status != hipSuccess) {
-    return status;
-  }
-  hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(causal_attention_decode_gqa6_split_p32_stage2_kernel),
-      dim3(q_heads), dim3(kDecodeGqa6SplitP32WorkgroupSize), 0U, stream, query,
-      output, q_heads, static_cast<const float *>(workspace));
-  return hipGetLastError();
-}
-
-hipError_t launch_decode_gqa6_split_p64(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale, void *const workspace,
-    const uint64_t workspace_bytes, const hipStream_t stream) noexcept {
-  (void)key_scales;
-  (void)value_scales;
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  (void)static_key_scale;
-  (void)static_value_scale;
-  constexpr uint64_t kRequiredBytes =
-      static_cast<uint64_t>(24U) * kDecodeGqa6SplitP64Partitions *
-      (kDecodeGqa6SplitP64HeadDim + 2U) * sizeof(float);
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || workspace == nullptr || query_count != 1U ||
-      start_position + 1U != committed_kv_length || q_heads != 24U ||
-      kv_heads != 4U || head_dim != kDecodeGqa6SplitP64HeadDim ||
-      encoding != SLLM_HIP_KV_ENCODING_FP16_V1 ||
-      workspace_bytes < kRequiredBytes) {
-    return hipErrorInvalidValue;
-  }
-  const auto *const key_fp16 = static_cast<const uint16_t *>(key);
-  const auto *const value_fp16 = static_cast<const uint16_t *>(value);
-  hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(causal_attention_decode_gqa6_split_p64_stage1_kernel),
-      dim3(kv_heads * kDecodeGqa6SplitP64Partitions),
-      dim3(kDecodeGqa6SplitP64WorkgroupSize), 0U, stream, query, key_fp16,
-      value_fp16, output, committed_kv_length, static_cast<float *>(workspace));
-  hipError_t status = hipGetLastError();
-  if (status != hipSuccess) {
-    return status;
-  }
-  hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(causal_attention_decode_gqa6_split_p64_stage2_kernel),
-      dim3(q_heads), dim3(kDecodeGqa6SplitP64WorkgroupSize), 0U, stream, query,
-      output, q_heads, static_cast<const float *>(workspace));
-  return hipGetLastError();
-}
-
-hipError_t launch_decode_gqa6_split_p128(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale, void *const workspace,
-    const uint64_t workspace_bytes, const hipStream_t stream) noexcept {
-  (void)key_scales;
-  (void)value_scales;
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  (void)static_key_scale;
-  (void)static_value_scale;
-  constexpr uint64_t kRequiredBytes =
-      static_cast<uint64_t>(24U) * kDecodeGqa6SplitP128Partitions *
-      (kDecodeGqa6SplitP128HeadDim + 2U) * sizeof(float);
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || workspace == nullptr || query_count != 1U ||
-      start_position + 1U != committed_kv_length || q_heads != 24U ||
-      kv_heads != 4U || head_dim != kDecodeGqa6SplitP128HeadDim ||
-      encoding != SLLM_HIP_KV_ENCODING_FP16_V1 ||
-      workspace_bytes < kRequiredBytes) {
-    return hipErrorInvalidValue;
-  }
-  const auto *const key_fp16 = static_cast<const uint16_t *>(key);
-  const auto *const value_fp16 = static_cast<const uint16_t *>(value);
-  hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(causal_attention_decode_gqa6_split_p128_stage1_kernel),
-      dim3(kv_heads * kDecodeGqa6SplitP128Partitions),
-      dim3(kDecodeGqa6SplitP128WorkgroupSize), 0U, stream, query, key_fp16,
-      value_fp16, output, committed_kv_length, static_cast<float *>(workspace));
-  hipError_t status = hipGetLastError();
-  if (status != hipSuccess) {
-    return status;
-  }
-  hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(causal_attention_decode_gqa6_split_p128_stage2_kernel),
-      dim3(q_heads), dim3(kDecodeGqa6SplitP128WorkgroupSize), 0U, stream, query,
-      output, q_heads, static_cast<const float *>(workspace));
-  return hipGetLastError();
-}
-
-// Explicit F32 staging/rocBLAS provider for the exact Qwen3.8 GQA6
-// FP16-KV shape.  The resident KV layout is [token,kv_head,head_dim].  Each
-// GEMM sees one KV head as a strided matrix (lda=4*D, batch stride=D), while
-// the packed query is four natural row-major [M*6,D] matrices.
-constexpr uint32_t kGqa6RocblasF32QHeads = 24U;
-constexpr uint32_t kGqa6RocblasF32KvHeads = 4U;
-constexpr uint32_t kGqa6RocblasF32Ratio = 6U;
-constexpr uint32_t kGqa6RocblasF32HeadDim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-constexpr uint32_t kGqa6RocblasF32Threads = 256U;
-
-__global__ void causal_attention_gqa6_rocblas_pack_query_f32_kernel(
-    const uint16_t *const query, float *const packed,
-    const uint32_t query_count) {
-  const uint64_t index =
-      static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const uint64_t query_count6 =
-      static_cast<uint64_t>(query_count) * kGqa6RocblasF32Ratio;
-  const uint64_t total = static_cast<uint64_t>(kGqa6RocblasF32KvHeads) *
-                         query_count6 * kGqa6RocblasF32HeadDim;
-  if (index >= total)
-    return;
-  const uint64_t per_batch = query_count6 * kGqa6RocblasF32HeadDim;
-  const uint32_t kv_head = static_cast<uint32_t>(index / per_batch);
-  const uint64_t local = index % per_batch;
-  const uint32_t query_head_index =
-      static_cast<uint32_t>(local / kGqa6RocblasF32HeadDim);
-  const uint32_t dimension =
-      static_cast<uint32_t>(local % kGqa6RocblasF32HeadDim);
-  const uint32_t row = query_head_index / kGqa6RocblasF32Ratio;
-  const uint32_t query_head =
-      kv_head * kGqa6RocblasF32Ratio + query_head_index % kGqa6RocblasF32Ratio;
-  packed[index] = bf16_to_f32(
-      query[(static_cast<uint64_t>(row) * kGqa6RocblasF32QHeads + query_head) *
-                kGqa6RocblasF32HeadDim +
-            dimension]);
-}
-
-__global__ void causal_attention_gqa6_rocblas_pack_query_f16_kernel(
-    const uint16_t *const query, uint16_t *const packed,
-    const uint32_t query_count) {
-  const uint64_t index =
-      static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const uint64_t query_count6 =
-      static_cast<uint64_t>(query_count) * kGqa6RocblasF32Ratio;
-  const uint64_t total = static_cast<uint64_t>(kGqa6RocblasF32KvHeads) *
-                         query_count6 * kGqa6RocblasF32HeadDim;
-  if (index >= total)
-    return;
-  const uint64_t per_batch = query_count6 * kGqa6RocblasF32HeadDim;
-  const uint32_t kv_head = static_cast<uint32_t>(index / per_batch);
-  const uint64_t local = index % per_batch;
-  const uint32_t query_head_index =
-      static_cast<uint32_t>(local / kGqa6RocblasF32HeadDim);
-  const uint32_t dimension =
-      static_cast<uint32_t>(local % kGqa6RocblasF32HeadDim);
-  const uint32_t row = query_head_index / kGqa6RocblasF32Ratio;
-  const uint32_t query_head =
-      kv_head * kGqa6RocblasF32Ratio + query_head_index % kGqa6RocblasF32Ratio;
-  packed[index] = __half_as_ushort(__float2half(bf16_to_f32(
-      query[(static_cast<uint64_t>(row) * kGqa6RocblasF32QHeads + query_head) *
-                kGqa6RocblasF32HeadDim +
-            dimension])));
-}
-
-__global__ void causal_attention_gqa6_rocblas_convert_kv_f32_kernel(
-    const uint16_t *const source, float *const destination,
-    const uint64_t elements) {
-  const uint64_t index =
-      static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index < elements)
-    destination[index] = f16_to_f32(source[index]);
-}
-
-__global__ void causal_attention_gqa6_rocblas_softmax_f32_kernel(
-    float *const scores, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t context) {
-  const uint64_t query_count6 =
-      static_cast<uint64_t>(query_count) * kGqa6RocblasF32Ratio;
-  const uint64_t flat = blockIdx.x;
-  const uint64_t kv_head = flat / query_count6;
-  const uint64_t query_index = flat % query_count6;
-  const uint64_t row = query_index / kGqa6RocblasF32Ratio;
-  if (kv_head >= kGqa6RocblasF32KvHeads || row >= query_count)
-    return;
-  const uint64_t last_key =
-      std::min<uint64_t>(context - 1U, start_position + row);
-  const uint64_t base =
-      kv_head * query_count6 * context + query_index * context;
-  __shared__ float warp_values[kGqa6RocblasF32Threads / 32U];
-  const uint32_t thread = threadIdx.x;
-  const uint32_t lane = thread & 31U;
-  const uint32_t warp = thread / 32U;
-  float maximum = -INFINITY;
-  for (uint64_t key = thread; key <= last_key; key += kGqa6RocblasF32Threads)
-    maximum = fmaxf(maximum, scores[base + key]);
-  for (uint32_t offset = 16U; offset; offset >>= 1U)
-    maximum = fmaxf(maximum, __shfl_down(maximum, offset, 32));
-  if (lane == 0U)
-    warp_values[warp] = maximum;
-  __syncthreads();
-  if (warp == 0U) {
-    maximum = lane < 8U ? warp_values[lane] : -INFINITY;
-    for (uint32_t offset = 16U; offset; offset >>= 1U)
-      maximum = fmaxf(maximum, __shfl_down(maximum, offset, 32));
-    if (lane == 0U)
-      warp_values[0] = maximum;
-  }
-  __syncthreads();
-  maximum = warp_values[0];
-  float denominator = 0.0F;
-  for (uint64_t key = thread; key <= last_key; key += kGqa6RocblasF32Threads) {
-    const float probability = expf(scores[base + key] - maximum);
-    scores[base + key] = probability;
-    denominator += probability;
-  }
-  for (uint32_t offset = 16U; offset; offset >>= 1U)
-    denominator += __shfl_down(denominator, offset, 32);
-  if (lane == 0U)
-    warp_values[warp] = denominator;
-  __syncthreads();
-  if (warp == 0U) {
-    denominator = lane < 8U ? warp_values[lane] : 0.0F;
-    for (uint32_t offset = 16U; offset; offset >>= 1U)
-      denominator += __shfl_down(denominator, offset, 32);
-    if (lane == 0U)
-      warp_values[0] = denominator;
-  }
-  __syncthreads();
-  denominator = warp_values[0];
-  for (uint64_t key = thread; key < context; key += kGqa6RocblasF32Threads)
-    scores[base + key] =
-        key <= last_key ? scores[base + key] / denominator : 0.0F;
-}
-
-__global__ void causal_attention_gqa6_rocblas_softmax_f16_kernel(
-    uint16_t *const scores, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t context) {
-  const uint64_t query_count6 =
-      static_cast<uint64_t>(query_count) * kGqa6RocblasF32Ratio;
-  const uint64_t flat = blockIdx.x;
-  const uint64_t kv_head = flat / query_count6;
-  const uint64_t query_index = flat % query_count6;
-  const uint64_t row = query_index / kGqa6RocblasF32Ratio;
-  if (kv_head >= kGqa6RocblasF32KvHeads || row >= query_count)
-    return;
-  const uint64_t last_key =
-      std::min<uint64_t>(context - 1U, start_position + row);
-  const uint64_t base =
-      kv_head * query_count6 * context + query_index * context;
-  __shared__ float warp_values[kGqa6RocblasF32Threads / 32U];
-  const uint32_t thread = threadIdx.x;
-  const uint32_t lane = thread & 31U;
-  const uint32_t warp = thread / 32U;
-  float maximum = -INFINITY;
-  for (uint64_t key = thread; key <= last_key; key += kGqa6RocblasF32Threads)
-    maximum = fmaxf(maximum, f16_to_f32(scores[base + key]));
-  for (uint32_t offset = 16U; offset; offset >>= 1U)
-    maximum = fmaxf(maximum, __shfl_down(maximum, offset, 32));
-  if (lane == 0U)
-    warp_values[warp] = maximum;
-  __syncthreads();
-  if (warp == 0U) {
-    maximum = lane < 8U ? warp_values[lane] : -INFINITY;
-    for (uint32_t offset = 16U; offset; offset >>= 1U)
-      maximum = fmaxf(maximum, __shfl_down(maximum, offset, 32));
-    if (lane == 0U)
-      warp_values[0] = maximum;
-  }
-  __syncthreads();
-  maximum = warp_values[0];
-  float denominator = 0.0F;
-  for (uint64_t key = thread; key <= last_key; key += kGqa6RocblasF32Threads) {
-    const float probability = expf(f16_to_f32(scores[base + key]) - maximum);
-    scores[base + key] = __half_as_ushort(__float2half(probability));
-    denominator += probability;
-  }
-  for (uint32_t offset = 16U; offset; offset >>= 1U)
-    denominator += __shfl_down(denominator, offset, 32);
-  if (lane == 0U)
-    warp_values[warp] = denominator;
-  __syncthreads();
-  if (warp == 0U) {
-    denominator = lane < 8U ? warp_values[lane] : 0.0F;
-    for (uint32_t offset = 16U; offset; offset >>= 1U)
-      denominator += __shfl_down(denominator, offset, 32);
-    if (lane == 0U)
-      warp_values[0] = denominator;
-  }
-  __syncthreads();
-  denominator = warp_values[0];
-  for (uint64_t key = thread; key < context; key += kGqa6RocblasF32Threads) {
-    const float probability =
-        key <= last_key ? f16_to_f32(scores[base + key]) / denominator : 0.0F;
-    scores[base + key] = __half_as_ushort(__float2half(probability));
-  }
-}
-
-__global__ void causal_attention_gqa6_rocblas_unpack_bf16_kernel(
-    const float *const pv, uint16_t *const output, const uint32_t query_count) {
-  const uint64_t index =
-      static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const uint64_t query_count6 =
-      static_cast<uint64_t>(query_count) * kGqa6RocblasF32Ratio;
-  const uint64_t total = static_cast<uint64_t>(kGqa6RocblasF32KvHeads) *
-                         query_count6 * kGqa6RocblasF32HeadDim;
-  if (index >= total)
-    return;
-  const uint64_t per_batch = query_count6 * kGqa6RocblasF32HeadDim;
-  const uint32_t kv_head = static_cast<uint32_t>(index / per_batch);
-  const uint64_t local = index % per_batch;
-  const uint32_t query_head_index =
-      static_cast<uint32_t>(local / kGqa6RocblasF32HeadDim);
-  const uint32_t dimension =
-      static_cast<uint32_t>(local % kGqa6RocblasF32HeadDim);
-  const uint32_t row = query_head_index / kGqa6RocblasF32Ratio;
-  const uint32_t query_head =
-      kv_head * kGqa6RocblasF32Ratio + query_head_index % kGqa6RocblasF32Ratio;
-  const float value =
-      pv[static_cast<uint64_t>(kv_head) * query_count6 *
-             kGqa6RocblasF32HeadDim +
-         static_cast<uint64_t>(query_head_index) * kGqa6RocblasF32HeadDim +
-         dimension];
-  output[(static_cast<uint64_t>(row) * kGqa6RocblasF32QHeads + query_head) *
-             kGqa6RocblasF32HeadDim +
-         dimension] = f32_to_bf16_rne(value);
-}
-
-uint64_t
-gqa6_rocblas_f32_workspace_bytes(const uint32_t query_count,
-                                 const uint64_t committed_kv_length) noexcept {
-  const uint64_t query_count6 =
-      static_cast<uint64_t>(query_count) * kGqa6RocblasF32Ratio;
-  const uint64_t batch = kGqa6RocblasF32KvHeads;
-  uint64_t bytes = 0U;
-  const auto append = [&bytes](const uint64_t elements,
-                               const uint64_t width) noexcept {
-    if (elements > UINT64_MAX / width)
-      return false;
-    const uint64_t part = elements * width;
-    if (bytes > UINT64_MAX - part)
-      return false;
-    bytes += part;
-    return true;
-  };
-  if (query_count == 0U || committed_kv_length == 0U ||
-      !append(batch * query_count6 * kGqa6RocblasF32HeadDim, sizeof(float)) ||
-      !append(batch * committed_kv_length * kGqa6RocblasF32HeadDim,
-              sizeof(float)) ||
-      !append(batch * committed_kv_length * kGqa6RocblasF32HeadDim,
-              sizeof(float)) ||
-      !append(batch * query_count6 * committed_kv_length, sizeof(float)) ||
-      !append(batch * query_count6 * kGqa6RocblasF32HeadDim, sizeof(float)))
-    return 0U;
-  return bytes;
-}
-
-hipError_t launch_gqa6_rocblas_f32(
-    const uint16_t *const query, const void *const key, const void *const value,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, void *const workspace,
-    const uint64_t workspace_bytes, void *const blas_handle,
-    void *const blas_mutex, const hipStream_t stream) noexcept {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-  (void)query;
-  (void)key;
-  (void)value;
-  (void)output;
-  (void)query_count;
-  (void)start_position;
-  (void)committed_kv_length;
-  (void)q_heads;
-  (void)kv_heads;
-  (void)head_dim;
-  (void)encoding;
-  (void)workspace;
-  (void)workspace_bytes;
-  (void)blas_handle;
-  (void)blas_mutex;
-  (void)stream;
-  return hipErrorNotSupported;
-#else
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || workspace == nullptr || blas_handle == nullptr ||
-      blas_mutex == nullptr || query_count < 2U || q_heads != 24U ||
-      kv_heads != 4U || head_dim != kGqa6RocblasF32HeadDim ||
-      encoding != SLLM_HIP_KV_ENCODING_FP16_V1 || committed_kv_length == 0U ||
-      committed_kv_length > SLLM_HIP_CAUSAL_ATTENTION_MAX_M ||
-      start_position > UINT64_MAX - query_count ||
-      start_position + query_count != committed_kv_length ||
-      query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M ||
-      query_count * static_cast<uint64_t>(kGqa6RocblasF32Ratio) >
-          static_cast<uint64_t>(std::numeric_limits<rocblas_int>::max()))
-    return hipErrorInvalidValue;
-  const uint64_t required =
-      gqa6_rocblas_f32_workspace_bytes(query_count, committed_kv_length);
-  if (required == 0U || workspace_bytes < required)
-    return hipErrorInvalidValue;
-  const uint64_t query_count6 =
-      static_cast<uint64_t>(query_count) * kGqa6RocblasF32Ratio;
-  uint8_t *cursor = static_cast<uint8_t *>(workspace);
-  const auto take = [&cursor](const uint64_t elements,
-                              const uint64_t width) noexcept -> void * {
-    void *const result = cursor;
-    cursor += elements * width;
-    return result;
-  };
-  auto *const query_f32 = static_cast<float *>(
-      take(kGqa6RocblasF32KvHeads * query_count6 * kGqa6RocblasF32HeadDim,
-           sizeof(float)));
-  auto *const key_f32 = static_cast<float *>(take(
-      kGqa6RocblasF32KvHeads * committed_kv_length * kGqa6RocblasF32HeadDim,
-      sizeof(float)));
-  auto *const value_f32 = static_cast<float *>(take(
-      kGqa6RocblasF32KvHeads * committed_kv_length * kGqa6RocblasF32HeadDim,
-      sizeof(float)));
-  auto *const scores = static_cast<float *>(
-      take(kGqa6RocblasF32KvHeads * query_count6 * committed_kv_length,
-           sizeof(float)));
-  auto *const pv = static_cast<float *>(
-      take(kGqa6RocblasF32KvHeads * query_count6 * kGqa6RocblasF32HeadDim,
-           sizeof(float)));
-  const uint64_t kv_elements =
-      kGqa6RocblasF32KvHeads * committed_kv_length * kGqa6RocblasF32HeadDim;
-  const uint32_t kv_blocks = static_cast<uint32_t>(
-      (kv_elements + kGqa6RocblasF32Threads - 1U) / kGqa6RocblasF32Threads);
-  const auto *const key_fp16 = static_cast<const uint16_t *>(key);
-  const auto *const value_fp16 = static_cast<const uint16_t *>(value);
-  hipLaunchKernelGGL(causal_attention_gqa6_rocblas_convert_kv_f32_kernel,
-                     dim3(kv_blocks), dim3(kGqa6RocblasF32Threads), 0U, stream,
-                     key_fp16, key_f32, kv_elements);
-  hipError_t launch_status = hipGetLastError();
-  if (launch_status != hipSuccess)
-    return launch_status;
-  hipLaunchKernelGGL(causal_attention_gqa6_rocblas_convert_kv_f32_kernel,
-                     dim3(kv_blocks), dim3(kGqa6RocblasF32Threads), 0U, stream,
-                     value_fp16, value_f32, kv_elements);
-  launch_status = hipGetLastError();
-  if (launch_status != hipSuccess)
-    return launch_status;
-  const uint64_t query_elements =
-      kGqa6RocblasF32KvHeads * query_count6 * kGqa6RocblasF32HeadDim;
-  const uint32_t query_blocks = static_cast<uint32_t>(
-      (query_elements + kGqa6RocblasF32Threads - 1U) / kGqa6RocblasF32Threads);
-  hipLaunchKernelGGL(causal_attention_gqa6_rocblas_pack_query_f32_kernel,
-                     dim3(query_blocks), dim3(kGqa6RocblasF32Threads), 0U,
-                     stream, query, query_f32, query_count);
-  launch_status = hipGetLastError();
-  if (launch_status != hipSuccess)
-    return launch_status;
-
-  rocblas_handle handle = static_cast<rocblas_handle>(blas_handle);
-  std::mutex *const mutex = static_cast<std::mutex *>(blas_mutex);
-  const float alpha = 1.0F / std::sqrt(static_cast<float>(head_dim));
-  const float one = 1.0F;
-  const float zero = 0.0F;
-  const rocblas_stride query_stride =
-      static_cast<rocblas_stride>(query_count6 * head_dim);
-  const rocblas_stride kv_stride = static_cast<rocblas_stride>(head_dim);
-  const rocblas_stride score_stride =
-      static_cast<rocblas_stride>(query_count6 * committed_kv_length);
-  const rocblas_stride pv_stride =
-      static_cast<rocblas_stride>(query_count6 * head_dim);
-  {
-    std::lock_guard<std::mutex> lock(*mutex);
-    rocblas_atomics_mode previous_atomics = rocblas_atomics_not_allowed;
-    if (rocblas_get_atomics_mode(handle, &previous_atomics) !=
-        rocblas_status_success)
-      return hipErrorUnknown;
-    if (rocblas_set_atomics_mode(handle, rocblas_atomics_not_allowed) !=
-        rocblas_status_success)
-      return hipErrorUnknown;
-    if (rocblas_set_stream(handle, stream) != rocblas_status_success) {
-      (void)rocblas_set_atomics_mode(handle, previous_atomics);
-      return hipErrorUnknown;
-    }
-    const rocblas_status gemm_status =
-        (rocblas_gemm_strided_batched_ex)(handle, rocblas_operation_transpose,
-                                          rocblas_operation_none,
-                                          static_cast<rocblas_int>(
-                                              committed_kv_length),
-                                          static_cast<rocblas_int>(
-                                              query_count6),
-                                          static_cast<rocblas_int>(head_dim),
-                                          &alpha, key_f32,
-                                          rocblas_datatype_f32_r,
-                                          static_cast<rocblas_int>(kv_heads *
-                                                                   head_dim),
-                                          kv_stride, query_f32,
-                                          rocblas_datatype_f32_r,
-                                          static_cast<rocblas_int>(head_dim),
-                                          query_stride, &zero, scores,
-                                          rocblas_datatype_f32_r,
-                                          static_cast<rocblas_int>(
-                                              committed_kv_length),
-                                          score_stride, scores,
-                                          rocblas_datatype_f32_r,
-                                          static_cast<rocblas_int>(
-                                              committed_kv_length),
-                                          score_stride,
-                                          static_cast<rocblas_int>(kv_heads),
-                                          rocblas_datatype_f32_r,
-                                          rocblas_gemm_algo_standard, 0U, 0U);
-    const rocblas_status restore_status =
-        rocblas_set_atomics_mode(handle, previous_atomics);
-    if (gemm_status != rocblas_status_success)
-      return hipErrorUnknown;
-    if (restore_status != rocblas_status_success)
-      return hipErrorUnknown;
-  }
-  const uint64_t score_blocks = static_cast<uint64_t>(kv_heads) * query_count6;
-  hipLaunchKernelGGL(causal_attention_gqa6_rocblas_softmax_f32_kernel,
-                     dim3(static_cast<uint32_t>(score_blocks)),
-                     dim3(kGqa6RocblasF32Threads), 0U, stream, scores,
-                     query_count, start_position, committed_kv_length);
-  launch_status = hipGetLastError();
-  if (launch_status != hipSuccess)
-    return launch_status;
-  {
-    std::lock_guard<std::mutex> lock(*mutex);
-    rocblas_atomics_mode previous_atomics = rocblas_atomics_not_allowed;
-    if (rocblas_get_atomics_mode(handle, &previous_atomics) !=
-        rocblas_status_success)
-      return hipErrorUnknown;
-    if (rocblas_set_atomics_mode(handle, rocblas_atomics_not_allowed) !=
-        rocblas_status_success)
-      return hipErrorUnknown;
-    if (rocblas_set_stream(handle, stream) != rocblas_status_success) {
-      (void)rocblas_set_atomics_mode(handle, previous_atomics);
-      return hipErrorUnknown;
-    }
-    const rocblas_status gemm_status =
-        (rocblas_gemm_strided_batched_ex)(handle, rocblas_operation_none,
-                                          rocblas_operation_none,
-                                          static_cast<rocblas_int>(head_dim),
-                                          static_cast<rocblas_int>(
-                                              query_count6),
-                                          static_cast<rocblas_int>(
-                                              committed_kv_length),
-                                          &one, value_f32,
-                                          rocblas_datatype_f32_r,
-                                          static_cast<rocblas_int>(kv_heads *
-                                                                   head_dim),
-                                          kv_stride, scores,
-                                          rocblas_datatype_f32_r,
-                                          static_cast<rocblas_int>(
-                                              committed_kv_length),
-                                          score_stride, &zero, pv,
-                                          rocblas_datatype_f32_r,
-                                          static_cast<rocblas_int>(head_dim),
-                                          pv_stride, pv, rocblas_datatype_f32_r,
-                                          static_cast<rocblas_int>(head_dim),
-                                          pv_stride,
-                                          static_cast<rocblas_int>(kv_heads),
-                                          rocblas_datatype_f32_r,
-                                          rocblas_gemm_algo_standard, 0U, 0U);
-    const rocblas_status restore_status =
-        rocblas_set_atomics_mode(handle, previous_atomics);
-    if (gemm_status != rocblas_status_success)
-      return hipErrorUnknown;
-    if (restore_status != rocblas_status_success)
-      return hipErrorUnknown;
-  }
-  const uint32_t output_blocks = static_cast<uint32_t>(
-      (query_elements + kGqa6RocblasF32Threads - 1U) / kGqa6RocblasF32Threads);
-  hipLaunchKernelGGL(causal_attention_gqa6_rocblas_unpack_bf16_kernel,
-                     dim3(output_blocks), dim3(kGqa6RocblasF32Threads), 0U,
-                     stream, pv, output, query_count);
-  return hipGetLastError();
-#endif
-}
-
-uint64_t gqa6_rocblas_f16_tail_workspace_bytes(
-    const uint32_t query_count, const uint64_t committed_kv_length) noexcept {
-  const uint64_t query_count6 =
-      static_cast<uint64_t>(query_count) * kGqa6RocblasF32Ratio;
-  const uint64_t batch = kGqa6RocblasF32KvHeads;
-  uint64_t bytes = 0U;
-  const auto append = [&bytes](const uint64_t elements,
-                               const uint64_t width) noexcept {
-    if (elements > UINT64_MAX / width)
-      return false;
-    const uint64_t part = elements * width;
-    if (bytes > UINT64_MAX - part)
-      return false;
-    bytes += part;
-    return true;
-  };
-  if (query_count == 0U || committed_kv_length == 0U ||
-      !append(batch * query_count6 * kGqa6RocblasF32HeadDim,
-              sizeof(uint16_t)) ||
-      !append(batch * query_count6 * committed_kv_length, sizeof(uint16_t)) ||
-      !append(batch * query_count6 * kGqa6RocblasF32HeadDim, sizeof(float)))
-    return 0U;
-  return bytes;
-}
-
-hipError_t launch_gqa6_rocblas_f16_tail(
-    const uint16_t *const query, const void *const key, const void *const value,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, void *const workspace,
-    const uint64_t workspace_bytes, void *const blas_handle,
-    void *const blas_mutex, const hipStream_t stream) noexcept {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-  (void)query;
-  (void)key;
-  (void)value;
-  (void)output;
-  (void)query_count;
-  (void)start_position;
-  (void)committed_kv_length;
-  (void)q_heads;
-  (void)kv_heads;
-  (void)head_dim;
-  (void)encoding;
-  (void)workspace;
-  (void)workspace_bytes;
-  (void)blas_handle;
-  (void)blas_mutex;
-  (void)stream;
-  return hipErrorNotSupported;
-#else
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || workspace == nullptr || blas_handle == nullptr ||
-      blas_mutex == nullptr || query_count < 2U || start_position == 0U ||
-      q_heads != kGqa6RocblasF32QHeads || kv_heads != kGqa6RocblasF32KvHeads ||
-      head_dim != kGqa6RocblasF32HeadDim ||
-      encoding != SLLM_HIP_KV_ENCODING_FP16_V1 || committed_kv_length == 0U ||
-      committed_kv_length > SLLM_HIP_CAUSAL_ATTENTION_MAX_M ||
-      start_position > UINT64_MAX - query_count ||
-      start_position + query_count != committed_kv_length ||
-      query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M ||
-      query_count * static_cast<uint64_t>(kGqa6RocblasF32Ratio) >
-          static_cast<uint64_t>(std::numeric_limits<rocblas_int>::max()))
-    return hipErrorInvalidValue;
-  const uint64_t required =
-      gqa6_rocblas_f16_tail_workspace_bytes(query_count, committed_kv_length);
-  if (required == 0U || workspace_bytes < required)
-    return hipErrorInvalidValue;
-  const uint64_t query_count6 =
-      static_cast<uint64_t>(query_count) * kGqa6RocblasF32Ratio;
-  uint8_t *cursor = static_cast<uint8_t *>(workspace);
-  const auto take = [&cursor](const uint64_t elements,
-                              const uint64_t width) noexcept -> void * {
-    void *const result = cursor;
-    cursor += elements * width;
-    return result;
-  };
-  auto *const query_f16 = static_cast<uint16_t *>(
-      take(kGqa6RocblasF32KvHeads * query_count6 * kGqa6RocblasF32HeadDim,
-           sizeof(uint16_t)));
-  auto *const scores = static_cast<uint16_t *>(
-      take(kGqa6RocblasF32KvHeads * query_count6 * committed_kv_length,
-           sizeof(uint16_t)));
-  auto *const pv = static_cast<float *>(
-      take(kGqa6RocblasF32KvHeads * query_count6 * kGqa6RocblasF32HeadDim,
-           sizeof(float)));
-  const uint64_t query_elements =
-      kGqa6RocblasF32KvHeads * query_count6 * kGqa6RocblasF32HeadDim;
-  const uint32_t query_blocks = static_cast<uint32_t>(
-      (query_elements + kGqa6RocblasF32Threads - 1U) / kGqa6RocblasF32Threads);
-  hipLaunchKernelGGL(causal_attention_gqa6_rocblas_pack_query_f16_kernel,
-                     dim3(query_blocks), dim3(kGqa6RocblasF32Threads), 0U,
-                     stream, query, query_f16, query_count);
-  hipError_t launch_status = hipGetLastError();
-  if (launch_status != hipSuccess)
-    return launch_status;
-
-  rocblas_handle handle = static_cast<rocblas_handle>(blas_handle);
-  std::mutex *const mutex = static_cast<std::mutex *>(blas_mutex);
-  const float alpha = 1.0F / std::sqrt(static_cast<float>(head_dim));
-  const float one = 1.0F;
-  const float zero = 0.0F;
-  const rocblas_stride query_stride =
-      static_cast<rocblas_stride>(query_count6 * head_dim);
-  const rocblas_stride kv_stride = static_cast<rocblas_stride>(head_dim);
-  const rocblas_stride score_stride =
-      static_cast<rocblas_stride>(query_count6 * committed_kv_length);
-  const rocblas_stride pv_stride =
-      static_cast<rocblas_stride>(query_count6 * head_dim);
-  const auto *const key_fp16 = static_cast<const uint16_t *>(key);
-  const auto *const value_fp16 = static_cast<const uint16_t *>(value);
-  {
-    std::lock_guard<std::mutex> lock(*mutex);
-    rocblas_atomics_mode previous_atomics = rocblas_atomics_not_allowed;
-    if (rocblas_get_atomics_mode(handle, &previous_atomics) !=
-        rocblas_status_success)
-      return hipErrorUnknown;
-    if (rocblas_set_atomics_mode(handle, rocblas_atomics_not_allowed) !=
-        rocblas_status_success)
-      return hipErrorUnknown;
-    if (rocblas_set_stream(handle, stream) != rocblas_status_success) {
-      (void)rocblas_set_atomics_mode(handle, previous_atomics);
-      return hipErrorUnknown;
-    }
-    const rocblas_status gemm_status =
-        (rocblas_gemm_strided_batched_ex)(handle, rocblas_operation_transpose,
-                                          rocblas_operation_none,
-                                          static_cast<rocblas_int>(
-                                              committed_kv_length),
-                                          static_cast<rocblas_int>(
-                                              query_count6),
-                                          static_cast<rocblas_int>(head_dim),
-                                          &alpha, key_fp16,
-                                          rocblas_datatype_f16_r,
-                                          static_cast<rocblas_int>(kv_heads *
-                                                                   head_dim),
-                                          kv_stride, query_f16,
-                                          rocblas_datatype_f16_r,
-                                          static_cast<rocblas_int>(head_dim),
-                                          query_stride, &zero, scores,
-                                          rocblas_datatype_f16_r,
-                                          static_cast<rocblas_int>(
-                                              committed_kv_length),
-                                          score_stride, scores,
-                                          rocblas_datatype_f16_r,
-                                          static_cast<rocblas_int>(
-                                              committed_kv_length),
-                                          score_stride,
-                                          static_cast<rocblas_int>(kv_heads),
-                                          rocblas_datatype_f32_r,
-                                          rocblas_gemm_algo_standard, 0U, 0U);
-    const rocblas_status restore_status =
-        rocblas_set_atomics_mode(handle, previous_atomics);
-    if (gemm_status != rocblas_status_success)
-      return hipErrorUnknown;
-    if (restore_status != rocblas_status_success)
-      return hipErrorUnknown;
-  }
-  const uint64_t score_blocks = static_cast<uint64_t>(kv_heads) * query_count6;
-  hipLaunchKernelGGL(causal_attention_gqa6_rocblas_softmax_f16_kernel,
-                     dim3(static_cast<uint32_t>(score_blocks)),
-                     dim3(kGqa6RocblasF32Threads), 0U, stream, scores,
-                     query_count, start_position, committed_kv_length);
-  launch_status = hipGetLastError();
-  if (launch_status != hipSuccess)
-    return launch_status;
-  {
-    std::lock_guard<std::mutex> lock(*mutex);
-    rocblas_atomics_mode previous_atomics = rocblas_atomics_not_allowed;
-    if (rocblas_get_atomics_mode(handle, &previous_atomics) !=
-        rocblas_status_success)
-      return hipErrorUnknown;
-    if (rocblas_set_atomics_mode(handle, rocblas_atomics_not_allowed) !=
-        rocblas_status_success)
-      return hipErrorUnknown;
-    if (rocblas_set_stream(handle, stream) != rocblas_status_success) {
-      (void)rocblas_set_atomics_mode(handle, previous_atomics);
-      return hipErrorUnknown;
-    }
-    const rocblas_status gemm_status =
-        (rocblas_gemm_strided_batched_ex)(handle, rocblas_operation_none,
-                                          rocblas_operation_none,
-                                          static_cast<rocblas_int>(head_dim),
-                                          static_cast<rocblas_int>(
-                                              query_count6),
-                                          static_cast<rocblas_int>(
-                                              committed_kv_length),
-                                          &one, value_fp16,
-                                          rocblas_datatype_f16_r,
-                                          static_cast<rocblas_int>(kv_heads *
-                                                                   head_dim),
-                                          kv_stride, scores,
-                                          rocblas_datatype_f16_r,
-                                          static_cast<rocblas_int>(
-                                              committed_kv_length),
-                                          score_stride, &zero, pv,
-                                          rocblas_datatype_f32_r,
-                                          static_cast<rocblas_int>(head_dim),
-                                          pv_stride, pv, rocblas_datatype_f32_r,
-                                          static_cast<rocblas_int>(head_dim),
-                                          pv_stride,
-                                          static_cast<rocblas_int>(kv_heads),
-                                          rocblas_datatype_f32_r,
-                                          rocblas_gemm_algo_standard, 0U, 0U);
-    const rocblas_status restore_status =
-        rocblas_set_atomics_mode(handle, previous_atomics);
-    if (gemm_status != rocblas_status_success)
-      return hipErrorUnknown;
-    if (restore_status != rocblas_status_success)
-      return hipErrorUnknown;
-  }
-  const uint32_t output_blocks = static_cast<uint32_t>(
-      (query_elements + kGqa6RocblasF32Threads - 1U) / kGqa6RocblasF32Threads);
-  hipLaunchKernelGGL(causal_attention_gqa6_rocblas_unpack_bf16_kernel,
-                     dim3(output_blocks), dim3(kGqa6RocblasF32Threads), 0U,
-                     stream, pv, output, query_count);
-  return hipGetLastError();
-#endif
-}
-
-hipError_t launch_scaled_prefill_gemm(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    const uint32_t encoding, const float static_key_scale,
-    const float static_value_scale, void *const workspace,
-    const uint64_t workspace_bytes, void *const blas_handle,
-    void *const blas_mutex, const hipStream_t stream) noexcept {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-  (void)query;
-  (void)key;
-  (void)value;
-  (void)key_scales;
-  (void)value_scales;
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  (void)output;
-  (void)query_count;
-  (void)start_position;
-  (void)committed_kv_length;
-  (void)q_heads;
-  (void)kv_heads;
-  (void)head_dim;
-  (void)encoding;
-  (void)static_key_scale;
-  (void)static_value_scale;
-  (void)workspace;
-  (void)workspace_bytes;
-  (void)blas_handle;
-  (void)blas_mutex;
-  (void)stream;
-  return hipErrorNotSupported;
-#else
-  constexpr uint32_t kChunkRows = 256U;
-  constexpr uint32_t kExpectedQHeads = 16U;
-  constexpr uint32_t kExpectedKvHeads = 4U;
-  constexpr uint32_t kExpectedHeadDim = 256U;
-  constexpr uint32_t kQGroup = 4U;
-  constexpr uint32_t kPackedRows = kChunkRows * kQGroup;
-  constexpr uint64_t kMaxWorkspaceBytes = UINT64_C(1) << 30;
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || workspace == nullptr || blas_handle == nullptr ||
-      blas_mutex == nullptr || query_count < 1024U ||
-      q_heads != kExpectedQHeads || kv_heads != kExpectedKvHeads ||
-      head_dim != kExpectedHeadDim ||
-      (encoding != SLLM_HIP_KV_ENCODING_FP16_V1 &&
-       encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) ||
-      (encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
-       (key_scales == nullptr || value_scales == nullptr)) ||
-      committed_kv_length == 0U || committed_kv_length < query_count ||
-      start_position > UINT64_MAX - query_count ||
-      start_position + query_count != committed_kv_length ||
-      committed_kv_length > static_cast<uint64_t>(INT32_MAX) ||
-      query_count > static_cast<uint32_t>(INT32_MAX)) {
-    return hipErrorInvalidValue;
-  }
-  if (committed_kv_length > UINT64_MAX / kPackedRows ||
-      committed_kv_length > UINT64_MAX / head_dim) {
-    return hipErrorOutOfMemory;
-  }
-  const uint64_t score_elements =
-      static_cast<uint64_t>(kPackedRows) * committed_kv_length;
-  const uint64_t kv_elements =
-      committed_kv_length * static_cast<uint64_t>(head_dim);
-  const uint64_t query_elements = static_cast<uint64_t>(kPackedRows) * head_dim;
-  const auto checked_bytes = [](const uint64_t elements, const uint64_t width,
-                                uint64_t *const result) noexcept -> bool {
-    if (result == nullptr || elements > UINT64_MAX / width) {
-      return false;
-    }
-    *result = elements * width;
-    return true;
-  };
-  uint64_t score_bytes = 0U;
-  uint64_t probability_bytes = 0U;
-  uint64_t residual_bytes = 0U;
-  uint64_t kv_bytes = 0U;
-  uint64_t query_bytes = 0U;
-  uint64_t scale_bytes = 0U;
-  uint64_t output_bytes = 0U;
-  uint64_t special_bytes = 0U;
-  if (!checked_bytes(score_elements, sizeof(float), &score_bytes) ||
-      !checked_bytes(score_elements, sizeof(uint16_t), &probability_bytes) ||
-      !checked_bytes(score_elements, sizeof(uint16_t), &residual_bytes) ||
-      !checked_bytes(kv_elements, sizeof(uint16_t), &kv_bytes) ||
-      !checked_bytes(query_elements, sizeof(uint16_t), &query_bytes) ||
-      !checked_bytes(kPackedRows, sizeof(float), &scale_bytes) ||
-      !checked_bytes(query_elements, sizeof(float), &output_bytes) ||
-      !checked_bytes(static_cast<uint64_t>(kExpectedKvHeads) *
-                         kExpectedHeadDim * 3U,
-                     sizeof(uint64_t), &special_bytes)) {
-    return hipErrorOutOfMemory;
-  }
-  uint64_t required_bytes = score_bytes;
-  const auto append_bytes = [&required_bytes](const uint64_t bytes) noexcept {
-    if (required_bytes > UINT64_MAX - bytes) {
-      return false;
-    }
-    required_bytes += bytes;
-    return true;
-  };
-  if (!append_bytes(probability_bytes) || !append_bytes(residual_bytes) ||
-      !append_bytes(kv_bytes) || !append_bytes(kv_bytes) ||
-      !append_bytes(query_bytes) || !append_bytes(scale_bytes) ||
-      !append_bytes(output_bytes) || !append_bytes(output_bytes) ||
-      !append_bytes(special_bytes)) {
-    return hipErrorOutOfMemory;
-  }
-  if (required_bytes > static_cast<uint64_t>(SIZE_MAX) ||
-      required_bytes > kMaxWorkspaceBytes || workspace_bytes < required_bytes) {
-    return hipErrorInvalidValue;
-  }
-  auto *const scores = static_cast<float *>(workspace);
-  auto *const probabilities = reinterpret_cast<uint16_t *>(
-      static_cast<uint8_t *>(workspace) + score_bytes);
-  auto *const residuals = reinterpret_cast<uint16_t *>(
-      static_cast<uint8_t *>(workspace) + score_bytes + probability_bytes);
-  auto *const key_pack = reinterpret_cast<uint16_t *>(
-      static_cast<uint8_t *>(workspace) + score_bytes + probability_bytes +
-      residual_bytes);
-  auto *const value_pack = reinterpret_cast<uint16_t *>(
-      static_cast<uint8_t *>(workspace) + score_bytes + probability_bytes +
-      residual_bytes + kv_bytes);
-  auto *const query_pack = reinterpret_cast<uint16_t *>(
-      static_cast<uint8_t *>(workspace) + score_bytes + probability_bytes +
-      residual_bytes + kv_bytes + kv_bytes);
-  auto *const scales = reinterpret_cast<float *>(
-      static_cast<uint8_t *>(workspace) + score_bytes + probability_bytes +
-      residual_bytes + kv_bytes + kv_bytes + query_bytes);
-  auto *const output_f32 = reinterpret_cast<float *>(
-      static_cast<uint8_t *>(workspace) + score_bytes + probability_bytes +
-      residual_bytes + kv_bytes + kv_bytes + query_bytes + scale_bytes);
-  auto *const residual_output_f32 = reinterpret_cast<float *>(
-      static_cast<uint8_t *>(workspace) + score_bytes + probability_bytes +
-      residual_bytes + kv_bytes + kv_bytes + query_bytes + scale_bytes +
-      output_bytes);
-  auto *const special_first = reinterpret_cast<uint64_t *>(
-      static_cast<uint8_t *>(workspace) + score_bytes + probability_bytes +
-      residual_bytes + kv_bytes + kv_bytes + query_bytes + scale_bytes +
-      output_bytes + output_bytes);
-  hipError_t status = hipMemsetAsync(
-      special_first, 0xff, static_cast<std::size_t>(special_bytes), stream);
-  if (status != hipSuccess) {
-    return status;
-  }
-  hipblasHandle_t handle = static_cast<hipblasHandle_t>(blas_handle);
-  std::mutex *const mutex = static_cast<std::mutex *>(blas_mutex);
-  const float alpha = 1.0F;
-  const float beta = 0.0F;
-  const auto gemm = [&](const hipblasOperation_t op_a,
-                        const hipblasOperation_t op_b, const int m, const int n,
-                        const int k, const void *const a, const int lda,
-                        const void *const b, const int ldb, void *const c,
-                        const int ldc, const hipDataType a_type,
-                        const hipDataType b_type) noexcept -> hipError_t {
-    std::lock_guard<std::mutex> lock(*mutex);
-    if (hipblasSetStream(handle, stream) != HIPBLAS_STATUS_SUCCESS) {
-      return hipErrorUnknown;
-    }
-    const hipblasStatus_t status =
-        hipblasGemmEx(handle, op_a, op_b, m, n, k, &alpha, a, a_type, lda, b,
-                      b_type, ldb, &beta, c, HIPBLAS_R_32F, ldc,
-                      HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT);
-    return status == HIPBLAS_STATUS_SUCCESS ? hipSuccess : hipErrorUnknown;
-  };
-  for (uint32_t kv_head = 0U;
-       status == hipSuccess && kv_head < kExpectedKvHeads; ++kv_head) {
-    const uint64_t packed_kv_elements =
-        committed_kv_length * static_cast<uint64_t>(head_dim);
-    if (encoding == SLLM_HIP_KV_ENCODING_FP16_V1) {
-      hipLaunchKernelGGL(
-          HIP_KERNEL_NAME(
-              scaled_prefill_pack_kv_kernel<SLLM_HIP_KV_ENCODING_FP16_V1>),
-          dim3(static_cast<uint32_t>((packed_kv_elements + 255U) / 256U)),
-          dim3(256U), 0U, stream, key, value, key_scales, value_scales,
-          key_outer_scales, value_outer_scales, key_pack, value_pack,
-          special_first, committed_kv_length, kv_heads, head_dim, kv_head,
-          static_key_scale, static_value_scale);
-    } else {
-      hipLaunchKernelGGL(
-          HIP_KERNEL_NAME(
-              scaled_prefill_pack_kv_kernel<SLLM_HIP_KV_ENCODING_MXFP8_E4_V1>),
-          dim3(static_cast<uint32_t>((packed_kv_elements + 255U) / 256U)),
-          dim3(256U), 0U, stream, key, value, key_scales, value_scales,
-          key_outer_scales, value_outer_scales, key_pack, value_pack,
-          special_first, committed_kv_length, kv_heads, head_dim, kv_head,
-          static_key_scale, static_value_scale);
-    }
-    status = hipGetLastError();
-    for (uint32_t row_offset = 0U;
-         status == hipSuccess && row_offset < query_count;
-         row_offset += kChunkRows) {
-      const uint32_t rows = std::min(kChunkRows, query_count - row_offset);
-      const uint32_t packed_rows = rows * kQGroup;
-      hipLaunchKernelGGL(scaled_prefill_pack_query_kernel, dim3(packed_rows),
-                         dim3(256U), 0U, stream, query, query_pack, scales,
-                         rows, q_heads, head_dim, kv_head, kQGroup, row_offset);
-      status = hipGetLastError();
-      if (status != hipSuccess) {
-        break;
-      }
-      status = gemm(
-          HIPBLAS_OP_T, HIPBLAS_OP_N, static_cast<int>(committed_kv_length),
-          static_cast<int>(packed_rows), static_cast<int>(head_dim), key_pack,
-          static_cast<int>(head_dim), query_pack, static_cast<int>(head_dim),
-          scores, static_cast<int>(committed_kv_length), HIPBLAS_R_16F,
-          HIPBLAS_R_16F);
-      if (status != hipSuccess) {
-        break;
-      }
-      hipLaunchKernelGGL(scaled_prefill_softmax_fp16_kernel, dim3(packed_rows),
-                         dim3(256U), 0U, stream, scores, probabilities,
-                         residuals, packed_rows, committed_kv_length,
-                         start_position, row_offset, kQGroup, scales,
-                         1.0F / std::sqrt(static_cast<float>(head_dim)));
-      status = hipGetLastError();
-      if (status != hipSuccess) {
-        break;
-      }
-      status = gemm(HIPBLAS_OP_N, HIPBLAS_OP_N, static_cast<int>(head_dim),
-                    static_cast<int>(packed_rows),
-                    static_cast<int>(committed_kv_length), value_pack,
-                    static_cast<int>(head_dim), probabilities,
-                    static_cast<int>(committed_kv_length), output_f32,
-                    static_cast<int>(head_dim), HIPBLAS_R_16F, HIPBLAS_R_16F);
-      if (status != hipSuccess) {
-        break;
-      }
-      status = gemm(HIPBLAS_OP_N, HIPBLAS_OP_N, static_cast<int>(head_dim),
-                    static_cast<int>(packed_rows),
-                    static_cast<int>(committed_kv_length), value_pack,
-                    static_cast<int>(head_dim), residuals,
-                    static_cast<int>(committed_kv_length), residual_output_f32,
-                    static_cast<int>(head_dim), HIPBLAS_R_16F, HIPBLAS_R_16F);
-      if (status != hipSuccess) {
-        break;
-      }
-      const uint64_t scatter_elements =
-          static_cast<uint64_t>(packed_rows) * head_dim;
-      if (encoding == SLLM_HIP_KV_ENCODING_FP16_V1) {
-        hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(
-                scaled_prefill_combine_kernel<SLLM_HIP_KV_ENCODING_FP16_V1>),
-            dim3(static_cast<uint32_t>((scatter_elements + 255U) / 256U)),
-            dim3(256U), 0U, stream, output_f32, residual_output_f32,
-            probabilities, residuals, special_first, value, value_scales,
-            value_outer_scales, rows, kv_heads, committed_kv_length,
-            start_position, row_offset, kQGroup, head_dim, kv_head,
-            static_value_scale);
-      } else {
-        hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(scaled_prefill_combine_kernel<
-                            SLLM_HIP_KV_ENCODING_MXFP8_E4_V1>),
-            dim3(static_cast<uint32_t>((scatter_elements + 255U) / 256U)),
-            dim3(256U), 0U, stream, output_f32, residual_output_f32,
-            probabilities, residuals, special_first, value, value_scales,
-            value_outer_scales, rows, kv_heads, committed_kv_length,
-            start_position, row_offset, kQGroup, head_dim, kv_head,
-            static_value_scale);
-      }
-      status = hipGetLastError();
-      if (status != hipSuccess) {
-        break;
-      }
-      hipLaunchKernelGGL(
-          scaled_prefill_scatter_kernel,
-          dim3(static_cast<uint32_t>((scatter_elements + 255U) / 256U)),
-          dim3(256U), 0U, stream, output_f32, output, rows, q_heads, head_dim,
-          kv_head, kQGroup, row_offset);
-      status = hipGetLastError();
-    }
-  }
-  return status;
-#endif
-}
-
-hipError_t launch_gqa6_qtile4_fp16(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint32_t q_heads,
-    const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale,
-    const uint32_t key_tile, const hipStream_t stream) noexcept {
-  (void)key_scales;
-  (void)value_scales;
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  (void)static_key_scale;
-  (void)static_value_scale;
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || query_count < 128U ||
-      query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M || q_heads != 24U ||
-      kv_heads != 4U || head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM ||
-      (key_tile != 4U && key_tile != 8U && key_tile != 16U &&
-       key_tile != 32U)) {
-    return hipErrorInvalidValue;
-  }
-  const uint64_t gqa_block_count =
-      (static_cast<uint64_t>(query_count) + 3U) / 4U * kv_heads;
-  if (gqa_block_count > std::numeric_limits<uint32_t>::max()) {
-    return hipErrorInvalidValue;
-  }
-#define SLLM_LAUNCH_GQA6_FP16_KEY_TILE(KeyTile)                                \
-  hipLaunchKernelGGL(                                                          \
-      HIP_KERNEL_NAME(                                                         \
-          causal_attention_prefill_gqa6_qtile4_fp16_kernel<KeyTile>),          \
-      dim3(static_cast<uint32_t>(gqa_block_count)),                            \
-      dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,  \
-      value, key_scales, value_scales, key_outer_scales, value_outer_scales,   \
-      output, query_count, start_position, q_heads, kv_heads, head_dim,        \
-      static_key_scale, static_value_scale)
-  switch (key_tile) {
-  case 4U:
-    SLLM_LAUNCH_GQA6_FP16_KEY_TILE(4U);
-    break;
-  case 8U:
-    SLLM_LAUNCH_GQA6_FP16_KEY_TILE(8U);
-    break;
-  case 16U:
-    SLLM_LAUNCH_GQA6_FP16_KEY_TILE(16U);
-    break;
-  case 32U:
-    SLLM_LAUNCH_GQA6_FP16_KEY_TILE(32U);
-    break;
-  default:
-    return hipErrorInvalidValue;
-  }
-#undef SLLM_LAUNCH_GQA6_FP16_KEY_TILE
-  return hipGetLastError();
-}
-
-hipError_t launch_gqa6_blocksoftmax_fp16(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint32_t q_heads,
-    const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale,
-    const uint32_t key_tile, const hipStream_t stream) noexcept {
-  (void)key_scales;
-  (void)value_scales;
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  (void)static_key_scale;
-  (void)static_value_scale;
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || query_count < 128U ||
-      query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M || q_heads != 24U ||
-      kv_heads != 4U || head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM ||
-      (key_tile != 8U && key_tile != 32U)) {
-    return hipErrorInvalidValue;
-  }
-  const uint64_t gqa_block_count =
-      (static_cast<uint64_t>(query_count) + 3U) / 4U * kv_heads;
-  if (gqa_block_count > std::numeric_limits<uint32_t>::max()) {
-    return hipErrorInvalidValue;
-  }
-#define SLLM_LAUNCH_GQA6_BLOCKSOFTMAX(KeyTile)                                 \
-  hipLaunchKernelGGL(                                                          \
-      HIP_KERNEL_NAME(                                                         \
-          causal_attention_prefill_gqa6_blocksoftmax_fp16_kernel<KeyTile>),    \
-      dim3(static_cast<uint32_t>(gqa_block_count)),                            \
-      dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,  \
-      value, key_scales, value_scales, key_outer_scales, value_outer_scales,   \
-      output, query_count, start_position, q_heads, kv_heads, head_dim,        \
-      static_key_scale, static_value_scale)
-  switch (key_tile) {
-  case 8U:
-    SLLM_LAUNCH_GQA6_BLOCKSOFTMAX(8U);
-    break;
-  case 32U:
-    SLLM_LAUNCH_GQA6_BLOCKSOFTMAX(32U);
-    break;
-  default:
-    return hipErrorInvalidValue;
-  }
-#undef SLLM_LAUNCH_GQA6_BLOCKSOFTMAX
-  return hipGetLastError();
-}
-
-hipError_t launch_gqa6_blocksoftmax_q8_fp16(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint32_t q_heads,
-    const uint32_t kv_heads, const uint32_t head_dim,
-    const float static_key_scale, const float static_value_scale,
-    const hipStream_t stream) noexcept {
-  (void)key_scales;
-  (void)value_scales;
-  (void)key_outer_scales;
-  (void)value_outer_scales;
-  (void)static_key_scale;
-  (void)static_value_scale;
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || query_count < 128U ||
-      query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M || q_heads != 24U ||
-      kv_heads != 4U || head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM) {
-    return hipErrorInvalidValue;
-  }
-  const uint64_t gqa_block_count =
-      (static_cast<uint64_t>(query_count) + 7U) / 8U * kv_heads;
-  if (gqa_block_count > std::numeric_limits<uint32_t>::max()) {
-    return hipErrorInvalidValue;
-  }
-  hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(
-          causal_attention_prefill_gqa6_blocksoftmax_q8_fp16_kernel),
-      dim3(static_cast<uint32_t>(gqa_block_count)),
-      dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,
-      value, key_scales, value_scales, key_outer_scales, value_outer_scales,
-      output, query_count, start_position, q_heads, kv_heads, head_dim,
-      static_key_scale, static_value_scale);
-  return hipGetLastError();
-}
-
-hipError_t launch(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t capacity_tokens, const uint64_t start_position,
+hipError_t launch_paged_prefill_gqa6(
+    const uint16_t *const query, const uint32_t *const logical_table,
+    const sllm_paged_kv::BlockDescriptor *const descriptor_table,
+    const uint32_t logical_table_count, const uint32_t descriptor_count,
+    uint32_t *const device_status, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
     const uint64_t committed_kv_length, const uint32_t q_heads,
     const uint32_t kv_heads, const uint32_t head_dim, const uint32_t encoding,
     const float static_key_scale, const float static_value_scale,
-    const bool use_gfx1201_wave_provider, const bool use_decode_wave_split,
-    const bool use_decode_wave_split_q_preload, const bool use_prefill_gqa4,
-    const bool use_prefill_gqa4_qtile4,
-    const bool use_prefill_gqa6_qtile4_k32_fp16, const uint64_t sliding_window,
-    const float score_scale, const hipStream_t stream) noexcept {
-  const bool known_encoding =
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1 ||
-      encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
-      encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 ||
-      encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 ||
-      encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
-      encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2 ||
-      encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
-      encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1;
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || !known_encoding || query_count == 0U ||
-      query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M || capacity_tokens == 0U ||
-      committed_kv_length == 0U || q_heads == 0U || kv_heads == 0U ||
-      q_heads % kv_heads != 0U || head_dim == 0U ||
-      !std::isfinite(score_scale) || score_scale <= 0.0F ||
-      head_dim > SLLM_HIP_KV_MAX_HEAD_DIM ||
-      ((encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
-        encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 ||
-        encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
-        encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2 ||
-        encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
-        encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) &&
-       (key_scales == nullptr || value_scales == nullptr)) ||
-      (encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 &&
-       (!std::isfinite(static_key_scale) || static_key_scale <= 0.0F ||
-        !std::isfinite(static_value_scale) || static_value_scale <= 0.0F)) ||
-      (sliding_window != 0U &&
-       (sliding_window != SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4 ||
-        encoding != SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 ||
-        static_key_scale != 1.0F || static_value_scale != 1.0F ||
-        capacity_tokens < sliding_window ||
-        capacity_tokens > sliding_window + UINT64_C(1) ||
-        (committed_kv_length > sliding_window && query_count != 1U) ||
-        use_gfx1201_wave_provider || use_decode_wave_split ||
-        use_prefill_gqa4 || use_prefill_gqa4_qtile4 ||
-        use_prefill_gqa6_qtile4_k32_fp16)) ||
-      (encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 &&
-       (key_outer_scales == nullptr || value_outer_scales == nullptr))) {
+    const bool wave_local_kv, const bool use_gfx1201_wave_provider,
+    const bool use_gfx1201_qtile4_provider, const hipStream_t stream) noexcept {
+  constexpr uint32_t kQHeads = 24U;
+  constexpr uint32_t kKvHeads = 4U;
+  constexpr uint32_t kHeadDim = 256U;
+  if (query == nullptr || logical_table == nullptr ||
+      descriptor_table == nullptr || device_status == nullptr ||
+      output == nullptr || query_count == 0U || logical_table_count == 0U ||
+      descriptor_count == 0U || q_heads != kQHeads || kv_heads != kKvHeads ||
+      head_dim != kHeadDim || encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+      start_position > UINT64_MAX - query_count ||
+      start_position + query_count != committed_kv_length ||
+      committed_kv_length == 0U ||
+      logical_table_count < committed_kv_length / 128U +
+                                (committed_kv_length % 128U != 0U ? 1U : 0U)) {
     return hipErrorInvalidValue;
   }
-  const uint64_t block_count = static_cast<uint64_t>(query_count) * q_heads;
-  if (block_count > std::numeric_limits<uint32_t>::max()) {
+  const uint64_t tiles = static_cast<uint64_t>(query_count) / 8U +
+                         (query_count % 8U != 0U ? 1U : 0U);
+  if (tiles > std::numeric_limits<uint32_t>::max() / kKvHeads) {
     return hipErrorInvalidValue;
   }
-#define SLLM_DISPATCH_ATTENTION_ENCODING(LaunchMacro, Option)                  \
-  switch (encoding) {                                                          \
-  case SLLM_HIP_KV_ENCODING_FP16_V1:                                           \
-    LaunchMacro(Option, SLLM_HIP_KV_ENCODING_FP16_V1);                         \
-    break;                                                                     \
-  case SLLM_HIP_KV_ENCODING_FP8_V1:                                            \
-    LaunchMacro(Option, SLLM_HIP_KV_ENCODING_FP8_V1);                          \
-    break;                                                                     \
-  case SLLM_HIP_KV_ENCODING_FP8_STATIC_V1:                                     \
-    LaunchMacro(Option, SLLM_HIP_KV_ENCODING_FP8_STATIC_V1);                   \
-    break;                                                                     \
-  case SLLM_HIP_KV_ENCODING_NVFP4_V1:                                          \
-    LaunchMacro(Option, SLLM_HIP_KV_ENCODING_NVFP4_V1);                        \
-    break;                                                                     \
-  case SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2:                                 \
-    LaunchMacro(Option, SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2);               \
-    break;                                                                     \
-  case SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2:                                 \
-    LaunchMacro(Option, SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2);               \
-    break;                                                                     \
-  case SLLM_HIP_KV_ENCODING_MXFP8_E4_V1:                                       \
-    LaunchMacro(Option, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1);                     \
-    break;                                                                     \
-  case SLLM_HIP_KV_ENCODING_MXFP8_E5_V1:                                       \
-    LaunchMacro(Option, SLLM_HIP_KV_ENCODING_MXFP8_E5_V1);                     \
-    break;                                                                     \
-  }
-#define SLLM_LAUNCH_DECODE_WAVE(UsePreload, EncodingValue)                     \
-  hipLaunchKernelGGL(                                                          \
-      HIP_KERNEL_NAME(                                                         \
-          causal_attention_decode_wave_split_kernel<UsePreload,                \
-                                                    EncodingValue>),           \
-      dim3(q_heads), dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U,       \
-      stream, query, key, value, key_scales, value_scales, key_outer_scales,   \
-      value_outer_scales, output, committed_kv_length, q_heads, kv_heads,      \
-      head_dim, static_key_scale, static_value_scale)
-#define SLLM_LAUNCH_QTILE4_GQA4(Unused, EncodingValue)                         \
-  hipLaunchKernelGGL(                                                          \
-      HIP_KERNEL_NAME(                                                         \
-          causal_attention_prefill_gqa4_qtile4_kernel<EncodingValue, 4U>),     \
-      dim3(static_cast<uint32_t>(gqa_block_count)),                            \
-      dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,  \
-      value, key_scales, value_scales, key_outer_scales, value_outer_scales,   \
-      output, query_count, start_position, q_heads, kv_heads, head_dim,        \
-      static_key_scale, static_value_scale)
-#define SLLM_LAUNCH_QTILE4_GQA6(Unused, EncodingValue)                         \
-  hipLaunchKernelGGL(                                                          \
-      HIP_KERNEL_NAME(                                                         \
-          causal_attention_prefill_gqa4_qtile4_kernel<EncodingValue, 6U>),     \
-      dim3(static_cast<uint32_t>(gqa_block_count)),                            \
-      dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,  \
-      value, key_scales, value_scales, key_outer_scales, value_outer_scales,   \
-      output, query_count, start_position, q_heads, kv_heads, head_dim,        \
-      static_key_scale, static_value_scale)
-#define SLLM_LAUNCH_GQA6_QTILE4_FP16(KeyTile)                                  \
-  hipLaunchKernelGGL(                                                          \
-      HIP_KERNEL_NAME(                                                         \
-          causal_attention_prefill_gqa6_qtile4_fp16_kernel<KeyTile>),          \
-      dim3(static_cast<uint32_t>(gqa_block_count)),                            \
-      dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,  \
-      value, key_scales, value_scales, key_outer_scales, value_outer_scales,   \
-      output, query_count, start_position, q_heads, kv_heads, head_dim,        \
-      static_key_scale, static_value_scale)
-#define SLLM_LAUNCH_GQA4_SHARED(Unused, EncodingValue)                         \
-  hipLaunchKernelGGL(                                                          \
-      HIP_KERNEL_NAME(                                                         \
-          causal_attention_prefill_gqa4_shared_kernel<EncodingValue>),         \
-      dim3(static_cast<uint32_t>(gqa_block_count)),                            \
-      dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,  \
-      value, key_scales, value_scales, key_outer_scales, value_outer_scales,   \
-      output, query_count, start_position, q_heads, kv_heads, head_dim,        \
-      static_key_scale, static_value_scale)
-#define SLLM_LAUNCH_CAUSAL_ATTENTION(UseWave, EncodingValue)                   \
-  hipLaunchKernelGGL(                                                          \
-      HIP_KERNEL_NAME(causal_attention_kernel<UseWave, EncodingValue>),        \
-      dim3(static_cast<uint32_t>(block_count)),                                \
-      dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,  \
-      value, key_scales, value_scales, key_outer_scales, value_outer_scales,   \
-      output, query_count, capacity_tokens, start_position,                    \
-      committed_kv_length, q_heads, kv_heads, head_dim, static_key_scale,      \
-      static_value_scale, sliding_window, score_scale)
-  if (use_decode_wave_split) {
-    if (query_count != 1U || start_position + 1U != committed_kv_length ||
-        head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM) {
-      return hipErrorInvalidValue;
-    }
-    if (use_decode_wave_split_q_preload) {
-      SLLM_DISPATCH_ATTENTION_ENCODING(SLLM_LAUNCH_DECODE_WAVE, true);
-    } else {
-      SLLM_DISPATCH_ATTENTION_ENCODING(SLLM_LAUNCH_DECODE_WAVE, false);
-    }
-  } else if (use_prefill_gqa6_qtile4_k32_fp16) {
-    if (!use_prefill_gqa4_qtile4 || query_count < 128U || q_heads != 24U ||
-        kv_heads != 4U || head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM ||
-        encoding != SLLM_HIP_KV_ENCODING_FP16_V1 || sliding_window != 0U) {
-      return hipErrorInvalidValue;
-    }
-    const uint64_t gqa_block_count =
-        (static_cast<uint64_t>(query_count) + 3U) / 4U * kv_heads;
-    if (gqa_block_count > std::numeric_limits<uint32_t>::max()) {
-      return hipErrorInvalidValue;
-    }
-    SLLM_LAUNCH_GQA6_QTILE4_FP16(32U);
-  } else if (use_prefill_gqa4_qtile4) {
-    const uint32_t gqa_ratio = q_heads / kv_heads;
-    if (query_count < 64U || (gqa_ratio != 4U && gqa_ratio != 6U) ||
-        head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM) {
-      return hipErrorInvalidValue;
-    }
-    const uint64_t gqa_block_count =
-        (static_cast<uint64_t>(query_count) + 3U) / 4U * kv_heads;
-    if (gqa_block_count > std::numeric_limits<uint32_t>::max()) {
-      return hipErrorInvalidValue;
-    }
-    if (gqa_ratio == 6U) {
-      SLLM_DISPATCH_ATTENTION_ENCODING(SLLM_LAUNCH_QTILE4_GQA6, false);
-    } else {
-      SLLM_DISPATCH_ATTENTION_ENCODING(SLLM_LAUNCH_QTILE4_GQA4, false);
-    }
-  } else if (use_prefill_gqa4) {
-    if (query_count < 64U || q_heads / kv_heads != 4U ||
-        head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM) {
-      return hipErrorInvalidValue;
-    }
-    const uint64_t gqa_block_count =
-        static_cast<uint64_t>(query_count) * kv_heads;
-    if (gqa_block_count > std::numeric_limits<uint32_t>::max()) {
-      return hipErrorInvalidValue;
-    }
-    SLLM_DISPATCH_ATTENTION_ENCODING(SLLM_LAUNCH_GQA4_SHARED, false);
-  } else {
-    if (use_gfx1201_wave_provider) {
-      SLLM_DISPATCH_ATTENTION_ENCODING(SLLM_LAUNCH_CAUSAL_ATTENTION, true);
-    } else {
-      SLLM_DISPATCH_ATTENTION_ENCODING(SLLM_LAUNCH_CAUSAL_ATTENTION, false);
-    }
-  }
-#undef SLLM_LAUNCH_CAUSAL_ATTENTION
-#undef SLLM_LAUNCH_GQA6_QTILE4_FP16
-#undef SLLM_LAUNCH_GQA4_SHARED
-#undef SLLM_LAUNCH_QTILE4_GQA6
-#undef SLLM_LAUNCH_QTILE4_GQA4
-#undef SLLM_LAUNCH_DECODE_WAVE
-#undef SLLM_DISPATCH_ATTENTION_ENCODING
-  return hipGetLastError();
-}
-
-hipError_t launch_gqa6_qtile8_w16(
-    const uint16_t *const query, const void *const key, const void *const value,
-    const void *const key_scales, const void *const value_scales,
-    const float *const key_outer_scales, const float *const value_outer_scales,
-    uint16_t *const output, const uint32_t query_count,
-    const uint64_t start_position, const uint32_t q_heads,
-    const uint32_t kv_heads, const uint32_t head_dim, const uint32_t encoding,
-    const float static_key_scale, const float static_value_scale,
-    const bool wave_local_kv, const hipStream_t stream) noexcept {
-  if (query == nullptr || key == nullptr || value == nullptr ||
-      key_scales == nullptr || value_scales == nullptr || output == nullptr ||
-      query_count < 128U || query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M ||
-      start_position < 1024U || q_heads != 24U || kv_heads != 4U ||
-      head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM ||
-      encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
+  const uint32_t grid_count = static_cast<uint32_t>(tiles * kKvHeads);
+  const uint64_t qtile4_grid64 =
+      (static_cast<uint64_t>(query_count) + 3U) / 4U * kKvHeads;
+  if (qtile4_grid64 > std::numeric_limits<uint32_t>::max())
     return hipErrorInvalidValue;
+  hipError_t status =
+      hipMemsetAsync(device_status, 0, sizeof(uint32_t), stream);
+  if (status != hipSuccess) {
+    return status;
   }
-  const uint64_t gqa_block_count =
-      (static_cast<uint64_t>(query_count) + 7U) / 8U * kv_heads;
-  if (gqa_block_count > std::numeric_limits<uint32_t>::max()) {
-    return hipErrorInvalidValue;
-  }
-  if (wave_local_kv) {
+  if (use_gfx1201_wave_provider) {
+    const uint64_t wave_grid = static_cast<uint64_t>(query_count) * q_heads;
+    if (wave_grid > std::numeric_limits<uint32_t>::max())
+      return hipErrorInvalidValue;
     hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(causal_attention_prefill_gqa6_qtile8_w16_kernel<
-                        SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 6U, true>),
-        dim3(static_cast<uint32_t>(gqa_block_count)), dim3(512U), 0U, stream,
-        query, key, value, key_scales, value_scales, key_outer_scales,
-        value_outer_scales, output, query_count, start_position, q_heads,
-        kv_heads, head_dim, static_key_scale, static_value_scale);
+        causal_attention_paged_prefill_gfx1201_wave_kernel,
+        dim3(static_cast<uint32_t>(wave_grid)), dim3(256U), 0U, stream, query,
+        logical_table, descriptor_table, logical_table_count, descriptor_count,
+        device_status, output, query_count, start_position, q_heads, kv_heads,
+        head_dim, 1.0F / std::sqrt(static_cast<float>(head_dim)));
+  } else if (use_gfx1201_qtile4_provider) {
+    hipLaunchKernelGGL(causal_attention_paged_prefill_gqa6_qtile4_kernel,
+                       dim3(static_cast<uint32_t>(qtile4_grid64)), dim3(256U),
+                       0U, stream, query, logical_table, descriptor_table,
+                       logical_table_count, descriptor_count, device_status,
+                       output, query_count, start_position, q_heads, kv_heads,
+                       head_dim);
+  } else if (wave_local_kv) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(
+            causal_attention_paged_prefill_gqa6_qtile8_kernel<true>),
+        dim3(grid_count), dim3(512U), 0U, stream, query, logical_table,
+        descriptor_table, logical_table_count, descriptor_count, device_status,
+        output, query_count, start_position, q_heads, kv_heads, head_dim,
+        static_key_scale, static_value_scale);
   } else {
     hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(causal_attention_prefill_gqa6_qtile8_w16_kernel<
-                        SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 6U>),
-        dim3(static_cast<uint32_t>(gqa_block_count)), dim3(512U), 0U, stream,
-        query, key, value, key_scales, value_scales, key_outer_scales,
-        value_outer_scales, output, query_count, start_position, q_heads,
-        kv_heads, head_dim, static_key_scale, static_value_scale);
+        HIP_KERNEL_NAME(
+            causal_attention_paged_prefill_gqa6_qtile8_kernel<false>),
+        dim3(grid_count), dim3(512U), 0U, stream, query, logical_table,
+        descriptor_table, logical_table_count, descriptor_count, device_status,
+        output, query_count, start_position, q_heads, kv_heads, head_dim,
+        static_key_scale, static_value_scale);
   }
   return hipGetLastError();
 }

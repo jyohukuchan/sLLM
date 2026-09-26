@@ -7010,6 +7010,8 @@ hipError_t launch_nvfp4_w4a4(const uint8_t *const packed_activation,
         gfx1201 &&
         phase78_nvfp4_w4a4_decode_scale_lut_gfx1201_activation_shared_shape(
             m, k, n);
+    const bool gfx1030_sgpr =
+        gfx1030 && phase87_stage1_nvfp4_decode_gfx1030_sgpr_shape(m, k, n);
     const size_t dynamic_shared_bytes =
         gfx1030 ? static_cast<size_t>(
                       nvfp4_w4a4_decode_activation_shared_lds_bytes(k))
@@ -7017,7 +7019,16 @@ hipError_t launch_nvfp4_w4a4(const uint8_t *const packed_activation,
             ? static_cast<size_t>(
                   nvfp4_w4a4_decode_activation_shared_lds_bytes(k))
             : 0U;
-    if (gfx1201_activation_shared) {
+    if (gfx1030_sgpr) {
+      hipLaunchKernelGGL(sllm_id84_nvfp4_scale_lut_detail::
+                             sllm_nvfp4_w4a4_decode_scale_lut_gfx1030_sgpr_v1,
+                         dim3(static_cast<uint32_t>((n + 31U) / 32U)),
+                         dim3(kNvfp4W4A4DecodeScaleLutWorkgroupSize),
+                         dynamic_shared_bytes, stream, packed_activation,
+                         activation_block_scales, packed_weight,
+                         weight_block_scales, weight_tensor_scale,
+                         input_tensor_scale, output, m, k, n);
+    } else if (gfx1201_activation_shared) {
       hipLaunchKernelGGL(sllm_nvfp4_w4a4_decode_scale_lut_gfx1201_actshared_v1,
                          dim3(static_cast<uint32_t>((n + 31U) / 32U)),
                          dim3(kNvfp4W4A4DecodeScaleLutWorkgroupSize),
@@ -7217,6 +7228,54 @@ hipError_t launch_nvfp4_w4a4(const uint8_t *const packed_activation,
   }
   return hipGetLastError();
 }
+
+#if defined(SLLM_PHASE87_STAGE12_M5_PROBE)
+hipError_t
+launch_nvfp4_w4a4_small_m_m5_probe(const uint8_t *const packed_activation,
+                                   const uint8_t *const activation_block_scales,
+                                   const uint8_t *const packed_weight,
+                                   const uint8_t *const weight_block_scales,
+                                   const float *const weight_tensor_scale,
+                                   const float *const input_tensor_scale,
+                                   uint16_t *const output, const uint64_t m,
+                                   const uint64_t k, const uint64_t n,
+                                   const hipStream_t stream) noexcept {
+#if defined(SLLM_HIP_COMPILE_TARGET)
+  const bool supported_target =
+      std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1030") == 0 ||
+      std::strcmp(SLLM_HIP_COMPILE_TARGET, "gfx1201") == 0;
+  const bool supported_shape =
+      m == UINT64_C(5) && ((k == UINT64_C(5120) && n == UINT64_C(17408)) ||
+                           (k == UINT64_C(17408) && n == UINT64_C(5120)));
+  if (!supported_target || !supported_shape || packed_activation == nullptr ||
+      activation_block_scales == nullptr || packed_weight == nullptr ||
+      weight_block_scales == nullptr || weight_tensor_scale == nullptr ||
+      input_tensor_scale == nullptr || output == nullptr) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(
+      sllm_nvfp4_w4a4_small_m_vgpr_reuse_m5_probe_v1,
+      dim3(static_cast<uint32_t>((n + UINT64_C(31)) / UINT64_C(32))), dim3(256),
+      0U, stream, packed_activation, activation_block_scales, packed_weight,
+      weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
+      k, n);
+  return hipGetLastError();
+#else
+  (void)packed_activation;
+  (void)activation_block_scales;
+  (void)packed_weight;
+  (void)weight_block_scales;
+  (void)weight_tensor_scale;
+  (void)input_tensor_scale;
+  (void)output;
+  (void)m;
+  (void)k;
+  (void)n;
+  (void)stream;
+  return hipErrorNotSupported;
+#endif
+}
+#endif
 
 // ID62 short split-K4 launcher. The caller reserves
 // 4 * m * n * sizeof(float) bytes for partial_workspace. Only the two

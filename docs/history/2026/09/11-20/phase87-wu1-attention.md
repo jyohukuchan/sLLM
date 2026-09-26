@@ -140,4 +140,4 @@ raw JSONL、27個の時間sample、生成token列、binary、source snapshotは
   `SLLM_CAUSAL_ATTENTION_DECODE_GQA_SHARED=0`を使える。
 - 集約: `python3 ci/tools/summarize_phase87_wu1.py --root .local-artifacts/phase87/wu1 --output <summary.json>`。
 
-計画: [Phase87 WU1](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu1-v620-mxfp8-e4-decode-attention-stage1)
+計画: [Phase87 WU1](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu1-v620-mxfp8-e4-decode-attention-stage1)

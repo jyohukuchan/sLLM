@@ -21,11 +21,16 @@ use crate::linear_attention::{
 };
 use crate::ministral3_graph::Ministral3YarnQueryScaleStage;
 use crate::session_checkpoint::{
-    OpaqueStatePlane, StateLayerMetadataV1, StateOwnerKindV1, StatePlaneKindV1,
+    OpaqueStatePlane, PagedStateImageV2, StateLayerMetadataV1, StateOwnerKindV1, StatePlaneKindV1,
 };
 use crate::{AccessMode, DType, Encoding, SemanticOpDescriptor, SemanticOpKind, TensorView};
 
 static NEXT_EXECUTION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Paged-capable V2 state image alias. V1 state images keep their original
+/// opaque-plane API and serialization meaning.
+#[allow(dead_code)]
+pub type ExecutionStateImageV2 = PagedStateImageV2;
 
 fn next_execution_id() -> u64 {
     loop {
@@ -860,6 +865,20 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         })
     }
 
+    /// Stages a conservative Paged KV block bound before replay submission.
+    /// The adapter queues table updates on the graph's stream without
+    /// publishing KV length or reading device control back to the host.
+    fn prepare_graph_paged_kv(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _span: &ExecutionGraphSpan,
+        _conservative_end: u64,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support graph paged KV preparation".to_owned(),
+        })
+    }
+
     /// Publishes graph-owned state metadata only after the caller has
     /// observed all replay completions. The adapter must downcast the
     /// finished graph payload and keep this host-only transition separate from
@@ -1002,6 +1021,31 @@ pub trait ExecutionSessionAdapter: Send + Sync {
     ) -> Result<(), ExecutionError> {
         Err(ExecutionError::Unsupported {
             reason: "backend does not support KV state image import".to_owned(),
+        })
+    }
+
+    /// Additive V2 Paged image export. Legacy V1 images remain unchanged and
+    /// backends without the topology-aware contract fail closed.
+    fn export_kv_state_image_v2(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &KvState,
+    ) -> Result<ExecutionStateImageV2, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support Paged V2 KV state image export".to_owned(),
+        })
+    }
+
+    /// Additive V2 Paged image import. The adapter must publish only after the
+    /// topology and all six native planes have been staged successfully.
+    fn import_kv_state_image_v2(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &KvState,
+        _image: &ExecutionStateImageV2,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support Paged V2 KV state image import".to_owned(),
         })
     }
 
@@ -1165,9 +1209,9 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         })
     }
 
-    /// Arms the private M3 width-2 checkpoint planes before the target
-    /// verification transition. Unsupported backends must reject here, before
-    /// any state transition or request-visible mutation.
+    /// Arms the private GDN checkpoint planes before the target verification
+    /// transition. Unsupported backends must reject here, before any state
+    /// transition or request-visible mutation.
     fn prepare_linear_attention_prefix_checkpoint(
         &self,
         _access: &ExecutionAdapterAccess<'_>,
@@ -1181,7 +1225,7 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         })
     }
 
-    /// Validates one completed M3 checkpoint without modifying the published
+    /// Validates one completed GDN checkpoint without modifying the published
     /// state. Callers use this pass for every layer before committing any one
     /// layer, so a partial validation cannot expose a partial rollback.
     fn validate_linear_attention_prefix_checkpoint(
@@ -2001,6 +2045,77 @@ impl ExecutionSession {
         )
     }
 
+    /// Exports a topology-aware Paged V2 image. V1 image APIs remain the
+    /// compatibility path for legacy contiguous KV states.
+    pub fn export_kv_state_image_v2(
+        &self,
+        state: &KvState,
+    ) -> Result<ExecutionStateImageV2, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_kv_state(state)?;
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        if state.append_in_flight.load(Ordering::Acquire)
+            || state.attention_in_flight.load(Ordering::Acquire)
+        {
+            return Err(ExecutionError::Busy);
+        }
+        let snapshot = self.kv_state_snapshot(state)?;
+        let image = self
+            .state
+            .adapter
+            .export_kv_state_image_v2(&ExecutionAdapterAccess { session: self }, state)?;
+        if image.metadata().owner != StateOwnerKindV1::Kv
+            || image.metadata().layer_id != state.layer_id()
+            || image.metadata().published_length != snapshot.length()
+            || image.paged_metadata().descriptor() != state.descriptor()
+        {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "Paged V2 image metadata does not match the state".to_owned(),
+            });
+        }
+        Ok(image)
+    }
+
+    /// Imports a topology-aware Paged V2 image into a fresh empty state.
+    pub fn import_kv_state_image_v2(
+        &self,
+        state: &KvState,
+        image: &ExecutionStateImageV2,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_kv_state(state)?;
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        if state.append_in_flight.load(Ordering::Acquire)
+            || state.attention_in_flight.load(Ordering::Acquire)
+        {
+            return Err(ExecutionError::Busy);
+        }
+        if self.kv_state_snapshot(state)?.length() != 0 {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "Paged V2 image import requires a fresh empty KV destination".to_owned(),
+            });
+        }
+        if image.metadata().owner != StateOwnerKindV1::Kv
+            || image.metadata().layer_id != state.layer_id()
+            || image.paged_metadata().descriptor() != state.descriptor()
+        {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "Paged V2 image metadata does not match the destination state".to_owned(),
+            });
+        }
+        self.state.adapter.import_kv_state_image_v2(
+            &ExecutionAdapterAccess { session: self },
+            state,
+            image,
+        )
+    }
+
     /// Forks a committed prefix into an independent state owner. Core closes
     /// admission around the source while the backend captures its published
     /// length and validates the returned redacted accounting.
@@ -2171,6 +2286,8 @@ impl ExecutionSession {
             || audit.destination_owned_bytes() < previous.destination_owned_bytes()
             || (audit.mode() == StateForkModeV1::SharedReadOnlyPages
                 && audit.shared_pages() > previous.shared_pages())
+            || (audit.mode() == StateForkModeV1::SharedPagedBlocks
+                && audit.shared_blocks() > previous.shared_blocks())
         {
             return Err(ExecutionError::InvalidRequest {
                 reason: "KV fork ownership audit is not monotonic".to_owned(),
@@ -2462,7 +2579,10 @@ impl ExecutionSession {
         )
     }
 
-    /// Arms the backend-owned two-row M3 prefix checkpoint before execution.
+    /// Arms the backend-owned GDN prefix checkpoint before execution.  The
+    /// private MTP contract uses target `token_count = rows + 1` and admits
+    /// widths two through four; the caller remains responsible for selecting
+    /// the default width two.
     /// This operation is admission-only: an unsupported backend leaves the
     /// state untouched so the caller can retain the legacy replay path.
     pub fn prepare_linear_attention_prefix_checkpoint(
@@ -2474,6 +2594,13 @@ impl ExecutionSession {
     ) -> Result<(), ExecutionError> {
         self.ensure_open()?;
         self.ensure_linear_attention_state(state)?;
+        if !linear_prefix_checkpoint_shape_supported(token_count, rows) {
+            return Err(ExecutionError::InvalidRequest {
+                reason: format!(
+                    "linear-attention checkpoint shape token_count={token_count}, rows={rows} is unsupported"
+                ),
+            });
+        }
         let snapshot = self.linear_attention_state_snapshot(state)?;
         if snapshot.length() != expected_start {
             return Err(ExecutionError::StaleLinearAttentionLength {
@@ -2493,14 +2620,16 @@ impl ExecutionSession {
                 .checkpoint_allocation
                 .lock()
                 .map_err(|_| ExecutionError::Busy)?;
-            if guard.is_some() {
+            let bytes = linear_state_checkpoint_allocation_bytes(state.descriptor, rows)
+                .ok_or_else(|| ExecutionError::InvalidRange {
+                    reason: "linear-attention checkpoint bytes overflowed".to_owned(),
+                })?;
+            if guard
+                .as_ref()
+                .is_some_and(|lease| lease.size_bytes == bytes)
+            {
                 None
             } else {
-                let bytes = linear_state_checkpoint_allocation_bytes(state.descriptor).ok_or_else(
-                    || ExecutionError::InvalidRange {
-                        reason: "linear-attention checkpoint bytes overflowed".to_owned(),
-                    },
-                )?;
                 Some(
                     self.state
                         .allocation_accounting
@@ -2532,7 +2661,7 @@ impl ExecutionSession {
         Ok(())
     }
 
-    /// Validates one completed M3 checkpoint without mutating it. Callers
+    /// Validates one completed GDN checkpoint without mutating it. Callers
     /// should invoke this for every layer before invoking any commit method.
     pub fn validate_linear_attention_prefix_checkpoint(
         &self,
@@ -2568,7 +2697,7 @@ impl ExecutionSession {
             )
     }
 
-    /// Commits one accepted M3 row after all layer validations have passed.
+    /// Commits one accepted GDN row after all layer validations have passed.
     pub fn commit_linear_attention_prefix_checkpoint(
         &self,
         state: &LinearAttentionState,
@@ -2601,7 +2730,7 @@ impl ExecutionSession {
             )
     }
 
-    /// Commits one accepted M3 row across all linear states.  Admission locks
+    /// Commits one accepted GDN row across all linear states.  Admission locks
     /// remain held until the adapter returns so a batch backend can validate,
     /// copy, fence, and publish without another state transition interleaving.
     pub fn commit_linear_attention_prefix_checkpoints(
@@ -3356,6 +3485,26 @@ impl ExecutionSession {
         )
     }
 
+    pub fn prepare_graph_paged_kv(
+        &self,
+        span: &ExecutionGraphSpan,
+        conservative_end: u64,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        ensure_identity(
+            self.backend_name(),
+            self.id(),
+            span.inner.state.backend,
+            span.inner.state.id,
+        )?;
+        self.ensure_queue(&span.inner.queue)?;
+        self.state.adapter.prepare_graph_paged_kv(
+            &ExecutionAdapterAccess { session: self },
+            span,
+            conservative_end,
+        )
+    }
+
     pub fn submit_graph_span(
         &self,
         span: &ExecutionGraphSpan,
@@ -3820,10 +3969,15 @@ fn linear_state_allocation_bytes(descriptor: LinearAttentionStateDescriptor) -> 
     convolution.checked_add(recurrent)
 }
 
+fn linear_prefix_checkpoint_shape_supported(token_count: u32, rows: u32) -> bool {
+    matches!((token_count, rows), (3, 2) | (4, 3) | (5, 4))
+}
+
 fn linear_state_checkpoint_allocation_bytes(
     descriptor: LinearAttentionStateDescriptor,
+    rows: u32,
 ) -> Option<u64> {
-    linear_state_allocation_bytes(descriptor)?.checked_mul(2)
+    linear_state_allocation_bytes(descriptor)?.checked_mul(u64::from(rows))
 }
 
 /// Opaque, session-owned device allocation.
@@ -7278,6 +7432,11 @@ mod tests {
                 .map_err(|_| ExecutionError::Busy)?;
             let owned_bytes = match mode {
                 crate::StateForkModeV1::SharedReadOnlyPages => 0,
+                crate::StateForkModeV1::SharedPagedBlocks => {
+                    return Err(ExecutionError::Unsupported {
+                        reason: "fake KV adapter does not implement Paged fork".to_owned(),
+                    });
+                }
                 crate::StateForkModeV1::DeviceCopy => {
                     kv_state_allocation_bytes(destination_descriptor).ok_or_else(|| {
                         ExecutionError::InvalidRequest {
@@ -7288,6 +7447,7 @@ mod tests {
             };
             let shared_pages = match mode {
                 crate::StateForkModeV1::SharedReadOnlyPages => length.div_ceil(256),
+                crate::StateForkModeV1::SharedPagedBlocks => 0,
                 crate::StateForkModeV1::DeviceCopy => 0,
             };
             let audit_length = if self.store.kv_fork_invalid_audit.load(Ordering::Relaxed) {
@@ -7549,6 +7709,11 @@ mod tests {
                 .map_err(|_| ExecutionError::Busy)?;
             let owned_bytes = match mode {
                 crate::StateForkModeV1::SharedReadOnlyPages => 0,
+                crate::StateForkModeV1::SharedPagedBlocks => {
+                    return Err(ExecutionError::Unsupported {
+                        reason: "fake linear adapter does not implement Paged fork".to_owned(),
+                    });
+                }
                 crate::StateForkModeV1::DeviceCopy => {
                     linear_state_allocation_bytes(destination_descriptor).ok_or_else(|| {
                         ExecutionError::InvalidRequest {
@@ -7559,6 +7724,7 @@ mod tests {
             };
             let shared_pages = match mode {
                 crate::StateForkModeV1::SharedReadOnlyPages => length.div_ceil(256),
+                crate::StateForkModeV1::SharedPagedBlocks => 0,
                 crate::StateForkModeV1::DeviceCopy => 0,
             };
             let audit_length = if self.store.linear_fork_invalid_audit.load(Ordering::Relaxed) {
@@ -7672,6 +7838,62 @@ mod tests {
         assert_eq!(final_snapshot.current_bytes(), 0);
         assert_eq!(final_snapshot.high_water_bytes(), 20);
         assert!(!final_snapshot.poisoned());
+    }
+
+    #[test]
+    fn linear_checkpoint_shape_contract_covers_widths_two_through_four() {
+        assert!(linear_prefix_checkpoint_shape_supported(3, 2));
+        assert!(linear_prefix_checkpoint_shape_supported(4, 3));
+        assert!(linear_prefix_checkpoint_shape_supported(5, 4));
+        assert!(!linear_prefix_checkpoint_shape_supported(2, 1));
+        assert!(!linear_prefix_checkpoint_shape_supported(5, 3));
+        assert!(!linear_prefix_checkpoint_shape_supported(6, 5));
+    }
+
+    #[test]
+    fn linear_checkpoint_allocation_preflight_scales_with_checkpoint_rows() {
+        let descriptor = LinearAttentionStateDescriptor::new(0, 4).unwrap();
+        let state_bytes = linear_state_allocation_bytes(descriptor).unwrap();
+        assert_eq!(
+            linear_state_checkpoint_allocation_bytes(descriptor, 2),
+            Some(state_bytes * 2)
+        );
+        assert_eq!(
+            linear_state_checkpoint_allocation_bytes(descriptor, 4),
+            Some(state_bytes * 4)
+        );
+        assert_eq!(
+            linear_state_checkpoint_allocation_bytes(descriptor, u32::MAX),
+            state_bytes.checked_mul(u64::from(u32::MAX))
+        );
+    }
+
+    #[test]
+    fn linear_checkpoint_prepare_rejects_invalid_shape_and_releases_width_four_probe() {
+        let (session, _) = kv_session();
+        let descriptor = LinearAttentionStateDescriptor::new(0, 4).unwrap();
+        let state = session.create_linear_attention_state(descriptor).unwrap();
+        let baseline = session.memory_snapshot().request_state().current_bytes();
+
+        assert!(matches!(
+            session.prepare_linear_attention_prefix_checkpoint(&state, 0, 4, 2),
+            Err(ExecutionError::InvalidRequest { reason }) if reason.contains("unsupported")
+        ));
+        assert_eq!(
+            session.memory_snapshot().request_state().current_bytes(),
+            baseline
+        );
+
+        // The test adapter rejects the backend operation, but admission must
+        // still reserve and then release the width-four accounting lease.
+        assert!(matches!(
+            session.prepare_linear_attention_prefix_checkpoint(&state, 0, 5, 4),
+            Err(ExecutionError::Unsupported { .. })
+        ));
+        assert_eq!(
+            session.memory_snapshot().request_state().current_bytes(),
+            baseline
+        );
     }
 
     #[test]
@@ -8522,6 +8744,9 @@ mod tests {
                     assert_eq!(audit.shared_pages(), 0);
                     assert_eq!(audit.copied_bytes(), source_bytes);
                     assert_eq!(audit.destination_owned_bytes(), source_bytes);
+                }
+                crate::StateForkModeV1::SharedPagedBlocks => {
+                    unreachable!("legacy fake fork fixture has no Paged mode")
                 }
             }
             assert_eq!(

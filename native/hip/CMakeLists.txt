@@ -445,6 +445,7 @@ set(SLLM_HIP_NATIVE_SOURCES
     src/windowed_attention_api.cpp
     src/causal_attention_api.cpp
     src/kv_state_api.cpp
+    src/paged_kv_image_api.cpp
     src/linear_attention_api.cpp
     src/hip_evidence_stub.cpp
     src/header_c_compile.c
@@ -815,6 +816,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
             DEPENDS src/kv_state_kernel.hip.cpp
                 src/kv_state_kernel_internal.hpp
+                src/paged_kv_device_layout.hpp
                 ../lowp/include/lowp/detail/low_precision_block_codec.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
@@ -827,6 +829,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
             DEPENDS src/causal_attention_kernel.hip.cpp
                 src/causal_attention_kernel_internal.hpp
+                src/paged_kv_device_layout.hpp
                 ../lowp/include/lowp/detail/low_precision_block_codec.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
@@ -1924,6 +1927,355 @@ if(SLLM_ENABLE_PHASE83_5_NVFP4_PREFILL_TILING_PUBLIC_GPU_TEST)
         ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
 endif()
 
+option(SLLM_ENABLE_PHASE87_STAGE12_NVFP4_M5_PROBE
+    "Build the private WU-12C NVFP4 M=5 candidate probe" OFF)
+if(SLLM_ENABLE_PHASE87_STAGE12_NVFP4_M5_PROBE)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase87 Stage12 M=5 probe requires the normal public HIP runtime build")
+    endif()
+    target_compile_definitions(sllm_lowp PRIVATE
+        SLLM_PHASE87_STAGE12_M5_PROBE=1)
+    enable_testing()
+    set_source_files_properties(
+        tests/phase87_stage12_nvfp4_m5_probe.hip.cpp PROPERTIES LANGUAGE HIP)
+    add_executable(sllm_phase87_stage12_nvfp4_m5_probe
+        tests/phase87_stage12_nvfp4_m5_probe.hip.cpp)
+    target_compile_features(sllm_phase87_stage12_nvfp4_m5_probe PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase87_stage12_nvfp4_m5_probe PRIVATE
+        SLLM_PHASE87_STAGE12_M5_PROBE=1
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase87_stage12_nvfp4_m5_probe PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+        $<$<COMPILE_LANGUAGE:HIP>:-mcode-object-version=6>
+        $<$<COMPILE_LANGUAGE:HIP>:${SLLM_WAVEFRONT_FLAG}>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>)
+    target_include_directories(sllm_phase87_stage12_nvfp4_m5_probe PRIVATE
+        "${PROJECT_SOURCE_DIR}/../lowp/include"
+        "${ROCM_PATH}/include")
+    target_link_libraries(sllm_phase87_stage12_nvfp4_m5_probe PRIVATE
+        sllm_lowp "${ROCM_PATH}/lib/libamdhip64.so")
+    set_target_properties(sllm_phase87_stage12_nvfp4_m5_probe PROPERTIES
+        LINKER_LANGUAGE HIP)
+    add_test(NAME sllm_phase87_stage12_nvfp4_m5_probe
+        COMMAND sllm_phase87_stage12_nvfp4_m5_probe)
+    set_tests_properties(sllm_phase87_stage12_nvfp4_m5_probe PROPERTIES
+        LABELS "gpu;phase87;stage12;nvfp4;m5"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE87_STAGE10_PAGED_STATE_PUBLIC_GPU_TEST
+    "Build the Phase87 Stage10 paged KV create/query/release public ABI test" OFF)
+if(SLLM_ENABLE_PHASE87_STAGE10_PAGED_STATE_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase87 Stage10 paged KV public test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase87_stage10_paged_state_public_gpu_test
+        tests/phase87_stage10_paged_state_public_gpu_test.cpp)
+    target_compile_features(sllm_phase87_stage10_paged_state_public_gpu_test
+        PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase87_stage10_paged_state_public_gpu_test
+        PRIVATE SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase87_stage10_paged_state_public_gpu_test
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+        -Wshadow -Werror)
+    target_link_libraries(sllm_phase87_stage10_paged_state_public_gpu_test
+        PRIVATE sllm_hip_stub)
+    add_test(NAME sllm_phase87_stage10_paged_state_public_gpu_test
+        COMMAND sllm_phase87_stage10_paged_state_public_gpu_test)
+    set_tests_properties(sllm_phase87_stage10_paged_state_public_gpu_test
+        PROPERTIES LABELS "gpu;phase87;stage10;paged-kv"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE87_STAGE10_PAGED_REQUEST_PUBLIC_GPU_TEST
+    "Build the Phase87 Stage10 paged KV append/attention/fork public oracle" OFF)
+if(SLLM_ENABLE_PHASE87_STAGE10_PAGED_REQUEST_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase87 Stage10 paged request test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase87_stage10_paged_request_public_gpu_test
+        tests/phase87_stage10_paged_request_public_gpu_test.cpp)
+    target_compile_features(sllm_phase87_stage10_paged_request_public_gpu_test
+        PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase87_stage10_paged_request_public_gpu_test
+        PRIVATE SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase87_stage10_paged_request_public_gpu_test
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+        -Wshadow -Werror)
+    target_link_libraries(sllm_phase87_stage10_paged_request_public_gpu_test
+        PRIVATE sllm_hip_stub)
+    add_test(NAME sllm_phase87_stage10_paged_request_public_gpu_test
+        COMMAND sllm_phase87_stage10_paged_request_public_gpu_test)
+    set_tests_properties(sllm_phase87_stage10_paged_request_public_gpu_test
+        PROPERTIES LABELS "gpu;phase87;stage10;paged-kv"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE87_STAGE10_PAGED_FP16_PUBLIC_GPU_TEST
+    "Build the Phase87 Stage10 paged FP16 public request oracle" OFF)
+if(SLLM_ENABLE_PHASE87_STAGE10_PAGED_FP16_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase87 Stage10 paged FP16 test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase87_stage10_paged_fp16_public_gpu_test
+        tests/phase87_stage10_paged_fp16_public_gpu_test.cpp)
+    target_compile_features(sllm_phase87_stage10_paged_fp16_public_gpu_test
+        PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase87_stage10_paged_fp16_public_gpu_test
+        PRIVATE SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase87_stage10_paged_fp16_public_gpu_test
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+        -Wshadow -Werror)
+    target_link_libraries(sllm_phase87_stage10_paged_fp16_public_gpu_test
+        PRIVATE sllm_hip_stub)
+    add_test(NAME sllm_phase87_stage10_paged_fp16_public_gpu_test
+        COMMAND sllm_phase87_stage10_paged_fp16_public_gpu_test)
+    set_tests_properties(sllm_phase87_stage10_paged_fp16_public_gpu_test
+        PROPERTIES LABELS "gpu;phase87;stage10;paged-kv;fp16"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE87_STAGE10_QWEN35_MOE_PAGED_FP16_PUBLIC_GPU_TEST
+    "Build the Phase87 Stage10 Qwen3.5 MoE [16,2,256] Paged FP16 oracle" OFF)
+if(SLLM_ENABLE_PHASE87_STAGE10_QWEN35_MOE_PAGED_FP16_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase87 Stage10 Qwen3.5 MoE Paged FP16 test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase87_stage10_qwen35_moe_paged_fp16_public_gpu_test
+        tests/phase87_stage10_qwen35_moe_paged_fp16_public_gpu_test.cpp)
+    target_compile_features(sllm_phase87_stage10_qwen35_moe_paged_fp16_public_gpu_test
+        PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase87_stage10_qwen35_moe_paged_fp16_public_gpu_test
+        PRIVATE SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase87_stage10_qwen35_moe_paged_fp16_public_gpu_test
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+        -Wshadow -Werror)
+    target_link_libraries(sllm_phase87_stage10_qwen35_moe_paged_fp16_public_gpu_test
+        PRIVATE sllm_hip_stub)
+    add_test(NAME sllm_phase87_stage10_qwen35_moe_paged_fp16_public_gpu_test
+        COMMAND sllm_phase87_stage10_qwen35_moe_paged_fp16_public_gpu_test)
+    set_tests_properties(sllm_phase87_stage10_qwen35_moe_paged_fp16_public_gpu_test
+        PROPERTIES LABELS "gpu;phase87;stage10;paged-kv;fp16;qwen35-moe"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE87_STAGE10_MINISTRAL3_PAGED_FP16_PUBLIC_GPU_TEST
+    "Build the Phase87 Stage10 Ministral3 geometry Paged FP16 smoke" OFF)
+if(SLLM_ENABLE_PHASE87_STAGE10_MINISTRAL3_PAGED_FP16_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase87 Stage10 Ministral3 Paged FP16 test requires the normal public HIP runtime build")
+    endif()
+    if(SLLM_HIP_COMPILE_TARGET STREQUAL "gfx1030")
+        set(SLLM_STAGE10_MINISTRAL3_FP16_UUID "GPU-76a08c022586fed6")
+    elseif(SLLM_HIP_COMPILE_TARGET STREQUAL "gfx1201")
+        set(SLLM_STAGE10_MINISTRAL3_FP16_UUID "GPU-a8e9ddefa2d60f55")
+    else()
+        message(FATAL_ERROR
+            "Phase87 Stage10 Ministral3 Paged FP16 test requires gfx1030 or gfx1201")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase87_stage10_ministral3_paged_fp16_public_gpu_test
+        tests/phase87_stage10_ministral3_paged_fp16_public_gpu_test.cpp)
+    target_compile_features(sllm_phase87_stage10_ministral3_paged_fp16_public_gpu_test
+        PRIVATE cxx_std_17)
+    target_include_directories(sllm_phase87_stage10_ministral3_paged_fp16_public_gpu_test
+        PRIVATE "${ROCM_PATH}/include")
+    target_compile_definitions(sllm_phase87_stage10_ministral3_paged_fp16_public_gpu_test
+        PRIVATE __HIP_PLATFORM_AMD__=1
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+        SLLM_TEST_EXPECTED_UUID="${SLLM_STAGE10_MINISTRAL3_FP16_UUID}")
+    target_compile_options(sllm_phase87_stage10_ministral3_paged_fp16_public_gpu_test
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+        -Wshadow -Werror)
+    target_link_libraries(sllm_phase87_stage10_ministral3_paged_fp16_public_gpu_test
+        PRIVATE sllm_hip_stub)
+    add_test(NAME sllm_phase87_stage10_ministral3_paged_fp16_public_gpu_test
+        COMMAND sllm_phase87_stage10_ministral3_paged_fp16_public_gpu_test)
+    set_tests_properties(sllm_phase87_stage10_ministral3_paged_fp16_public_gpu_test
+        PROPERTIES LABELS "gpu;phase87;stage10;paged-kv;ministral3;fp16"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE87_STAGE10_PAGED_FORMATS_PUBLIC_GPU_TEST
+    "Build the Phase87 Stage10 paged KV format public request oracle" OFF)
+if(SLLM_ENABLE_PHASE87_STAGE10_PAGED_FORMATS_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase87 Stage10 paged formats test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase87_stage10_paged_formats_public_gpu_test
+        tests/phase87_stage10_paged_formats_public_gpu_test.cpp)
+    target_compile_features(sllm_phase87_stage10_paged_formats_public_gpu_test
+        PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase87_stage10_paged_formats_public_gpu_test
+        PRIVATE SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase87_stage10_paged_formats_public_gpu_test
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+        -Wshadow -Werror)
+    target_link_libraries(sllm_phase87_stage10_paged_formats_public_gpu_test
+        PRIVATE sllm_hip_stub)
+    add_test(NAME sllm_phase87_stage10_paged_formats_public_gpu_test
+        COMMAND sllm_phase87_stage10_paged_formats_public_gpu_test)
+    set_tests_properties(sllm_phase87_stage10_paged_formats_public_gpu_test
+        PROPERTIES LABELS "gpu;phase87;stage10;paged-kv;formats"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE87_STAGE10_PAGED_GRAPH_PUBLIC_GPU_TEST
+    "Build the Phase87 Stage10 paged graph public request oracle" OFF)
+if(SLLM_ENABLE_PHASE87_STAGE10_PAGED_GRAPH_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase87 Stage10 paged graph test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase87_stage10_paged_graph_public_gpu_test
+        tests/phase87_stage10_paged_graph_public_gpu_test.cpp)
+    target_compile_features(sllm_phase87_stage10_paged_graph_public_gpu_test
+        PRIVATE cxx_std_17)
+    target_include_directories(sllm_phase87_stage10_paged_graph_public_gpu_test
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${ROCM_PATH}/include")
+    if(SLLM_HIP_COMPILE_TARGET STREQUAL "gfx1030")
+        set(SLLM_STAGE10_PAGED_GRAPH_UUID "GPU-76a08c022586fed6")
+    elseif(SLLM_HIP_COMPILE_TARGET STREQUAL "gfx1201")
+        set(SLLM_STAGE10_PAGED_GRAPH_UUID "GPU-a8e9ddefa2d60f55")
+    else()
+        message(FATAL_ERROR "Phase87 Stage10 paged graph test requires gfx1030 or gfx1201")
+    endif()
+    target_compile_definitions(sllm_phase87_stage10_paged_graph_public_gpu_test
+        PRIVATE __HIP_PLATFORM_AMD__=1
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+        SLLM_TEST_EXPECTED_UUID="${SLLM_STAGE10_PAGED_GRAPH_UUID}")
+    target_compile_options(sllm_phase87_stage10_paged_graph_public_gpu_test
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+        -Wshadow -Werror)
+    target_link_libraries(sllm_phase87_stage10_paged_graph_public_gpu_test
+        PRIVATE sllm_hip_stub)
+    add_test(NAME sllm_phase87_stage10_paged_graph_public_gpu_test
+        COMMAND sllm_phase87_stage10_paged_graph_public_gpu_test)
+    set_tests_properties(sllm_phase87_stage10_paged_graph_public_gpu_test
+        PROPERTIES LABELS "gpu;phase87;stage10;paged-kv;graph"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE87_STAGE10_PAGED_REWIND_PUBLIC_GPU_TEST
+    "Build the Phase87 Stage10 paged KV rewind public regression" OFF)
+if(SLLM_ENABLE_PHASE87_STAGE10_PAGED_REWIND_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase87 Stage10 paged rewind test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase87_stage10_paged_rewind_public_gpu_test
+        tests/phase87_stage10_paged_rewind_public_gpu_test.cpp)
+    target_compile_features(sllm_phase87_stage10_paged_rewind_public_gpu_test
+        PRIVATE cxx_std_17)
+    target_include_directories(sllm_phase87_stage10_paged_rewind_public_gpu_test
+        PRIVATE "${ROCM_PATH}/include")
+    if(SLLM_HIP_COMPILE_TARGET STREQUAL "gfx1030")
+        set(SLLM_STAGE10_PAGED_REWIND_UUID "GPU-76a08c022586fed6")
+    elseif(SLLM_HIP_COMPILE_TARGET STREQUAL "gfx1201")
+        set(SLLM_STAGE10_PAGED_REWIND_UUID "GPU-a8e9ddefa2d60f55")
+    else()
+        message(FATAL_ERROR "Phase87 Stage10 paged rewind test requires gfx1030 or gfx1201")
+    endif()
+    target_compile_definitions(sllm_phase87_stage10_paged_rewind_public_gpu_test
+        PRIVATE __HIP_PLATFORM_AMD__=1
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+        SLLM_TEST_EXPECTED_UUID="${SLLM_STAGE10_PAGED_REWIND_UUID}")
+    target_compile_options(sllm_phase87_stage10_paged_rewind_public_gpu_test
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+        -Wshadow -Werror)
+    target_link_libraries(sllm_phase87_stage10_paged_rewind_public_gpu_test
+        PRIVATE sllm_hip_stub)
+    add_test(NAME sllm_phase87_stage10_paged_rewind_public_gpu_test
+        COMMAND sllm_phase87_stage10_paged_rewind_public_gpu_test)
+    set_tests_properties(sllm_phase87_stage10_paged_rewind_public_gpu_test
+        PROPERTIES LABELS "gpu;phase87;stage10;paged-kv;rewind"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+
+
+option(SLLM_ENABLE_PHASE87_STAGE10_PAGED_FP16_GRAPH_GPU_TEST
+    "Build the Phase87 Stage10 paged FP16 graph oracle" OFF)
+if(SLLM_ENABLE_PHASE87_STAGE10_PAGED_FP16_GRAPH_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase87 Stage10 paged FP16 graph test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase87_stage10_paged_fp16_graph_gpu_test
+        tests/phase87_stage10_paged_fp16_graph_gpu_test.hip.cpp)
+    target_compile_features(sllm_phase87_stage10_paged_fp16_graph_gpu_test
+        PRIVATE cxx_std_17)
+    target_include_directories(sllm_phase87_stage10_paged_fp16_graph_gpu_test
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${ROCM_PATH}/include")
+    target_compile_definitions(sllm_phase87_stage10_paged_fp16_graph_gpu_test
+        PRIVATE __HIP_PLATFORM_AMD__=1
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase87_stage10_paged_fp16_graph_gpu_test
+        PRIVATE $<$<COMPILE_LANGUAGE:HIP>:${SLLM_WAVEFRONT_FLAG}>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    target_link_libraries(sllm_phase87_stage10_paged_fp16_graph_gpu_test
+        PRIVATE sllm_hip_stub "${ROCM_PATH}/lib/libamdhip64.so")
+    add_test(NAME sllm_phase87_stage10_paged_fp16_graph_gpu_test
+        COMMAND sllm_phase87_stage10_paged_fp16_graph_gpu_test)
+    set_tests_properties(sllm_phase87_stage10_paged_fp16_graph_gpu_test
+        PROPERTIES LABELS "gpu;phase87;stage10;paged-kv;fp16;graph"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE87_STAGE10_PAGED_IMAGE_ROUNDTRIP_GPU_TEST
+    "Build the Phase87 Stage10 paged KV image public roundtrip" OFF)
+if(SLLM_ENABLE_PHASE87_STAGE10_PAGED_IMAGE_ROUNDTRIP_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase87 Stage10 paged image test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_phase87_stage10_paged_image_roundtrip_gpu_test
+        tests/phase87_stage10_paged_image_roundtrip_gpu_test.cpp)
+    target_compile_features(sllm_phase87_stage10_paged_image_roundtrip_gpu_test
+        PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase87_stage10_paged_image_roundtrip_gpu_test
+        PRIVATE SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
+    target_compile_options(sllm_phase87_stage10_paged_image_roundtrip_gpu_test
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+        -Wshadow -Werror)
+    target_link_libraries(sllm_phase87_stage10_paged_image_roundtrip_gpu_test
+        PRIVATE sllm_hip_stub)
+    add_test(NAME sllm_phase87_stage10_paged_image_roundtrip_gpu_test
+        COMMAND sllm_phase87_stage10_paged_image_roundtrip_gpu_test)
+    set_tests_properties(sllm_phase87_stage10_paged_image_roundtrip_gpu_test
+        PROPERTIES LABELS "gpu;phase87;stage10;paged-kv;image"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+
 option(SLLM_ENABLE_PHASE83_5_TOKEN_SELECTOR_SUPPORT_GPU_TEST
     "Build the fixed-K20 private workspace support GPU oracle" OFF)
 if(SLLM_ENABLE_PHASE83_5_TOKEN_SELECTOR_SUPPORT_GPU_TEST)
@@ -2060,6 +2412,50 @@ if(SLLM_ENABLE_PHASE83_BF16_PREFILL_PUBLIC_GPU_TEST)
         COMMAND sllm_phase83_bf16_prefill_public_gpu_test)
     set_tests_properties(sllm_phase83_bf16_prefill_public_gpu_test PROPERTIES
         LABELS "gpu;phase83;bf16;matmul"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
+option(SLLM_ENABLE_PHASE87_STAGE11_C1_PAGED_DECODE_GPU_TEST
+    "Build the Phase87 Stage11 C1 Paged GQA6 decode candidate oracle" OFF)
+if(SLLM_ENABLE_PHASE87_STAGE11_C1_PAGED_DECODE_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase87 Stage11 C1 test requires the normal public HIP runtime build")
+    endif()
+    if(SLLM_HIP_COMPILE_TARGET STREQUAL "gfx1030")
+        set(SLLM_STAGE11_C1_UUID "GPU-76a08c022586fed6")
+    elseif(SLLM_HIP_COMPILE_TARGET STREQUAL "gfx1201")
+        set(SLLM_STAGE11_C1_UUID "GPU-a8e9ddefa2d60f55")
+    else()
+        message(FATAL_ERROR
+            "Phase87 Stage11 C1 test requires gfx1030 or gfx1201")
+    endif()
+    enable_testing()
+    set_source_files_properties(
+        tests/phase87_stage11_c1_paged_decode_gpu_test.hip.cpp PROPERTIES
+        LANGUAGE HIP)
+    add_executable(sllm_phase87_stage11_c1_paged_decode_gpu_test
+        tests/phase87_stage11_c1_paged_decode_gpu_test.hip.cpp)
+    target_compile_features(sllm_phase87_stage11_c1_paged_decode_gpu_test
+        PRIVATE cxx_std_17)
+    target_include_directories(sllm_phase87_stage11_c1_paged_decode_gpu_test
+        PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${ROCM_PATH}/include")
+    target_compile_definitions(sllm_phase87_stage11_c1_paged_decode_gpu_test
+        PRIVATE __HIP_PLATFORM_AMD__=1
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+        SLLM_TEST_EXPECTED_UUID="${SLLM_STAGE11_C1_UUID}")
+    target_compile_options(sllm_phase87_stage11_c1_paged_decode_gpu_test
+        PRIVATE $<$<COMPILE_LANGUAGE:HIP>:${SLLM_WAVEFRONT_FLAG}>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+        -Wshadow -Werror)
+    target_link_libraries(sllm_phase87_stage11_c1_paged_decode_gpu_test
+        PRIVATE sllm_hip_stub "${ROCM_PATH}/lib/libamdhip64.so")
+    add_test(NAME sllm_phase87_stage11_c1_paged_decode_gpu_test
+        COMMAND sllm_phase87_stage11_c1_paged_decode_gpu_test)
+    set_tests_properties(sllm_phase87_stage11_c1_paged_decode_gpu_test
+        PROPERTIES LABELS "gpu;phase87;stage11;attention;c1"
         RESOURCE_LOCK sllm_gpu
         ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}")
 endif()

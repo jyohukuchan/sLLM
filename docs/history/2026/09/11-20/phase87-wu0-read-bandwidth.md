@@ -2,7 +2,7 @@
 
 ## 状態と受入範囲
 
-2026-09-19完了。対象は[Phase 87計画のWU0](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu0-読み出し専用の帯域上限計測のみ)。
+2026-09-19完了。対象は[Phase 87計画のWU0](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu0-読み出し専用の帯域上限計測のみ)。
 WU1のattention最適化は別の作業単位とする。
 
 - 段階0と同じ73 payloadをexact `gfx1030`／`gfx1201`で測る。
@@ -193,4 +193,4 @@ R9700と同様に大きいpayloadでは公称値近くまで読める。
 
 結果: [WU0の73 payloadと段階0行への結合](phase87-wu0-read-bandwidth-results.json)
 
-計画: [Phase 87](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)
+計画: [Phase 87](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)

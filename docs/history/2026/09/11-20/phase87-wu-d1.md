@@ -7,7 +7,7 @@ GQA型の先行処理が次のNVFP4を遅くする方向である。ただし、
 
 ## 条件と実装
 
-[WU-D1計画](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu-d1-nvfp4-m1-decodeの近傍依存の原因調査段階1のnvfp4最適化より前)の3手順を実行した。
+[WU-D1計画](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu-d1-nvfp4-m1-decodeの近傍依存の原因調査段階1のnvfp4最適化より前)の3手順を実行した。
 基準は[WU2後の8192/128・MTPなしprofile](phase87-idle-recheck.md)。排除済み原因の再検証は行っていない。
 
 - V620 `gfx1030`、UUID `GPU-76a08c022586fed6`、ROCm 7.14.0。Qwen補助サービス停止、GPU単独使用、performance levelは変更なし。
@@ -102,4 +102,4 @@ page/bank状態とMALL内容のどちらなのかという物理的帰属は残�
 - production source全ファイルの開始前／終了後hash一致、終了後GPU使用率0・VRAMは開始時水準へ復帰。
   外部コードの新規copy/adapt/port、commit、pushは行っていない。
 
-計画: [Phase87 WU-D1](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu-d1-nvfp4-m1-decodeの近傍依存の原因調査段階1のnvfp4最適化より前)
+計画: [Phase87 WU-D1](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu-d1-nvfp4-m1-decodeの近傍依存の原因調査段階1のnvfp4最適化より前)

@@ -153,6 +153,8 @@ test "$(git -C reference/KTransformers grep -Il '^version https://git-lfs.github
 - tree: `e5f6b86fca7b2ac45e70e93be18e04c1c4b3868b`
 - MIT、Copyright (c) 2025 Turboderp。ユーザー指示による実行調査と軽微な局所修正を許可。
 - sLLM productionへのコード組込みなし。局所差分と結果は[調査履歴](../history/2026/09/11-20/rocm-exl3-investigation.md)へ記録する。
+- 2026-09-25のユーザー決定により、MIT部分はllama.cppと同じ条件でEXL3作業へ直接流用できる
+  （[provenance](../provenance/README.md)の「rocm_exl3 and exllamav3」節）。流用するときは、その時点のrevisionを改めて固定して記録する。
 
 ## vllm-mxfp4 独立調査追加（2026-09-20）
 

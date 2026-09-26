@@ -1,0 +1,10 @@
+次のRust関数を、入力の末尾に区切り文字がない場合も安全に扱えるよう修正してください。所有権を余分にコピーせず、空のフィールドは許可し、変換できない数値では行番号を含むエラーを返す方針にします。修正版の考え方を日本語で説明してください。
+
+```rust
+fn read_pair(line: &str) -> Result<(u32, u32), String> {
+    let mut fields = line.split(',');
+    let left = fields.next().unwrap().parse::<u32>().map_err(|e| e.to_string())?;
+    let right = fields.next().unwrap().parse::<u32>().map_err(|e| e.to_string())?;
+    Ok((left, right))
+}
+```

@@ -134,6 +134,8 @@ def support(
         token_ids = np.arange(row.shape[0], dtype=np.int64)
     elif token_ids.shape != row.shape:
         raise ValueError("candidate draft vocabulary map length does not match logits row")
+    if row.ndim != 1 or row.size == 0 or not np.isfinite(row).all():
+        raise ValueError("draft or target logits row is empty or non-finite")
     k = min(top_k, row.shape[0]) if top_k else row.shape[0]
     # A partition wide enough to survive ties at the k-th value, then an exact
     # (value desc, id asc) order, matching the reference selector.
@@ -279,6 +281,12 @@ def self_test() -> None:
     # sorted global-token map. This catches accidental local-ID comparison.
     mapped = np.array([10.0, 10.0, 9.0], dtype=np.float32)
     assert list(support(mapped, 2, 1.0, np.array([7, 42, 100], dtype=np.uint32))) == [7, 42]
+    try:
+        support(np.array([0.0, np.nan], dtype=np.float32), 2, 1.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("non-finite logits must fail closed")
     print("self-test PASS")
 
 
@@ -287,6 +295,11 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--baseline", type=pathlib.Path, help="report for the control series")
     parser.add_argument("--candidate", type=pathlib.Path, help="report for the candidate series")
+    parser.add_argument(
+        "--baseline-draft-vocab-map",
+        type=pathlib.Path,
+        help="sorted LE-u32 global token IDs for compact baseline draft logits",
+    )
     parser.add_argument(
         "--candidate-draft-vocab-map",
         type=pathlib.Path,
@@ -307,6 +320,11 @@ def main() -> int:
     base, cand = entries(args.baseline), entries(args.candidate)
     if set(base) != set(cand):
         raise SystemExit("baseline and candidate cover different conditions")
+    baseline_map = (
+        load_candidate_draft_vocab_map(args.baseline_draft_vocab_map.resolve())
+        if args.baseline_draft_vocab_map
+        else None
+    )
     candidate_map = (
         load_candidate_draft_vocab_map(args.candidate_draft_vocab_map.resolve())
         if args.candidate_draft_vocab_map
@@ -315,15 +333,28 @@ def main() -> int:
     per_prompt = []
     step_totals = {"baseline": {0: [], 1: []}, "candidate": {0: [], 1: []}}
     for case in sorted(base):
-        b = run_rows(base[case], args.top_k, args.top_p)
+        b = run_rows(base[case], args.top_k, args.top_p, baseline_map)
         c = run_rows(cand[case], args.top_k, args.top_p, candidate_map)
         for name, rows in (("baseline", b), ("candidate", c)):
             for step, value in rows:
                 step_totals[name].setdefault(step, []).append(value)
         bm = float(np.mean([v for _, v in b]))
         cm = float(np.mean([v for _, v in c]))
+        per_step = {}
+        for step in (0, 1):
+            baseline_values = [value for row_step, value in b if row_step == step]
+            candidate_values = [value for row_step, value in c if row_step == step]
+            if not baseline_values or not candidate_values:
+                raise ValueError(f"missing proposal step {step + 1} for {case}")
+            per_step[f"step{step + 1}"] = {
+                "baseline": float(np.mean(baseline_values)),
+                "candidate": float(np.mean(candidate_values)),
+                "rows_baseline": len(baseline_values),
+                "rows_candidate": len(candidate_values),
+            }
         per_prompt.append({"case_id": case, "baseline": bm, "candidate": cm,
-                           "difference": cm - bm, "baseline_rows": len(b), "candidate_rows": len(c)})
+                           "difference": cm - bm, "baseline_rows": len(b), "candidate_rows": len(c),
+                           "by_proposal_step": per_step})
         print("%-28s %.4f -> %.4f  %+.4f" % (case, bm, cm, cm - bm), flush=True)
 
     diffs = np.array([row["difference"] for row in per_prompt])
@@ -341,6 +372,10 @@ def main() -> int:
                               "order": "logit desc, lower token id on ties; top_k; softmax; smallest prefix with cumulative >= top_p*sum (>=1); renormalise",
                               "reference": "native/hip/src/token_selector_kernel.hip.cpp top_k/top_p branch"},
         "baseline_report": str(args.baseline), "candidate_report": str(args.candidate),
+        "baseline_draft_vocab_map": (
+            str(args.baseline_draft_vocab_map) if args.baseline_draft_vocab_map else None
+        ),
+        "baseline_draft_vocab_size": int(baseline_map.size) if baseline_map is not None else VOCAB,
         "candidate_draft_vocab_map": (
             str(args.candidate_draft_vocab_map) if args.candidate_draft_vocab_map else None
         ),

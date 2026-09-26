@@ -3,7 +3,10 @@
 2026-09-24。vAttention（HIP VMMによるvirtual-contiguous KV）を続けるか、Paged Attentionへ移るかを検討した。
 ユーザー決定により、vAttentionを完全に廃止してPaged Attentionへ完全移行する方針とした。
 ただし、pagedを最適化しても性能低下が10%以上になる場合は再考する。
-判断材料を取る試作は[Phase 87計画のWU-P1](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)で行う。
+判断材料を取る試作は[Phase 87計画のWU-P1](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)で行う。
+追記: 2026-09-24に[WU-P1の両GPU数値・性能受入](phase87-wu-p1-paged-attention.md)を完了し、
+[本移行](../../../../plans/archive/2026/09/21-30/paged-kv-full-migration.md)をPhase 88前の独立作業として計画した。
+同日、ユーザー指示で本移行をPhase 87の段階10として統合し、attention kernelの最適化を段階11として追加した。
 
 ## 現状
 
@@ -56,4 +59,4 @@ Phase 83の破損との関係は断定しない。
 移行するまでの間、Codexなどfdのsoft limitが1024の環境から起動するV620の長いcontextの実行は、VMM経路で同じ壁に当たりうる。
 今のベンチマーク（8192入力）では当たらない。
 
-計画: [Phase 87](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)
+計画: [Phase 87](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)

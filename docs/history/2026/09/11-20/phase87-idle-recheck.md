@@ -121,4 +121,4 @@ profile、traces、クロック記録、旧binaryの対照実行は`.local-artif
 `ci/tools/phase87_profile_breakdown.py`を段階0と同じ条件で使用した。
 実行前後でローカルQwenサービスとR9700サービスは停止のまま、performance levelは`auto`を維持した。
 
-計画: [Phase 87](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)
+計画: [Phase 87](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)

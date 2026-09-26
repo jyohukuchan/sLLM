@@ -13,19 +13,21 @@
 R56後のCI修正はlint/formatのみで、前後source対応とfresh buildを確認する。最終比較・API・未証明の品質範囲は
 [Phase83.5履歴](../history/2026/09/1-10/phase83-5-llama-guided-performance.md)に集約する。
 
-## 数値変更の承認規則
+## 数値変更の分類規則
 
-token完全一致は観測項目として残すが、それ単独を数値correctnessのhard gateにしない。candidateは次の区分で扱う。
+token完全一致は観測項目として残すが、それ単独を数値correctnessのhard gateにしない。candidateは次の区分で記録する。
+分類だけでは採否を決めず、2026-09-24以降の変更には
+[main-planの共通採否ルール](../plans/main-plan.md#変更の採否ルール2026-09-24ユーザー決定)を使う。
 
 ### N0: 数値・token互換
 
 - 実数式、浮動小数点演算順、丸めstageを維持するか、固定matrixで必要なtoken/logit一致を確認した変更。
-- 通常のcorrectness、性能、resource、fallback、cleanup条件を満たせば通常承認できる。
+- 数値互換の分類であり、性能・resource・fallback・cleanupを含む採否は共通ルールで決める。
 
 ### N1: 解析的に誤差非増加または低減
 
-次をすべて満たす変更は、変更前とtoken列が異なっても**数値変更として自動承認**する。高精度providerや全modelのFP64比較を
-新しい必須gateにしない。
+次をすべて満たす変更は、変更前とtoken列が異なっても**N1に分類**する。高精度providerや全modelのFP64比較を
+分類のための一律必須gateにしない。
 
 1. real-number semantic equationを変更しない。
 2. dtype、丸めstage、入力集合、加算項等の欠落がなく、差の原因を演算順・近似式・精度昇格等へ局所化して説明できる。
@@ -35,13 +37,13 @@ token完全一致は観測項目として残すが、それ単独を数値correc
 5. 既存のfinite、tiny numerical oracle、state publication、padding、cleanup、unsupported inputのfail-closedを満たす。
 6. token/logit差を隠さず、この台帳へ最初の分岐位置、対象scope、source/provider identity、rollbackを記録する。
 
-N1の自動承認は数値互換性gateだけに適用する。性能採用条件、security/correctness defect、resource、ABI、fallback、cleanup条件を
+N1の分類は性能採用、security/correctness defect、resource、ABI、fallback、cleanup条件を
 免除しない。semantic equation自体、量子化recipe、sampling規則、stop/usageを変える変更はN1に分類しない。
 
 ### N2: 誤差が僅かに増加
 
 - 既存oracle tolerance内だが、解析上の誤差bound、accumulator精度、近似誤差のいずれかが僅かに悪化する変更。
-- 自動承認しない。scope、速度・memory効果、誤差bound、token/logit差、品質controlを提示し、人間が採否を決定する。
+- scope、速度・memory効果、誤差bound、token/logit差、品質controlを記録する。N2という分類だけで人間判断を必須にせず、共通ルールの変更種類と実測で採否を決める。
 - 「僅か」は既存の演算別tolerance内かつfinite/state/tokenization contractを壊さない範囲に限定する。範囲を説明できない場合はN3とする。
 
 ### N3: 不明・非有界・意味変更
@@ -60,6 +62,67 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 - 性能・resource結果、採否、target split、rollback identity。
 
 ## 変更履歴
+
+### 2026-09-25 Phase87 段階11 C1: Paged decode M3行間KV共有
+
+- scope: Qwen3.8のexact `gfx1030`／`gfx1201`、MXFP8 E4 KV、GQA6、M=3、committed KV長8192以上のPaged decodeだけ。M=1/2/4/5、短いKV、別形式・modelは既存providerを維持する。
+- classification: **N0**。K/Vの8-token tileを3 query行へ再利用するが、QK還元、online softmax、value累積、split merge、BF16丸めは既存stage1と共有device helperで同じ順序を保つ。127／128／129、8191／8192／8193、65535／65536／65537の直接GPU probeは両targetでattention全出力bitwise一致・独立oracle PASS。全語彙logitsの別計測はしていない。
+- model output: 8192入力・最大17出力、MTP幅2の同一fixtureで両経路とも17 tokenのSHAと受理8/16が一致。HIP-only、fallbackなし、cleanup0。
+- performance/resource: 1 warmup＋2 measuredのTPOT中央値はV620 `50.722→49.658 ms`（2.10%短縮）、R9700 `43.508→41.630 ms`（4.32%短縮）。TTFTはV620 +0.128%（対照内の揺れ未満）、R9700 −0.303%。session high-waterは両経路とも`24,824,122,080 B`。同一8192入力のROCm物理VRAM peak差はV620 +81,920 B、R9700 +155,648 Bで許容上限未満。
+- status/rollback: 種類Bの共通採否条件を満たすため両targetで限定採用。旧Paged stage1はM=1/2/4/5と短いKVの対照・本番経路として残す。復旧時はC1のexact shape selectorとID118 providerを対応するsource差分で戻す。詳細は[段階11履歴](../history/2026/09/21-30/phase87-stage11.md)。
+
+### 2026-09-24 Phase87 段階3 MTP companionのNVFP4 sidecar
+
+- scope: Qwen3.8 NVFP4 targetのMTP companionにある8行列だけを、BF16 sourceからsLLM量子化器の
+  E2M1 W4A4／K16 E4M3FN block scaleへ変換する明示sidecar。活性値input-global scaleは
+  評価入力に重ならない6較正prompt・両GPUのBF16入力amaxから固定した。norm、target重み、
+  shared embedding／draft縮小head、KV、固定K20／top-p0.95のp/q受理式は維持する。
+- classification: **NVFP4既定経路の形式差はN2候補**。NVFP4 companionのdraft logitsはBF16とは別量子化recipeにより変わるため、
+  BF16とのN0／N1互換は主張しない。p/q補正後のtarget分布契約と、固定seedのtoken列一致とは区別する。
+  共通の種類B採否条件は測定上満たさなかったが、2026-09-24のユーザー明示決定により今回の段階3では適用せず、
+  NVFP4を既定化した。MTP無効時のtarget-only数値経路は変えない。
+  p/q補正のtarget分布契約を維持することと、固定seedのtoken列一致とは区別する。
+- evidence: exact `gfx1030`／`gfx1201`のTier A 26条件・BF16／W8A8凍結列のM1は
+  NVFP4−BF16が−1.08〜−1.37 pt、NVFP4−MXFP6が−0.80〜−1.01 pt。
+  5ポイント規則は不成立。形式比較時の1.0 pt規則は2026-09-24に廃止した。
+  通常8192/128の最初のBF16対NVFP4出力分岐はV620で10 token目、R9700で7 token目。
+  MTPなしの128 token SHAは段階9と両GPUで一致。GPU実行はHIP-only、finite、fallbackなし、cleanup zero。
+  NVFP4の通常自由生成速度はBF16前後対照比V620 −0.56%、R9700 −11.80%だったが、
+  候補間で生成列が分岐するためM5の参考値でありM4の代用にしない。
+- WU-3S: 両GPU・両凍結列のM4はNVFP4がBF16より1.61〜1.76%速く、prompt-cluster 95%区間も正。
+  同一processの通常8192/128 AB/BAでは、V620のTPOT短縮率が−0.63%／−0.48%、R9700が
+  −13.28%／−13.27%で、種類Bの両指標を満たさない。MTP無効時のtarget-only出力はN0を維持する。
+  MXFP6 MTP sidecarは退役し、既存artifactの明示選択はエラーで拒否する。これは旧opt-in経路の削除であり、
+  MXFP6本体の数値・kernel経路は維持する。NVFP4のprefix準備は遅いが、今回限りの採否例外として
+  [backlog P12](../plans/backlog.md)へ記録した。
+- status/rollback: WU-3S完了。MTP有効時に`--mtp-weights`を省略すると、
+  `<artifact_root>/.sllm/mtp-nvfp4-v1/`を解決し、NVFP4 encodingとcombined recipe digest
+  `sha256:d9698c41954ef7b53a2937c0f662ac2a273f1bdc40c602f77d4928b63de991e1`を検証する。
+  欠落・破損・不一致はfail-closedで、明示`--mtp-weights`は既定を上書きする。BF16はbenchmark controlと
+  source／binary rollback pathとして残し、BF16専用CLI rollback flagは設けない。MXFP6 sidecarの復帰には退役変更の差分を戻す。
+  sourceを戻す場合は本作業単位のGit差分を戻す。詳細は[段階3履歴](../history/2026/09/21-30/phase87-stage3.md)。
+
+### 2026-09-25 Phase87 WU-3P NVFP4 MTP prefix prefill
+
+- scope: exact `gfx1030`／`gfx1201`、Qwen3.8 MTP companionのNVFP4 W4A4、M32〜1024、
+  fc K10240/N5120、q K5120/N12288、k/v K5120/N1024。M1 decode、target本体の他shape、
+  量子化recipe、MTPのp/q補正と丸め境界は変更しない。
+- baseline/candidate: 汎用ID59 `row8_tiled256`を、既存ID62 DP4A 64×64（gfx1030）／
+  ID64 WMMA 128×64（gfx1201）へexact tupleで選択し直す。実数のE2M1×E2M1積和は同じで、
+  K方向のFP32加算順が変わりBF16 RNE出力が一部1 ULP異なる。**N2候補（draft数値）**として記録する。
+  target pの計算とp/q補正後の分布は維持する。sourceは
+  `native/lowp/include/lowp/detail/lowp_kernel_internal.hpp`のselectorと既存device kernel。
+- oracle/state: 両GPU各62ケース・151,375,970 BF16値を現行と比較し、157値の差、最大1 ULP。
+  独立long-double oracle 744点の候補差は0 ULP、非有限0、repeat差0。通常8192/128は
+  HIP-only、fallbackなし、固定K20 p/q、cleanup zero。MTP無効のtoken SHAは両GPUで段階9と一致。
+  MTPありの最初の出力分岐はV620 108 token目、R9700 53 token目。
+- performance/resource/adoption: MTP prefix wallはV620 7.527→0.287秒、R9700 6.018→0.201秒。
+  通常prefillは43.515→36.198秒／20.746→14.916秒、TTFTも同方向。residentとpeak VRAMは
+  両GPUで前後一致。2026-09-24のNVFP4既定化だけの採否例外は使わず、
+  [WU-3P計画](../plans/archive/2026/09/21-30/phase87-mtp-nvfp4-prefix-prefill.md)の範囲に採用した。
+  Phase 82で保留した本体MLP shapeのID62／ID64の一般採用は変更しない。
+  詳細とbinary/report identityは[WU-3P履歴](../history/2026/09/21-30/phase87-mtp-nvfp4-prefix-prefill.md)。
+  rollbackは本変更のselector差分またはbinary identityを戻す。未コミットsourceに架空のcommit IDを付けない。
 
 ### 2026-09-24 Phase87 段階9 MTP draft縮小語彙head
 

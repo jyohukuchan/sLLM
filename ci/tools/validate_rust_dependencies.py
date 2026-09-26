@@ -30,6 +30,7 @@ from validate_rust import (  # noqa: E402
     MSRV_RUST_VERSION,
     MSRV_TARGET,
     b0_cargo_environment,
+    local_fast_command,
     msrv_check_command,
 )
 
@@ -818,6 +819,10 @@ def run_cargo_check(repo: Path = ROOT, runner: Callable[..., subprocess.Complete
         raise ContractError(f"cargo check failed ({process.returncode}): {detail[-4000:]}")
 
 
+def _local_fast_runner(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(local_fast_command(command), **kwargs)
+
+
 def validate_policy(repo: Path = ROOT, *, run_check: bool = True) -> None:
     """Validate the checked-in policy against fresh offline Cargo evidence."""
 
@@ -830,7 +835,7 @@ def validate_policy(repo: Path = ROOT, *, run_check: bool = True) -> None:
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise ContractError("B0 MSRV authority requires current Linux x86_64 execution")
     if run_check:
-        run_cargo_check(repo)
+        run_cargo_check(repo, runner=_local_fast_runner)
 
 
 def main(argv: list[str] | None = None) -> int:

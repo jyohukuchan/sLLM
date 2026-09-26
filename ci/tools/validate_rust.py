@@ -14,6 +14,10 @@ DEV_RUST_VERSION = "1.97.1"
 MSRV_RUST_VERSION = "1.85.0"
 MSRV_TARGET = "x86_64-unknown-linux-gnu"
 RUSTUP_AUTO_INSTALL = "0"
+# Set only by `run_host_suite.py` for a local, non-strict run. The registered
+# commands keep `--jobs 1` so that CI stays inside its per-row memory budget;
+# a local run on a large host may drop it.
+LOCAL_FAST_ENVIRONMENT = "SLLM_HOST_LOCAL_FAST"
 B0_DISABLED_HIP_FLAGS = frozenset({
     "SLLM_ENABLE_HIP_COMPILE_PROBE",
     "SLLM_ENABLE_HIP_RUNTIME",
@@ -112,6 +116,29 @@ def msrv_check_command() -> list[str]:
     ]
 
 
+def local_fast_enabled() -> bool:
+    """Return true only for a local fast host run outside GitHub Actions."""
+    return (
+        os.environ.get(LOCAL_FAST_ENVIRONMENT) == "1"
+        and os.environ.get("GITHUB_ACTIONS") != "true"
+    )
+
+
+def local_fast_command(command: list[str]) -> list[str]:
+    """Drop the registered `--jobs 1` for a local fast run; otherwise unchanged."""
+    if not local_fast_enabled():
+        return command
+    result: list[str] = []
+    index = 0
+    while index < len(command):
+        if command[index : index + 2] == ["--jobs", "1"]:
+            index += 2
+            continue
+        result.append(command[index])
+        index += 1
+    return result
+
+
 def command_for_mode(mode: str) -> list[str]:
     """Return the only accepted toolchain/subcommand pairing for each gate."""
 
@@ -169,7 +196,7 @@ def main() -> int:
         environment["RUSTUP_AUTO_INSTALL"] = RUSTUP_AUTO_INSTALL
     try:
         result = subprocess.run(
-            command,
+            local_fast_command(command),
             cwd=ROOT,
             check=False,
             timeout=300,

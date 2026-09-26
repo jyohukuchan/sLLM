@@ -662,6 +662,20 @@
           "doctest": false
         },
         {
+          "name": "phase87_stage10_paged_image_v2_e2e",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "sllm-attention-preprocess-g1-evidence",
           "kind": [
             "bin"

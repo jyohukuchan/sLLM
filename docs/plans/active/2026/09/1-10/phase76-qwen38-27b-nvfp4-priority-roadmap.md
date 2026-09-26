@@ -1,15 +1,39 @@
 # Phase 76以降: Qwen3.8-27B NVFP4優先ロードマップ
 
-> 状態: Phase 76〜86（83.5・84.5を含む）完了。Phase 87は段階7のC1／C2 producer融合、段階9のMTP draft縮小語彙、段階4のW×A16退役（WU-4Rの残存kernel削除を含む）まで完了。次はWU-P1と段階3など。Phase 88は計画済み・未着手。2026-09-17のユーザー決定による旧86・87の繰下げとPhase78の完了判断は維持する。
+> 状態: Phase 76〜87（83.5・84.5を含む）完了。Phase 87は段階7のC1／C2 producer融合、段階9のMTP draft縮小語彙、段階4のW×A16退役（WU-4Rを含む）、WU-P1のPaged Attention試作、段階3のMTP companion（WU-3S）、WU-3PのNVFP4 MTP prefix改善、段階2のV620 FP8残件まで完了。段階3はユーザー決定によりNVFP4 companionを既定化して閉じた。段階2のV620候補は新規採用なし。段階1はV620 M=1のSGPR hoistをN0で採用し、MTPなしTPOTを1.857%短縮して完了。R9700 M=1と両GPU M=2〜3は既定維持。段階12・10・11も完了し、2026-09-26のユーザー決定でPhase 87を完了した。Phase 88（llama.cpp比のkernel効率、2026-09-26新設）とPhase 89（リクエストバッチ処理、旧88）は計画済み・未着手。2026-09-17のユーザー決定による旧86・87の繰下げとPhase78の完了判断は維持する。
 > 作成日: 2026-09-03
+
+## 2026-09-26の番号変更
+
+llama.cppとの比較でkernel本体が約9.1 ms/token遅いことが分かったため、ユーザー指示で
+[Phase 88: Qwen3.8単一要求のkernel効率（llama.cpp比）](../21-30/phase88-qwen38-llama-kernel-parity.md)を新設した。
+旧Phase 88（NVFP4リクエストバッチ処理）はPhase 89へ繰り下げ、冒頭の基盤の事前調査もPhase 89の冒頭へ一緒に移した。
+以下の節に残る「Phase 88（バッチ処理）」の番号は当時の決定であり、現在の番号はPhase 89である。
+
+## 2026-09-25の最新状態
+
+Phase 87の[WU-3P](../../../../archive/2026/09/21-30/phase87-mtp-nvfp4-prefix-prefill.md)で、
+NVFP4 MTP prefixのfc/q/k/v実shapeを既存DP4A／WMMAへ限定選択した。
+MTP prefixはV620 7.527→0.287秒、R9700 6.018→0.201秒、通常8192/128 prefillは
+43.515→36.198秒／20.746→14.916秒へ短縮した。両GPUの数値oracle、通常HIP実行、
+MTPなし不変を確認し、[backlog P12](../../../../backlog.md)を解消した。
+詳細は[WU-3P履歴](../../../../../history/2026/09/21-30/phase87-mtp-nvfp4-prefix-prefill.md)。
 
 ## 2026-09-24の最新状態
 
 Phase 87の段階7は、FP8 producer融合88 nodeとNVFP4 producer融合112 nodeを採用して完了した。
 C2は通常の1%採用基準未満だが、N0で単体AB/BAの全roundが改善したためユーザー決定で採用した。
 段階9のdraft専用縮小語彙lm_headは両GPUでM1 26条件とAB/BA全roundの1%以上短縮を確認して採用し、
-段階4はレビューで見つかった残存NVFP4 W4A16 kernelをWU-4Rで削除し、両GPUのW4A4 token列を再確認して完了した。次は[Phase 87の現行計画](../11-20/phase87-qwen38-nvfp4-single-request.md#今後の順序2026-09-22整理)に従い、
-WU-P1のPaged Attention試作、段階3のMTP companion形式判断へ進む。以下の旧段階番号と途中経過は当時の記録として残す。
+段階4はレビューで見つかった残存NVFP4 W4A16 kernelをWU-4Rで削除し、両GPUのW4A4 token列を再確認して完了した。
+WU-P1のPaged Attention試作は両GPUでbitwise一致と単体増加10%未満を確認して完了し、本移行はPhase 87の段階10、attention kernelの最適化は段階11として統合した（2026-09-24）。
+段階3ではNVFP4とMXFP6のMTP companionをTier A 26条件の固定列M1で比較し、5ポイント規則は不成立だった。
+WU-3SでMXFP6 MTP sidecarを退役させた。NVFP4のM4は両GPU・両凍結列で1%以上改善した一方、通常AB/BAのTPOTは両GPUで悪化した。共通ルールを今回の判断へ適用せず、ユーザー決定によりNVFP4 companionを既定化して段階3を閉じた。prefill／TTFT退行は今回だけ採否から除外し、観測値と原因は[backlog](../../../../backlog.md)へ残した。
+次は[Phase 87の現行計画](../../../../archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#今後の順序2026-09-22整理)に従い、
+段階2のV620 FP8残件は[WU-2V](../../../../../history/2026/09/21-30/phase87-wu-2v-v620-fp8.md)で新規採用なしに終了した。段階1はV620 M=1 C1を採用し、R9700 M=1と両GPU M=2〜3を既定維持で完了した。次は段階12、段階10・11へ進む（段階8のdual-output bundleは2026-09-25にbacklogへ移した）。以下の旧段階番号と途中経過は当時の記録として残す。
+
+MTP有効時に明示`--mtp-weights`がない場合は、artifact rootの`.sllm/mtp-nvfp4-v1/`を既定sidecarとして解決し、
+NVFP4 encodingとcombined recipe digest `sha256:d9698c41954ef7b53a2937c0f662ac2a273f1bdc40c602f77d4928b63de991e1`を検証する。
+欠落・破損・不一致はfail-closedとし、明示sidecarは既定を上書きする。MTP無効時は従来経路を維持する。
 
 ## 2026-09-17の最新状態
 
@@ -1432,7 +1456,7 @@ tree／並列drafting、batching、greedy受理規則は含めない。
 ## Phase 87: Qwen3.8 NVFP4の単一要求decode最適化とW×A16の廃止（2026-09-19に再定義）
 
 2026-09-19のユーザー決定（`README.md`の方針）により範囲を再定義し、詳細は
-[Phase 87計画](../11-20/phase87-qwen38-nvfp4-single-request.md)を正本とする。Qwen3.8ではNVFP4だけを考え、
+[Phase 87計画](../../../../archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)を正本とする。Qwen3.8ではNVFP4だけを考え、
 本番のQwen3.8-27B NVFP4（Unsloth混合精度）のNVFP4 W4A4とFP8 W8A8のdecode、MTP companionのNVFP4化とMXFP6との比較、
 活性値BF16の低精度経路（NVFP4 W4A16、MXFP8 W8A16、MXFP6 W6A16）の廃止を行う。
 
@@ -1456,16 +1480,37 @@ WU1.1では採否と探索打ち切り線を分け、両GPUのlong contextへspl
 再定義前の項目（MXFP8／MXFP6本体のdecode残差、MXFP4の新形式）はPhase 87から外した。MXFP4の活性値はW4A8から
 MXFP6（W4A6）へ変更した。一般的なFP8 artifact互換は保留を維持する。
 
-## Phase 88: NVFP4リクエストバッチ処理（旧Phase87、さらに前は旧Phase86）
+## Phase 88: Qwen3.8単一要求のkernel効率（llama.cpp比）
 
-Phase87完了後に開始する。最初はQwen3.8-27B NVFP4 W4A4へ限定する。
+2026-09-26新設。対象・段階・採否は[Phase 88計画](../21-30/phase88-qwen38-llama-kernel-parity.md)を正とする。
+
+## Phase 89: NVFP4リクエストバッチ処理（旧Phase 88、その前は旧Phase87・旧Phase86）
+
+Phase 88完了後に開始する。最初はQwen3.8-27B NVFP4 W4A4へ限定する。
+
+0. **冒頭: 大規模化に向けた基盤の事前調査（2026-09-24ユーザー指示）。** 数M context、数百B〜数Tのモデル、
+   8〜16並列、最大8 GPUを将来扱うために、後から入れ替えにくい技術選定を先に洗い出す。
+   schedulerとKV管理をこのPhaseで作るので、それらが複数GPUと階層メモリを後から足せる形になっているかを、実装前に確かめるのが目的である。
+   読み取りと小さな実験だけで行い、multi-GPUやoffloadの実装はしない（下の対象外の方針は変えない）。
+   成果物は論点ごとの現状・選択肢・推奨と、Phase 89の設計への制約の一覧とし、履歴文書へ残す。
+   1. **複数GPUの実行モデル**: TP／PP／EP／CPの組み合わせ方、実行IRとHIP graphへのdevice配置と集団通信の表し方。
+      事実確認として、このマシンでのPCIe P2P（GPU間直接転送）の可否と、RCCLのgfx1030／gfx1201対応を調べる。
+   2. **メモリの階層化**: 重みとKVのGPU／host／NVMe配置、MoE expertのCPU配置と計算（READMEのCPU対象を含む）、先読みとcache。
+   3. **kernelの作り方**: 現行のexact-shape providerが「モデル×GPU×形状（TP分割で変わる）」に広がったときの限界と、
+      形状汎用kernel＋自動調整、テンプレート（CK Tileなど）、hipBLASLtの扱い（2026-09-24に保留した論点）の比較。
+   4. **数M context固有の問題**: prefillのCP分割、KVの永続化とsession間再利用、prefillの再開、
+      KVの階層化とsparse attention（blockを選んで読む方式）、kernel内の32-bitオフセットの点検（token×head×dimが2³¹を超える箇所）。
+   5. **モデル定義とロード**: モデルごとの手書きgraphの追従費用、数百GBの重みのGPU別部分読み込み・並列アップロード・model lockのハッシュ時間。
+   6. **schedulingと運用**: chunked prefillとcontinuous batchingで長いprefillがdecodeを止めない仕組み、中断と再開、KV予約による受け入れ制御、
+      長時間jobと多GPU構成での障害の扱い。
+   [Paged KV本移行](../../../../../plans/archive/2026/09/21-30/paged-kv-full-migration.md)の成果（block単位のKV pool）を前提にする。
 
 1. 同一decode stepのB=`2/4/8`でactivation pack、weight tile、scale loadをrequest間共有し、単一要求TPOTとaggregate throughputを測る。
 2. Phase 26のhost planningを再利用し、GPU B>1 executionへ接続する。単一要求providerを暗黙にB>1へ流用しない。
 3. decode-only batchingを成立させた後、prefill/decode混在、continuous admission、cancellation、KV ownershipへ進む。
 4. fairness、p50/p99 latency、aggregate tok/s、resident/request workspace、OOM admissionを別指標として記録する。
 
-tensor parallel、multi-GPU、RDMAはPhase 88へ含めず、リクエストバッチ処理と通信最適化を同時に導入しない。
+tensor parallel、multi-GPU、RDMAはPhase 89へ含めず、リクエストバッチ処理と通信最適化を同時に導入しない。
 
 ## 共通停止・再計画条件
 

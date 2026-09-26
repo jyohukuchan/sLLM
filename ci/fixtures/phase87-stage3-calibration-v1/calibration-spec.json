@@ -1,0 +1,63 @@
+{
+  "schema_version": "phase87-stage3-calibration-spec-v1",
+  "state": "frozen",
+  "purpose": "Small fixed multilingual and code prompt set for Qwen3.8 MTP activation-scale calibration.",
+  "model": "Qwen3.8-27B-NVFP4",
+  "capture_contract": {
+    "input_format": "jsonl",
+    "one_request_per_case": true,
+    "chat_template": "qwen3.8-single-user-thinking-closed-v1",
+    "max_new_tokens": 32,
+    "temperature": 1.0,
+    "top_k": 20,
+    "top_p": 0.95,
+    "seed": 123,
+    "mtp_draft_width": 2,
+    "kv_cache_encoding": "kv-mxfp8-e4",
+    "activation_capture": "record target and draft activation-scale inputs during prefill and MTP decode"
+  },
+  "cases": [
+    {
+      "id": "en-systems-note",
+      "family": "prose",
+      "language": "en",
+      "prompt_file": "prompts/en-systems-note.txt",
+      "max_new_tokens": 32
+    },
+    {
+      "id": "ja-release-note",
+      "family": "prose",
+      "language": "ja",
+      "prompt_file": "prompts/ja-release-note.txt",
+      "max_new_tokens": 32
+    },
+    {
+      "id": "zh-data-contract",
+      "family": "prose",
+      "language": "zh",
+      "prompt_file": "prompts/zh-data-contract.txt",
+      "max_new_tokens": 32
+    },
+    {
+      "id": "en-python-stream",
+      "family": "code",
+      "language": "en",
+      "prompt_file": "prompts/en-python-stream.txt",
+      "max_new_tokens": 32
+    },
+    {
+      "id": "ja-rust-parser",
+      "family": "code",
+      "language": "ja",
+      "prompt_file": "prompts/ja-rust-parser.txt",
+      "max_new_tokens": 32
+    },
+    {
+      "id": "zh-hip-reducer",
+      "family": "code",
+      "language": "zh",
+      "prompt_file": "prompts/zh-hip-reducer.txt",
+      "max_new_tokens": 32
+    }
+  ]
+}

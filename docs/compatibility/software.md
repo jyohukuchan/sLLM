@@ -1,6 +1,6 @@
 # ソフトウェア互換性方針
 
-> 最終更新: 2026-09-09
+> 最終更新: 2026-09-25
 
 ## 目的
 
@@ -44,6 +44,15 @@ Python host CIのtransitive dependencyを含むexact versionとartifact SHA-256�
 「ROCm components は同一 release」とは、各 component 固有の内部バージョン番号を `7.14.0` に揃えるという意味ではない。ROCm 7.14.0 の配布物・repository として組み合わせて公開された compiler、HIP runtime、ROCr、math libraries、headers、device libraries を混在させずに使う、という意味である。
 
 ### GPU target と codegen feature
+
+2026-09-25のユーザー決定で、Phase 87段階10以降の現行runtimeは`gfx942`を
+`unsupported`とする。過去の`gfx942` code object生成とHot Aisle MI300X実機記録は
+当時のsource/tupleの証拠であり、現行Paged KVの実行可否を示さない。
+Rust sessionと公開C contextはGPU allocation前にtargetをfail-closedで拒否する。
+旧residentコードとCI記述の撤去は段階10で続ける。
+
+以下のPhase 12/36節は、2026-08-21当時のsource、tuple、実行結果を残す履歴である。
+そこに記載されたresident選択や実機PASSは、Phase 87段階10の現行Paged-only runtimeへ継承しない。
 
 HIP binary の target は host の自動検出結果だけで決めず、Cargo から CMake へ `CMAKE_HIP_ARCHITECTURES` を明示的に渡す。`xnack`、`sramecc`、wavefront size など、binary compatibility または命令生成を変える codegen feature は project 固有の `SLLM_HIP_CODEGEN_FEATURES` に正規化して明示的に渡す。target 文字列から feature suffix を捨てない。
 
@@ -116,7 +125,7 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 | Lifecycle | Ubuntu | Kernel | ROCm | GPU と artifact 条件 | 備考 |
 | --- | --- | --- | --- | --- | --- |
 | `experimental` | 24.04.4 LTS | GA 6.8 | build/runtime とも 7.14.0 | GPU、target、features ごとに個別 tuple | 主開発候補。現時点では sLLM 実機検証結果なし |
-| `experimental` | Hot Aisle Ubuntu 24.04 | `6.8.0-124-generic`、amdgpu `6.16.13` | canonical user-space 7.14.0、HIP `7.14.60850`、hipBLASLt 1.4 | MI300X VF x1、`gfx942:sramecc+:xnack-`、exact `gfx942` artifact | Phase 12 `project-verified` scope。SR-IOV VF、single GPU、実行済みoperator/model/service/performanceに限定 |
+| `unsupported`（2026-09-25現行runtime） | Hot Aisle Ubuntu 24.04 | `6.8.0-124-generic`、amdgpu `6.16.13` | canonical user-space 7.14.0、HIP `7.14.60850`、hipBLASLt 1.4 | MI300X VF x1、`gfx942:sramecc+:xnack-`、exact `gfx942` artifact | Phase 12の`project-verified`は当時の履歴として保持。Phase 87段階10の現行Paged KVではGPU allocation前に拒否 |
 | `planned` | 26.04 LTS | GA 7.0 | 7.14.0 | GPU、target、features ごとに個別 tuple | 将来検証候補 |
 
 - Ubuntu 24.04.4 LTS、GA kernel 6.8、ROCm 7.14.0 の組み合わせを主系統候補とする。具体的な driver、GPU、target/features、dynamic library path まで確定した tuple だけを evidence の対象にする。
@@ -707,7 +716,7 @@ runtime evidenceへ昇格しない。software lifecycleは`experimental`のま�
 別target、長時間安定性へ一般化しない。詳細は
 [Phase 75追跡要約](../../ci/matrix/phase75-gfx1030-mxfp8-mxfp6-shared-half2-v1.json)を正本とする。
 
-### 2026-09-09 Phase83 local R9700 VMM alias／resident KV tuple
+### 2026-09-09 Phase83 local R9700 VMM alias／resident KV tuple（旧runtime履歴）
 
 canonical R9700のUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、
 HIP `7.14.60850`、LLVM 23、Code Object V6、wave32、exact `gfx1201` tupleで、固定Qwen3.8-27B-NVFP4、
@@ -715,14 +724,16 @@ standard OCP MXFP8 KV、MTPを使ったscratch診断を実行した。r22の旧V
 recovery後の8,192-token prefill＋MTP verify中に、別live KV stateの破壊を後段layerのVMM grow直後かつappend kernel前へ
 局所化した。これはこのtupleでのVMM live-mapping correctness failureであり、ROCm内部の根本原因は未確定である。
 
-現在のRust HIP adapterは、sliding windowなしの通常KV stateについてexact `gfx1201`の全capacity／encodingを
+当時のRust HIP adapterは、sliding windowなしの通常KV stateについてexact `gfx1201`の全capacity／encodingを
 `contiguous-resident`へcreate時に固定する。direct native C ABIの`CAPABILITY_SELECTED`、明示
 `VIRTUAL_CONTIGUOUS`、sliding stateはVMM経路を維持し、runtime error後のprovider retry、CPU fallback、GTT fallbackは
 追加しない。gfx1030のcapacity 65,536以上とgfx942の全capacityという既存resident policyも維持する。
 
 resident選択を入れたscratch r23は同じ履歴から8,192入力／128出力を完走し、4 plane、finite replay、HIP-only、
-fallbackなし、cleanup 0を維持した。capacity 8,320のKV committed bytesは`281,149,440`だった。current-main sourceは
-両GPU targetのbuild identity確認とKV host test 28件をPASSした。診断なしr25のR9700既定CLI/APIでも8,192入力／128出力、
+fallbackなし、cleanup 0を維持した。これは2026-09-09時点のscratch sourceに対する検証結果であり、現行runtimeの既定を表さない。
+Phase 87段階10の現行runtimeはexact `gfx1030`／`gfx1201`のPaged-only方針を採用し、`gfx942`はunsupportedとして拒否する。
+capacity 8,320のKV committed bytesは`281,149,440`だった。当時のmain sourceは
+両GPU targetのbuild identity確認とKV host test 28件をPASSした。診断なしr25のR9700 CLI/APIでも8,192入力／128出力、
 MTP 113候補／70採用、HIP-only、正常終了を確認し、r26の対話も成功した。V620 r26でもCLI/APIの8,192入力／128出力と対話が成功し、遅延観測でVRAM／GTTのbaseline復帰を確認した。公開結果は当該commitのGitHub Checksで確認する。software lifecycleは
 `experimental`のままとし、別OS、kernel、driver、ROCm、GPU SKU、model、direct ABI／sliding VMMへ一般化しない。
 診断と検証の詳細は[Phase 83計画](../plans/archive/2026/09/1-10/phase83-mxfp8-fixed-sampling-mtp.md)と

@@ -2,10 +2,16 @@
 
 ## 状態
 
-- 段階0・WU0・WU1・WU1.1・WU-C1・WU2・WU-D1〜D3・段階5・段階6・段階7・段階9・段階4（WU-4Rを含む）完了。段階7はproducer融合のC1を88 node/replay、C2を112 node/replayへ採用した（2026-09-24）。
-  2026-09-22に別途あった「consumer側へ量子化を取り込む」試行は段階7の対象ではなく破棄済みで、producer融合の評価結果ではない（[記録](../../../../../history/2026/09/21-30/phase87-stage7.md)）。[Phase 76〜88計画](../1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)のPhase 87を置き換える。
+- **Phase 87は2026-09-26のユーザー決定で完了した。** 段階8はbacklogへ移し、llama.cppとの比較で見つかったkernel本体の差は[Phase 88](../../../../active/2026/09/21-30/phase88-qwen38-llama-kernel-parity.md)で扱う。
+- 段階0・WU0・WU1・WU1.1・WU-C1・WU2・WU-D1〜D3・段階2（WU-2Vを含む）・段階5・段階6・段階7・段階9・段階4（WU-4Rを含む）・WU-P1・段階3（WU-3S）完了。段階3はMXFP6 MTP sidecarを退役させ、測定上のTPOT低下を確認したうえで、2026-09-24のユーザー決定によりNVFP4 MTP companionを既定化して閉じた。段階7はproducer融合のC1を88 node/replay、C2を112 node/replayへ採用した（2026-09-24）。
+  2026-09-22に別途あった「consumer側へ量子化を取り込む」試行は段階7の対象ではなく破棄済みで、producer融合の評価結果ではない（[記録](../../../../../history/2026/09/21-30/phase87-stage7.md)）。[Phase 76〜88計画](../../../../active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md)のPhase 87を置き換える。
+- WU-3Pは2026-09-25完了。段階3後に残ったNVFP4 MTP prefixのprefill退行を、実shape限定の既存DP4A／WMMA選択で改善した。8192/128のprefillはV620 43.515→36.198秒、R9700 20.746→14.916秒（[計画](../../../../archive/2026/09/21-30/phase87-mtp-nvfp4-prefix-prefill.md)、[履歴](../../../../../history/2026/09/21-30/phase87-mtp-nvfp4-prefix-prefill.md)）。
+- 段階1は2026-09-25完了。V620のNVFP4 W4A4 M=1 2形状へSGPR基点hoistをN0で採用し、通常8192/128のMTPなしTPOTは58.069→56.990 ms（1.857%短縮）、MTPありは同等。R9700 M=1の同hoistは全round退行、M=2向けsplit-KもV620で約28%退行したため、R9700 M=1と両GPU M=2〜3は現行を維持する（[履歴](../../../../../history/2026/09/21-30/phase87-stage1.md)）。
 - 段階9のMTP draft専用98,304語彙headは2026-09-24に採用した。両GPUのTier A 26条件、同一process AB/BAの全roundで1%以上短縮、MTPなし不変を確認した（[履歴](../../../../../history/2026/09/21-30/phase87-stage9.md)）。
-- 2026-09-24にWU-P1（Paged Attentionの試作と軽い検証、段階9・4の後）を追加した。vAttentionを廃止してpagedへ完全移行する方針の判断材料を取る。
+- WU-P1では両GPUのPaged Attention probeが数値・単体性能の受入を通過した。2026-09-24のユーザー指示で、本移行を段階10、attention kernelの最適化を段階11としてPhase 87へ統合した（段階10の詳細は[本移行計画](../../../../../plans/archive/2026/09/21-30/paged-kv-full-migration.md)）。
+- 段階12は完了。幅2／3／4選択と両GPUの機能受入、幅4の重大退行防止を確認した。2026-09-25のユーザー決定で既定幅は両GPUとも2に固定し、追加の長時間採否ベンチマークを終了した（[履歴](../../../../../history/2026/09/21-30/phase87-stage12.md)）。段階10・11の元の範囲は維持する。
+- 段階10は2026-09-25完了。exact `gfx1030`／`gfx1201`をPaged KVへ統一し、最終連続KV対照の10%条件、公開GPU数値、V2 checkpoint、旧VMM／resident退役を確認した。`gfx942`は明示未対応。詳細とartifact不足の証拠範囲は[履歴](../../../../../history/2026/09/21-30/phase87-stage10-paged-kv.md)に記録した。
+- 段階11は2026-09-25に実装・採否を完了した。Paged decodeのM=3／KV8192以上でC1の行間KV共有を両GPUへ限定採用し、1 warmup＋2 measuredのTPOTはV620で2.10%、R9700で4.32%短縮。C2のR9700 GQA共有・V620 M1候補は速度条件未達、C3のdot2は退行、FP8 WMMAは品質非増加を満たさず不採用とした（[履歴](../../../../../history/2026/09/21-30/phase87-stage11.md)）。
 - 両GPU・MTPなし／ありの通常速度、kernel時間、read-request counter、形状別copy、R9700の2 KV形式のKLD、
   W×A16利用箇所と過去の棄却候補の棚卸しを完了した。
   [段階0履歴](../../../../../history/2026/09/11-20/phase87-stage0.md)と
@@ -37,7 +43,6 @@
   高バッチ時の合計生成速度で有利な、ネイティブ対応のある形式（MXFP／NVFP4／FP8）を優先する。
 - Qwen3.8では基本的にNVFP4だけを考える。Phase 87は、本番のQwen3.8-27B NVFP4（Unsloth、混合精度）の
   単一要求decodeを対象とし、その中の**FP8部分（重みの約40%）もPhase 87の範囲に含める**。
-- MTP companionをNVFP4化してMXFP6と比べ、採用率が5%以上落ちる場合はMXFP6も含める。
 - 2026-09-19の段階0実測でV620のdecode attentionの寄与が大きいと確認し、ユーザーは
   「attentionも候補に含め、帯域・時間から優先順位を決める」と承認した。
   decode attentionを後続最適化の候補に追加する。段階0では計測・順位付けまで行う。
@@ -71,14 +76,9 @@ W×A16の廃止対象は、別途棚卸しする旧sidecar互換経路・公開A
 - **計測で優先度を決める。** 作業の順番は段階0の内訳から決め、上の項目の並び順では決めない。
 - **1作業単位＝1仮説。** 着手前に、対象カーネルと形状、段階0のデータに基づく仮説、到達可能帯域から計算した
   改善の上限を書く。候補は1作業単位あたり3つまでとし、上限の半分に届かなければ打ち切り、効かなかった理由を記録する。
-  打ち切り線は探索を続けるかどうかの判断であり、候補の採否は次の採用基準で別に決める（2026-09-20ユーザー決定）。
-- **採用基準（候補ごと・GPUごと）。** 次をすべて満たす候補は、打ち切り線に届かなくても採用する。
-  1. 正しさ: 独立oracle、finite、repeat、cleanupがPASSする。
-  2. 数値分類: N0／N1は数値・出力影響変更台帳の規則どおり自動承認し、N2はユーザーが判断する。
-  3. 速度: 同一processのAB／BAの全roundで改善の向きが揃い、本番形状の短縮が通常計測のTPOTの1%以上。
-     モデル全体の1 warmup＋3 measuredには約0.5%の揺れがあるため、採否は単体ベンチの短縮量で判断し、
-     モデル全体の速度は記録する。
-  4. 他のcontext長・M・対象GPUで遅くならない（対象を限定して採用してよい）。
+  打ち切り線は探索を続けるかどうかの判断であり、候補の採否は[共通ルール](../../../../main-plan.md#変更の採否ルール2026-09-24ユーザー決定)で別に決める。
+- **採否（2026-09-24から）。** [main-planの変更の採否ルール](../../../../main-plan.md#変更の採否ルール2026-09-24ユーザー決定)に従う。
+  正しさ（独立oracle、finite、repeat、cleanup）は前提とする。完了済み作業の当時の採否と測定結果は各履歴に残す。
   元に戻すための環境変数は要求しない（Gitで戻せるため）。比較のcontrolに必要な切替だけを置いてよい。
 - **毎回同じ物差しで測る。** 作業単位ごとに、本番形状の単体ベンチ（両GPU）、独立FP32 oracle、
   モデル全体のdecode tok/s（MTPなし、代表8192/128、1 warmup＋3 measured）を取る。
@@ -166,7 +166,7 @@ W×A16の廃止対象は、別途棚卸しする旧sidecar互換経路・公開A
   [WU1.1履歴](../../../../../history/2026/09/11-20/phase87-wu1-1-attention.md)と
   [集約結果](../../../../../history/2026/09/11-20/phase87-wu1-1-attention-results.json)を正本とする。
 
-WU1は候補を単独で比べたため、仕組みの異なる候補の組合せを評価していない。上の採用基準で次の2点を扱う。
+WU1は候補を単独で比べたため、仕組みの異なる候補の組合せを評価していない。当時、次の2点を扱った。
 
 - **V620 C1×C3**: C1（GQA共有）は1層のblock数を768から128（4 KV head×32 split）へ減らし、72 CUのV620で
   並列度が不足している可能性がある。C3（split増）は単独で5.01 ms/tokenを短縮しており、仕組みが補完的である。
@@ -175,7 +175,7 @@ WU1は候補を単独で比べたため、仕組みの異なる候補の組合�
   - 上限と打ち切り: WU1後のC1 stage1は0.336 ms/層、16層で約5.38 ms/token。WU0再計測の参照0.766 ms/tokenとの差
     約4.61 ms/tokenを余地とし、その半分約2.31 ms/tokenを打ち切り線とする。
 - **R9700 C3**: WU1のsplit128は1.1725 ms/token（打ち切り線1.3935未達）だが、TPOT約52 msの約2.2%で
-  採用基準の速度条件を満たす見込み。split64／128／256を比べて最良を採否判定する（C1はR9700で効果がなかったため組み合わせない）。
+  split64／128／256を比べて採否を判断した（C1はR9700で効果がなかったため組み合わせない）。
 - 数値: split数の変更はpartitionとstage2の合成順を変えるため、controlとのbitwise一致を前提にしない。
   各partitionの直列和が短くなりstage2の合成が増える変更として、誤差boundが非増加であることを解析で示せればN1とする。
   示せない場合はN2としてユーザーへ提示する。独立oracle、context長1023／1024／1025／8192／8193／8256、M=1〜3を確認する。
@@ -271,6 +271,41 @@ WU1は候補を単独で比べたため、仕組みの異なる候補の組合�
 - 数値: C1は累積順が変わるためN1相当。C2は現行quantizerと同じscale・丸めならN0を目指す。
   M=1〜3（MTP verify）、非整列K／Nで独立FP32 oracleを確認する。
 
+### WU-2V: 段階2のV620 FP8 decode残件（2026-09-25着手）
+
+- **完了（2026-09-25、新規採用なし）**。WU2が完了させたのはR9700のM=1だけで、V620 `gfx1030` のsoftware FP8 W8A8 decodeをここで扱った。
+  既定ID82の本番8形状、M=1〜3のMTP verify、token毎のactivation quantizerとlm_headを測定範囲に含める。
+  まずM=1 `(K,N)=(6144,5120)`を候補形状とする。WU0のwarm read参照に対する正の余地はこの形状で
+  **0.68118 ms/token**、V620 FP8全8形状で**1.05206 ms/token**。全体の探索継続線は**0.52603 ms/token**。
+  `(5120,6144)`の余地は0.08785 ms/tokenなので、単なる専用wrapper追加を初手にしない。
+- **仮説C1**: 現行ID82のweight column baseはwave内で同じだが、生成ISAでlaneごとのaddress計算が残る可能性がある。
+  wave-uniform baseを明示して、LUT、weight load順、FP32累積順、scale、BF16 RNEを変えずにM=1
+  `(6144,5120)`のmemory命令／VGPR費用を下げる。最初はtest-onlyの独立候補としてproduction ID82と同一processで比較する。
+  生成ISAが既に同等のscalar化をしている場合、または単体改善が形状余地の半分**0.34059 ms/token**に
+  届かなければC1探索を止め、理由を記録する。この値も探索線であり採否の自動条件ではない。
+  **C1は2026-09-25に打切り**。両経路はbitwise一致・独立oracle最大0 ULPだったが、
+  再確認r2のpattern 0 dotは0.089001→0.088681 ms/call（64回換算+0.02048 ms/token）で、
+  探索線0.34059に届かずAB-BA-ABの3roundも改善方向が揃わなかった。
+  VGPRは170→169のみ。詳細は[WU-2V履歴](../../../../../history/2026/09/21-30/phase87-wu-2v-v620-fp8.md#c1-wave共通weight-baseの明示scalar化)。
+- **後続候補の上限**: C1を含めて最大3 family。C2は既存probeのactivation-shared wave4／4 columnを
+  現行ID82と同じLUT decodeへ合わせ、M=1 `(6144,5120)`でactivation再読込だけを減らす。
+  C3はC2の結果がなお余地を示す場合に限り、ID82 LUTを維持したdirect-wave4 pair2を検討する。
+  C2/C3とも既存probeをproduction成果とみなさず、現行ID82に対する数値・資源・速度で判定する。
+  既採用のnon-temporal loadとLDS padding、既棄却のID82 prefetch P1、hipBLASLt全形状切替は再提案しない。
+  **C2/C3も2026-09-25に不採用**。両者ともpattern 0〜2で現行ID82とbitwise一致・独立oracle最大0 ULPだったが、
+  C2はdot約7〜8%退行、C3は約30〜37%退行した。本番sourceは不変。3候補の結果は
+  [WU-2V履歴](../../../../../history/2026/09/21-30/phase87-wu-2v-v620-fp8.md)に記録した。
+  残る7形状の正のread参照余地は合計0.370885 ms/tokenで、全8形状の探索継続線0.526032を下回る。
+  lm_headの余地は0.094098 ms/token。段階7後に残るFP8量子化97 nodeの具体的な融合候補は
+  [backlog P3](../../../../backlog.md)へ移動済みである。既存ID92のM=2〜3は維持する。
+  以上を含めて段階2はWU2とWU-2Vで完了し、次は段階1へ進む。
+- **採否前の証拠**: exact GPU UUID、300 ms継続warmup、同一process AB-BA-AB各9 samples、quantizerと
+  matmulの分離値、512 MiB以上の巡回weight pool、VGPR／SGPR／LDS／occupancy／spillを記録する。
+  数値は本番8形状×M=1〜3と非整列境界で独立FP32 oracle、finite、controlとのbitwiseまたは分類済み差、
+  repeat、guard、cleanupを確認する。採用する場合は公開dispatchと通常8192/128のMTPなし／ありを
+  1 warmup＋3 measuredで検証し、他GPU・他shapeの非退行も確認する。単体の探索線は採用条件と混同しない。
+  作業結果は[WU-2V履歴](../../../../../history/2026/09/21-30/phase87-wu-2v-v620-fp8.md)へ記録する。
+
 ### WU-D1: NVFP4 M=1 decodeの近傍依存の原因調査（段階1のNVFP4最適化より前）
 
 - **完了（2026-09-20）**。両shapeでisolated／staged型は約123〜124 µs、GQA型のKV reader後は約135〜136 µsとなり、
@@ -337,7 +372,7 @@ WU-D1は「GQA型のKV読み出しの直後の1 NVFP4 dispatch」で差を再現
 ### WU-D3: decode attentionのKV読み出し方式による罰則の緩和（WU-D2の後）
 
 - **完了・3候補とも不採用（2026-09-20）**。C1 tile32とC3先読みはattentionが大幅に退行し、C2 block配置は単体でほぼ中立。
-  C2の実モデルはV620 MTPなし+0.344%／あり−0.093%、token一致。正味1%の採用基準・0.95 ms/tokenの打ち切り線に未達。
+  C2の実モデルはV620 MTPなし+0.344%／あり−0.093%、token一致。当時の打ち切り線0.95 ms/tokenに未達。
   実attention harnessはD1/D2の合成readerの罰則を再現しないという限界を明記した。
   両GPUの通常モデルと境界検査を記録し、本番sourceとbuild cacheを復元。現象の修正は採用していない。
   [WU-D3履歴](../../../../../history/2026/09/11-20/phase87-wu-d3.md)と[結果JSON](../../../../../history/2026/09/11-20/phase87-wu-d3-results.json)。
@@ -354,9 +389,8 @@ V620で約1.9 ms/token（TPOT比約3%）、R9700で約1.0 ms/tokenに相当す�
   - C3: 読み出しと復号の間にprefetch距離を設け、outstanding requestの分布を変える。
 - 上限と打ち切り: 上限はNVFP4側の罰則の解消（V620で約1.9 ms/token）。attention自体が遅くなる分は差し引く。
   半分（約0.95 ms/token）に届かなければ打ち切り、理由を記録する。
-- 採用基準: 「進め方の原則」の採用基準に従う。attentionとNVFP4を合わせた正味のTPOT短縮が1%以上で、
-  他のcontext長・M・GPUで退行しないこと。数値はN0（読み出し順だけの変更で累積順を保つ）を目指し、
-  変わる場合はN1の根拠を示す。
+- 当時の採否と数値分類は[WU-D3履歴](../../../../../history/2026/09/11-20/phase87-wu-d3.md)に残す。
+  attentionと後続NVFP4を合わせて測り、他のcontext長・M・GPUの影響も確認した。
 - 計測: 単体ベンチ（attention単体とNVFP4を分けて記録し、合計も出す）と、両GPUのMTPなし・ありの通常8192/128。
 - 変更してよいファイル: `native/hip/src/causal_attention_kernel.hip.cpp`、`causal_attention_kernel_internal.hpp`、
   `causal_attention_runtime.inc`、`crates/sllm-hip/src/kv_state.rs`のmetadata検査、対応するtest、
@@ -369,7 +403,7 @@ GQA型のKV読み出しが後続のNVFP4 M=1を約9〜10%遅くする現象に�
 
 - 到達点: 合成readerで再現（V620、32 dispatch以上持続、軽い介在処理で回復しない）。R9700の合成probeでは非再現。
   EA busy cycleの増加までは観測したが、MALL／DRAMの内訳は両GPUのcounterに存在せず物理機構は未特定。
-  緩和3候補はattention側の退行が大きく、最も中立なC2も実モデルで+0.344%／−0.093%と採用基準に届かなかった。
+  緩和3候補はattention側の退行が大きく、最も中立なC2も実モデルで+0.344%／−0.093%だったため採用しなかった。
 - 打ち切りの理由: 影響はV620で約1.9 ms/token（TPOT比約3%）、R9700で約1.0 ms/tokenで、残る候補より小さい。
   特定に必要なcounterがROCm 7.14のgfx1030／gfx1201 catalogにない。緩和候補の費用が利益を上回る。
 - 再開の条件: 新しい計測手段（MALL／DRAM内訳を取得できるtoolやGPU）が使えるようになった場合、
@@ -403,22 +437,82 @@ GQA型のKV読み出しが後続のNVFP4 M=1を約9〜10%遅くする現象に�
 
 ### 段階1: NVFP4 W4A4のM=1 decode
 
+- **完了（2026-09-25）**。V620のexact M=1 wide／downにC1を採用し、R9700 M=1はID84、両GPUのM=2〜3はID94を維持する。R9700 hoist wideはGQA先行で0.103121→0.104801 ms/call、V620 M=2 wideのsplit-K=2＋reductionは0.125360→0.160361 ms/callと退行したため、候補を広げず打ち切った（[履歴](../../../../../history/2026/09/21-30/phase87-stage1.md)）。
 - 段階0の結果に基づき、W4A4の行列ベクトル積と、M=1の活性値量子化（行列ベクトル積の前処理への融合を含む）を最適化する。
 - M=2〜3（MTP verify）の形状も同じ作業単位で扱う。
 - 現行のW4A4既定を維持する。最適化で数値が変わる場合は、その変更内容に基づいて数値分類を記録する。
+- **2026-09-25着手時のC1仮説と受入条件**: 両GPUの実M=1はID84で、対象は
+  `(M,K,N)=(1,5120,17408)`（gate/up、112回/token）と`(1,17408,5120)`（down、56回/token）。
+  WU0のwarm read参照に対する正の余地はV620 0.8320、R9700 1.4121 ms/token、探索継続線は
+  その半分の0.4160／0.7061 ms/token。C1はweight／scaleのwave共通な列baseを明示的に
+  scalar化し、現行のE2M1 byte permute、DP4A／sudot4、scale LUT、2／4-block先読み、
+  FP32加算順とBF16 RNEを保つN0候補とする。non-temporal loadとLUT paddingは既実装で再提案しない。
+  まず代表shapeをcompileしてVGPR／SGPR／LDS／occupancy／spillとISAのaddress生成を記録する。
+- C1は最初test-onlyで両GPUのproduction ID84をcontrolにする。両shapeの全出力bitwise、独立FP32
+  oracle、finite、repeat、guard、cleanup、量子化済み入力とtensor scaleの一致を確認する。
+  M=2〜3のID94とexact tuple外の選択は変えない。非整列値とM1／M2の境界もselectorで検査する。
+  300 ms継続warmup、同一process AB-BA-AB各9 samples、512 MiB以上の巡回weight poolで
+  quantizer／matmul／合計を分けて測り、孤立条件と[WU-D1](../../../../../history/2026/09/11-20/phase87-wu-d1.md)の
+  GQA型KV reader先行条件を並べる。両条件を同じ条件内のcontrolと候補で交互に測り、近傍依存を効果と混同しない。
+  探索線に届かないGPUではC1を打ち切る。採否は探索線と分け、公開経路のMTPなし／あり8192/128
+  各1 warmup＋3 measuredと[共通ルール](../../../../main-plan.md#変更の採否ルール2026-09-24ユーザー決定)で判断する。
+  結果は[段階1履歴](../../../../../history/2026/09/21-30/phase87-stage1.md)へ記録する。
+- **C1の採否（2026-09-25）**: 両GPUのM=1両tupleはproduction ID84とbitwise一致、独立oracle最大0 ULP。
+  wave共通baseをKループ外へhoistした最終版はV620のWU-D1型GQA先行AB-BA-ABで両shape・全3round改善し、
+  112/56回を掛けたdot短縮は合計1.2768 ms/token。通常8192/128のMTPなしTPOTは
+  58.068919→56.990410 ms（**1.857%短縮**）、MTPあり30.416029→30.414372 msで同等。
+  生成SHA、MTP受理75/103、peak VRAMは前後一致した。共通ルールに従いV620 exact M=1 2 tupleへ採用する。
+  R9700のGQA先行合計は−0.098560 ms/tokenで不採用。hoistをR9700のwideへtest-only適用しても全round退行し、
+  ID84を維持する。M=2〜3は上記のtest-only候補を評価してID94維持で完了した。
+  詳細は[段階1履歴](../../../../../history/2026/09/21-30/phase87-stage1.md#c1-hoist最終結果とv620限定採用)。
 
 ### 段階2: FP8 W8A8のdecode
 
+- **完了（2026-09-25）**。R9700 M=1はWU2のID103を採用し、V620はWU-2Vの3候補を数値PASS・速度不採用で終了した。
+  V620の他7形状（lm_headを含む）の正のread参照余地は探索継続線未満。残るFP8 producer融合97 nodeは
+  段階7完了時にbacklog P3へ移したため、この段階で再実装しない。
 - gfx1201（hipBLASLtのnative FP8）とgfx1030（software経路、Phase 78のID68／71／75／82等）について、
   tokenごとの活性値量子化と行列ベクトル積を段階0の優先順位に従って最適化する。lm_headを含む。
 
 ### 段階3: MTP companionの形式
 
+- **完了（2026-09-24、WU-3S）**。形式比較後に一度完了を差し戻し、低bit companionの遅延原因、形式整理、受理率込み速度を確認した。最初の通常8192/128の実効速度は、BF16前後平均に対して
+  MXFP6がV620 −7.34%／R9700 −7.59%、NVFP4が−0.56%／−11.80%だった。draftが読む重みはBF16の約0.85 GB/stepから
+  NVFP4で約0.25 GB/stepへ減るはずで、受理数がほぼ同じV620のMXFP6（75/105、BF16は77/101）でも遅い。
+  **WU-3Sの実施項目（2026-09-24に書き直し）**:
+  **原因（[記録](../../../../../history/2026/09/21-30/phase87-stage3.md#低bit-companionが遅い原因2026-09-24wu-3s)）**:
+  MXFP6はcompanionのM=1 kernel `sllm_mxfp6_w6a6_m1_col2_v1`が読み出し帯域の約2〜3割（95〜161 GB/s）しか出ず、
+  BF16 kernel（約500〜625 GB/s）より1回あたり1.1〜1.7倍遅い。NVFP4のkernelはBF16より1 blockあたり約2 ms速く、
+  通常計測の遅さは単一prompt自由生成の受理数のばらつき（R9700で66/123）による。
+  1. **MXFP6 companion sidecarを廃止する**（種類F。ただし公開opt-inの削除は今回のユーザー委任による明示判断）。
+     MTP companion専用のMXFP6変換・manifest読込み・選択経路だけを削除する。既存のMXFP6 sidecarを
+     `--mtp-weights`へ渡した場合は、BF16／NVFP4への暗黙fallbackをせず、退役した形式として明確に拒否する。
+     CLI／APIの説明、converterのhelp、関連testを同じ作業で更新し、現在MXFP6を明示選択している利用者への互換性変更を履歴へ記録する。
+     MXFP6形式そのものと本体モデルの経路、共用kernel `sllm_mxfp6_w6a6_m1_col2_v1`は残す
+     （kernelの遅さは[未計画の課題一覧](../../../../backlog.md)のP1）。MXFP8とNVFP4のsidecarは維持する。
+  2. **NVFP4経路の非効率の確認結果を記録する**: decodeのprofileでは大きな行列積が読み出し帯域の約75%で動いており
+     （gate/upはV620 384、R9700 480 GB/s）、decode側に大きな行列積の非効率は見えない。
+     k/vの小さな行列積と、MTP層RMSNorm後の独立した量子化nodeが合計1 blockあたり0.2〜0.3 ms程度残る（一覧のP2）。
+     一方、prefix準備のNVFP4行列積は遅く、[backlogのP12](../../../../backlog.md)へ記録する。今回の段階3では直さない。
+  3. **ベンチマーク**: 両GPUのTier A 26条件で、BF16とNVFP4のM3（1 blockあたりのdraft／non-draft時間）を測り、
+     取得済みのM1と合わせてM4（受理率込みのdecode速度）を導く。単一prompt自由生成は経路の分岐で大きくぶれるため判定に使わず、
+     整合の確認として同一processのAB/BAの通常計測を付ける。VRAMの増減も記録する。
+  4. **既定採用**: 測定結果を記録したうえで、2026-09-24の追加ユーザー決定を適用する。
+     ユーザーは今回のNVFP4 MTP companionの既定採否について共通の性能採否ルールをすべて無視し、
+     M4と通常AB/BAのTPOTが共通基準を満たさないこと、prefill／TTFTが低下することを受け入れてNVFP4を既定にするよう指示した。
+     draftだけの変更でp/q補正後のtarget分布は維持するため、KLDはこの採否で要求しない。
+     この明示的な例外を後続作業へ引き継がない。BF16はベンチマークcontrolとsource／binary rollback経路として残し、
+     BF16へ戻す専用CLI flagは追加しない。
+  5. 結果を記録して段階3を完了にする。
+- **WU-3Sの結果**: MXFP6 companion sidecarの変換・読込みを退役させ、既存sidecarは明示エラーで拒否する。MXFP6本体形式・共用kernelは維持する。Tier A 26条件のM4はNVFP4がBF16比でV620 +1.70%／+1.76%、R9700 +1.75%／+1.61%（BF16／W8A8凍結列）で、各prompt-cluster 95%区間も正だった。一方、同一processの通常8192/128 AB/BAではV620 −0.63%／−0.48%、R9700 −13.28%／−13.27%と両順序でTPOTが悪化した。共通ルールならBF16維持となる結果だが、ユーザーの明示決定によりNVFP4を既定にして段階3を閉じた。詳細なM3内訳・資源・公開経路と既定解決は[履歴](../../../../../history/2026/09/21-30/phase87-stage3.md#wu-3sの最終結果)へ記録した。
+- 形式比較の結果（2026-09-24）: sLLM量子化器と評価入力に重ならない較正入力からNVFP4 W4A4 sidecarを作り、
+  既存MXFP6 W6A6とBF16を両GPU・Tier A 26条件の固定列M1で比較した。
+  NVFP4−MXFP6は−0.80〜−1.01ポイントだった。
+  NVFP4−BF16は−1.08〜−1.37ポイントだった。既定採否は上のWU-3Sで判断した。
+  通常8192/128の実効decode速度、公開CLI、MTPなしの不変性まで[履歴](../../../../../history/2026/09/21-30/phase87-stage3.md)へ記録した。
 - MTP companionをNVFP4 W4A4（重みはsLLMの量子化器、活性値のglobal scaleは較正で決める）とMXFP6 W6A6で作り、
   [MTP採用率ベンチマーク](../../../../../development/mtp-acceptance-benchmark.md)の主指標M1（期待受理率、両GPU）で比べる。
   あわせて実効decode速度も記録する。
-- NVFP4の採用率がMXFP6より5%以上低い場合は、MXFP6 companionも対応に含める。
-  「5%」は期待受理率の差5ポイントと解釈する（相対5%の場合は着手前にユーザーへ確認する）。
 - 活性値global scaleの較正に使う入力は、ベンチマークの評価入力と重ならないものにする。
 
 ### 段階4: W×A16の廃止と契約の整理
@@ -545,7 +639,7 @@ MTPありでは受理判定の読み戻しと、一部受理時のrestore＋repl
   3. **計測**: 段階0と同じ条件（両GPU、MTPなし／あり、8192/128、1 warmup＋3 measured）と、
      profileのkernel間隙間・intra_graph_gapを記録する。
 - 上限と打ち切り: 上限は手順0で算出する。打ち切り線はその半分とし、届かなければ理由を記録して段階6を終える。
-  採用は「進め方の原則」の採用基準（正しさ、N0／N1、通常TPOTの1%以上、他条件で退行しない）に従う。
+  当時の採否と数値分類は[段階6履歴](../../../../../history/2026/09/21-30/phase87-stage6.md)に残す。
 - 数値と正しさ:
   - 並列化は独立kernelの実行順だけを変えるので、各kernelの入力・演算順は不変でN0を目指す。
     依存を1つでも取り違えると競合で結果が変わるため、**依存関係の根拠を各枝について明記**し、
@@ -570,7 +664,7 @@ MTPありでは受理判定の読み戻しと、一部受理時のrestore＋repl
 - **見込み**（[探索記録](../../../../../history/2026/09/21-30/phase87-mtp-proposal-shortlist.md)）:
   N=98,304で期待受理率（M1）−0.17 pt、draft lm_headは両GPUで行数に比例して短縮し、
   正味は約+3.8%（V620）／+3.2%（R9700）。追加VRAMは約503 MB（MTP有効時のみ）。第一候補はN=98,304とする。
-- **打切り線**: 見込みの半分（正味V620 +1.9%／R9700 +1.6%）。採否は通常の採用基準（TPOTの1%以上）で決める。
+- **当時の打切り線**: 見込みの半分（正味V620 +1.9%／R9700 +1.6%）。採否の測定結果は[段階9履歴](../../../../../history/2026/09/21-30/phase87-stage9.md)に残す。
 
 **語彙集合の作り方（2026-09-23ユーザー決定: 生成手順だけを置く）**
 
@@ -601,13 +695,18 @@ SWE-chatを使う場合は、sLLMリポジトリ由来のsessionが含まれて�
 
 1. 実runのM1（mtp-bench-v1、両GPU、Tier A 26条件）が探索の反実仮想値と一致する。
    差が出た行は、draft top-1がS外にありblock進行が変わった行かどうかで説明する。
-2. 通常計測（8192入力／128出力、warmup 1＋measured 3）のMTPありで、同一process AB/BAのTPOTが1%以上短縮する。
-   MTPなしは経路が変わらないことを確認する。
+2. 通常計測（8192入力／128出力、warmup 1＋measured 3）のMTPありで同一process AB/BAを記録し、
+   MTPなしは経路が変わらないことを確認する。当時の採否条件と結果は[段階9履歴](../../../../../history/2026/09/21-30/phase87-stage9.md)に残す。
 3. 数値分類: target分布は不変、固定seedの生成token列はdraft変更により変わりうる。N1として記録する。
 4. 追加VRAM、生成物のSHA-256、corpus manifestを履歴へ記録する。
 5. commit前に`validate_cpp.py --mode format`、`cargo fmt`、clippy、CI hash連鎖の更新を通す。
 
 ### WU-P1: Paged Attentionの試作と軽い検証（2026-09-24追加）
+
+**完了（2026-09-24）**。[最終結果](../../../../../history/2026/09/21-30/phase87-wu-p1-paged-attention.md):
+exact V620／R9700の各27条件でbitwise・独立oracleをPASSし、decode／prefillの全AB/BA/AB roundが
+kernel単体の増加10%未満だった。最悪増加はV620 +1.345%／+8.194%、R9700 −16.346%／+3.290%。
+本番source・公開ABI・既定経路は変更せず、[本移行計画](../../../../../plans/archive/2026/09/21-30/paged-kv-full-migration.md)を作成した。
 
 **方針（2026-09-24ユーザー決定）**: 将来の拡張性（1M以上のcontext、8〜16並列、複数GPU、READMEの対象ハードウェア）を考え、
 vAttention（HIP VMMによるvirtual-contiguous KV）を完全に廃止し、Paged Attentionへ完全移行する。
@@ -634,6 +733,123 @@ vAttention（HIP VMMによるvirtual-contiguous KV）を完全に廃止し、Pag
   - 公開C ABIのKV memory kindと[KV memory方式の決定](../../../../../architecture/kv-memory.md)の書き換え
 
   連続KVの経路は、移行の作業単位の中で最終比較を終えるまでだけ残す。実行時の切替は作らない。
+
+### 段階10: Paged KV／Attentionへの本移行（2026-09-24、Phase 87へ統合）
+
+WU-P1の合格を受け、vAttention（HIP VMM）を廃止してPaged KVへ完全移行する。
+範囲・実装の順序・受入条件は[本移行計画](../../../../../plans/archive/2026/09/21-30/paged-kv-full-migration.md)を詳細計画とし、ここでは要点だけを書く。
+
+**2026-09-25完了**。実装・検証・対象外の詳細は[履歴](../../../../../history/2026/09/21-30/phase87-stage10-paged-kv.md)。
+
+- 本番のdecode（段階12で追加した幅3／4のverifyを含むM=1〜5）とprefillをblock単位のKV poolへ接続し、prefix共有・分岐・末尾COW・cancel・graph replay前のblock table更新を揃える。
+- 現行の計算順序と丸めを保ち、現行連続KVとの最終比較（kernel単体の10%条件の再確認、TPOT・TTFT・peak VRAM）の後に、
+  VMM provider、page共有・末尾COW、grow transaction、V620の65,536境界、R9700の全量resident特例を撤去する。
+- 性能の改善は段階11で行う。段階10はbitwiseの対照を保つため、計算の構造を変えない。
+
+### 段階11: attention kernelの最適化（2026-09-24追加）
+
+**2026-09-25実装・採否完了**。C1をM=3／KV8192以上のexact両GPUで採用し、C2/C3候補は採否ルールにより不採用。数値・モデル速度・VRAM・残る制約は[段階11履歴](../../../../../history/2026/09/21-30/phase87-stage11.md)を正とする。
+
+**根拠**: [改善余地の分析](../../../../../history/2026/09/21-30/phase87-attention-headroom.md)。
+現行のdecode attentionは、KVの論理byte数に対する実効帯域がread参照値のV620約19%、R9700約24%にとどまる。
+prefillは両GPUとも1〜3 TFLOP/sで、行列演算命令を使っていない。構造上の原因として次の2つを確認した。
+
+- query行ごとにKVを読み直している（両GPU）。MTP verifyのM=3はM=1の2.4〜2.5倍の時間になる。
+- R9700の本番decodeはGQAを共有せず、1本のKV headを6つのquery headが別々に読む。
+
+**時期**: 段階10の完了後。段階10で書き直したpaged kernelの上で行い、kernelを二度書き直さない。
+
+**着手時に行うこと**
+1. 段階10後の本番kernelを基準に、上限と打切り線（上限の半分）を計算し直す。分析時点の上限の目安は、
+   decode M=1がV620約3.4／R9700約1.9 ms/token、MTP verify M=3がV620約3.7／R9700約2.8 ms/token（確定tokenあたり）、
+   prefillがTTFTのV620約2割／R9700約3割である。R9700の値は段階10でpaged候補の読み方が入る分だけ小さくなる。
+2. V620のdecode M=1が1 keyずつの逆量子化とonline softmaxの更新で律速しているという推定を、profilerで確かめる。
+3. AGENTS.mdのkernel融合方針に従い、代表1変種をcompileしてVGPR・LDS・occupancyを記録する。
+
+**候補（作業単位ごとに3つまで）**
+1. **C1: decodeでquery行の間のKV共有（両GPU、MTP verify向け）。** M=2〜3の行が同じKV tileを一度だけ読み、
+   各行のQK・softmax・value累積は現行と同じ順序で行う。N0を目標とする。
+2. **C2: R9700 decodeのGQA共有と、V620 decode M=1の内側loopの見直し。** R9700はV620のWU1と同じく6つのquery headでKVを共有する。
+   V620は、複数keyをまとめて逆量子化・内積し、softmaxの更新を塊単位にする。加算順が変わる場合はN1として記録する。
+3. **C3: prefillを行列演算命令で書き直す（FlashAttention型）。** R9700はWMMA、V620はpacked FP16のdot命令を使う。
+   加算順が変わるためN1の候補とし、別の作業単位にしてよい。
+
+**採否**
+- decodeの候補は、[main-planの変更の採否ルール](../../../../main-plan.md#変更の採否ルール2026-09-24ユーザー決定)で判定する。
+  数値差は台帳へ分類して記録し、N0／N1の分類だけで採用を自動承認しない。
+  C1はMTPあり、C2はMTPなし・ありの両方で測る。
+- prefillの候補は、8192入力のprefill時間（TTFT）を同一processのAB/BAで比較し、decodeの副作用も含めて同じ共通ルールで判定する。
+  KV長65536での効果も記録する。
+- 実行時の切替は作らない。exact-shapeのgateは、既存のproviderと同じく実際に使う形状に限る。
+
+### 段階12: MTP幅3・4への対応と最適化（2026-09-25追加）
+
+**目的**: MTPの幅（1回に出す候補の数）を今の2から3・4へ広げ、1回あたりの確定token数を増やす。
+DFlash2は[main-plan](../../../../main-plan.md)のとおりEXL3の後に検討し、この段階では扱わない。
+段階1の後に行い、段階10・11より前に置く（2026-09-25ユーザー指示）。
+
+**背景と見込み**
+- 今の幅2では1回あたりの確定token数は最大3で、実測は約2.4（段ごとの受理率a₁≈0.81、a₂≈0.72）。
+  3段目の受理率を約0.65とすると幅3で約2.77（+16%）、4段目を約0.6とすると幅4で約3.0（+25%）の見込み。
+  Cinferenceの公開値（Qwen3.8 NVFP4、MTP3、Code）では1回あたり3.29 token。
+- 増える費用は、draftの1 stepあたり約3 ms（NVFP4 companion、V620）と、verifyのMが3から4・5へ増える分。
+  attentionはquery行ごとにKVを読み直すため、verifyの費用がMにほぼ比例して増える（段階11の分析）。
+  改善なしでは得の多くが消える可能性がある。
+
+**位置づけ（2026-09-25ユーザー指示）**: 幅3・4を選べることは、[採否ルール](../../../../main-plan.md#変更の採否ルール2026-09-24ユーザー決定)の
+種類D（機能の追加）として**必ず実装して残す**。既定の幅をどうするか（WU-12D）とは切り離し、幅3・4が既定にならなくても、
+利用者が明示的に選べる機能として維持する。「使わない経路を残さない」整理の対象にもしない。
+WU-12Aの完了は機能の正しさだけで判断し、速度や探索の打切り線で中止しない。
+
+**WU-12A: 幅を2・3・4で選べるようにする（機能、必須）**
+
+**完了（2026-09-25）**。両GPUで既定幅2の回帰一致、幅3・4の固定seed反復、幅4の独立p/q残差oracle、
+全幅のstop・1 token／幅＋1予算・32-token context末尾とcleanupを確認した。
+幅2を既定に保ち、幅3・4の明示選択を残す。後続は幅4の重大退行を防ぐ確認に絞る
+（[履歴](../../../../../history/2026/09/21-30/phase87-stage12.md)）。
+
+1. `QWEN38_MTP_DRAFT_WIDTH`（従来は2に固定）を設定値にし、CLI（従来は幅0か2だけを受け付けた）とserverで2・3・4を選べるようにする。
+   既定は2のまま維持し、幅3・4の明示選択を残す。
+2. 幅固定のdraft／verify graph capture、候補ごとのsupport record、workspace、device制御記録、
+   verify行（幅＋1行）のKV書き戻しとGDN状態の保持・巻き戻しを、幅3・4で動くようにする。
+3. 両GPUで、幅2の出力が変更前と一致すること、幅3・4で固定seedの生成が決定的で、target単独と同じ分布の規則
+   （p/q受理と残差からの引き直し）を守ることを確認する。途中停止・予算・context末尾・cleanupも幅ごとに確認する。
+
+**段階12の受入を簡素化する最終ユーザー決定（2026-09-25）**: 既定幅はGPU共通で2に固定し、
+幅3・4は明示選択の機能として残す。GPU別の既定幅や、既定採否のための追加の26条件M3／M4・
+複数prompt AB/BAは行わない。既に取得した詳細ベンチマークは[履歴](../../../../../history/2026/09/21-30/phase87-stage12.md)へ残す。
+簡素化するのは段階12だけであり、段階10・11の範囲は維持する。
+
+**WU-12B: 取得済み測定と重大退行の原因確認**
+
+- `mtp-bench-v2`のTier A 26条件M1は両GPU・全幅で完了。M3／M4はR9700の幅2・3・4と
+  V620の幅2・3を取得した。R9700幅4の未最適化M4は幅2比`−89.57%`で、
+  M=5のNVFP4 MLPがID94からID59 row8へ落ちることをprofileで確認した。
+- V620幅4の未最適化26条件M3は追加しない。candidateのR9700幅4・26条件M3も
+  ユーザー指示時点で中止した原票として区別し、採否証拠へ含めない。
+
+**WU-12C: 幅4の深刻な退行を解消する**
+
+**完了（2026-09-25）**。両GPUのC1数値oracle／bitwise対照と単体比較がPASSし、
+本番serverの短い64出力要求で幅4／幅2の時間比はR9700 `1.075`、V620 `1.260`だった。
+どちらも2倍以下で、HIP-only・fallbackなし・cleanup・service復元を確認した。
+
+- 実際に使う`M=5`、`(K,N)=(5120,17408)`／`(17408,5120)`だけを既存ID94の共有算術へ接続する。
+  両exact GPUで独立数値oracle、現行row8とのbitwise一致、全roundの単体改善、M4/M6境界、
+  HIP-only、fallbackなし、cleanupを確認する。他の幅とMTPなしのselectorは変更しない。
+- productionの短い同一入力・固定seed・64出力要求を、幅2と幅4それぞれで両GPUのserverへ
+  1 warmup＋2 measured流す。各GPUで幅4の要求時間中央値が幅2の**2倍以下**、
+  64 token完走、NVFP4 companion一致、HIP-only、fallbackなし、cleanup・service復元を受入線とする。
+  これは過度な遅さの防止であり、幅4を既定採用する速度判定ではない。
+
+**WU-12D: 共通の既定幅と段階の完了**
+
+**完了（2026-09-25）**。GPU共通の既定幅2、明示選択の幅3・4で段階12を閉じた。
+短い要求での重大退行防止を受入とし、残る26条件M3と複数prompt AB/BAは
+ユーザー決定により段階12の受入から除外した。段階10・11の範囲は維持する。
+
+- 両GPUとも既定幅2を維持し、幅3・4は明示選択として残す。GPU別の既定値分岐を作らない。
+- WU-12Aの機能試験とWU-12Cの重大退行防止を照合し、結果・省略した測定・残る制約を履歴に記録して段階12を閉じる。
 
 ## 今後の順序（2026-09-22整理）
 
@@ -677,29 +893,40 @@ graph化でも取れないことは段階5で確認済みである。したが�
 3. **段階4: W×A16の廃止と契約の整理（WU-4Rを含め完了、2026-09-24）**
    - 呼び出し元のない旧NVFP4 W4A16 kernelも削除し、数値8／9／10は監査用tombstoneとして保持した。
    - 両GPUでlowp／HIP runtimeとQwen3.8のW4A4生成tokenを確認した。
-4. **WU-P1: Paged Attentionの試作と軽い検証（次、2026-09-24追加）**
-   - vAttentionを廃止してPaged Attentionへ完全移行するための判断材料を取る。本番sourceは変更しない。
-   - 問題がなければ、本移行をPhase 88のバッチ処理より前の独立した作業として計画する（下記「WU-P1」）。
-5. **段階3: MTP companionの形式（NVFP4 vs MXFP6）**
-   - READMEの方針決定に必要。5ポイント規則で採否を決める。
+4. **WU-P1: Paged Attentionの試作と軽い検証（2026-09-24完了）**
+   - 両GPUのkernel単体と数値が受入を通過。本番sourceは変更せず、本移行は段階10としてPhase 87へ統合した。
+5. **段階3: MTP companionの形式（WU-3Sまで完了、2026-09-24）**
+   - NVFP4とMXFP6のM1差は最大約1.01ポイントで5ポイント規則は不成立。MXFP6 companion sidecarは退役した。
+   - NVFP4はM4で両GPU1%以上改善した一方、通常AB/BAのTPOTは両GPUで悪化した。共通ルールを今回の判断へ適用せず、ユーザー決定でNVFP4を既定化して段階3を閉じた。
    - vllm-mxfp4はdrafterをMXFP4にすると受理が2.5→2.21へ落ち、FP8 per-channelなら2.60〜2.80を維持したと記録している。
      「低bit化で受理率が落ちると全体が遅くなる」という論点の先行事例として、評価時に参照する。
-6. **段階2の残り（V620のFP8 W8A8）と段階1（NVFP4 W4A4）**
+6. **段階2（V620のFP8 W8A8は新規採用なしで完了、2026-09-25）と段階1（NVFP4 W4A4、次）**
    - WU0再計測の余地はV620 FP8約1.05、V620 NVFP4約0.83、R9700 NVFP4約1.41 ms/token。
    - 着手前に、vllm-mxfp4側の技法（weightのWMMA fragment順配置＋non-temporal load、LDS padding、
      SGPRへのwave-uniform base address、小M用のTM=ceil(M/16)と深いsplit-K）とsLLM現行providerの差分を
      読み取りだけで確認し、未実装のものだけを候補にする。相手の数値は倍率として転用しない。
    - V620のNVFP4には[D系統](../../../../../history/2026/09/21-30/phase87-stage6.md)で打ち切った近傍依存（約1.9 ms/token）が残る。
      再開条件は満たさないが、このstageの対照は実モデルの先行条件で取る。
-7. **段階8: gate/upとGDN qkv/zのdual-output bundle（段階7の後に判断）**
-   - vllm-mxfp4のGDN in_proj mergeは約2.9%。sLLMは最大104 pairが対象だが、量子化は既に共有しており、
-     V620は段階6で並列枝になっているため、同じ削減量は期待しない。
-   - 段階7でproducer融合が入るとpairの前後関係が変わるため、順序はこの後にする。
-     対照はV620が並列枝、R9700が直列枝。
-8. **Phase 88（リクエストバッチ処理）**
-   - prefill向けのA-tiled producer-consumerやKV容量設計（group size選択）は、ここで扱う。
-   - WU-P1で問題がなければ、Paged Attentionへの本移行をPhase 88の開始条件とし、バッチ用のattention kernelと
-     KV管理はpagedを前提に書く。
+7. **段階12: MTP幅3・4への対応と最適化（段階1の後、2026-09-25追加）**
+   - 幅を2・3・4で選べるようにする（機能として必須、既定にしなくても残す）。a₃・a₄とM3からM4を見積もり、
+     M=4・5で重い処理を最適化し、既定の幅を変えるかを判断する。
+   - 見込みは1回あたりの確定token数で幅3が約+16%、幅4が約+25%。attentionの行間KV共有（段階11のC1）は前倒ししてよい。
+8. **段階10: Paged KV／Attentionへの本移行（2026-09-24、Phase 87へ統合）**
+   - 2026-09-25完了。vAttentionを廃止し、本番のdecode・prefillをblock単位のKV poolへ接続した。計算の構造は変えていない。
+   - 段階1（行列積）とは触るfileがほぼ重ならないため、並行してよい。graph／runtimeの共有fileを変えるときだけ順序を調整する。
+9. **段階11: attention kernelの最適化（段階10の後、2026-09-24追加）**
+   - 2026-09-25採否完了。MTP verifyのM=3行間KV共有を両GPUで限定採用。R9700のGQA共有とV620のM1内側loop、prefillのdot2／FP8 WMMA試作は不採用。
+   - 分析時点の上限の目安はMTPありで確定tokenあたり約10〜11%、prefillでTTFTの2〜3割で、Phase 87の残り候補の中で最も大きい。
+10. **段階8: gate/upとGDN qkv/zのdual-output bundle（2026-09-25にPhase 87から外し、[backlog](../../../../backlog.md)のP13へ移した）**
+   - 段階7の後に判断する予定だったが、判断されないまま残っていた。段階7後は、NVFP4 gate/upの活性値がproducerで量子化済みになり、
+     GDN qkv/zの量子化も共有済みのため、減るのは各組の起動1回分だけである。上限の目安は104組×node gapで
+     V620約0.54、R9700約0.46 ms/token（TPOTの約1%前後）。新しいkernel変種を伴う「重い変更」でend-to-end 1%が必要なため、
+     V620は並列枝の分だけ届かない見込みで、R9700がぎりぎりである。
+11. **[Phase 88（llama.cpp比のkernel効率）](../../../../active/2026/09/21-30/phase88-qwen38-llama-kernel-parity.md)**（2026-09-26新設）
+   - decode attentionのtile化、NVFP4 matvecのK方向分割、gate/up融合（旧段階8を含む）、GDN、prefill（A-tiled producer-consumerを含む）を扱う。
+12. **Phase 89（リクエストバッチ処理、旧Phase 88）**
+   - KV容量設計（group size選択）は、ここで扱う。
+   - 段階10（Paged KV本移行）はPhase 87の中で完了し、バッチ用のattention kernelとKV管理はpagedを前提に書く。
 
 ### 段階7の着手時上限と候補（2026-09-22）
 
@@ -709,18 +936,18 @@ node数と量子化時間は[段階0結果JSON](../../../../../history/2026/09/1
 MTPなし・127 transition実測（`sllm_matmul_bf16_to_fp8_outer_v2` 185回、
 `sllm_matmul_bf16_to_nvfp4_block16_wave8_v1` 112回、
 `sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1` 16回）を使う。
-採用に必要な速度は採用基準3より「通常計測TPOTの1%以上」＝ **V620 0.5948 ms/token、R9700 0.4662 ms/token**
-（段階6後の通常計測 16.8134／21.4513 tok/s を基準とする）。
+当時の通常計測はV620 16.8134／R9700 21.4513 tok/s（MTPなし）である。
+以下は2026-09-22時点の探索余地と打切り線であり、現在の採否ルールを定める表ではない。
 
-| family | node/token | 上限 V620 | 打切り線 V620 | 上限 R9700 | 打切り線 R9700 | 採用に必要 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| FP8 per-row | 185 | 2.9215 | 1.4607 | 2.4514 | 1.2257 | 0.5948／0.4662 |
-| NVFP4 block16＋tensor scale | 112 | 0.9869 | 0.4935 | 0.8217 | 0.4109 | 0.5948／0.4662 |
-| MXFP8 KV前処理 | 16 | 0.1590 | 0.0795 | 0.1192 | 0.0596 | 0.5948／0.4662 |
+| family | node/token | 上限 V620 | 打切り線 V620 | 上限 R9700 | 打切り線 R9700 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| FP8 per-row | 185 | 2.9215 | 1.4607 | 2.4514 | 1.2257 |
+| NVFP4 block16＋tensor scale | 112 | 0.9869 | 0.4935 | 0.8217 | 0.4109 |
+| MXFP8 KV前処理 | 16 | 0.1590 | 0.0795 | 0.1192 | 0.0596 |
 
-単位はms/token。**MXFP8 KV前処理は上限0.1590／0.1192が採用に必要な0.5948／0.4662を
-26%／25%しか満たさないため、100%実現しても採用基準3に到達できない。**
-候補C3として実装を開始せず、この算術で対象外とする（打切りではなく到達不能）。
+単位はms/token。MXFP8 KV前処理の上限0.1590／0.1192は、当時の全体TPOTの約0.27%／0.26%にとどまる。
+新kernelを伴う変更では[共通ルール](../../../../main-plan.md#変更の採否ルール2026-09-24ユーザー決定)の全体改善1%にも届かない見込みであり、
+候補C3としては実装せず[backlog](../../../../backlog.md)へ移した。
 
 **量子化185回／112回の producer 対応表（MTPなし）**
 
@@ -755,22 +982,20 @@ BF16の`linear.b_matmul`／`linear.a_matmul`とFP8のqkv/zが同時に消費し�
 
 **段階7の採否（2026-09-24）**: C1のうちproducer内でFP8行scaleを完結できる88 nodeを両GPUで採用した。
 同一processのHIP graph AB/BAでは88 node構成の短縮がV620 0.842541、R9700 0.704588 ms/replayで、
-各7 roundすべて1%採用基準を超えた。通常8192/128のMTPなし／ありも両GPUで段階6より速く、
+各7 roundすべて短縮率が1%を超えた。通常8192/128のMTPなし／ありも両GPUで段階6より速く、
 生成token列と固定128位置の全語彙logitsは段階6相当対照と一致した。
 `linear_attention_state`→GDN outの48 nodeはheadごとに分かれたkernelから全headの行amaxを求められず、
 `final_rmsnorm`→lm_headの1 nodeは最終行aliasからscale planeの最終行を参照できないため、今回の融合範囲から除外した。
 既に除外したLinearAttention `input_rmsnorm` 48 nodeと合わせ、未融合97 nodeを採用数に含めない。
-C2（NVFP4 producer融合、112 node）は、同一process単体でV620 0.263、R9700 0.325 ms（TPOT比0.45%／0.71%）と1%基準に届かない。
+C2（NVFP4 producer融合、112 node）は、同一process単体でV620 0.263、R9700 0.325 ms（TPOT比0.45%／0.71%）の短縮だった。
 それでも2026-09-24のユーザー決定で採用した。理由は、N0で全roundが改善し、実装が完了済みで、無効のまま経路を残さないため。
 C1+C2の通常計測（MTPなし）はV620 17.2036、R9700 21.9810 tok/sで、生成token列は段階6と一致した。MTPありはユーザー指示で再計測していない。
-C3は着手時の上限が1%基準に届かず対象外。[検証記録](../../../../../history/2026/09/21-30/phase87-stage7-c1.md)へ数値と残件を記録する。
+C3は着手時の上限が小さく対象外とした。[検証記録](../../../../../history/2026/09/21-30/phase87-stage7-c1.md)へ数値と残件を記録する。
 
 ### 当面着手しないもの
 
-- MTP draft headの低bit化＋厳密rerank。段階3の結果とhead寄与のprofileが先。
-  段階9の縮小語彙headと同じ費用（draft lm_head）を対象とするため、段階9の結果を見てから判断する。
-- MTP幅3の再比較。段階9と段階3でdraftが安くなった後に単回で行う（[探索記録](../../../../../history/2026/09/21-30/phase87-mtp-proposal-shortlist.md#あわせて見えたこと)）。
-- GDNのconv＋recurrent追加融合（相手側の単独効果0.4〜0.8%で1%基準に届かない見込み）。
+- MTP draft headの低bit化＋厳密rerank、MTP幅3の再比較、GDNのconv＋recurrent追加融合など、計画のない候補は
+  [未計画の課題一覧](../../../../backlog.md)へ移した（2026-09-24）。
 - vllm-mxfp4由来のうち[分析](../../../../../history/2026/09/21-30/vllm-mxfp4-optimization-analysis.md)で
   「適用しない」と整理した項目（MXFP4 W4A8形式、R4D attention、DFlash2、int2 target verify head、
   lazy GDN snapshot、KV pin、ParoQuant、TP関連、sourceの直接流用）。
@@ -792,7 +1017,7 @@ C3は着手時の上限が1%基準に届かず対象外。[検証記録](../../.
 - MXFP4 W4A6の実装（Phase 87では契約の書き換えだけを行う）。
 - MXFP6 KV等、READMEにあるKV形式の追加。
 - EXL3の導入（流用方針の決定が先に必要）。
-- リクエストバッチ処理（Phase 88）。
+- llama.cpp比のkernel効率（Phase 88）とリクエストバッチ処理（Phase 89）。
 
 ## 実行時の注意
 
@@ -819,3 +1044,17 @@ R9700 FP8単独追加評価: [不採用の測定根拠](../../../../../history/2
 段階4履歴: [W×A16廃止と契約整理](../../../../../history/2026/09/21-30/phase87-stage4.md)。
 
 段階9履歴: [MTP draft縮小語彙head](../../../../../history/2026/09/21-30/phase87-stage9.md)。
+
+WU-P1履歴: [Paged Attention試作](../../../../../history/2026/09/21-30/phase87-wu-p1-paged-attention.md)。
+
+段階3履歴: [MTP companion NVFP4／MXFP6比較](../../../../../history/2026/09/21-30/phase87-stage3.md)。
+
+WU-2V履歴: [V620 FP8 decode残件](../../../../../history/2026/09/21-30/phase87-wu-2v-v620-fp8.md)。
+
+段階1履歴: [NVFP4 W4A4 decode](../../../../../history/2026/09/21-30/phase87-stage1.md)。
+
+段階12履歴: [MTP幅3・4](../../../../../history/2026/09/21-30/phase87-stage12.md)。
+
+段階10履歴: [Paged KV本移行](../../../../../history/2026/09/21-30/phase87-stage10-paged-kv.md)。
+
+段階11履歴: [Paged attention kernel最適化](../../../../../history/2026/09/21-30/phase87-stage11.md)。

@@ -2,6 +2,7 @@
 #define SLLM_CAUSAL_ATTENTION_KERNEL_INTERNAL_HPP
 
 #include "decode_control_kernel_internal.hpp"
+#include "paged_kv_device_layout.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -142,6 +143,181 @@ constexpr const char *kGfx1201Gqa6RocblasF16TailLogicalKernelId =
     "causal_attention.prefill.gfx1201_rocblas_gqa6_f16_tail.v1";
 constexpr const char *kGfx1201Gqa6RocblasF16TailDeviceSymbol =
     "sllm_causal_attention_prefill_gfx1201_rocblas_gqa6_f16_tail_v1";
+
+// Phase 87 Stage10 production paged MXFP8-E4 entry points. The descriptor
+// table is capture-stable; descriptor[i] points at the six planes of physical
+// 128-token block i. These entries are intentionally internal and limited to
+// the exact Qwen3.8 GQA6 geometry used by WU-P1.
+constexpr const char *kPagedDecodeGqa6LogicalKernelId =
+    "causal_attention.paged_decode.gqa6_m1_m5.mxfp8_e4.v1";
+constexpr const char *kPagedDecodeGqa6DeviceSymbol =
+    "sllm_causal_attention_paged_decode_gqa6_m1_m5_mxfp8_e4_v1";
+// Stage11 C1 candidate.  The runtime gates this exact symbol to M3 and
+// committed KV>=8192 on gfx1030/gfx1201; all other shapes use the provider
+// above until the candidate is accepted.
+constexpr const char *kPagedDecodeGqa6C1M3LogicalKernelId =
+    "causal_attention.paged_decode.gqa6_c1_m3.mxfp8_e4.v1";
+constexpr const char *kPagedDecodeGqa6C1M3DeviceSymbol =
+    "sllm_causal_attention_paged_decode_gqa6_c1_m3_mxfp8_e4_v1";
+constexpr const char *kPagedPrefillGqa6LogicalKernelId =
+    "causal_attention.paged_prefill.gqa6_qtile8.mxfp8_e4.v1";
+constexpr const char *kPagedPrefillGqa6DeviceSymbol =
+    "sllm_causal_attention_paged_prefill_gqa6_qtile8_mxfp8_e4_v1";
+constexpr const char *kPagedPrefillGqa6Gfx1201WaveLogicalKernelId =
+    "causal_attention.paged_prefill.gqa6_wave.gfx1201.mxfp8_e4.v1";
+constexpr const char *kPagedPrefillGqa6Gfx1201WaveDeviceSymbol =
+    "sllm_causal_attention_paged_prefill_gqa6_wave_gfx1201_mxfp8_e4_v1";
+constexpr const char *kPagedPrefillGqa6QTile4LogicalKernelId =
+    "causal_attention.paged_prefill.gqa6_qtile4.mxfp8_e4.v1";
+constexpr const char *kPagedPrefillGqa6QTile4DeviceSymbol =
+    "sllm_causal_attention_paged_prefill_gqa6_qtile4_mxfp8_e4_v1";
+
+// Phase 87 Stage10 FP16 paged control path.  This deliberately reuses the
+// generic online-softmax reduction order and only changes the KV row lookup.
+// It is an opt-in internal launch until the production runtime owns the
+// paged append/attention transaction for FP16 states.
+constexpr const char *kPagedDecodeFp16LogicalKernelId =
+    "causal_attention.paged_decode.fp16_gqa.v1";
+constexpr const char *kPagedDecodeFp16DeviceSymbol =
+    "sllm_causal_attention_paged_decode_fp16_gqa_v1";
+constexpr const char *kPagedPrefillFp16LogicalKernelId =
+    "causal_attention.paged_prefill.fp16_gqa.v1";
+constexpr const char *kPagedPrefillFp16DeviceSymbol =
+    "sllm_causal_attention_paged_prefill_fp16_gqa_v1";
+// FP16 GQA4 prefill uses the legacy shared-wave arithmetic with only the
+// logical 128-token page lookup changed. Keep the existing public FP16
+// paged kernel id until the ABI constant table is extended.
+constexpr const char *kPagedPrefillGqa4LogicalKernelId =
+    "causal_attention.paged_prefill.gqa4_shared.v1";
+constexpr const char *kPagedPrefillGqa4DeviceSymbol =
+    "sllm_causal_attention_paged_prefill_gqa4_shared_v1";
+
+// Format-generic paged control path.  This is the exact generic online
+// softmax provider used by the contiguous fallback, with only the logical
+// 128-token block lookup changed.  It is intentionally an opt-in internal
+// entry point while production state migration is still in progress.
+constexpr const char *kPagedAttentionFormatsLogicalKernelId =
+    "causal_attention.paged.generic_formats.v1";
+constexpr const char *kPagedAttentionFormatsDeviceSymbol =
+    "sllm_causal_attention_paged_generic_formats_v1";
+
+constexpr uint32_t kPagedSlidingRingSlots = 9U;
+constexpr uint64_t kPagedSlidingWindowTokens = 1024U;
+constexpr const char *kPagedSlidingStaticFp8LogicalKernelId =
+    "causal_attention.paged_sliding_static_fp8_ring.v1";
+constexpr const char *kPagedSlidingStaticFp8DeviceSymbol =
+    "sllm_causal_attention_paged_sliding_static_fp8_ring_v1";
+
+hipError_t
+launch_paged_attention(const uint16_t *query, const uint32_t *logical_table,
+                       const sllm_paged_kv::BlockDescriptor *descriptor_table,
+                       uint32_t logical_table_count, uint32_t descriptor_count,
+                       uint32_t *device_status, uint16_t *output,
+                       uint32_t query_count, uint64_t start_position,
+                       uint64_t committed_kv_length, uint32_t q_heads,
+                       uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
+                       float static_key_scale, float static_value_scale,
+                       float score_scale, hipStream_t stream) noexcept;
+
+hipError_t launch_paged_decode_fp16(
+    const uint16_t *query, const uint32_t *logical_table,
+    const sllm_paged_kv::BlockDescriptor *descriptor_table,
+    uint32_t logical_table_count, uint32_t descriptor_count,
+    uint32_t *device_status, uint16_t *output, uint32_t query_count,
+    uint64_t start_position, uint64_t committed_kv_length, uint32_t q_heads,
+    uint32_t kv_heads, uint32_t head_dim, hipStream_t stream) noexcept;
+
+hipError_t launch_paged_prefill_fp16(
+    const uint16_t *query, const uint32_t *logical_table,
+    const sllm_paged_kv::BlockDescriptor *descriptor_table,
+    uint32_t logical_table_count, uint32_t descriptor_count,
+    uint32_t *device_status, uint16_t *output, uint32_t query_count,
+    uint64_t start_position, uint64_t committed_kv_length, uint32_t q_heads,
+    uint32_t kv_heads, uint32_t head_dim, hipStream_t stream) noexcept;
+
+hipError_t launch_paged_prefill_gqa4(
+    const uint16_t *query, const uint32_t *logical_table,
+    const sllm_paged_kv::BlockDescriptor *descriptor_table,
+    uint32_t logical_table_count, uint32_t descriptor_count,
+    uint32_t *device_status, uint16_t *output, uint32_t query_count,
+    uint64_t start_position, uint64_t committed_kv_length, uint32_t q_heads,
+    uint32_t kv_heads, uint32_t head_dim, hipStream_t stream) noexcept;
+
+hipError_t launch_paged_decode_fp16_device(
+    const uint16_t *query, const uint32_t *logical_table,
+    const sllm_paged_kv::BlockDescriptor *descriptor_table,
+    uint32_t logical_table_count, uint32_t descriptor_count,
+    uint32_t *device_status, uint16_t *output, uint32_t query_count,
+    uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim,
+    sllm_decode_control::ControlV1 *control, hipStream_t stream) noexcept;
+
+hipError_t launch_paged_decode_gqa6(
+    const uint16_t *query, const uint32_t *logical_table,
+    const sllm_paged_kv::BlockDescriptor *descriptor_table,
+    uint32_t logical_table_count, uint32_t descriptor_count,
+    uint32_t *device_status, float *workspace, uint64_t workspace_bytes,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, uint32_t encoding, bool use_gqa_shared,
+    hipStream_t stream) noexcept;
+
+/* Whole-decode graph variant for the paged MXFP8-E4 GQA6 provider.  The
+ * logical/descriptor/status/control pointers are capture-stable.  The
+ * captured launch reserves the P128 workspace/grid; each replay selects P32
+ * or P128 and its phase_position/phase_rows from the resident ControlV1. */
+hipError_t launch_paged_decode_gqa6_device(
+    const uint16_t *query, const uint32_t *logical_table,
+    const sllm_paged_kv::BlockDescriptor *descriptor_table,
+    uint32_t logical_table_count, uint32_t descriptor_count,
+    uint32_t *device_status, float *workspace, uint64_t workspace_bytes,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, uint32_t encoding, bool use_gqa_shared,
+    sllm_decode_control::ControlV1 *control, hipStream_t stream) noexcept;
+
+/* Stage 11 C1 test-only candidate.  Query rows 2/3 share the Paged MXFP8-E4
+ * KV tile while preserving the existing workspace and merge layout.  These
+ * entry points are intentionally separate from the production selector. */
+hipError_t launch_paged_decode_gqa6_c1(
+    const uint16_t *query, const uint32_t *logical_table,
+    const sllm_paged_kv::BlockDescriptor *descriptor_table,
+    uint32_t logical_table_count, uint32_t descriptor_count,
+    uint32_t *device_status, float *workspace, uint64_t workspace_bytes,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, uint32_t encoding, hipStream_t stream) noexcept;
+
+hipError_t launch_paged_decode_gqa6_c1_device(
+    const uint16_t *query, const uint32_t *logical_table,
+    const sllm_paged_kv::BlockDescriptor *descriptor_table,
+    uint32_t logical_table_count, uint32_t descriptor_count,
+    uint32_t *device_status, float *workspace, uint64_t workspace_bytes,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, uint32_t encoding,
+    sllm_decode_control::ControlV1 *control, hipStream_t stream) noexcept;
+
+hipError_t launch_paged_prefill_gqa6(
+    const uint16_t *query, const uint32_t *logical_table,
+    const sllm_paged_kv::BlockDescriptor *descriptor_table,
+    uint32_t logical_table_count, uint32_t descriptor_count,
+    uint32_t *device_status, uint16_t *output, uint32_t query_count,
+    uint64_t start_position, uint64_t committed_kv_length, uint32_t q_heads,
+    uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
+    float static_key_scale, float static_value_scale, bool wave_local_kv,
+    bool use_gfx1201_wave_provider, bool use_gfx1201_qtile4_provider,
+    hipStream_t stream) noexcept;
+
+hipError_t launch_paged_sliding_static_fp8_attention(
+    const uint16_t *query, const uint32_t *ring_table,
+    const uint64_t *ring_tags,
+    const sllm_paged_kv::BlockDescriptor *descriptor_table,
+    uint32_t ring_slot_count, uint32_t descriptor_count,
+    uint32_t *device_status, uint16_t *output, uint32_t query_count,
+    uint64_t start_position, uint64_t committed_kv_length,
+    uint64_t retained_start, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, float static_key_scale, float static_value_scale,
+    float score_scale, hipStream_t stream) noexcept;
 hipError_t
 launch(const uint16_t *query, const void *key, const void *value,
        const void *key_scales, const void *value_scales,

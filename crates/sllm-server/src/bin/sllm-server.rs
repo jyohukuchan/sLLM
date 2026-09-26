@@ -129,6 +129,7 @@ struct Config {
     library_only: bool,
     qwen38_nvfp4: Option<PathBuf>,
     mtp_weights: Option<PathBuf>,
+    mtp_draft_width: usize,
     gguf: PathBuf,
     derived_lock: Option<PathBuf>,
     mtp_assistant_gguf_path: Option<PathBuf>,
@@ -199,6 +200,18 @@ where
         .is_some_and(|path| path.as_os_str().is_empty() || !path.is_absolute())
     {
         return Err("--mtp-weights path must be absolute".to_owned());
+    }
+    let mtp_draft_width_requested = values.remove("--mtp-draft-width");
+    if mtp_draft_width_requested.is_some() && qwen38_nvfp4.is_none() {
+        return Err("--mtp-draft-width requires --qwen38-nvfp4".to_owned());
+    }
+    let mtp_draft_width = mtp_draft_width_requested
+        .as_deref()
+        .map(|value| parse_value::<usize>(value, "MTP draft width"))
+        .transpose()?
+        .unwrap_or(sllm_core::QWEN38_MTP_DRAFT_WIDTH);
+    if !(2..=4).contains(&mtp_draft_width) {
+        return Err("--mtp-draft-width must be 2, 3, or 4".to_owned());
     }
     let legacy_gguf = values.remove("--gguf");
     let legacy_derived_lock = values.remove("--derived-lock");
@@ -582,6 +595,11 @@ where
             "--mtp-weights requires --draft mtp-auto; remove the sidecar or enable MTP".to_owned(),
         );
     }
+    if mtp_draft_width_requested.is_some()
+        && !matches!(phase41.draft, DraftStartupConfigV1::MtpAuto)
+    {
+        return Err("--mtp-draft-width requires --draft mtp-auto".to_owned());
+    }
     if mtp_assistant_gguf_path.is_some() {
         if models.is_some() || library_only {
             return Err(
@@ -602,6 +620,7 @@ where
     Ok(Config {
         qwen38_nvfp4,
         mtp_weights,
+        mtp_draft_width,
         models,
         library_only,
         gguf,
@@ -687,6 +706,7 @@ fn run(config: Config) -> Result<(), String> {
                 completion_timeout: config.completion_timeout,
                 shutdown_timeout: config.shutdown_timeout,
                 context_length: config.context_length.unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
+                mtp_draft_width: config.mtp_draft_width,
                 phase41: config.phase41.clone(),
             }).map_err(|error| error.to_string())?;
             (ActiveBackend::Qwen(Arc::new(backend)), KvCacheSelectionReportV1::qwen38_nvfp4(kv_cache_encoding))
@@ -2179,7 +2199,7 @@ fn reject_disabled_options(
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server [--qwen38-nvfp4 ABSOLUTE_DIRECTORY [--mtp-weights ABSOLUTE_DIRECTORY] (V620 gfx1030 or R9700 gfx1201, single request, FP16 or MXFP8 E4 KV; --draft mtp-auto uses bundled model_mtp.safetensors when --mtp-weights is absent) | --models PATH | --gguf PATH [--derived-lock PATH] --device-index N --target GFX [--mtp-assistant-gguf PATH --mtp-assistant-derived-lock PATH --draft mtp-auto]] [--listen HOST:PORT] [--webui true|false] [--webui-port PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4|kv-mxfp8-e4|kv-mxfp8-e5] (Qwen default: kv-mxfp8-e4; Gemma 4 MoE: auto or fp8-static only; direct official Ministral 3: FP16 only; FP16 rollback applies to Qwen) [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
+    "usage: sllm-server [--qwen38-nvfp4 ABSOLUTE_DIRECTORY [--mtp-weights ABSOLUTE_DIRECTORY] [--mtp-draft-width 2|3|4] (V620 gfx1030 or R9700 gfx1201, single request, FP16 or MXFP8 E4 KV; --draft mtp-auto uses reviewed .sllm/mtp-nvfp4-v1 sidecar when --mtp-weights is absent) | --models PATH | --gguf PATH [--derived-lock PATH] --device-index N --target GFX [--mtp-assistant-gguf PATH --mtp-assistant-derived-lock PATH --draft mtp-auto]] [--listen HOST:PORT] [--webui true|false] [--webui-port PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4|kv-mxfp8-e4|kv-mxfp8-e5] (Qwen default: kv-mxfp8-e4; Gemma 4 MoE: auto or fp8-static only; direct official Ministral 3: FP16 only; FP16 rollback applies to Qwen) [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
 }
 
 #[cfg(test)]
@@ -2229,6 +2249,20 @@ mod tests {
         assert_eq!(config.device_index, 0);
         assert_eq!(config.model, "qwen3.8-27b-nvfp4");
         assert_eq!(config.kv_cache_encoding, Some(KvCacheEncoding::Mxfp8E4));
+        assert_eq!(config.mtp_draft_width, 2);
+        for width in [2, 3, 4] {
+            let value = width.to_string();
+            let selected = parse_args_from([
+                "--qwen38-nvfp4",
+                "/models/qwen38",
+                "--draft",
+                "mtp-auto",
+                "--mtp-draft-width",
+                value.as_str(),
+            ])
+            .unwrap();
+            assert_eq!(selected.mtp_draft_width, width);
+        }
         let companion = parse_args_from([
             "--qwen38-nvfp4",
             "/models/qwen38",
@@ -2301,6 +2335,24 @@ mod tests {
             assert!(parse_args_from(args).is_err());
         }
         assert!(parse_args_from(["--qwen38-nvfp4", "relative"]).is_err());
+        for width in ["0", "1", "5"] {
+            assert!(
+                parse_args_from([
+                    "--qwen38-nvfp4",
+                    "/models/qwen38",
+                    "--draft",
+                    "mtp-auto",
+                    "--mtp-draft-width",
+                    width,
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            parse_args_from(["--qwen38-nvfp4", "/models/qwen38", "--mtp-draft-width", "4",])
+                .is_err()
+        );
+        assert!(parse_args_from(["--mtp-draft-width", "4"]).is_err());
         assert!(
             parse_args_from([
                 "--qwen38-nvfp4",

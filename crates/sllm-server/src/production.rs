@@ -11,20 +11,21 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sllm_core::{
-    AdapterModelDimsV1, AdapterRequestSetV1, AllocationSnapshot, Backend, CheckpointIdentity,
-    CheckpointStore, CompiledGrammar, ContextPositionPolicyV1, ContextWindowStateV1,
-    ControlVectorLockV1, ControlVectorSelectionV1, DerivedGgufLock, DraftProposalV1,
-    DrySamplingConfigV1 as CoreDrySamplingConfigV1, DynamicTemperatureV1, EmbeddingPoolV1,
-    ExecutionSession, ExecutionSessionRequest, GEMMA4_12B_IT_FINGERPRINT, GEMMA4_HIDDEN_SIZE,
-    GEMMA4_MOE_MODEL_FINGERPRINT, GEMMA4_MTP_FINGERPRINT, GEMMA4_RECOMMENDED_CONTEXT_TOKENS,
-    Gemma4ModelLock, Gemma4MoeExecutionOutput, Gemma4MoeExecutionRequest,
-    Gemma4MoePrefixForkAuditV1, Gemma4MoePrefixStateV1, Gemma4MoeResidentModel, Gemma4MtpModelLock,
-    Gemma4MtpResidentModel, Gemma4PrefixForkAuditV1, Gemma4PrefixStateV1, Gemma4ResidentModel,
-    Gemma4TensorBacking, KvCacheEncoding, KvCacheSelection, KvCacheSelectionSource,
-    KvFp8PhysicalVariant, KvStateDescriptor, LogitBiasV1 as CoreLogitBiasV1, LoraAdapterLockV1,
-    LoraAdapterSelectionV1, MINISTRAL3_CONTEXT_LENGTH, MINISTRAL3_MODEL_ALIAS,
-    MINISTRAL3_MODEL_LOCK_FINGERPRINT, Ministral3ModelLock, Ministral3ResidentModel,
-    MirostatModeV1, MirostatSamplingConfigV1 as CoreMirostatSamplingConfigV1, ModelLock,
+    AdapterModelDimsV1, AdapterRequestSetV1, AllocationSnapshot, Backend, CHECKPOINT_MAGIC,
+    CheckpointIdentity, CheckpointStore, CompiledGrammar, ContextPositionPolicyV1,
+    ContextWindowStateV1, ControlVectorLockV1, ControlVectorSelectionV1, DerivedGgufLock,
+    DraftProposalV1, DrySamplingConfigV1 as CoreDrySamplingConfigV1, DynamicTemperatureV1,
+    EmbeddingPoolV1, ExecutionSession, ExecutionSessionRequest, GEMMA4_12B_IT_FINGERPRINT,
+    GEMMA4_HIDDEN_SIZE, GEMMA4_MOE_MODEL_FINGERPRINT, GEMMA4_MTP_FINGERPRINT,
+    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, Gemma4ModelLock, Gemma4MoeExecutionOutput,
+    Gemma4MoeExecutionRequest, Gemma4MoePrefixForkAuditV1, Gemma4MoePrefixStateV1,
+    Gemma4MoeResidentModel, Gemma4MtpModelLock, Gemma4MtpResidentModel, Gemma4PrefixForkAuditV1,
+    Gemma4PrefixStateV1, Gemma4ResidentModel, Gemma4TensorBacking, KvCacheEncoding,
+    KvCacheSelection, KvCacheSelectionSource, KvFp8PhysicalVariant, KvPhysicalMemoryMetadata,
+    KvStateDescriptor, LogitBiasV1 as CoreLogitBiasV1, LoraAdapterLockV1, LoraAdapterSelectionV1,
+    MINISTRAL3_CONTEXT_LENGTH, MINISTRAL3_MODEL_ALIAS, MINISTRAL3_MODEL_LOCK_FINGERPRINT,
+    Ministral3ModelLock, Ministral3ResidentModel, MirostatModeV1,
+    MirostatSamplingConfigV1 as CoreMirostatSamplingConfigV1, ModelLock, MtpWeightEncoding,
     NgramDraftProviderV1, OsSamplingRandom, PrefixCacheConfigV1, PrefixCacheKeyV1, PrefixCacheV1,
     PrefixCacheValueV1, PrefixEntryIdV1, PrefixKvLayoutV1, PrefixLeaseV1, PrefixLookupKind,
     PrefixStateIdentityV1, QWEN35_4B_FINGERPRINT, QWEN35_HIDDEN_SIZE,
@@ -33,7 +34,7 @@ use sllm_core::{
     QwenGraphStateDescriptor, QwenMultimodalImageEmbedding, QwenMultimodalPrompt,
     QwenPrefixForkAuditV1, QwenPrefixStateV1, QwenResidentModel, QwenVisionExecutionInput,
     QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock, SamplerChainConfigV1,
-    SamplerChainV1, SessionCheckpoint, SpeculativeAccountingV1, VerifiedCache,
+    SamplerChainV1, SessionCheckpoint, SessionCheckpointV2, SpeculativeAccountingV1, VerifiedCache,
     VerifiedControlVectorPayloadV1, VerifiedFp8Sidecar, VerifiedGgufGemma4Moe,
     VerifiedGgufGemma4Mtp, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe,
     VerifiedGgufWeightSource, VerifiedLoraPayloadV1, VerifiedMinistral3WeightSource,
@@ -93,16 +94,16 @@ const GEMMA_FIXED_TOP_K_V1: usize = 64;
 // the full vocabulary.  The device selector must support this tuple before
 // a request can leave the backend (there is no host fallback).
 const MINISTRAL_FIXED_TOP_K_V1: usize = 0;
+const QWEN38_DEFAULT_MTP_NVFP4_DIRECTORY: &str = ".sllm/mtp-nvfp4-v1";
+const QWEN38_DEFAULT_MTP_NVFP4_DIGEST: &str =
+    "sha256:d9698c41954ef7b53a2937c0f662ac2a273f1bdc40c602f77d4928b63de991e1";
 const GEMMA4_RAW_CHAT_MAX_BYTES: usize = 16 * 1024 * 1024;
-const GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN: u64 = 172_032;
 const GEMMA4_MTP_MAX_CONTEXT_TOKENS: u32 = 2_048;
 // 25 sliding layers (8x256 K/V) and 5 full layers (2x512 K/V), one byte per
 // FP8 plane.  This is the fixed Gemma 4 MoE graph recipe, not the dense model
 // accounting above.
-const GEMMA4_MOE_STATIC_FP8_KV_BYTES_PER_TOKEN: u64 = 112_640;
 // 26 full-attention layers, each with 8 KV heads x 128 dimensions, two-byte
 // FP16 elements, and separate K/V planes.
-const MINISTRAL3_FP16_KV_BYTES_PER_TOKEN: u64 = 106_496;
 
 /// Returns whether the logprob controls are semantically disabled.
 ///
@@ -1507,8 +1508,8 @@ pub struct QwenBackendConfigV1 {
 #[derive(Clone, Debug)]
 pub struct Qwen38Nvfp4BackendConfigV1 {
     pub artifact_root: PathBuf,
-    /// Optional verified MTP companion sidecar.  When absent, the exact
-    /// bundled BF16 `model_mtp.safetensors` path remains the rollback/default.
+    /// Explicit sidecar override. With MTP enabled, absence selects the
+    /// reviewed NVFP4 sidecar under the artifact root.
     pub mtp_weights: Option<PathBuf>,
     pub device_index: u32,
     pub target: String,
@@ -1516,10 +1517,24 @@ pub struct Qwen38Nvfp4BackendConfigV1 {
     pub shutdown_timeout: Duration,
     pub context_length: u32,
     pub kv_cache_encoding: KvCacheEncoding,
+    pub mtp_draft_width: usize,
     pub phase41: Phase41ProductionConfigV1,
 }
 
 impl Qwen38Nvfp4BackendConfigV1 {
+    fn resolved_mtp_companion(&self) -> Option<(PathBuf, bool)> {
+        if !matches!(self.phase41.draft, DraftStartupConfigV1::MtpAuto) {
+            return None;
+        }
+        Some(match &self.mtp_weights {
+            Some(path) => (path.clone(), false),
+            None => (
+                self.artifact_root.join(QWEN38_DEFAULT_MTP_NVFP4_DIRECTORY),
+                true,
+            ),
+        })
+    }
+
     pub fn validate(&self) -> Result<(), BackendErrorV1> {
         if self.artifact_root.as_os_str().is_empty()
             || self
@@ -1540,6 +1555,11 @@ impl Qwen38Nvfp4BackendConfigV1 {
                 "Qwen3.8 NVFP4 requires a non-empty absolute artifact root, an optional absolute MTP sidecar path, logical device index 0, exact target gfx1030 or gfx1201, valid timeouts, nonzero context length, and FP16 or MXFP8 E4 KV",
             ));
         }
+        if !(2..=4).contains(&self.mtp_draft_width) {
+            return Err(BackendErrorV1::new(
+                "Qwen3.8 MTP draft width must be 2, 3, or 4",
+            ));
+        }
         self.phase41.validate()?;
         validate_qwen_phase41_operational_config(&self.phase41)?;
         if self.mtp_weights.is_some()
@@ -1547,6 +1567,13 @@ impl Qwen38Nvfp4BackendConfigV1 {
         {
             return Err(BackendErrorV1::new(
                 "Qwen3.8 MTP companion sidecar requires MTP draft execution",
+            ));
+        }
+        if self.mtp_draft_width != QWEN38_MTP_DRAFT_WIDTH
+            && matches!(self.phase41.draft, DraftStartupConfigV1::Disabled)
+        {
+            return Err(BackendErrorV1::new(
+                "Qwen3.8 MTP draft width requires MTP draft execution",
             ));
         }
         Ok(())
@@ -2550,6 +2577,13 @@ pub struct ProductionRequestAuditV1 {
     pub tokens_per_page: Option<u64>,
     pub mapped_kv_capacity_tokens: Option<u64>,
     pub committed_kv_bytes: Option<u64>,
+    pub paged_token_block_size: Option<u32>,
+    pub paged_physical_layout_version: Option<u32>,
+    pub paged_logical_table_capacity: Option<u64>,
+    pub paged_max_physical_blocks: Option<u64>,
+    pub paged_allocated_physical_blocks: Option<u64>,
+    pub paged_committed_bytes_per_plane: Option<[u64; 6]>,
+    pub paged_committed_bytes_total: Option<u64>,
     pub prefill_chunk_capacity_tokens: Option<u64>,
     pub prefill_chunk_count: Option<u64>,
     pub placement_total_memory_bytes: Option<u64>,
@@ -2566,6 +2600,52 @@ pub struct ProductionRequestAuditV1 {
     pub cleanup_request_state_bytes: u64,
     pub cleanup_workspace_bytes: u64,
     pub phase41: ProductionPhase41AuditV1,
+}
+
+#[derive(Default)]
+struct GemmaMoeKvAuditFields {
+    kv_memory_kind: Option<String>,
+    committed_kv_bytes: Option<u64>,
+    paged_token_block_size: Option<u32>,
+    paged_physical_layout_version: Option<u32>,
+    paged_logical_table_capacity: Option<u64>,
+    paged_max_physical_blocks: Option<u64>,
+    paged_allocated_physical_blocks: Option<u64>,
+    paged_committed_bytes_per_plane: Option<[u64; 6]>,
+    paged_committed_bytes_total: Option<u64>,
+}
+
+fn gemma_moe_kv_audit_fields(
+    layers: Option<&[(u32, Option<KvPhysicalMemoryMetadata>)]>,
+) -> GemmaMoeKvAuditFields {
+    let Some(layers) = layers.filter(|layers| !layers.is_empty()) else {
+        return GemmaMoeKvAuditFields::default();
+    };
+    let all_paged = layers
+        .iter()
+        .all(|(_, metadata)| matches!(metadata, Some(KvPhysicalMemoryMetadata::Paged(_))));
+    if all_paged {
+        let Some(KvPhysicalMemoryMetadata::Paged(first)) =
+            layers.first().and_then(|(_, metadata)| metadata.as_ref())
+        else {
+            return GemmaMoeKvAuditFields::default();
+        };
+        let uniform = layers.iter().all(|(_, metadata)| {
+            matches!(metadata, Some(KvPhysicalMemoryMetadata::Paged(value)) if value == first)
+        });
+        return GemmaMoeKvAuditFields {
+            kv_memory_kind: Some("paged".to_owned()),
+            committed_kv_bytes: uniform.then_some(first.committed_bytes_total()),
+            paged_token_block_size: Some(first.token_block_size()),
+            paged_physical_layout_version: Some(first.physical_layout_version()),
+            paged_logical_table_capacity: uniform.then_some(first.logical_table_capacity()),
+            paged_max_physical_blocks: uniform.then_some(first.max_physical_blocks()),
+            paged_allocated_physical_blocks: uniform.then_some(first.allocated_physical_blocks()),
+            paged_committed_bytes_per_plane: uniform.then_some(first.committed_bytes_per_plane()),
+            paged_committed_bytes_total: uniform.then_some(first.committed_bytes_total()),
+        };
+    }
+    GemmaMoeKvAuditFields::default()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -2605,6 +2685,7 @@ pub enum ProductionDraftProviderV1 {
 pub struct ProductionPhase41AuditV1 {
     pub prefix_cache_result: Option<ProductionPrefixCacheResultV1>,
     pub prefix_shared_pages: u64,
+    pub prefix_shared_blocks: u64,
     pub prefix_cow_pages: u64,
     pub prefix_copied_bytes: u64,
     pub checkpoint_operation: Option<ProductionCheckpointOperationV1>,
@@ -2696,14 +2777,68 @@ struct QwenPrefixHitV1 {
     kind: PrefixLookupKind,
 }
 
+/// Classifies a failed V2 load without accepting a legacy V1 payload.
+///
+/// The store's public loaders fully validate their respective envelopes. The
+/// bounded header read identifies only the exact legacy magic; every other
+/// result remains a V2 load failure. This keeps malformed V2 bytes from being
+/// reinterpreted through the V1 loader and avoids exposing a checkpoint path
+/// or payload in the startup error.
+fn checkpoint_v2_load_error(
+    store: &CheckpointStore,
+    name: &str,
+    model: &str,
+    target: &str,
+) -> BackendErrorV1 {
+    let legacy_magic = validate_checkpoint_name(name)
+        .is_ok()
+        .then(|| {
+            let path = store.root().join(format!("{name}.ckpt"));
+            fs::symlink_metadata(&path)
+                .ok()
+                .filter(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+                .and_then(|metadata| {
+                    let mut options = OpenOptions::new();
+                    options.read(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+                    }
+                    let file = options.open(&path).ok()?;
+                    let opened = file.metadata().ok()?;
+                    if !opened.is_file() || opened.len() != metadata.len() {
+                        return None;
+                    }
+                    let mut magic = [0_u8; 8];
+                    (&file).take(8).read_exact(&mut magic).ok()?;
+                    Some(magic)
+                })
+        })
+        .flatten();
+    if legacy_magic == Some(CHECKPOINT_MAGIC) {
+        BackendErrorV1::new(format!(
+            "{model} V1 checkpoint is unsupported; recreate it as V2"
+        ))
+    } else if !matches!(target, "gfx1030" | "gfx1201") {
+        BackendErrorV1::new(format!(
+            "{model} V2 checkpoint requires exact gfx1030 or gfx1201 target"
+        ))
+    } else {
+        BackendErrorV1::new(format!("{model} V2 checkpoint load failed"))
+    }
+}
+
 struct QwenCheckpointRuntimeV1 {
     store: Arc<CheckpointStore>,
     loaded: Option<Arc<SessionCheckpoint>>,
+    loaded_v2: Option<Arc<SessionCheckpointV2>>,
     save_name: Option<String>,
+    save_v2: bool,
 }
 
 struct QwenCapturedChatCheckpointV1 {
-    checkpoint: SessionCheckpoint,
+    checkpoint: SessionCheckpointV2,
     text: String,
     reasoning: Option<String>,
     prompt_tokens: u64,
@@ -2715,6 +2850,7 @@ struct QwenCheckpointSaveV1 {
     identity: CheckpointIdentity,
     prompt_tokens: Vec<u32>,
     status: Arc<AtomicU8>,
+    v2: bool,
 }
 
 const CHECKPOINT_STATUS_NONE: u8 = 0;
@@ -3058,6 +3194,7 @@ struct QwenBackendStateV1 {
     mtp_resident: Option<QwenResidentModel>,
     mtp_plan: Option<WeightLoadPlan>,
     mtp_companion: Option<Arc<VerifiedQwen38MtpQuantizedSidecar>>,
+    qwen38_mtp_draft_width: Option<usize>,
     session: Arc<ExecutionSession>,
     target: String,
     model_ready_current_bytes: u64,
@@ -3203,10 +3340,10 @@ struct Gemma4BackendStateV1 {
     target: String,
     model_ready_current_bytes: u64,
     weight_encoding: String,
-    kv_bytes_per_token: u64,
     phase41: Phase41ProductionConfigV1,
     prefix_cache: GemmaPrefixCacheRuntimeV1,
     checkpoint: Option<QwenCheckpointRuntimeV1>,
+    paged_v2_checkpoint: bool,
     checkpoint_descriptor_digest: Option<[u8; 32]>,
 }
 
@@ -3224,6 +3361,7 @@ struct Gemma4MoeBackendStateV1 {
     phase41: Phase41ProductionConfigV1,
     prefix_cache: GemmaMoePrefixCacheRuntimeV1,
     checkpoint: Option<QwenCheckpointRuntimeV1>,
+    paged_v2_checkpoint: bool,
     checkpoint_descriptor_digest: Option<[u8; 32]>,
 }
 
@@ -3357,6 +3495,13 @@ fn qwen_checkpoint_kv_descriptor_digest(graph: &QwenGraph) -> [u8; 32] {
         }
     }
     qwen_kv_descriptor_digest(descriptors)
+}
+
+fn qwen_graph_has_kv_state(graph: &QwenGraph) -> bool {
+    graph
+        .states()
+        .iter()
+        .any(|state| matches!(state.descriptor(), QwenGraphStateDescriptor::Kv(_)))
 }
 
 fn qwen_kv_descriptor_digest(
@@ -3561,16 +3706,26 @@ fn build_gemma_moe_checkpoint_runtime(
         Arc::new(CheckpointStore::new(directory, *quota_bytes).map_err(|_| {
             BackendErrorV1::new("Gemma MoE checkpoint store initialization failed")
         })?);
-    let loaded = load_name
-        .as_deref()
-        .map(|name| {
-            store
-                .load_validated(name)
-                .map(Arc::new)
-                .map_err(|_| BackendErrorV1::new("Gemma MoE checkpoint load failed"))
-        })
-        .transpose()?;
-    if let Some(checkpoint) = loaded.as_ref() {
+    let v2_eligible = matches!(target, "gfx1030" | "gfx1201");
+    let mut loaded_v2 = None;
+    let save_v2 = v2_eligible;
+    if save_name.is_some() && !v2_eligible {
+        return Err(BackendErrorV1::new(
+            "Gemma MoE V2 checkpoint save requires exact gfx1030 or gfx1201 target",
+        ));
+    }
+    if let Some(name) = load_name.as_deref() {
+        if !v2_eligible {
+            return Err(checkpoint_v2_load_error(&store, name, "Gemma MoE", target));
+        }
+        match store.load_v2_validated(name) {
+            Ok(checkpoint) => loaded_v2 = Some(Arc::new(checkpoint)),
+            Err(_) => {
+                return Err(checkpoint_v2_load_error(&store, name, "Gemma MoE", target));
+            }
+        }
+    }
+    if let Some(checkpoint) = loaded_v2.as_ref() {
         let expected = gemma_moe_checkpoint_identity(
             plan,
             tokenizer,
@@ -3581,18 +3736,31 @@ fn build_gemma_moe_checkpoint_runtime(
         )?;
         if checkpoint.header.identity != expected {
             return Err(BackendErrorV1::new(
-                "Gemma MoE checkpoint identity differs from the running model",
+                "Gemma MoE V2 checkpoint identity differs from the running model",
             ));
         }
     }
     Ok(Some(QwenCheckpointRuntimeV1 {
         store,
-        loaded,
+        loaded: None,
+        loaded_v2,
         save_name: save_name.clone(),
+        save_v2,
     }))
 }
 
 fn gemma_moe_checkpoint_terminal_token(checkpoint: &SessionCheckpoint) -> Option<i32> {
+    let marker = b"sllm-gemma4-moe-terminal-v1";
+    let bytes = checkpoint.payload.sampler_state.as_slice();
+    if bytes.get(..marker.len()) != Some(marker) {
+        return None;
+    }
+    let token_start = marker.len();
+    let token = i32::from_le_bytes(bytes.get(token_start..token_start + 4)?.try_into().ok()?);
+    (0..262_144).contains(&token).then_some(token)
+}
+
+fn gemma_moe_checkpoint_terminal_token_v2(checkpoint: &SessionCheckpointV2) -> Option<i32> {
     let marker = b"sllm-gemma4-moe-terminal-v1";
     let bytes = checkpoint.payload.sampler_state.as_slice();
     if bytes.get(..marker.len()) != Some(marker) {
@@ -3757,16 +3925,26 @@ fn build_gemma_checkpoint_runtime(
         CheckpointStore::new(directory, *quota_bytes)
             .map_err(|_| BackendErrorV1::new("Gemma checkpoint store initialization failed"))?,
     );
-    let loaded = load_name
-        .as_deref()
-        .map(|name| {
-            store
-                .load_validated(name)
-                .map(Arc::new)
-                .map_err(|_| BackendErrorV1::new("Gemma checkpoint load failed"))
-        })
-        .transpose()?;
-    if let Some(checkpoint) = loaded.as_ref() {
+    let v2_eligible = matches!(target, "gfx1030" | "gfx1201");
+    let mut loaded_v2 = None;
+    let save_v2 = v2_eligible;
+    if save_name.is_some() && !v2_eligible {
+        return Err(BackendErrorV1::new(
+            "Gemma V2 checkpoint save requires exact gfx1030 or gfx1201 target",
+        ));
+    }
+    if let Some(name) = load_name.as_deref() {
+        if !v2_eligible {
+            return Err(checkpoint_v2_load_error(&store, name, "Gemma", target));
+        }
+        match store.load_v2_validated(name) {
+            Ok(checkpoint) => loaded_v2 = Some(Arc::new(checkpoint)),
+            Err(_) => {
+                return Err(checkpoint_v2_load_error(&store, name, "Gemma", target));
+            }
+        }
+    }
+    if let Some(checkpoint) = loaded_v2.as_ref() {
         let expected = gemma_checkpoint_identity(
             graph.lock_fingerprint(),
             plan,
@@ -3777,14 +3955,16 @@ fn build_gemma_checkpoint_runtime(
         )?;
         if checkpoint.header.identity != expected {
             return Err(BackendErrorV1::new(
-                "Gemma checkpoint identity differs from the running model",
+                "Gemma V2 checkpoint identity differs from the running model",
             ));
         }
     }
     Ok(Some(QwenCheckpointRuntimeV1 {
         store,
-        loaded,
+        loaded: None,
+        loaded_v2,
         save_name: save_name.clone(),
+        save_v2,
     }))
 }
 
@@ -3856,7 +4036,7 @@ fn build_qwen_checkpoint_runtime(
     _plan: &WeightLoadPlan,
     _tokenizer: &TokenizerFrontendV1,
     _renderer: &Qwen35ChatTemplateV1,
-    _target: &str,
+    target: &str,
     fp8_provider: Option<&str>,
     _kv_cache_encoding: KvCacheEncoding,
 ) -> Result<Option<QwenCheckpointRuntimeV1>, BackendErrorV1> {
@@ -3878,19 +4058,33 @@ fn build_qwen_checkpoint_runtime(
         CheckpointStore::new(directory, *quota_bytes)
             .map_err(|_| BackendErrorV1::new("Qwen checkpoint store initialization failed"))?,
     );
-    let loaded = load_name
-        .as_deref()
-        .map(|name| {
-            store
-                .load_validated(name)
-                .map(Arc::new)
-                .map_err(|_| BackendErrorV1::new("Qwen checkpoint load failed"))
-        })
-        .transpose()?;
+    let v2_eligible = qwen_graph_has_kv_state(graph)
+        && matches!(target, "gfx1030" | "gfx1201")
+        && fp8_provider.is_none();
+    let mut loaded_v2 = None;
+    let save_v2 = v2_eligible;
+    if save_name.is_some() && !v2_eligible {
+        return Err(BackendErrorV1::new(
+            "Qwen V2 checkpoint save requires exact dense BF16 gfx1030 or gfx1201 target",
+        ));
+    }
+    if let Some(name) = load_name.as_deref() {
+        if !v2_eligible {
+            return Err(checkpoint_v2_load_error(&store, name, "Qwen", target));
+        }
+        match store.load_v2_validated(name) {
+            Ok(checkpoint) => loaded_v2 = Some(Arc::new(checkpoint)),
+            Err(_) => {
+                return Err(checkpoint_v2_load_error(&store, name, "Qwen", target));
+            }
+        }
+    }
     Ok(Some(QwenCheckpointRuntimeV1 {
         store,
-        loaded,
+        loaded: None,
+        loaded_v2,
         save_name: save_name.clone(),
+        save_v2,
     }))
 }
 
@@ -4498,10 +4692,17 @@ impl ChatGenerationBackendV1 for Ministral3ChatBackendV1 {
             logical_kv_capacity_tokens: Some(state_capacity),
             observed_kv_length_tokens: Some(observed_length),
             physical_page_bytes: None,
-            kv_memory_kind: Some("contiguous-resident".to_owned()),
+            kv_memory_kind: Some("paged".to_owned()),
             tokens_per_page: None,
-            mapped_kv_capacity_tokens: Some(state_capacity),
-            committed_kv_bytes: observed_length.checked_mul(MINISTRAL3_FP16_KV_BYTES_PER_TOKEN),
+            mapped_kv_capacity_tokens: None,
+            committed_kv_bytes: None,
+            paged_token_block_size: Some(sllm_core::KV_PAGED_TOKEN_BLOCK_SIZE),
+            paged_physical_layout_version: Some(sllm_core::KV_PAGED_PHYSICAL_LAYOUT_VERSION),
+            paged_logical_table_capacity: None,
+            paged_max_physical_blocks: None,
+            paged_allocated_physical_blocks: None,
+            paged_committed_bytes_per_plane: None,
+            paged_committed_bytes_total: None,
             prefill_chunk_capacity_tokens: Some(prompt_tokens),
             prefill_chunk_count: Some(1),
             placement_total_memory_bytes: None,
@@ -4601,21 +4802,36 @@ impl QwenChatBackendV1 {
                 }
             };
         let mtp_companion = config
-            .mtp_weights
-            .as_ref()
-            .map(|directory| {
-                verify_qwen38_mtp_quantized_sidecar(
+            .resolved_mtp_companion()
+            .map(|(directory, reviewed_default)| {
+                let sidecar = verify_qwen38_mtp_quantized_sidecar(
                     &lock,
                     &artifact,
                     &directory.join("manifest.json"),
                     &directory.join("payload.safetensors"),
                 )
-                .map(Arc::new)
                 .map_err(|error| {
+                    let selection = if reviewed_default {
+                        "default Qwen3.8 MTP NVFP4 sidecar"
+                    } else {
+                        "Qwen3.8 MTP companion"
+                    };
                     BackendErrorV1::new(format!(
-                        "Qwen3.8 MTP companion verification failed: {error}"
+                        "{selection} verification failed at {}: {error}",
+                        directory.display()
                     ))
-                })
+                })?;
+                if reviewed_default
+                    && (sidecar.encoding() != MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32
+                        || sidecar.combined_recipe_digest(artifact.recipe_digest())
+                            != QWEN38_DEFAULT_MTP_NVFP4_DIGEST)
+                {
+                    return Err(BackendErrorV1::new(format!(
+                        "default Qwen3.8 MTP NVFP4 sidecar identity differs at {}",
+                        directory.display()
+                    )));
+                }
+                Ok(Arc::new(sidecar))
             })
             .transpose()?;
         let plan = build_qwen38_nvfp4_weight_load_plan(&lock, &artifact).map_err(|error| {
@@ -4743,6 +4959,7 @@ impl QwenChatBackendV1 {
                 mtp_resident,
                 mtp_plan,
                 mtp_companion: mtp_companion.clone(),
+                qwen38_mtp_draft_width: Some(config.mtp_draft_width),
                 session,
                 target: config.target,
                 model_ready_current_bytes,
@@ -4940,6 +5157,25 @@ impl QwenChatBackendV1 {
             BackendErrorV1::new(format!("resident seed graph construction failed: {error}"))
         })?;
         let checkpoint_graph = seed_graph.clone();
+        let checkpoint = build_qwen_checkpoint_runtime(
+            &config.phase41.checkpoint,
+            &checkpoint_graph,
+            &plan,
+            &tokenizer,
+            &renderer,
+            &config.target,
+            gguf_fp8_provider,
+            config.kv_cache_encoding,
+        )?;
+        let vision_manifest = if lock.fingerprint() == sllm_core::QWEN35_4B_FINGERPRINT {
+            Some(
+                build_verified_gguf_qwen35_vision_manifest(&lock, &source).map_err(|error| {
+                    BackendErrorV1::new(format!("GGUF vision manifest validation failed: {error}"))
+                })?,
+            )
+        } else {
+            None
+        };
         let backend = HipBackend::connect()
             .map_err(|error| BackendErrorV1::new(format!("HIP backend is unavailable: {error}")))?;
         let session_request = ExecutionSessionRequest::new(config.device_index, &config.target)
@@ -4957,15 +5193,6 @@ impl QwenChatBackendV1 {
             config.completion_timeout,
         )
         .map_err(|error| BackendErrorV1::new(format!("resident model load failed: {error}")))?;
-        let vision_manifest = if lock.fingerprint() == sllm_core::QWEN35_4B_FINGERPRINT {
-            Some(
-                build_verified_gguf_qwen35_vision_manifest(&lock, &source).map_err(|error| {
-                    BackendErrorV1::new(format!("GGUF vision manifest validation failed: {error}"))
-                })?,
-            )
-        } else {
-            None
-        };
         let (mtp_resident, mtp_plan) = if !source.has_quantized_linear_recipe()
             && config.target == "gfx1201"
             && config.kv_cache_encoding == KvCacheEncoding::Fp16
@@ -5014,16 +5241,6 @@ impl QwenChatBackendV1 {
             recommended_context_tokens: QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32,
         };
         let prefix_cache = QwenPrefixCacheRuntimeV1::new(&config.phase41.prefix_cache)?;
-        let checkpoint = build_qwen_checkpoint_runtime(
-            &config.phase41.checkpoint,
-            &checkpoint_graph,
-            &plan,
-            &tokenizer,
-            &renderer,
-            &config.target,
-            fp8_provider.as_deref(),
-            config.kv_cache_encoding,
-        )?;
         Ok(Self {
             state: Mutex::new(Some(QwenBackendStateV1 {
                 reasoning_close_token_ids,
@@ -5039,6 +5256,7 @@ impl QwenChatBackendV1 {
                 mtp_resident,
                 mtp_plan,
                 mtp_companion: None,
+                qwen38_mtp_draft_width: None,
                 session,
                 target: config.target,
                 model_ready_current_bytes,
@@ -5149,6 +5367,7 @@ impl QwenChatBackendV1 {
                 mtp_resident: None,
                 mtp_plan: None,
                 mtp_companion: None,
+                qwen38_mtp_draft_width: None,
                 session,
                 target: config.target,
                 model_ready_current_bytes,
@@ -5217,7 +5436,7 @@ impl QwenChatBackendV1 {
 
     fn validate_persistent_checkpoint_identity(
         state: &QwenBackendStateV1,
-        checkpoint: &SessionCheckpoint,
+        checkpoint: &SessionCheckpointV2,
     ) -> Result<(), BackendErrorV1> {
         let descriptor_digest = state
             .persistent_checkpoint_descriptor_digest
@@ -5253,7 +5472,7 @@ impl QwenChatBackendV1 {
     fn install_persistent_checkpoint(
         &self,
         store: Arc<CheckpointStore>,
-        loaded: Option<&SessionCheckpoint>,
+        loaded: Option<&SessionCheckpointV2>,
     ) -> Result<(), BackendErrorV1> {
         let mut state_guard = self
             .state
@@ -5268,8 +5487,10 @@ impl QwenChatBackendV1 {
         }
         state.checkpoint = Some(QwenCheckpointRuntimeV1 {
             store,
-            loaded: loaded.map(|checkpoint| Arc::new(checkpoint.clone())),
+            loaded: None,
+            loaded_v2: loaded.map(|checkpoint| Arc::new(checkpoint.clone())),
             save_name: None,
+            save_v2: true,
         });
         state.persistent_capture_requested = false;
         state.persistent_capture = None;
@@ -5534,6 +5755,9 @@ impl Gemma4ChatBackendV1 {
         })?;
         let backend = HipBackend::connect()
             .map_err(|error| BackendErrorV1::new(format!("HIP backend is unavailable: {error}")))?;
+        let paged_v2_checkpoint = checkpoint
+            .as_ref()
+            .is_some_and(|runtime| runtime.save_v2 || runtime.loaded_v2.is_some());
         let session_request = ExecutionSessionRequest::new(config.device_index, &config.target)
             .map_err(|error| BackendErrorV1::new(format!("HIP session request failed: {error}")))?;
         let session = backend
@@ -5606,10 +5830,10 @@ impl Gemma4ChatBackendV1 {
                 } else {
                     "mixed-nvfp4-w4a4-fp8-w8a8".to_owned()
                 },
-                kv_bytes_per_token: GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN,
                 phase41: config.phase41,
                 prefix_cache,
                 checkpoint,
+                paged_v2_checkpoint,
                 checkpoint_descriptor_digest: Some(checkpoint_descriptor_digest),
             })),
             audits: Mutex::new(Vec::new()),
@@ -6046,15 +6270,27 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             .checkpoint
             .as_ref()
             .and_then(|runtime| runtime.loaded.clone());
-        if loaded_checkpoint.is_some() && !assistant_prefill_tokens.is_empty() {
+        let loaded_checkpoint_v2 = state
+            .checkpoint
+            .as_ref()
+            .and_then(|runtime| runtime.loaded_v2.clone());
+        let loaded_checkpoint_any = loaded_checkpoint.is_some() || loaded_checkpoint_v2.is_some();
+        let loaded_checkpoint_tokens = loaded_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.payload.token_history.clone())
+            .or_else(|| {
+                loaded_checkpoint_v2
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.payload.token_history.clone())
+            });
+        if loaded_checkpoint_any && !assistant_prefill_tokens.is_empty() {
             return Err(BackendErrorV1::new(
                 "assistant prefill cannot be combined with a loaded Qwen checkpoint",
             ));
         }
-        let checkpoint_suffix = loaded_checkpoint
+        let checkpoint_suffix = loaded_checkpoint_tokens
             .as_ref()
-            .map(|checkpoint| {
-                let prefix = &checkpoint.payload.token_history;
+            .map(|prefix| {
                 if prompt.len() <= prefix.len() || !prompt.starts_with(prefix) {
                     return Err(BackendErrorV1::new(
                         "Qwen checkpoint request must extend the loaded prompt token prefix",
@@ -6178,7 +6414,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 "prefix cache is currently text-only and rejects multimodal requests",
             ));
         }
-        if loaded_checkpoint.is_some() && multimodal_prompt.is_some() {
+        if loaded_checkpoint_any && multimodal_prompt.is_some() {
             return Err(BackendErrorV1::new(
                 "Qwen prompt checkpoint continuation is text-only",
             ));
@@ -6297,7 +6533,9 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             && qwen_mtp_sampling_supported(&generation, requires_logits)
             && multimodal_prompt.is_none();
         let mtp_draft_width = if mtp_target && state.qwen38_artifact.is_some() {
-            QWEN38_MTP_DRAFT_WIDTH
+            state.qwen38_mtp_draft_width.ok_or_else(|| {
+                BackendErrorV1::new("Qwen3.8 MTP draft width is missing from backend state")
+            })?
         } else if mtp_target {
             1
         } else {
@@ -6457,7 +6695,13 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let prefill_chunk_capacity_tokens = graph.token_count();
         let checkpoint_identity = loaded_checkpoint
             .as_ref()
-            .map(|checkpoint| {
+            .map(|checkpoint| &checkpoint.payload.token_history)
+            .or_else(|| {
+                loaded_checkpoint_v2
+                    .as_ref()
+                    .map(|checkpoint| &checkpoint.payload.token_history)
+            })
+            .map(|tokens| {
                 let expected = qwen_checkpoint_identity(
                     &graph,
                     &state.plan,
@@ -6467,9 +6711,15 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     state.fp8_provider.as_deref(),
                     adapter_request.identity(),
                     state.kv_cache_encoding,
-                    &checkpoint.payload.token_history,
+                    tokens,
                 )?;
-                if checkpoint.header.identity != expected {
+                let identity_matches = loaded_checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.header.identity == expected)
+                    || loaded_checkpoint_v2
+                        .as_ref()
+                        .is_some_and(|checkpoint| checkpoint.header.identity == expected);
+                if !identity_matches {
                     return Err(BackendErrorV1::new(
                         "Qwen checkpoint identity differs from the request graph",
                     ));
@@ -6511,18 +6761,19 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             ),
             ..ProductionPhase41AuditV1::default()
         };
-        if loaded_checkpoint.is_some() {
+        if loaded_checkpoint_any {
             phase41_audit.checkpoint_operation = Some(ProductionCheckpointOperationV1::Load);
             phase41_audit.checkpoint_result = Some(ProductionCheckpointResultV1::Succeeded);
         }
         if let Some(hit) = prefix_hit.as_ref() {
             let audit = hit.prefix.fork_audit();
             phase41_audit.prefix_shared_pages = audit.shared_pages();
+            phase41_audit.prefix_shared_blocks = audit.shared_blocks();
             phase41_audit.prefix_copied_bytes = audit.copied_bytes();
         }
         let prefix_continuation = prefix_hit.is_some();
         let checkpoint_save_status = Arc::new(AtomicU8::new(CHECKPOINT_STATUS_NONE));
-        let checkpoint_save = if loaded_checkpoint.is_none() && !prefix_continuation {
+        let checkpoint_save = if !loaded_checkpoint_any && !prefix_continuation {
             state
                 .checkpoint
                 .as_ref()
@@ -6549,6 +6800,10 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                         )?,
                         prompt_tokens: prompt.clone(),
                         status: Arc::clone(&checkpoint_save_status),
+                        v2: state
+                            .checkpoint
+                            .as_ref()
+                            .is_some_and(|runtime| runtime.save_v2),
                     })
                 })
                 .transpose()?
@@ -6557,18 +6812,31 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         };
         let checkpoint_save_requested = checkpoint_save.is_some();
         let persistent_capture_graph = state.persistent_capture_requested.then(|| graph.clone());
-        let (owner, prefix_hit) = if let (Some(checkpoint), Some(identity)) =
-            (loaded_checkpoint.as_ref(), checkpoint_identity.as_ref())
-        {
-            let owner = state
-                .resident
-                .new_request_from_checkpoint_with_adapters(
+        let (owner, prefix_hit) = if let Some(identity) = checkpoint_identity.as_ref() {
+            let owner = if let Some(checkpoint) = loaded_checkpoint_v2.as_ref() {
+                state.resident.new_request_from_checkpoint_v2_with_adapters(
                     checkpoint,
                     graph,
                     identity,
                     adapter_request.clone(),
                 )
-                .map_err(|_| BackendErrorV1::new("Qwen checkpoint request provisioning failed"))?;
+            } else if let Some(checkpoint) = loaded_checkpoint.as_ref() {
+                state.resident.new_request_from_checkpoint_with_adapters(
+                    checkpoint,
+                    graph,
+                    identity,
+                    adapter_request.clone(),
+                )
+            } else {
+                return Err(BackendErrorV1::new(
+                    "Qwen checkpoint identity has no loaded payload",
+                ));
+            }
+            .map_err(|error| {
+                BackendErrorV1::new(format!(
+                    "Qwen checkpoint request provisioning failed: {error}"
+                ))
+            })?;
             (owner, None)
         } else if let Some(hit) = prefix_hit {
             let owner = state
@@ -6657,14 +6925,18 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     BackendErrorV1::new(format!("MTP request provisioning failed: {error}"))
                 })?;
                 allocated = state.session.memory_snapshot();
-                let mut executor = SpeculativeGenerationAdapterV1::new(
-                    QwenMtpGenerationExecutorV1::new_with_draft_width(
-                        owner,
-                        mtp_owner,
-                        mtp_draft_width,
-                    )
-                    .map_err(|error| BackendErrorV1::new(error.to_string()))?,
-                );
+                let mut mtp_executor = QwenMtpGenerationExecutorV1::new_with_draft_width(
+                    owner,
+                    mtp_owner,
+                    mtp_draft_width,
+                )
+                .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+                if state.qwen38_artifact.is_some() {
+                    mtp_executor = mtp_executor
+                        .with_device_draft_width_limit(4)
+                        .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+                }
+                let mut executor = SpeculativeGenerationAdapterV1::new(mtp_executor);
                 let outcome = generate_with_optional_assistant_prefill(
                     &service,
                     &mut executor,
@@ -6740,6 +7012,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                                 .prefix_shared_pages
                                 .saturating_sub(audit.shared_pages());
                             phase41_audit.prefix_shared_pages = audit.shared_pages();
+                            phase41_audit.prefix_shared_blocks = audit.shared_blocks();
                             phase41_audit.prefix_copied_bytes = audit.copied_bytes();
                         }
                         Err(error) => {
@@ -6763,8 +7036,15 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 let mut executor = match prefix_hit {
                     Some(hit) => QwenPrefixGenerationExecutorV1::from_hit(owner, hit, 1),
                     None => {
-                        let executor =
-                            QwenPrefixGenerationExecutorV1::fresh(owner, 1, prefix_cache_eligible);
+                        let executor = if let Some(tokens) = loaded_checkpoint_tokens.as_ref() {
+                            QwenPrefixGenerationExecutorV1::from_checkpoint(
+                                owner,
+                                tokens.clone(),
+                                1,
+                            )
+                        } else {
+                            QwenPrefixGenerationExecutorV1::fresh(owner, 1, prefix_cache_eligible)
+                        };
                         match checkpoint_save {
                             Some(save) => executor.with_checkpoint_save(save),
                             None => executor,
@@ -6843,6 +7123,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                                 .prefix_shared_pages
                                 .saturating_sub(audit.shared_pages());
                             phase41_audit.prefix_shared_pages = audit.shared_pages();
+                            phase41_audit.prefix_shared_blocks = audit.shared_blocks();
                             phase41_audit.prefix_copied_bytes = audit.copied_bytes();
                         }
                         Err(error) => {
@@ -6918,9 +7199,14 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     sllm_frontend::FinishReasonV1::Length => FinishReasonV1::Length,
                 };
                 let usage = result.usage();
+                let prompt_usage = if loaded_checkpoint_any {
+                    prompt_tokens
+                } else {
+                    usage.prompt_tokens()
+                };
                 Ok(BackendCompletionV1 {
                     finish_reason,
-                    usage: TokenUsageV1::new(usage.prompt_tokens(), usage.completion_tokens())
+                    usage: TokenUsageV1::new(prompt_usage, usage.completion_tokens())
                         .map_err(|error| BackendErrorV1::new(error.to_string()))?,
                     matched_stop: result.matched_stop().map(str::to_owned),
                 })
@@ -6934,6 +7220,41 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let committed_kv_bytes = memory
             .as_ref()
             .and_then(|audit| audit.committed_kv_bytes().ok());
+        let (
+            physical_page_bytes,
+            kv_memory_kind,
+            tokens_per_page,
+            mapped_kv_capacity_tokens,
+            paged_token_block_size,
+            paged_physical_layout_version,
+            paged_logical_table_capacity,
+            paged_max_physical_blocks,
+            paged_allocated_physical_blocks,
+            paged_committed_bytes_per_plane,
+            paged_committed_bytes_total,
+        ) = match first_kv.map(|layer| layer.physical_metadata()) {
+            Some(KvPhysicalMemoryMetadata::Paged(physical)) => (
+                None,
+                Some("paged".to_owned()),
+                None,
+                None,
+                Some(physical.token_block_size()),
+                Some(physical.physical_layout_version()),
+                Some(physical.logical_table_capacity()),
+                Some(physical.max_physical_blocks()),
+                Some(physical.allocated_physical_blocks()),
+                Some(physical.committed_bytes_per_plane()),
+                Some(physical.committed_bytes_total()),
+            ),
+            Some(KvPhysicalMemoryMetadata::Vmm(_)) => {
+                return Err(BackendErrorV1::new(
+                    "Paged-only runtime reported legacy VMM KV metadata",
+                ));
+            }
+            None => (
+                None, None, None, None, None, None, None, None, None, None, None,
+            ),
+        };
         let completion_tokens = result
             .as_ref()
             .ok()
@@ -6980,15 +7301,18 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 .map_or(0, |audit| audit.linear_attention_layers()),
             logical_kv_capacity_tokens: first_kv.map(|layer| layer.logical_capacity_tokens()),
             observed_kv_length_tokens: first_kv.map(|layer| layer.observed_length_tokens()),
-            physical_page_bytes: first_kv.map(|layer| layer.physical().physical_page_bytes()),
-            kv_memory_kind: first_kv.map(|layer| match layer.physical().memory_kind() {
-                sllm_core::KvMemoryKind::VirtualContiguous => "virtual-contiguous".to_owned(),
-                sllm_core::KvMemoryKind::ContiguousResident => "contiguous-resident".to_owned(),
-            }),
-            tokens_per_page: first_kv.map(|layer| layer.physical().tokens_per_page()),
-            mapped_kv_capacity_tokens: first_kv
-                .map(|layer| layer.physical().mapped_token_capacity()),
+            physical_page_bytes,
+            kv_memory_kind,
+            tokens_per_page,
+            mapped_kv_capacity_tokens,
             committed_kv_bytes,
+            paged_token_block_size,
+            paged_physical_layout_version,
+            paged_logical_table_capacity,
+            paged_max_physical_blocks,
+            paged_allocated_physical_blocks,
+            paged_committed_bytes_per_plane,
+            paged_committed_bytes_total,
             prefill_chunk_capacity_tokens: Some(prefill_chunk_capacity_tokens),
             prefill_chunk_count,
             placement_total_memory_bytes: Some(placement_total_memory_bytes),
@@ -7020,12 +7344,12 @@ impl GenerationDeltaSinkV1 for PersistentChatSinkV1 {
 
 #[derive(Default)]
 struct PersistentCheckpointStateV1 {
-    current: Option<SessionCheckpoint>,
-    pending: Option<SessionCheckpoint>,
+    current: Option<SessionCheckpointV2>,
+    pending: Option<SessionCheckpointV2>,
 }
 
 impl PersistentCheckpointStateV1 {
-    fn stage(&mut self, checkpoint: SessionCheckpoint) -> Result<(), BackendErrorV1> {
+    fn stage(&mut self, checkpoint: SessionCheckpointV2) -> Result<(), BackendErrorV1> {
         if self.pending.is_some() {
             return Err(BackendErrorV1::new(
                 "persistent chat has an uncommitted turn",
@@ -7038,7 +7362,7 @@ impl PersistentCheckpointStateV1 {
     fn candidate_with_conversation(
         &self,
         conversation: &[u8],
-    ) -> Result<SessionCheckpoint, BackendErrorV1> {
+    ) -> Result<SessionCheckpointV2, BackendErrorV1> {
         let mut candidate = self.pending.clone().ok_or_else(|| {
             BackendErrorV1::new("persistent chat has no pending turn to checkpoint")
         })?;
@@ -7049,7 +7373,7 @@ impl PersistentCheckpointStateV1 {
         Ok(candidate)
     }
 
-    fn promote(&mut self, checkpoint: SessionCheckpoint) {
+    fn promote(&mut self, checkpoint: SessionCheckpointV2) {
         self.current = Some(checkpoint);
         self.pending = None;
     }
@@ -7177,10 +7501,9 @@ impl QwenPersistentChatSessionV1 {
                 "cannot load a checkpoint while a turn is pending commit",
             ));
         }
-        let checkpoint = self
-            .store
-            .load_validated(name)
-            .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+        let checkpoint = self.store.load_v2_validated(name).map_err(|_| {
+            checkpoint_v2_load_error(&self.store, name, "Qwen", &self.backend.identity.target)
+        })?;
         self.backend
             .install_persistent_checkpoint(Arc::clone(&self.store), Some(&checkpoint))?;
         let conversation = checkpoint.payload.conversation.clone();
@@ -7223,7 +7546,7 @@ impl QwenPersistentChatSessionV1 {
         let candidate = self.checkpoints.candidate_with_conversation(conversation)?;
         self.backend
             .install_persistent_checkpoint(Arc::clone(&self.store), Some(&candidate))?;
-        if let Err(error) = self.store.save(name, &candidate) {
+        if let Err(error) = self.store.save_v2(name, &candidate) {
             let _ = self
                 .backend
                 .install_persistent_checkpoint(Arc::clone(&self.store), previous.as_ref());
@@ -7458,6 +7781,11 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             SamplerChainConfigV1::requires_randomness,
         );
         let mtp_target = matches!(state.phase41.draft, DraftStartupConfigV1::MtpAuto);
+        if state.paged_v2_checkpoint && mtp_target {
+            return Err(BackendErrorV1::new(
+                "Gemma Paged V2 checkpointing does not support MTP draft execution",
+            ));
+        }
         if mtp_target && (requires_logits || requires_randomness) {
             return Err(BackendErrorV1::new(
                 "Gemma MTP auto supports greedy generation only",
@@ -7477,15 +7805,26 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             .checkpoint
             .as_ref()
             .and_then(|runtime| runtime.loaded.clone());
-        if loaded_checkpoint.is_some() && !assistant_prefill_tokens.is_empty() {
+        let loaded_checkpoint_v2 = state
+            .checkpoint
+            .as_ref()
+            .and_then(|runtime| runtime.loaded_v2.clone());
+        let loaded_checkpoint_any = loaded_checkpoint.is_some() || loaded_checkpoint_v2.is_some();
+        if loaded_checkpoint_any && !assistant_prefill_tokens.is_empty() {
             return Err(BackendErrorV1::new(
                 "assistant prefill cannot be combined with a loaded Gemma checkpoint",
             ));
         }
-        let checkpoint_suffix = loaded_checkpoint
+        let loaded_checkpoint_tokens = loaded_checkpoint
             .as_ref()
-            .map(|checkpoint| {
-                let prefix = &checkpoint.payload.token_history;
+            .map(|checkpoint| &checkpoint.payload.token_history)
+            .or_else(|| {
+                loaded_checkpoint_v2
+                    .as_ref()
+                    .map(|checkpoint| &checkpoint.payload.token_history)
+            });
+        let checkpoint_suffix = loaded_checkpoint_tokens
+            .map(|prefix| {
                 if prompt.len() <= prefix.len() || !prompt.starts_with(prefix) {
                     return Err(BackendErrorV1::new(
                         "Gemma checkpoint request must extend the loaded prompt token prefix",
@@ -7506,6 +7845,11 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
                     .map_err(|error| BackendErrorV1::new(error.to_string()))?,
             ),
         };
+        if state.paged_v2_checkpoint && context_policy.is_some() {
+            return Err(BackendErrorV1::new(
+                "Gemma Paged V2 checkpointing does not support context-window shifting",
+            ));
+        }
         if context_policy.is_some() && generation.device_selector_seed().is_some() {
             return Err(BackendErrorV1::new(
                 "context-window shifting cannot be combined with device-selector sampling",
@@ -7541,9 +7885,8 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
         let state_capacity = requested_state_capacity
             .checked_add(u64::from(mtp_target))
             .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?;
-        let checkpoint_identity = loaded_checkpoint
-            .as_ref()
-            .map(|checkpoint| {
+        let checkpoint_identity = loaded_checkpoint_tokens
+            .map(|tokens| {
                 let descriptor_digest = state.checkpoint_descriptor_digest.ok_or_else(|| {
                     BackendErrorV1::new("Gemma checkpoint descriptor is unavailable")
                 })?;
@@ -7553,9 +7896,17 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
                     &state.tokenizer,
                     &state.target,
                     descriptor_digest,
-                    &checkpoint.payload.token_history,
+                    tokens,
                 )?;
-                if checkpoint.header.identity != expected {
+                let actual = loaded_checkpoint
+                    .as_ref()
+                    .map(|checkpoint| &checkpoint.header.identity)
+                    .or_else(|| {
+                        loaded_checkpoint_v2
+                            .as_ref()
+                            .map(|checkpoint| &checkpoint.header.identity)
+                    });
+                if actual != Some(&expected) {
                     return Err(BackendErrorV1::new(
                         "Gemma checkpoint identity differs from the request graph",
                     ));
@@ -7563,10 +7914,11 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
                 Ok(expected)
             })
             .transpose()?;
-        let prefix_cache_enabled = !matches!(
-            state.phase41.prefix_cache,
-            PrefixCacheStartupConfigV1::Disabled
-        );
+        let prefix_cache_enabled = !state.paged_v2_checkpoint
+            && !matches!(
+                state.phase41.prefix_cache,
+                PrefixCacheStartupConfigV1::Disabled
+            );
         let prefix_cache_eligible = prefix_cache_enabled
             && assistant_prefill_tokens.is_empty()
             && !requires_logits
@@ -7594,7 +7946,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             ),
             ..ProductionPhase41AuditV1::default()
         };
-        if loaded_checkpoint.is_some() {
+        if loaded_checkpoint_any {
             phase41_audit.checkpoint_operation = Some(ProductionCheckpointOperationV1::Load);
             phase41_audit.checkpoint_result = Some(ProductionCheckpointResultV1::Succeeded);
         }
@@ -7605,7 +7957,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
         }
         let prefix_continuation = prefix_hit.is_some();
         let checkpoint_save_status = Arc::new(AtomicU8::new(CHECKPOINT_STATUS_NONE));
-        let checkpoint_save = if loaded_checkpoint.is_none() && !prefix_continuation {
+        let checkpoint_save = if !loaded_checkpoint_any && !prefix_continuation {
             state
                 .checkpoint
                 .as_ref()
@@ -7633,6 +7985,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
                         )?,
                         prompt_tokens: prompt.clone(),
                         status: Arc::clone(&checkpoint_save_status),
+                        v2: state.paged_v2_checkpoint,
                     })
                 })
                 .transpose()?
@@ -7692,11 +8045,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             let executor = Gemma4MtpGenerationExecutorV1::new_with_draft_width(
                 state
                     .resident
-                    .new_request_for_session(
-                        Arc::clone(&state.session),
-                        initial_graph_tokens,
-                        state_capacity,
-                    )
+                    .new_paged_request(initial_graph_tokens, state_capacity)
                     .map_err(|error| {
                         BackendErrorV1::new(format!("request provisioning failed: {error}"))
                     })?,
@@ -7705,6 +8054,27 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             )
             .map_err(|error| BackendErrorV1::new(error.to_string()))?;
             GemmaGenerationExecutorV1::Mtp(Box::new(SpeculativeGenerationAdapterV1::new(executor)))
+        } else if let (Some(checkpoint), Some(identity)) =
+            (loaded_checkpoint_v2.as_ref(), checkpoint_identity.as_ref())
+        {
+            let suffix_tokens = u64::try_from(
+                checkpoint_suffix
+                    .as_ref()
+                    .expect("checkpoint suffix validated before owner creation")
+                    .len(),
+            )
+            .map_err(|_| BackendErrorV1::new("Gemma V2 checkpoint suffix length overflowed"))?;
+            let owner = state
+                .resident
+                .new_request_from_checkpoint_v2(checkpoint, identity, suffix_tokens, state_capacity)
+                .map_err(|error| {
+                    BackendErrorV1::new(format!(
+                        "Gemma V2 checkpoint request provisioning failed: {error}"
+                    ))
+                })?;
+            GemmaGenerationExecutorV1::Target(Box::new(
+                GemmaPrefixGenerationExecutorV1::from_checkpoint(owner),
+            ))
         } else if let (Some(checkpoint), Some(identity)) =
             (loaded_checkpoint.as_ref(), checkpoint_identity.as_ref())
         {
@@ -7719,9 +8089,9 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
                 .resident
                 .new_request_from_checkpoint(checkpoint, identity, suffix_tokens, state_capacity)
                 .map_err(|_| BackendErrorV1::new("Gemma checkpoint request provisioning failed"))?;
-            GemmaGenerationExecutorV1::Target(Box::new(GemmaPrefixGenerationExecutorV1::fresh(
-                owner, false,
-            )))
+            GemmaGenerationExecutorV1::Target(Box::new(
+                GemmaPrefixGenerationExecutorV1::from_checkpoint(owner),
+            ))
         } else if let Some(hit) = prefix_hit {
             let suffix_tokens = prompt_tokens
                 .checked_sub(hit.prefix.committed_length())
@@ -7738,11 +8108,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
         } else {
             let owner = state
                 .resident
-                .new_request_for_session(
-                    Arc::clone(&state.session),
-                    initial_graph_tokens,
-                    state_capacity,
-                )
+                .new_paged_request(initial_graph_tokens, state_capacity)
                 .map_err(|error| {
                     BackendErrorV1::new(format!("request provisioning failed: {error}"))
                 })?;
@@ -7902,10 +8268,17 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             logical_kv_capacity_tokens: Some(state_capacity),
             observed_kv_length_tokens: Some(observed_length),
             physical_page_bytes: None,
-            kv_memory_kind: Some("contiguous-resident".to_owned()),
+            kv_memory_kind: Some("paged".to_owned()),
             tokens_per_page: None,
-            mapped_kv_capacity_tokens: Some(state_capacity),
-            committed_kv_bytes: observed_length.checked_mul(state.kv_bytes_per_token),
+            mapped_kv_capacity_tokens: None,
+            committed_kv_bytes: None,
+            paged_token_block_size: Some(sllm_core::KV_PAGED_TOKEN_BLOCK_SIZE),
+            paged_physical_layout_version: Some(sllm_core::KV_PAGED_PHYSICAL_LAYOUT_VERSION),
+            paged_logical_table_capacity: None,
+            paged_max_physical_blocks: None,
+            paged_allocated_physical_blocks: None,
+            paged_committed_bytes_per_plane: None,
+            paged_committed_bytes_total: None,
             prefill_chunk_capacity_tokens: None,
             prefill_chunk_count: None,
             placement_total_memory_bytes: None,
@@ -7988,6 +8361,9 @@ impl Gemma4MoeChatBackendV1 {
         })?;
         let backend = HipBackend::connect()
             .map_err(|error| BackendErrorV1::new(format!("HIP backend is unavailable: {error}")))?;
+        let paged_v2_checkpoint = checkpoint
+            .as_ref()
+            .is_some_and(|runtime| runtime.save_v2 || runtime.loaded_v2.is_some());
         let session_request = ExecutionSessionRequest::new(config.device_index, &config.target)
             .map_err(|error| BackendErrorV1::new(format!("HIP session request failed: {error}")))?;
         let session = backend
@@ -8036,6 +8412,7 @@ impl Gemma4MoeChatBackendV1 {
                 phase41: config.phase41,
                 prefix_cache,
                 checkpoint,
+                paged_v2_checkpoint,
                 checkpoint_descriptor_digest: Some(checkpoint_descriptor_digest),
             })),
             audits: Mutex::new(Vec::new()),
@@ -8357,15 +8734,22 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
                 self.identity.context_length
             )));
         }
-        let prefix_cache_enabled = !matches!(
-            state.phase41.prefix_cache,
-            PrefixCacheStartupConfigV1::Disabled
-        );
+        let prefix_cache_enabled = !state.paged_v2_checkpoint
+            && !matches!(
+                state.phase41.prefix_cache,
+                PrefixCacheStartupConfigV1::Disabled
+            );
         let loaded_checkpoint = state
             .checkpoint
             .as_ref()
             .and_then(|runtime| runtime.loaded.as_ref())
             .cloned();
+        let loaded_checkpoint_v2 = state
+            .checkpoint
+            .as_ref()
+            .and_then(|runtime| runtime.loaded_v2.as_ref())
+            .cloned();
+        let loaded_checkpoint_any = loaded_checkpoint.is_some() || loaded_checkpoint_v2.is_some();
         let state_capacity = if prefix_cache_enabled || state.checkpoint.is_some() {
             u64::from(self.identity.context_length)
         } else {
@@ -8390,10 +8774,17 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
         .map_err(|error| {
             BackendErrorV1::new(format!("Gemma 4 MoE request graph failed: {error}"))
         })?;
-        let checkpoint_identity = loaded_checkpoint
+        let checkpoint_tokens = loaded_checkpoint
             .as_ref()
-            .map(|checkpoint| {
-                if !prompt.starts_with(&checkpoint.payload.token_history) {
+            .map(|checkpoint| &checkpoint.payload.token_history)
+            .or_else(|| {
+                loaded_checkpoint_v2
+                    .as_ref()
+                    .map(|checkpoint| &checkpoint.payload.token_history)
+            });
+        let checkpoint_identity = checkpoint_tokens
+            .map(|tokens| {
+                if !prompt.starts_with(tokens) {
                     return Err(BackendErrorV1::new(
                         "Gemma 4 MoE checkpoint request must extend the saved token prefix",
                     ));
@@ -8407,7 +8798,7 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
                     &state.renderer,
                     &state.target,
                     descriptor_digest,
-                    &checkpoint.payload.token_history,
+                    tokens,
                 )
             })
             .transpose()?;
@@ -8436,7 +8827,7 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
             ),
             ..ProductionPhase41AuditV1::default()
         };
-        if loaded_checkpoint.is_some() {
+        if loaded_checkpoint_any {
             phase41_audit.checkpoint_operation = Some(ProductionCheckpointOperationV1::Load);
             phase41_audit.checkpoint_result = Some(ProductionCheckpointResultV1::Succeeded);
         }
@@ -8448,7 +8839,7 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
         let prefix_hit = prefix_lookup;
         let prefix_continuation = prefix_hit.is_some();
         let checkpoint_save_status = Arc::new(AtomicU8::new(CHECKPOINT_STATUS_NONE));
-        let checkpoint_save = if loaded_checkpoint.is_none() && !prefix_cache_enabled {
+        let checkpoint_save = if !loaded_checkpoint_any && !prefix_cache_enabled {
             state
                 .checkpoint
                 .as_ref()
@@ -8476,6 +8867,7 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
                         )?,
                         prompt_tokens: prompt.clone(),
                         status: Arc::clone(&checkpoint_save_status),
+                        v2: state.paged_v2_checkpoint,
                     })
                 })
                 .transpose()?
@@ -8484,6 +8876,25 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
         };
         let checkpoint_save_requested = checkpoint_save.is_some();
         let mut executor = if let (Some(checkpoint), Some(identity)) =
+            (loaded_checkpoint_v2.as_ref(), checkpoint_identity.as_ref())
+        {
+            let owner = state
+                .resident
+                .new_request_from_checkpoint_v2(checkpoint, graph.clone(), identity)
+                .map_err(|error| {
+                    BackendErrorV1::new(format!(
+                        "Gemma 4 MoE V2 checkpoint restore failed: {error}"
+                    ))
+                })?;
+            let terminal = gemma_moe_checkpoint_terminal_token_v2(checkpoint).ok_or_else(|| {
+                BackendErrorV1::new("Gemma 4 MoE V2 checkpoint has no terminal argmax state")
+            })?;
+            Gemma4MoeGenerationExecutorV1::from_checkpoint(
+                owner,
+                checkpoint.payload.token_history.clone(),
+                terminal,
+            )
+        } else if let (Some(checkpoint), Some(identity)) =
             (loaded_checkpoint.as_ref(), checkpoint_identity.as_ref())
         {
             let owner = state
@@ -8548,6 +8959,7 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
             &mut output_sink,
         );
         let dispatch = executor.last_audit.take();
+        let kv_physical_audit = executor.inner.kv_physical_memory_audit().ok();
         let observed_length = executor.committed_length();
         let prefill_chunk_capacity = executor.prefill_chunk_capacity();
         let prefill_chunk_count = executor.prefill_chunk_count();
@@ -8600,6 +9012,7 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
             }
         });
         let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let kv_audit = gemma_moe_kv_audit_fields(kv_physical_audit.as_deref());
         let result = outcome
             .map_err(|error| BackendErrorV1::new(format!("Gemma 4 MoE generation failed: {error}")))
             .and_then(|result| {
@@ -8668,11 +9081,17 @@ impl ChatGenerationBackendV1 for Gemma4MoeChatBackendV1 {
             logical_kv_capacity_tokens: Some(state_capacity),
             observed_kv_length_tokens: Some(observed_length),
             physical_page_bytes: None,
-            kv_memory_kind: Some("static-fp8-sliding".to_owned()),
+            kv_memory_kind: kv_audit.kv_memory_kind,
             tokens_per_page: None,
-            mapped_kv_capacity_tokens: Some(state_capacity),
-            committed_kv_bytes: observed_length
-                .checked_mul(GEMMA4_MOE_STATIC_FP8_KV_BYTES_PER_TOKEN),
+            mapped_kv_capacity_tokens: None,
+            committed_kv_bytes: kv_audit.committed_kv_bytes,
+            paged_token_block_size: kv_audit.paged_token_block_size,
+            paged_physical_layout_version: kv_audit.paged_physical_layout_version,
+            paged_logical_table_capacity: kv_audit.paged_logical_table_capacity,
+            paged_max_physical_blocks: kv_audit.paged_max_physical_blocks,
+            paged_allocated_physical_blocks: kv_audit.paged_allocated_physical_blocks,
+            paged_committed_bytes_per_plane: kv_audit.paged_committed_bytes_per_plane,
+            paged_committed_bytes_total: kv_audit.paged_committed_bytes_total,
             prefill_chunk_capacity_tokens: Some(prefill_chunk_capacity),
             prefill_chunk_count: Some(prefill_chunk_count),
             placement_total_memory_bytes: None,
@@ -9065,20 +9484,30 @@ impl Gemma4MoeGenerationExecutorV1 {
                 .store(CHECKPOINT_STATUS_FAILED, Ordering::Release);
             GenerationServiceError::CountOverflow
         })?;
+        if !checkpoint.v2 {
+            checkpoint
+                .status
+                .store(CHECKPOINT_STATUS_FAILED, Ordering::Release);
+            return Err(GenerationServiceError::Execution(
+                "Gemma 4 MoE V1 checkpoint is unsupported; recreate it as V2".to_owned(),
+            ));
+        }
         let image = self
             .inner
-            .state_image()
+            .state_image_v2()
             .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
         let terminal_output = image
             .cached_terminal_output()
             .cloned()
             .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
-        let result = image
-            .to_checkpoint(
+        let terminal_state = gemma_moe_checkpoint_terminal_state(&terminal_output);
+        let result = self
+            .inner
+            .checkpoint_v2(
                 checkpoint.identity,
                 &checkpoint.prompt_tokens,
                 &[],
-                &gemma_moe_checkpoint_terminal_state(&terminal_output),
+                &terminal_state,
                 &[],
                 &[],
                 prompt_len,
@@ -9089,7 +9518,7 @@ impl Gemma4MoeGenerationExecutorV1 {
             .and_then(|payload| {
                 checkpoint
                     .store
-                    .save(&checkpoint.name, &payload)
+                    .save_v2(&checkpoint.name, &payload)
                     .map(|_| ())
                     .map_err(|_| {
                         GenerationServiceError::Execution("checkpoint save failed".to_owned())
@@ -9534,7 +9963,7 @@ fn capture_qwen_persistent_checkpoint(
     let conversation = state
         .checkpoint
         .as_ref()
-        .and_then(|runtime| runtime.loaded.as_ref())
+        .and_then(|runtime| runtime.loaded_v2.as_ref())
         .map_or_else(Vec::new, |checkpoint| {
             checkpoint.payload.conversation.clone()
         });
@@ -9542,7 +9971,7 @@ fn capture_qwen_persistent_checkpoint(
         u64::try_from(token_history.len()).map_err(|_| GenerationServiceError::CountOverflow)?;
     let checkpoint = executor
         .inner()
-        .checkpoint(
+        .checkpoint_v2(
             identity,
             token_history,
             &conversation,
@@ -9641,6 +10070,27 @@ impl QwenPrefixGenerationExecutorV1 {
         }
     }
 
+    fn from_checkpoint(
+        inner: QwenExecutionRequest,
+        _checkpoint_tokens: Vec<u32>,
+        draft_width: usize,
+    ) -> Self {
+        Self {
+            inner,
+            // The generation service removes the restored prefix before it
+            // calls this executor. An empty marker selects the continuation
+            // route while accepting exactly that suffix.
+            matched_tokens: Some(Vec::new()),
+            _lease: None,
+            published_prefix: None,
+            publish_prefix: false,
+            draft_width,
+            speculative_block_pending: false,
+            context_shift: None,
+            checkpoint_save: None,
+        }
+    }
+
     fn with_context_shift(
         mut self,
         resident: QwenResidentModel,
@@ -9687,9 +10137,17 @@ impl QwenPrefixGenerationExecutorV1 {
                 .store(CHECKPOINT_STATUS_FAILED, Ordering::Release);
             GenerationServiceError::CountOverflow
         })?;
+        if !checkpoint.v2 {
+            checkpoint
+                .status
+                .store(CHECKPOINT_STATUS_FAILED, Ordering::Release);
+            return Err(GenerationServiceError::Execution(
+                "Qwen V1 checkpoint is unsupported; recreate it as V2".to_owned(),
+            ));
+        }
         let result = self
             .inner
-            .checkpoint(
+            .checkpoint_v2(
                 checkpoint.identity,
                 &checkpoint.prompt_tokens,
                 &[],
@@ -9704,7 +10162,7 @@ impl QwenPrefixGenerationExecutorV1 {
             .and_then(|checkpoint_payload| {
                 checkpoint
                     .store
-                    .save(&checkpoint.name, &checkpoint_payload)
+                    .save_v2(&checkpoint.name, &checkpoint_payload)
                     .map(|_| ())
                     .map_err(|_| {
                         GenerationServiceError::Execution("checkpoint save failed".to_owned())
@@ -9861,19 +10319,28 @@ impl QwenPrefixGenerationExecutorV1 {
             self.save_checkpoint_after_prefill(input_token_ids.len())?;
             return Ok(step);
         };
-        if include_last_logits || !input_token_ids.starts_with(matched_tokens) {
-            return Err(GenerationServiceError::Execution(
-                "prefix continuation requires exact greedy prompt semantics".to_owned(),
-            ));
+        if !input_token_ids.starts_with(matched_tokens) {
+            let mismatch = input_token_ids
+                .iter()
+                .zip(matched_tokens.iter())
+                .position(|(actual, expected)| actual != expected)
+                .unwrap_or_else(|| matched_tokens.len().min(input_token_ids.len()));
+            return Err(GenerationServiceError::Execution(format!(
+                "prefix continuation requires exact greedy prompt semantics at index {mismatch} actual={:?} expected={:?}",
+                input_token_ids.get(mismatch),
+                matched_tokens.get(mismatch),
+            )));
         }
         let suffix = input_token_ids[matched_tokens.len()..]
             .iter()
             .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
             .collect::<Result<Vec<_>, _>>()?;
-        let output = self
-            .inner
-            .continue_from_prefix(&suffix)
-            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let output = if include_last_logits {
+            self.inner.continue_from_prefix_with_last_logits(&suffix)
+        } else {
+            self.inner.continue_from_prefix(&suffix)
+        }
+        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
         qwen_step_from_output(&output, output.token_ids().len().saturating_sub(1))
     }
 }
@@ -10132,6 +10599,21 @@ impl GemmaPrefixGenerationExecutorV1 {
         }
     }
 
+    fn from_checkpoint(inner: sllm_core::Gemma4ExecutionRequest) -> Self {
+        Self {
+            inner,
+            // The generation service supplies only the suffix after restore.
+            // An empty marker selects the continuation path without replaying
+            // the already-published checkpoint prefix.
+            matched_tokens: Some(Vec::new()),
+            _lease: None,
+            published_prefix: None,
+            publish_prefix: false,
+            context_shift: None,
+            checkpoint_save: None,
+        }
+    }
+
     fn with_context_shift(
         mut self,
         resident: Gemma4ResidentModel,
@@ -10174,9 +10656,17 @@ impl GemmaPrefixGenerationExecutorV1 {
                 .store(CHECKPOINT_STATUS_FAILED, Ordering::Release);
             GenerationServiceError::CountOverflow
         })?;
+        if !checkpoint.v2 {
+            checkpoint
+                .status
+                .store(CHECKPOINT_STATUS_FAILED, Ordering::Release);
+            return Err(GenerationServiceError::Execution(
+                "Gemma V1 checkpoint is unsupported; recreate it as V2".to_owned(),
+            ));
+        }
         let result = self
             .inner
-            .checkpoint(
+            .checkpoint_v2(
                 checkpoint.identity,
                 &checkpoint.prompt_tokens,
                 &[],
@@ -10191,7 +10681,7 @@ impl GemmaPrefixGenerationExecutorV1 {
             .and_then(|checkpoint_payload| {
                 checkpoint
                     .store
-                    .save(&checkpoint.name, &checkpoint_payload)
+                    .save_v2(&checkpoint.name, &checkpoint_payload)
                     .map(|_| ())
                     .map_err(|_| {
                         GenerationServiceError::Execution("checkpoint save failed".to_owned())
@@ -10251,7 +10741,7 @@ impl GenerationExecutorV1 for GemmaPrefixGenerationExecutorV1 {
         include_last_logits: bool,
     ) -> Result<GenerationStepV1, GenerationServiceError> {
         if let Some(matched_tokens) = self.matched_tokens.as_deref() {
-            if include_last_logits || !input_token_ids.starts_with(matched_tokens) {
+            if !input_token_ids.starts_with(matched_tokens) {
                 return Err(GenerationServiceError::Execution(
                     "Gemma prefix continuation requires exact greedy prompt semantics".to_owned(),
                 ));
@@ -10262,10 +10752,12 @@ impl GenerationExecutorV1 for GemmaPrefixGenerationExecutorV1 {
                     i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let output = self
-                .inner
-                .continue_from_prefix(&suffix)
-                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            let output = if include_last_logits {
+                self.inner.continue_from_prefix_with_last_logits(&suffix)
+            } else {
+                self.inner.continue_from_prefix(&suffix)
+            }
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
             return gemma_step_from_output(&output, output.token_ids().len().saturating_sub(1));
         }
         if let Some(context) = self.context_shift.as_mut() {
@@ -10748,7 +11240,42 @@ mod tests {
         ))
     }
 
-    fn lifecycle_checkpoint(tokens: &[u32], conversation: &[u8]) -> SessionCheckpoint {
+    fn lifecycle_checkpoint(tokens: &[u32], conversation: &[u8]) -> SessionCheckpointV2 {
+        let identity = CheckpointIdentity::for_tokens(
+            format!("sha256:{}", "0".repeat(64)),
+            "artifact",
+            "adapter",
+            "renderer",
+            "tokenizer",
+            "gfx1201",
+            "plan",
+            tokens,
+            KvCacheEncoding::Fp16,
+            [0; 32],
+            [0; 32],
+        )
+        .unwrap();
+        let payload = sllm_core::CheckpointPayloadV2 {
+            token_history: tokens.to_vec(),
+            conversation: conversation.to_vec(),
+            paged_state_layers: Vec::new(),
+            linear_state_layers: Vec::new(),
+            linear_state_planes: Vec::new(),
+            sampler_state: Vec::new(),
+            grammar_state: Vec::new(),
+            stop_state: Vec::new(),
+        };
+        SessionCheckpointV2::new(
+            identity,
+            tokens.len() as u64,
+            tokens.len() as u64,
+            1,
+            payload,
+        )
+        .unwrap()
+    }
+
+    fn legacy_checkpoint(tokens: &[u32], conversation: &[u8]) -> SessionCheckpoint {
         let identity = CheckpointIdentity::for_tokens(
             format!("sha256:{}", "0".repeat(64)),
             "artifact",
@@ -11023,6 +11550,144 @@ mod tests {
         }
     }
 
+    // Qwen3.5-4B vision reuses the text decoder's full-attention contract:
+    // Q=16, KV=4, head_dim=256, implicit score scale 1/sqrt(256)=1/16.
+    // The image fixture expands to M=85 text rows; this bounded oracle uses
+    // the append boundaries around the first two 128-token pages and keeps
+    // the high-entropy values independent from any GPU implementation.
+    const QWEN_VISION_ORACLE_Q_HEADS: usize = 16;
+    const QWEN_VISION_ORACLE_KV_HEADS: usize = 4;
+    const QWEN_VISION_ORACLE_HEAD_DIM: usize = 256;
+    const QWEN_VISION_ORACLE_BLOCK_TOKENS: usize = 128;
+
+    fn qwen_vision_oracle_value(index: usize) -> f32 {
+        let mut value = (index as u32)
+            .wrapping_mul(747_796_405)
+            .wrapping_add(2_891_336_453);
+        value ^= value >> 16;
+        value = value.wrapping_mul(2_246_822_519);
+        value ^= value >> 13;
+        (value % 2_001) as f32 / 200.0 - 5.0
+    }
+
+    fn qwen_vision_attention_oracle(
+        query: &[f32],
+        keys: &[f32],
+        values: &[f32],
+        query_positions: &[usize],
+    ) -> Vec<f32> {
+        let q_heads = QWEN_VISION_ORACLE_Q_HEADS;
+        let kv_heads = QWEN_VISION_ORACLE_KV_HEADS;
+        let head_dim = QWEN_VISION_ORACLE_HEAD_DIM;
+        let kv_tokens = keys.len() / (kv_heads * head_dim);
+        assert_eq!(keys.len(), values.len());
+        assert_eq!(query.len(), query_positions.len() * q_heads * head_dim);
+        let q_per_kv = q_heads / kv_heads;
+        let score_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let mut output = vec![0.0_f32; query.len()];
+        for (row, &position) in query_positions.iter().enumerate() {
+            assert!(position < kv_tokens);
+            for q_head in 0..q_heads {
+                let kv_head = q_head / q_per_kv;
+                let query_base = (row * q_heads + q_head) * head_dim;
+                let mut scores = Vec::with_capacity(position + 1);
+                for token in 0..=position {
+                    let key_base = (token * kv_heads + kv_head) * head_dim;
+                    let mut dot = 0.0_f32;
+                    for dimension in 0..head_dim {
+                        dot += query[query_base + dimension] * keys[key_base + dimension];
+                    }
+                    scores.push(dot * score_scale);
+                }
+                let maximum = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut denominator = 0.0_f32;
+                for score in &mut scores {
+                    *score = (*score - maximum).exp();
+                    denominator += *score;
+                }
+                let output_base = query_base;
+                for dimension in 0..head_dim {
+                    let mut accumulated = 0.0_f32;
+                    for (token, score) in scores.iter().enumerate() {
+                        let value_base = (token * kv_heads + kv_head) * head_dim;
+                        accumulated += (*score / denominator) * values[value_base + dimension];
+                    }
+                    output[output_base + dimension] = accumulated;
+                }
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn qwen_vision_paged_and_legacy_fp16_append_attention_are_bitwise_equal() {
+        let total_tokens = 130;
+        let q_heads = QWEN_VISION_ORACLE_Q_HEADS;
+        let kv_heads = QWEN_VISION_ORACLE_KV_HEADS;
+        let head_dim = QWEN_VISION_ORACLE_HEAD_DIM;
+        let plane_len = kv_heads * head_dim;
+        let mut legacy_keys = vec![0.0_f32; total_tokens * plane_len];
+        let mut legacy_values = vec![0.0_f32; total_tokens * plane_len];
+        let block_len = QWEN_VISION_ORACLE_BLOCK_TOKENS * plane_len;
+        let mut paged_keys = vec![vec![0.0_f32; block_len]; 2];
+        let mut paged_values = vec![vec![0.0_f32; block_len]; 2];
+        // A non-identity table makes the logical-to-physical mapping part of
+        // the oracle instead of accidentally accepting direct block order.
+        let logical_to_physical = [1_usize, 0_usize];
+        for token in 0..total_tokens {
+            let logical_block = token / QWEN_VISION_ORACLE_BLOCK_TOKENS;
+            let block_offset = (token % QWEN_VISION_ORACLE_BLOCK_TOKENS) * plane_len;
+            let physical_block = logical_to_physical[logical_block];
+            for element in 0..plane_len {
+                let key = qwen_vision_oracle_value(token * plane_len + element);
+                let value = qwen_vision_oracle_value(1_000_000 + token * plane_len + element);
+                legacy_keys[token * plane_len + element] = key;
+                legacy_values[token * plane_len + element] = value;
+                paged_keys[physical_block][block_offset + element] = key;
+                paged_values[physical_block][block_offset + element] = value;
+            }
+        }
+        let mut gathered_keys = vec![0.0_f32; legacy_keys.len()];
+        let mut gathered_values = vec![0.0_f32; legacy_values.len()];
+        for token in 0..total_tokens {
+            let logical_block = token / QWEN_VISION_ORACLE_BLOCK_TOKENS;
+            let block_offset = (token % QWEN_VISION_ORACLE_BLOCK_TOKENS) * plane_len;
+            let physical_block = logical_to_physical[logical_block];
+            let destination = token * plane_len;
+            gathered_keys[destination..destination + plane_len].copy_from_slice(
+                &paged_keys[physical_block][block_offset..block_offset + plane_len],
+            );
+            gathered_values[destination..destination + plane_len].copy_from_slice(
+                &paged_values[physical_block][block_offset..block_offset + plane_len],
+            );
+        }
+        assert_eq!(logical_to_physical, [1, 0]);
+        let query_positions = [127_usize, 128, 129];
+        let query = (0..query_positions.len() * q_heads * head_dim)
+            .map(|index| qwen_vision_oracle_value(2_000_000 + index))
+            .collect::<Vec<_>>();
+        let legacy =
+            qwen_vision_attention_oracle(&query, &legacy_keys, &legacy_values, &query_positions);
+        let paged = qwen_vision_attention_oracle(
+            &query,
+            &gathered_keys,
+            &gathered_values,
+            &query_positions,
+        );
+        assert_eq!(legacy.len(), query_positions.len() * q_heads * head_dim);
+        assert_eq!(
+            legacy
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            paged
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "Paged logical table and append boundaries must preserve FP16 control attention"
+        );
+    }
+
     #[test]
     fn phase41_defaults_are_disabled_and_valid() {
         let config = Phase41ProductionConfigV1::default();
@@ -11088,11 +11753,13 @@ mod tests {
             shutdown_timeout: Duration::from_secs(1),
             context_length: 16_384,
             kv_cache_encoding: KvCacheEncoding::Mxfp8E4,
+            mtp_draft_width: QWEN38_MTP_DRAFT_WIDTH,
             phase41: Phase41ProductionConfigV1::default(),
         };
         config
             .validate()
             .expect("the fixed Qwen3.8 production profile should validate on host");
+        assert_eq!(config.resolved_mtp_companion(), None);
         let relative_companion = Qwen38Nvfp4BackendConfigV1 {
             mtp_weights: Some(PathBuf::from("relative-mtp-sidecar")),
             ..config.clone()
@@ -11128,6 +11795,7 @@ mod tests {
                 shutdown_timeout: config.shutdown_timeout,
                 context_length,
                 kv_cache_encoding: config.kv_cache_encoding,
+                mtp_draft_width: config.mtp_draft_width,
                 phase41: config.phase41.clone(),
             };
             assert!(
@@ -11139,8 +11807,28 @@ mod tests {
             let mut mtp = config.clone();
             mtp.target = target.to_owned();
             mtp.phase41.draft = DraftStartupConfigV1::MtpAuto;
-            mtp.validate()
-                .expect("Qwen3.8 MTP draft mode should be host-admissible");
+            for width in 2..=4 {
+                mtp.mtp_draft_width = width;
+                mtp.validate()
+                    .expect("Qwen3.8 MTP width should be host-admissible");
+            }
+            for width in [1, 5] {
+                mtp.mtp_draft_width = width;
+                assert!(mtp.validate().is_err());
+            }
+            mtp.mtp_draft_width = QWEN38_MTP_DRAFT_WIDTH;
+            assert_eq!(
+                mtp.resolved_mtp_companion(),
+                Some((
+                    PathBuf::from("/models/Qwen3.8-27B-NVFP4/.sllm/mtp-nvfp4-v1"),
+                    true
+                ))
+            );
+            mtp.mtp_weights = Some(PathBuf::from("/models/explicit-mtp-sidecar"));
+            assert_eq!(
+                mtp.resolved_mtp_companion(),
+                Some((PathBuf::from("/models/explicit-mtp-sidecar"), false))
+            );
         }
         for kv_cache_encoding in [KvCacheEncoding::Mxfp8E5, KvCacheEncoding::Nvfp4] {
             let invalid = Qwen38Nvfp4BackendConfigV1 {
@@ -11195,6 +11883,51 @@ mod tests {
                 "context length {context_length} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn gemma_moe_paged_audit_marks_heterogeneous_layers_without_false_scalars() {
+        let sliding = sllm_core::KvPagedPhysicalMemorySnapshot::new(
+            1_024,
+            34,
+            128,
+            1,
+            9,
+            18,
+            9,
+            [1, 2, 3, 4, 5, 6],
+            21,
+        )
+        .unwrap();
+        let full = sllm_core::KvPagedPhysicalMemorySnapshot::new(
+            1_024,
+            34,
+            128,
+            1,
+            8,
+            16,
+            8,
+            [1, 2, 3, 4, 5, 6],
+            21,
+        )
+        .unwrap();
+        let mixed = gemma_moe_kv_audit_fields(Some(&[
+            (0, Some(KvPhysicalMemoryMetadata::Paged(sliding))),
+            (1, Some(KvPhysicalMemoryMetadata::Paged(full))),
+        ]));
+        assert_eq!(mixed.kv_memory_kind.as_deref(), Some("paged"));
+        assert_eq!(mixed.paged_token_block_size, Some(128));
+        assert_eq!(mixed.paged_physical_layout_version, Some(1));
+        assert_eq!(mixed.paged_logical_table_capacity, None);
+        assert_eq!(mixed.paged_max_physical_blocks, None);
+        assert_eq!(mixed.paged_allocated_physical_blocks, None);
+        assert_eq!(mixed.paged_committed_bytes_per_plane, None);
+        assert_eq!(mixed.paged_committed_bytes_total, None);
+        assert_eq!(mixed.committed_kv_bytes, None);
+
+        let unavailable = gemma_moe_kv_audit_fields(None);
+        assert_eq!(unavailable.kv_memory_kind, None);
+        assert_eq!(unavailable.paged_token_block_size, None);
     }
 
     #[test]
@@ -11711,6 +12444,33 @@ mod tests {
     }
 
     #[test]
+    fn v1_checkpoint_load_is_rejected_with_v2_recreation_guidance() {
+        let directory = checkpoint_test_directory("v1-unsupported");
+        let _ = std::fs::remove_dir_all(&directory);
+        let store = CheckpointStore::new(&directory, 1 << 20).unwrap();
+        store
+            .save("legacy", &legacy_checkpoint(&[1, 2, 3], b"legacy"))
+            .unwrap();
+
+        let error = checkpoint_v2_load_error(&store, "legacy", "Qwen", "gfx1201");
+        assert_eq!(
+            error.to_string(),
+            "Qwen V1 checkpoint is unsupported; recreate it as V2"
+        );
+
+        std::fs::write(directory.join("broken.ckpt"), b"SLLMCKP2broken").unwrap();
+        let error = checkpoint_v2_load_error(&store, "broken", "Qwen", "gfx1201");
+        assert_eq!(error.to_string(), "Qwen V2 checkpoint load failed");
+
+        let error = checkpoint_v2_load_error(&store, "legacy", "Qwen", "gfx942");
+        assert_eq!(
+            error.to_string(),
+            "Qwen V1 checkpoint is unsupported; recreate it as V2"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn checkpoint_names_are_bounded_and_cannot_escape_the_directory() {
         for name in [
             "",
@@ -11747,6 +12507,7 @@ mod tests {
         let json = serde_json::to_value(ProductionPhase41AuditV1 {
             prefix_cache_result: Some(ProductionPrefixCacheResultV1::PartialHit),
             prefix_shared_pages: 3,
+            prefix_shared_blocks: 2,
             prefix_cow_pages: 1,
             prefix_copied_bytes: 4096,
             checkpoint_operation: Some(ProductionCheckpointOperationV1::Load),
@@ -11764,6 +12525,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json["prefix_cache_result"], "partial-hit");
+        assert_eq!(json["prefix_shared_blocks"], 2);
         assert_eq!(json["checkpoint_operation"], "load");
         assert_eq!(json["checkpoint_result"], "succeeded");
         assert_eq!(json["draft_provider"], "external");

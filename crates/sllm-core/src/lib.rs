@@ -217,12 +217,13 @@ pub use execution::{
     ExecutionLinearAttentionSubmissionAdapter, ExecutionMinistral3YarnSubmissionAdapter,
     ExecutionQueue, ExecutionQueueFence, ExecutionQueueFenceAdapter, ExecutionQueueId,
     ExecutionReadbackAdapter, ExecutionSession, ExecutionSessionAdapter, ExecutionSessionId,
-    ExecutionSessionRequest, ExecutionState, ExecutionStateImageV1, ExecutionSubmissionAdapter,
-    ExecutionTransferAdapter, ExecutionWholeDecodeCapture, ExecutionWholeDecodeCaptureAdapter,
-    KvState, KvStateAppendSubmission, KvStateId, LinearAttentionBindings, LinearAttentionState,
-    LinearAttentionStateId, LinearAttentionSubmission, Ministral3YarnSubmission,
-    OwnedTensorBinding, PrepareSupport, PreparedMatmulFootprint, PreparedOperation,
-    PreparedOperationId, QueueCompletionMode, Readback, ShutdownReport, Submission, Transfer,
+    ExecutionSessionRequest, ExecutionState, ExecutionStateImageV1, ExecutionStateImageV2,
+    ExecutionSubmissionAdapter, ExecutionTransferAdapter, ExecutionWholeDecodeCapture,
+    ExecutionWholeDecodeCaptureAdapter, KvState, KvStateAppendSubmission, KvStateId,
+    LinearAttentionBindings, LinearAttentionState, LinearAttentionStateId,
+    LinearAttentionSubmission, Ministral3YarnSubmission, OwnedTensorBinding, PrepareSupport,
+    PreparedMatmulFootprint, PreparedOperation, PreparedOperationId, QueueCompletionMode, Readback,
+    ShutdownReport, Submission, Transfer,
 };
 pub use fake::{FakeBackend, MAX_FAKE_MATERIALIZATION_BYTES};
 pub use final_output::{
@@ -248,11 +249,12 @@ pub use gemma4::{
 pub use gemma4_execution::{
     Gemma4ExecutionAudit, Gemma4ExecutionLayout, Gemma4ExecutionLayoutError, Gemma4ExecutionNode,
     Gemma4ExecutionOptions, Gemma4ExecutionOutput, Gemma4ExecutionRequest, Gemma4ExecutionTensor,
-    Gemma4KvAppendLayout, Gemma4KvPlane, Gemma4KvStateImageV1, Gemma4MtpTargetKvLease,
-    Gemma4PrefixForkAuditV1, Gemma4PrefixStateV1, Gemma4ProvisionedBuffers, Gemma4ResidentModel,
-    Gemma4SlidingStateImageV1, Gemma4StateImageV1, Gemma4TensorBacking,
-    build_gemma4_execution_layout, build_gemma4_nvfp4_execution_layout,
-    build_gemma4_quantized_execution_layout, provision_gemma4_execution_buffers,
+    Gemma4KvAppendLayout, Gemma4KvPlane, Gemma4KvStateImageV1, Gemma4KvStateImageV2,
+    Gemma4MtpTargetKvLease, Gemma4PrefixForkAuditV1, Gemma4PrefixStateV1, Gemma4ProvisionedBuffers,
+    Gemma4ResidentModel, Gemma4SlidingStateImageV1, Gemma4SlidingStateImageV2, Gemma4StateImageV1,
+    Gemma4StateImageV2, Gemma4TensorBacking, build_gemma4_execution_layout,
+    build_gemma4_nvfp4_execution_layout, build_gemma4_quantized_execution_layout,
+    provision_gemma4_execution_buffers,
 };
 pub use gemma4_graph::{
     GEMMA4_HIDDEN_SIZE, GEMMA4_INTERMEDIATE_SIZE, GEMMA4_LAYER_COUNT,
@@ -289,10 +291,10 @@ pub use gemma4_moe_execution::{
     Gemma4MoeAttentionHook, Gemma4MoeExecutionError, Gemma4MoeExecutionLayout,
     Gemma4MoeExecutionNode, Gemma4MoeExecutionOutput, Gemma4MoeExecutionRequest,
     Gemma4MoeExecutionSegment, Gemma4MoeExecutionTensor, Gemma4MoeKvStateImageV1,
-    Gemma4MoeLowering, Gemma4MoeOpaqueKvState, Gemma4MoePrefixForkAuditV1, Gemma4MoePrefixStateV1,
-    Gemma4MoePreparedAudit, Gemma4MoeRequestState, Gemma4MoeResidentAudit, Gemma4MoeResidentModel,
-    Gemma4MoeStateImageV1, Gemma4MoeTensorBacking, Gemma4MoeTransitionSegment,
-    Gemma4MoeWeightSource, build_gemma4_moe_execution_layout,
+    Gemma4MoeKvStateImageV2, Gemma4MoeLowering, Gemma4MoeOpaqueKvState, Gemma4MoePrefixForkAuditV1,
+    Gemma4MoePrefixStateV1, Gemma4MoePreparedAudit, Gemma4MoeRequestState, Gemma4MoeResidentAudit,
+    Gemma4MoeResidentModel, Gemma4MoeStateImageV1, Gemma4MoeStateImageV2, Gemma4MoeTensorBacking,
+    Gemma4MoeTransitionSegment, Gemma4MoeWeightSource, build_gemma4_moe_execution_layout,
     build_gemma4_moe_resident_weight_load_plan, pack_gemma4_moe_layer_blob,
     plan_gemma4_moe_transitions,
 };
@@ -388,10 +390,15 @@ pub use kv_fp8::{
 };
 pub use kv_mxfp8::{KvMxfp8CodecError, QuantizedKvMxfp8, decode_kv_mxfp8, quantize_kv_mxfp8};
 pub use kv_state::{
-    CausalAttentionDescriptor, KV_FP8_BLOCK_SIZE, KV_MXFP8_BLOCK_SIZE, KvCacheEncoding,
-    KvFp8Block16Descriptor, KvFp8PhysicalVariant, KvFp8ScaleEncoding, KvMemoryKind,
-    KvMxfp8Descriptor, KvPhysicalMemorySnapshot, KvStateAppendRequest, KvStateDescriptor,
-    KvStateError, KvStateLayout, KvStateSnapshot, StateForkAuditV1, StateForkModeV1,
+    CausalAttentionDescriptor, KV_FP8_BLOCK_SIZE, KV_MXFP8_BLOCK_SIZE,
+    KV_PAGED_IMAGE_METADATA_VERSION, KV_PAGED_IMAGE_TOKEN_BLOCK_SIZE, KV_PAGED_INVALID_BLOCK_ID,
+    KV_PAGED_INVALID_TAG, KV_PAGED_PHYSICAL_LAYOUT_VERSION, KV_PAGED_PLANE_COUNT,
+    KV_PAGED_RING_SLOT_COUNT, KV_PAGED_TOKEN_BLOCK_SIZE, KvCacheEncoding, KvFp8Block16Descriptor,
+    KvFp8PhysicalVariant, KvFp8ScaleEncoding, KvMemoryKind, KvMxfp8Descriptor,
+    KvPagedImageMetadataV1, KvPagedImageTopologyV1, KvPagedPhysicalMemorySnapshot,
+    KvPagedRingTableV1, KvPhysicalMemoryMetadata, KvPhysicalMemorySnapshot, KvStateAppendRequest,
+    KvStateDescriptor, KvStateError, KvStateLayout, KvStateSnapshot, StateForkAuditV1,
+    StateForkModeV1,
 };
 pub use linear_attention::{
     LinearAttentionDescriptor, LinearAttentionError, LinearAttentionLayout, LinearAttentionRequest,
@@ -555,10 +562,11 @@ pub use moe::{
     reference_sparse_moe_route,
 };
 pub use mtp_quantized_sidecar::{
-    Bf16RoundtripDiagnostics, MtpBf16RoundtripEncoding, MtpQuantizedSidecarError,
-    MtpQuantizedSidecarTensor, MtpWeightEncoding, VerifiedQwen38MtpQuantizedSidecar,
-    convert_qwen38_mtp_bf16_roundtrip_sidecar, convert_qwen38_mtp_quantized_sidecar,
-    verify_qwen38_mtp_quantized_sidecar,
+    Bf16RoundtripDiagnostics, MtpBf16RoundtripEncoding, MtpNvfp4ActivationScaleManifest,
+    MtpQuantizedSidecarError, MtpQuantizedSidecarTensor, MtpWeightEncoding,
+    VerifiedQwen38MtpQuantizedSidecar, convert_qwen38_mtp_bf16_roundtrip_sidecar,
+    convert_qwen38_mtp_nvfp4_sidecar, convert_qwen38_mtp_quantized_sidecar,
+    read_qwen38_mtp_nvfp4_activation_scale_manifest, verify_qwen38_mtp_quantized_sidecar,
 };
 pub use mxfp::{
     MX_BLOCK_SIZE, MxElementFormat, MxError, QuantizedMx, decode_e3m2, decode_e8m0, decode_mxfp4,
@@ -645,9 +653,9 @@ pub use qwen_execution::{
     QWEN_PREFILL_CHUNK_BUCKETS, QWEN_PREFILL_SMALL_DEVICE_CHUNK_TOKENS,
     QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES, QwenExecutionAudit, QwenExecutionError,
     QwenExecutionOutput, QwenExecutionRequest, QwenGraphMemoryEstimate, QwenKvLayerMemoryAudit,
-    QwenKvPayloadEvidence, QwenKvStateImageV1, QwenLinearStateImageV1, QwenMtpPqDecisionV1,
-    QwenPrefixForkAuditV1, QwenPrefixStateV1, QwenRequestMemoryAudit, QwenResidentModel,
-    QwenStateImageV1, qwen_graph_memory_estimate,
+    QwenKvPayloadEvidence, QwenKvStateImageV1, QwenKvStateImageV2, QwenLinearStateImageV1,
+    QwenMtpPqDecisionV1, QwenPrefixForkAuditV1, QwenPrefixStateV1, QwenRequestMemoryAudit,
+    QwenResidentModel, QwenStateImageV1, QwenStateImageV2, qwen_graph_memory_estimate,
     qwen_graph_memory_estimate_with_prepared_workspace, qwen_prefill_chunk_candidates,
 };
 pub use qwen_graph::{
@@ -711,13 +719,14 @@ pub use sampling::{
     SamplingParametersV1, SamplingRandomSource, SamplingSelectionV1, XtcSamplingConfigV1,
 };
 pub use session_checkpoint::{
-    CHECKPOINT_MAGIC, CHECKPOINT_SCHEMA_ID, CHECKPOINT_SCHEMA_VERSION, CheckpointError,
-    CheckpointIdentity, CheckpointPayload, CheckpointStore, MAX_CHECKPOINT_BYTES,
+    CHECKPOINT_MAGIC, CHECKPOINT_MAGIC_V2, CHECKPOINT_SCHEMA_ID, CHECKPOINT_SCHEMA_ID_V2,
+    CHECKPOINT_SCHEMA_VERSION, CHECKPOINT_SCHEMA_VERSION_V2, CheckpointError, CheckpointIdentity,
+    CheckpointPayload, CheckpointPayloadV2, CheckpointStore, MAX_CHECKPOINT_BYTES,
     MAX_CHECKPOINT_HEADER_BYTES, MAX_CHECKPOINT_SECTIONS, MAX_CONVERSATION_BYTES,
     MAX_IDENTITY_FIELD_BYTES, MAX_KV_PLANES, MAX_SECTION_BYTES, MAX_STATE_LAYERS, MAX_STATE_PLANES,
-    MAX_TOKEN_HISTORY, OpaqueStatePlane, SessionCheckpoint, SessionCheckpointHeader,
-    SessionCheckpointStore, SessionStateHeaderV1, StateLayerMetadataV1, StateOwnerKindV1,
-    StatePlaneKindV1, token_sequence_digest,
+    MAX_TOKEN_HISTORY, OpaqueStatePlane, PagedStateImageV2, SessionCheckpoint,
+    SessionCheckpointHeader, SessionCheckpointStore, SessionCheckpointV2, SessionStateHeaderV1,
+    StateLayerMetadataV1, StateOwnerKindV1, StatePlaneKindV1, token_sequence_digest,
 };
 pub use speculative::{
     DraftProposalV1, DraftProviderKindV1, DraftProviderV1, DraftToken,

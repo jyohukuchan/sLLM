@@ -13,18 +13,23 @@
     }                                                                          \
   } while (0)
 
-int main(int argc, char **argv) {
+int run_width(const char *const expected_target,
+              const unsigned checkpoint_rows) {
   hipDeviceProp_t properties{};
   HIP_CHECK(hipGetDeviceProperties(&properties, 0));
-  if (argc != 2 ||
-      std::strstr(properties.gcnArchName, argv[1]) != properties.gcnArchName)
+  if (expected_target == nullptr ||
+      std::strstr(properties.gcnArchName, expected_target) !=
+          properties.gcnArchName)
     return 9;
-  const auto target_length = std::strlen(argv[1]);
+  const auto target_length = std::strlen(expected_target);
   if (properties.gcnArchName[target_length] != '\0' &&
       properties.gcnArchName[target_length] != ':')
     return 9;
-  constexpr unsigned conv_size = 259, recurrent_size = 257, rows = 3;
-  constexpr unsigned checkpoint_rows = rows - 1;
+  if (checkpoint_rows < 2U || checkpoint_rows > 4U) {
+    return 9;
+  }
+  constexpr unsigned conv_size = 259, recurrent_size = 257;
+  const unsigned rows = checkpoint_rows + 1U;
   std::vector<uint16_t> conv(conv_size * checkpoint_rows),
       anchor_conv_seed(conv_size), other_conv_seed(conv_size),
       observed_anchor_conv(conv_size), observed_other_conv(conv_size);
@@ -75,7 +80,7 @@ int main(int argc, char **argv) {
     for (unsigned active_width = 1; active_width <= checkpoint_rows;
          ++active_width) {
       const unsigned active_rows = active_width + 1U;
-      for (unsigned count = 0; count <= 4; ++count) {
+      for (unsigned count = 0; count <= rows + 1U; ++count) {
         for (unsigned condition = 0; condition < 4; ++condition) {
           sllm_decode_control::ControlV1 host{};
           host.mode = sllm_decode_control::kModeMtp;
@@ -167,6 +172,21 @@ int main(int argc, char **argv) {
   HIP_CHECK(hipFree(other_conv));
   HIP_CHECK(hipFree(checkpoint_recurrent));
   HIP_CHECK(hipFree(checkpoint_conv));
-  std::printf("linear_decode_state_select status=PASS checks=%u target=%s\n",
-              checks, properties.gcnArchName);
+  std::printf(
+      "linear_decode_state_select status=PASS width=%u checks=%u target=%s\n",
+      checkpoint_rows, checks, properties.gcnArchName);
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  if (argc != 2) {
+    return 9;
+  }
+  for (unsigned width = 2U; width <= 4U; ++width) {
+    const int status = run_width(argv[1], width);
+    if (status != 0) {
+      return status;
+    }
+  }
+  return 0;
 }

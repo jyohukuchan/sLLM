@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -68,6 +69,16 @@ COUNT_KEYS = ("collected", "selected", "passed", "failed", "skipped", "deselecte
 EVIDENCE_MODE_REQUIRED_CI = "required-ci"
 EVIDENCE_MODE_LOCAL_DEVELOPMENT = "local-development"
 UNITTEST_WRAPPER_FLAG = "--_unittest-count-wrapper"
+# Local fast mode (see docs/development/testing.md). It is applied automatically
+# to every run without --strict-ci and never to CI evidence; --serial opts out.
+UNITTEST_PARALLEL_WRAPPER_FLAG = "--_unittest-parallel-wrapper"
+UNITTEST_CHUNK_FLAG = "--_unittest-chunk"
+LOCAL_FAST_ENVIRONMENT = "SLLM_HOST_LOCAL_FAST"
+LOCAL_FAST_UNITTEST_CHUNKS = 8
+LOCAL_FAST_MAX_WORKERS = 32
+# Parallel cargo and chunked unittest processes exceed the 2 GiB CI row budget
+# by design; a local fast run bounds each command at this larger value instead.
+LOCAL_FAST_MAX_RSS_BYTES = 64 * 1024 * 1024 * 1024
 PROC_LIVE_STATES = frozenset({"R", "S", "D", "T", "t", "K", "W", "P", "I"})
 
 
@@ -130,6 +141,11 @@ def args_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-dirty-local", action="store_true",
         help="explicitly permit a non-immutable local-development run",
+    )
+    parser.add_argument(
+        "--serial", action="store_true",
+        help="run a local row one command at a time with the CI --jobs 1 and memory budget "
+        "(local runs are otherwise parallel; --strict-ci is always serial)",
     )
     parser.add_argument("--seed", type=int, help="must equal the versioned row seed")
     return parser
@@ -447,11 +463,109 @@ def run_unittest_count_wrapper(original_argv: list[str], *, repo: Path = ROOT) -
     return 0 if result.wasSuccessful() else 1
 
 
-def execution_argv(argv: list[str], *, repo: Path = ROOT) -> list[str]:
+def local_fast_cargo_controls() -> dict[str, str]:
+    """Cargo controls for a local fast run, replacing the fixed CI job count."""
+    return {"CARGO_BUILD_JOBS": str(os.cpu_count() or 2), "CARGO_INCREMENTAL": "1"}
+
+
+def _flat_tests(test: unittest.TestSuite | unittest.case.TestCase) -> list[unittest.case.TestCase]:
+    if isinstance(test, unittest.TestSuite):
+        result: list[unittest.case.TestCase] = []
+        for child in test:
+            result.extend(_flat_tests(child))
+        return result
+    return [test]
+
+
+def _registered_module_tests(original_argv: list[str], repo: Path) -> list[unittest.case.TestCase]:
+    _validate_unittest_command(original_argv, repo)
+    if original_argv[1:3] != ["-m", "unittest"] or not _is_registered_unittest_invocation(original_argv, repo):
+        raise ValueError("only a registered `-m unittest` command can be split")
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    return _flat_tests(unittest.defaultTestLoader.loadTestsFromNames(original_argv[3:]))
+
+
+def run_unittest_chunk(index: int, count: int, original_argv: list[str], *, repo: Path = ROOT) -> int:
+    """Run the tests of one registered command whose position % count == index."""
+    try:
+        if count < 1 or not 0 <= index < count:
+            raise ValueError("invalid unittest chunk")
+        tests = _registered_module_tests(original_argv, repo)
+    except (ValueError, ImportError) as exc:
+        print(f"unittest chunk: {exc}", file=sys.stderr)
+        return 2
+    runner = _MachineCountRunner(verbosity=2)
+    result = runner.run(unittest.TestSuite(t for i, t in enumerate(tests) if i % count == index))
+    outcomes = {"passed": 0, "failed": 0, "skipped": 0}
+    for test_id in runner.selected_ids:
+        outcomes[result.machine_outcomes.get(test_id, "failed")] += 1
+    counts = {
+        "collected": len(runner.selected_ids),
+        "selected": len(runner.selected_ids),
+        **outcomes,
+        "deselected": 0,
+    }
+    print("SLLM_UNITTEST_COUNTS=" + json.dumps(counts, sort_keys=True, separators=(",", ":")), flush=True)
+    return 0 if result.wasSuccessful() else 1
+
+
+def run_unittest_parallel_wrapper(original_argv: list[str], *, repo: Path = ROOT) -> int:
+    """Local fast mode: split one registered unittest command across processes.
+
+    Each chunk reports its own machine count; the chunk records are removed from
+    the forwarded output and replaced by one summed record, so the parent sees
+    exactly the record shape of the serial wrapper.
+    """
+    if original_argv[1:3] != ["-m", "unittest"]:
+        return run_unittest_count_wrapper(original_argv, repo=repo)
+    try:
+        total = len(_registered_module_tests(original_argv, repo))
+    except (ValueError, ImportError) as exc:
+        print(f"unittest parallel wrapper: {exc}", file=sys.stderr)
+        return 2
+    chunks = min(LOCAL_FAST_UNITTEST_CHUNKS, total)
+    if chunks < 2:
+        return run_unittest_count_wrapper(original_argv, repo=repo)
+    this_file = str(Path(__file__).resolve())
+
+    def run_chunk(index: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, this_file, UNITTEST_CHUNK_FLAG, str(index), str(chunks), *original_argv[1:]],
+            cwd=repo, text=True, capture_output=True, check=False,
+        )
+
+    with ThreadPoolExecutor(max_workers=chunks) as pool:
+        results = list(pool.map(run_chunk, range(chunks)))
+    totals = {key: 0 for key in COUNT_KEYS}
+    status = 0
+    for index, result in enumerate(results):
+        output = result.stdout + "\n" + result.stderr
+        counts, warning, _ = _machine_counts(output, prefix="SLLM_UNITTEST_COUNTS", source="unittest chunk")
+        if warning is not None and counts["selected"] == 0:
+            print(f"unittest parallel wrapper: chunk {index}: {warning}", file=sys.stderr)
+            status = 2
+        for key in COUNT_KEYS:
+            totals[key] += counts[key]
+        if result.returncode != 0 and status == 0:
+            status = 1
+        for stream, text in ((sys.stdout, result.stdout), (sys.stderr, result.stderr)):
+            kept = [line for line in text.splitlines() if not line.startswith("SLLM_UNITTEST_COUNTS=")]
+            if kept:
+                print("\n".join(kept), file=stream)
+    if totals["selected"] != total:
+        print(f"unittest parallel wrapper: ran {totals['selected']} of {total} tests", file=sys.stderr)
+        status = 2
+    print("SLLM_UNITTEST_COUNTS=" + json.dumps(totals, sort_keys=True, separators=(",", ":")), flush=True)
+    return status
+
+
+def execution_argv(argv: list[str], *, repo: Path = ROOT, local_fast: bool = False) -> list[str]:
     if argv not in _registered_host_commands(repo):
         raise ValueError("command is not exactly registered in the host command allowlist")
     if _is_registered_unittest_invocation(argv, repo):
-        return [sys.executable, str(Path(__file__).resolve()), UNITTEST_WRAPPER_FLAG, *argv[1:]]
+        flag = UNITTEST_PARALLEL_WRAPPER_FLAG if local_fast else UNITTEST_WRAPPER_FLAG
+        return [sys.executable, str(Path(__file__).resolve()), flag, *argv[1:]]
     return argv
 
 
@@ -615,6 +729,9 @@ def run_bounded_process(
         deadline = time.monotonic() + timeout_seconds
     command_env = isolated_env()
     command_env["SLLM_EMIT_TEST_COUNTS"] = "1"
+    if os.environ.get(LOCAL_FAST_ENVIRONMENT) == "1":
+        # isolated_env() pins the CI job count and non-incremental builds.
+        command_env.update(local_fast_cargo_controls())
     if time.monotonic() >= deadline:
         raise ProcessDeadlineExpired("process launch deadline expired")
     proc = subprocess.Popen(
@@ -767,6 +884,7 @@ def run_command(
     max_rss_bytes: int,
     output_limit_bytes: int,
     address_space_limit_bytes: int | None,
+    local_fast: bool = False,
 ) -> tuple[dict[str, Any], str]:
     started = utc_now()
     command_started = time.monotonic()
@@ -784,7 +902,10 @@ def run_command(
     launch_deadline_error: ProcessDeadlineExpired | None = None
     restoration_error: NetworkIsolationError | None = None
     try:
-        plan = prepare_isolation(outer_deadline=deadline)
+        if local_fast:
+            plan = prepare_isolation(outer_deadline=deadline, resource_overrides=local_fast_cargo_controls())
+        else:
+            plan = prepare_isolation(outer_deadline=deadline)
         strategy = plan.strategy
         remaining = timeout_seconds - (time.monotonic() - command_started)
         if remaining <= 0:
@@ -794,7 +915,7 @@ def run_command(
         else:
             wrapped = wrap_command(
                 plan,
-                execution_argv(argv, repo=repo),
+                execution_argv(argv, repo=repo, local_fast=local_fast),
                 address_space_limit_bytes=address_space_limit_bytes,
                 outer_deadline=deadline,
             )
@@ -1012,12 +1133,111 @@ def write_diagnostic_summary(
     (output_dir / "diagnostic.md").write_bytes(summary_bytes)
 
 
+MSRV_LANE_SCRIPTS = frozenset({"validate_rust_dependencies.py", "test_rust_dependencies.py"})
+DEV_CARGO_LANE_SCRIPTS = frozenset({"validate_rust.py"})
+
+
+def _cargo_lane(command: list[str]) -> str | None:
+    """Return the Cargo lane of a command, or None when it does not build with Cargo.
+
+    Commands in one lane share a target directory and run in order. The MSRV
+    check builds for an explicit `--target` into its own directory, so the MSRV
+    lane runs beside the development-toolchain lane.
+    """
+    names = {Path(part).name for part in command}
+    if names & MSRV_LANE_SCRIPTS or (names & DEV_CARGO_LANE_SCRIPTS and command[-2:] == ["--mode", "msrv"]):
+        return "msrv"
+    if "cargo" in command or names & DEV_CARGO_LANE_SCRIPTS:
+        return "dev"
+    return None
+
+
+def run_commands_local_fast(
+    commands: list[tuple[str, list[str]]],
+    command_resources: dict[str, dict[str, Any]],
+    row: dict[str, Any],
+    *,
+    repo: Path,
+    output_dir: Path,
+    started_monotonic: float,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Run a local row concurrently: one ordered Cargo lane, everything else in a pool.
+
+    Steps are returned in registration order so the report shape matches a
+    serial run. Output budgets are enforced per command here and for the row
+    by the caller's aggregate check.
+    """
+    results: list[tuple[dict[str, Any], str] | None] = [None] * len(commands)
+
+    def run_one(index: int) -> None:
+        command_id, command = commands[index]
+        resource = command_resources.get(command_id, {})
+        remaining_wall = row["timeout_seconds"] - (time.monotonic() - started_monotonic)
+        results[index] = run_command(
+            command_id,
+            command,
+            timeout_seconds=max(
+                0.001,
+                min(
+                    float(row["max_command_seconds"]),
+                    float(resource.get("max_command_seconds", row["max_command_seconds"])),
+                    remaining_wall,
+                ),
+            ),
+            repo=repo,
+            output_dir=output_dir,
+            max_rss_bytes=max(row["max_rss_bytes"], LOCAL_FAST_MAX_RSS_BYTES),
+            output_limit_bytes=min(row["max_command_output_bytes"], row["max_row_output_bytes"]),
+            address_space_limit_bytes=row["address_space_limit_bytes"],
+            local_fast=True,
+        )
+
+    lanes: dict[str, list[int]] = {}
+    others: list[int] = []
+    for index, (_, command) in enumerate(commands):
+        lane = _cargo_lane(command)
+        if lane is None:
+            others.append(index)
+        else:
+            lanes.setdefault(lane, []).append(index)
+
+    def run_lane(indices: list[int]) -> None:
+        for index in indices:
+            run_one(index)
+
+    with ThreadPoolExecutor(max_workers=min(LOCAL_FAST_MAX_WORKERS, len(commands)) or 1) as pool:
+        futures = [pool.submit(run_lane, indices) for indices in lanes.values()]
+        futures += [pool.submit(run_one, index) for index in others]
+        for future in futures:
+            future.result()
+    steps: list[dict[str, Any]] = []
+    diagnostics: list[str] = []
+    for (command_id, _), item in zip(commands, results):
+        if item is None:
+            raise RuntimeError(f"local fast run lost the result of {command_id}")
+        step, detail = item
+        steps.append(step)
+        if step["state"] != "PASS":
+            diagnostics.append(f"{command_id}: {step['diagnostic']} {detail}".strip())
+    return steps, diagnostics
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv and argv[0] == UNITTEST_WRAPPER_FLAG:
         return run_unittest_count_wrapper(
             [sys.executable, *argv[1:]], repo=Path.cwd().resolve()
+        )
+    if argv and argv[0] == UNITTEST_PARALLEL_WRAPPER_FLAG:
+        return run_unittest_parallel_wrapper(
+            [sys.executable, *argv[1:]], repo=Path.cwd().resolve()
+        )
+    if argv and argv[0] == UNITTEST_CHUNK_FLAG:
+        if len(argv) < 4:
+            return fail_harness("unittest chunk requires index, count and a command")
+        return run_unittest_chunk(
+            int(argv[1]), int(argv[2]), [sys.executable, *argv[3:]], repo=Path.cwd().resolve()
         )
     args = args_parser().parse_args(argv)
     try:
@@ -1064,13 +1284,23 @@ def main(argv: list[str] | None = None) -> int:
             command_id: resource
             for command_id, _command, resource in registered_row_command_specs(suites, row, repo)
         }
+        local_fast = not args.strict_ci and not args.serial
+        if local_fast:
+            os.environ[LOCAL_FAST_ENVIRONMENT] = "1"
         fixture_bytes = fixture_size_bytes(repo)
         started = utc_now()
         started_monotonic = time.monotonic()
         steps: list[dict[str, Any]] = []
         diagnostics: list[str] = []
         row_output_exhausted = row_timeout_exhausted = False
-        for command_id, command in commands:
+        row_rss_limit = max(row["max_rss_bytes"], LOCAL_FAST_MAX_RSS_BYTES) if local_fast else row["max_rss_bytes"]
+        if local_fast:
+            steps, fast_diagnostics = run_commands_local_fast(
+                commands, command_resources, row, repo=repo, output_dir=output_dir,
+                started_monotonic=started_monotonic,
+            )
+            diagnostics.extend(fast_diagnostics)
+        for command_id, command in ([] if local_fast else commands):
             command_resource = command_resources.get(command_id, {})
             elapsed_before = time.monotonic() - started_monotonic
             remaining_wall = row["timeout_seconds"] - elapsed_before
@@ -1133,7 +1363,7 @@ def main(argv: list[str] | None = None) -> int:
             commands_complete=commands_complete,
             command_output_breach=any(step["resource"]["output_breach"] for step in steps),
         )
-        rss_breach = aggregate_rss > row["max_rss_bytes"] or any(
+        rss_breach = aggregate_rss > row_rss_limit or any(
             step["resource"]["rss_breach"] for step in steps
         )
         wall_time_breach = elapsed > row["timeout_seconds"] or row_timeout_exhausted
@@ -1141,7 +1371,7 @@ def main(argv: list[str] | None = None) -> int:
             "wall_time_limit_seconds": row["timeout_seconds"],
             "wall_time_breach": wall_time_breach,
             "max_rss_bytes": aggregate_rss,
-            "max_rss_limit_bytes": row["max_rss_bytes"],
+            "max_rss_limit_bytes": row_rss_limit,
             "rss_breach": rss_breach,
             "runner_max_rss_bytes": runner_rss,
             "fixture_size_bytes": fixture_bytes,
@@ -1179,6 +1409,11 @@ def main(argv: list[str] | None = None) -> int:
         warnings = []
         if evidence_mode == EVIDENCE_MODE_LOCAL_DEVELOPMENT:
             warnings.append("LOCAL DEVELOPMENT ONLY: this report is not immutable evidence")
+        if local_fast:
+            warnings.append(
+                "LOCAL FAST MODE: commands ran in parallel, cargo incremental without --jobs 1 and with a "
+                f"{LOCAL_FAST_MAX_RSS_BYTES} byte memory bound; use --serial for the CI resource behaviour"
+            )
         if not worktree_clean:
             warnings.append("worktree was dirty before or after command execution")
         payload: dict[str, Any] = {

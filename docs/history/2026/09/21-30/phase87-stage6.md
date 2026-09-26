@@ -43,7 +43,7 @@ queue追加、replay中のhost確保、再instantiate、環境変数追加は行
 `baseline-<target>-<off|on>-prior-n0.json` は前回との照合結果。
 単体probeの初期試行は、最適化不足と冷間校正の不一致のため採用根拠から除外している。
 
-計画: [Phase 87](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)。
+計画: [Phase 87](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)。
 
 ## 基準DAGのcritical pathと上限
 
@@ -227,7 +227,7 @@ R9700は `profile-gfx1201-{off,on}-r1`／`final-profile-gfx1201-{off,on}-r1`。
 `weighted/candidate-v-nv-only{,-on}-dag.json` が最終のDAG証拠。
 生成物・binary・raw traceは全て `.local-artifacts/phase87/stage6/` に置き、Gitには追加しない。
 
-計画: [Phase 87](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)。
+計画: [Phase 87](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)。
 
 完了監査: `completion-audit.json`（27証拠、SHA-256 `7eb5924f999055eb5b51ab6fd859ee24524426aa64fbeb334de0e489fd8fb0f7`）。
 最終source SHA-256: `f8cee126acc1c921822cf85c18fe5f851c63ef70b2a686c6214512669c302dd7`。

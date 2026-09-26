@@ -46,7 +46,7 @@ record it as direct reuse.
 Suggested source-file header:
 
 ```text
-// Portions derived from llama.cpp.
+// Portions derived from llama.cpp (or rocm_exl3/exllamav3).
 // Provenance: THIRD_PARTY_NOTICES.md#<stable-entry-id>
 // Upstream: <repository URL> @ <full commit SHA>, <source path>
 // SPDX-License-Identifier: <license identifier for this file>
@@ -55,9 +55,34 @@ Suggested source-file header:
 The SPDX line describes the licensing conclusion for that local file; it does
 not replace required copyright or notice text.
 
+### rocm_exl3 and exllamav3
+
+2026-09-25 user decision: the MIT-licensed parts of
+[rocm_exl3](https://github.com/CarouselAether/rocm_exl3), the ROCm/RDNA fork of
+[exllamav3](https://github.com/turboderp-org/exllamav3), may be copied, adapted,
+or ported for EXL3 work in the same way as llama.cpp, with the same record
+requirements (import log, detailed notice, per-file provenance header).
+
+- The repository LICENSE is MIT, Copyright (c) 2025 Turboderp. The ROCm port
+  (`exllamav3/exllamav3_ext/rocm/`, `exllamav3/rocm_py/`, `rocm_tools/`, and the
+  few changed upstream files) is contributed by the fork author(s) under the same
+  repository license. Record both the upstream exllamav3 copyright and the fork
+  as the source of each imported file, and keep the MIT notice.
+- Check the license and any file-level notice at the exact revision before each
+  import. A file that carries other terms is not covered by this permission.
+- Code derived from non-MIT sources is not covered. In particular, exllamav3
+  cites [QTIP](https://github.com/Cornell-RelaxML/qtip) (GPL-3.0) as the
+  structural reference of its small-M GEMV path
+  (`exllamav3_ext/quant/exl3_gemv_kernel.cuh`). QTIP itself stays a no-copy
+  reference. Before importing that GEMV path or its RDNA sibling, confirm that
+  the imported code is exllamav3's own implementation and not text taken from
+  QTIP; when in doubt, reimplement from the documented design instead.
+- Use the header below with `rocm_exl3/exllamav3` in place of `llama.cpp`.
+
 ### Other inference engines
 
-Do not directly copy, adapt, or port source from vLLM or other inference engines.
+Do not directly copy, adapt, or port source from vLLM or other inference engines
+other than llama.cpp and the MIT parts of rocm_exl3 described above.
 Use them only to identify technical facts, algorithms, constraints, and evaluation
 ideas. Keep inspection notes separate from implementation: the inspection output
 documents technical points without source expression, and implementation is based

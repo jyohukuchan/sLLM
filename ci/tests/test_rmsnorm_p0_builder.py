@@ -187,7 +187,10 @@ class P0BuilderTests(unittest.TestCase):
                 real_signal(group_id, signal_value)
 
             try:
-                with patch.object(builder, "P0_BUILD_TIMEOUT_SECONDS", 0.1), patch.object(
+                # The timeout must outlast the child's own start-up and grandchild
+                # spawn, or the retained member can be missing when the host is
+                # busy (for example a parallel local host run).
+                with patch.object(builder, "P0_BUILD_TIMEOUT_SECONDS", 1.0), patch.object(
                     builder, "P0_BUILD_KILL_GRACE_SECONDS", 0.05
                 ), patch.object(builder, "_signal_process_group", side_effect=fail_group_kill):
                     with self.assertRaises(contracts.ContractError) as raised:

@@ -76,4 +76,4 @@ MX A16はBF16 activationをそのまま読む形式なので、NVFP4 W4A4のよ�
 3. Gemma4 31B NVIDIAはscale catalogだけをupstream indexで確認したreference-only対象で、W4A4移行済みやW4A16削除後の動作を主張しない。
 4. この棚卸しで新規GPUは実行していない。既存Qwen3.8 W4A4 baselineとPhase 15Q W4A16 evidenceは形式・実行経路の同定にだけ使い、今回の訂正後スコープではW4A16診断比較を追加しない。
 
-計画: [Phase 87](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)
+計画: [Phase 87](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)

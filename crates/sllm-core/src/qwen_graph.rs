@@ -2378,7 +2378,7 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_vocabulary_ids(
 }
 
 /// Build the one-layer Qwen3.8 companion graph, optionally replacing the
-/// eight matrix weights with a verified MXFP8/MXFP6 sidecar.  The shared
+/// eight matrix weights with a verified MXFP8/MXFP6/NVFP4 sidecar.  The shared
 /// embedding and output projection remain bound to the reviewed artifact;
 /// companion quantization is limited to the eight two-dimensional MTP
 /// matrices and never changes norm or KV encodings.
@@ -2450,6 +2450,7 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
     let (bindings, known_unconsumed) = validate_mtp_plan(lock, plan)?;
     let mut fp8_tensor_names = BTreeSet::new();
     let mut quantized_weight_encodings = BTreeMap::new();
+    let mut activation_quant_scales = BTreeMap::new();
     if !dimensions.tied_embeddings {
         let output = artifact.tensor("lm_head.weight").ok_or_else(|| {
             QwenGraphError::InvalidPlan("Qwen3.8 MTP output projection is absent".to_owned())
@@ -2501,17 +2502,16 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
                     scale_dtype: DType::U8,
                 })
             }
-            crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0
-            | crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => {
-                Some(Encoding::Mxfp6W6A6 {
-                    block_size: 32,
-                    scale_dtype: DType::U8,
-                })
-            }
+            crate::MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32 => Some(Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            }),
             // Fake-quantized BF16 sidecars use the original BF16 graph layout.
             // Their replacement bytes are supplied by the resident provisioner.
             crate::MtpWeightEncoding::Bf16 => None,
         };
+        let nvfp4 = companion.encoding() == crate::MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32;
+        let mut nvfp4_scales = BTreeMap::new();
         for name in MTP_MATRIX_NAMES {
             let sidecar_tensor = companion.tensor(name).ok_or_else(|| {
                 QwenGraphError::InvalidPlan(format!(
@@ -2526,16 +2526,79 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
             if artifact_tensor.encoding != crate::QuantizedTensorEncoding::UnquantizedBf16
                 || artifact_tensor.logical_shape.as_slice()
                     != sidecar_tensor.logical_shape.as_slice()
-                || sidecar_tensor.logical_shape[1] % 32 != 0
+                || sidecar_tensor.logical_shape[1] % if nvfp4 { 16 } else { 32 } != 0
             {
                 return Err(QwenGraphError::InvalidPlan(format!(
                     "Qwen3.8 MTP companion tensor shape or source differs: {name}"
                 )));
             }
+            if nvfp4 {
+                let (weight_scale_bits, input_global_scale_bits) =
+                    companion.nvfp4_scale_bits(name).ok_or_else(|| {
+                        QwenGraphError::InvalidPlan(format!(
+                            "Qwen3.8 MTP NVFP4 scales are absent: {name}"
+                        ))
+                    })?;
+                let weight_scale = f32::from_bits(weight_scale_bits);
+                let input_global_scale = f32::from_bits(input_global_scale_bits);
+                if !weight_scale.is_finite()
+                    || weight_scale <= 0.0
+                    || !input_global_scale.is_finite()
+                    || input_global_scale <= 0.0
+                {
+                    return Err(QwenGraphError::InvalidPlan(format!(
+                        "Qwen3.8 MTP NVFP4 scale is non-positive or non-finite: {name}"
+                    )));
+                }
+                nvfp4_scales.insert(name, (weight_scale_bits, input_global_scale_bits));
+                // Stage3 sidecars store the calibrated resident g directly.
+                // Source compressed-tensors artifacts use a reciprocal field,
+                // but the sidecar has its own explicit scale convention.
+                activation_quant_scales.insert(name.to_owned(), input_global_scale_bits);
+            }
             if let Some(encoding) = encoding {
                 fp8_tensor_names.insert(name.to_owned());
                 quantized_weight_encodings.insert(name.to_owned(), encoding);
             }
+        }
+        if nvfp4 {
+            let require_equal = |names: &[&str], family: &str| {
+                let first = nvfp4_scales
+                    .get(names[0])
+                    .map(|(_, input_global_scale_bits)| *input_global_scale_bits)
+                    .ok_or_else(|| {
+                        QwenGraphError::InvalidPlan(format!(
+                            "Qwen3.8 MTP NVFP4 scale is absent: {}",
+                            names[0]
+                        ))
+                    })?;
+                if names.iter().skip(1).any(|name| {
+                    nvfp4_scales
+                        .get(*name)
+                        .map(|(_, input_global_scale_bits)| *input_global_scale_bits)
+                        != Some(first)
+                }) {
+                    return Err(QwenGraphError::InvalidPlan(format!(
+                        "Qwen3.8 MTP NVFP4 {family} input scales differ"
+                    )));
+                }
+                Ok::<(), QwenGraphError>(())
+            };
+            require_equal(
+                &[
+                    "mtp.layers.0.self_attn.q_proj.weight",
+                    "mtp.layers.0.self_attn.k_proj.weight",
+                    "mtp.layers.0.self_attn.v_proj.weight",
+                ],
+                "Q/K/V",
+            )?;
+            require_equal(
+                &[
+                    "mtp.layers.0.mlp.gate_proj.weight",
+                    "mtp.layers.0.mlp.up_proj.weight",
+                ],
+                "gate/up",
+            )?;
         }
     }
     let fp8_dtype = if companion.is_some_and(|sidecar| {
@@ -2566,7 +2629,7 @@ pub fn build_qwen38_nvfp4_mtp_graph_with_companion_and_vocabulary_ids(
         fp8_dtype,
         quantized_weight_encoding: None,
         quantized_weight_encodings,
-        activation_quant_scales: BTreeMap::new(),
+        activation_quant_scales,
         fp8_sidecar_fingerprint,
         kv_cache_encoding,
         mtp: true,
@@ -4809,8 +4872,9 @@ impl GraphBuilder {
 
         let input_norm_key = key(layer, WeightConsumer::InputNorm);
         let input_norm_weight = self.weight_tensor(input_norm_key)?;
-        // The MTP layer is full attention; its q/k/v weights decide whether
-        // the normalized activation is retyped to Encoding A.
+        // The MTP layer is full attention. Its Q/K/V weights may consume
+        // Encoding A directly, while NVFP4 keeps the BF16 RMSNorm output and
+        // quantizes the activation at the individual matmul boundary.
         let (normed, _) = self.producer_activation(
             layer,
             "input_rmsnorm.output",
@@ -4842,23 +4906,16 @@ impl GraphBuilder {
 
         let post_key = key(layer, WeightConsumer::PostAttentionNorm);
         let post_weight = self.weight_tensor(post_key)?;
-        let (post_normed, post_format) = self.producer_activation(
+        let (post_normed, _) = self.producer_activation(
             layer,
             "post_attention_rmsnorm.output",
             &[self.token_count, self.dimensions.hidden],
             &[WeightConsumer::MlpGate, WeightConsumer::MlpUp],
-            ProducerEncodingPolicy::EncodingAOrB {
-                scale_role: WeightConsumer::MlpGate,
-            },
+            ProducerEncodingPolicy::EncodingAOnly,
         )?;
-        let post_scale_bits = if post_format == Some(ActivationQuantFormat::Nvfp4Block16) {
-            self.activation_quant_scale_bits(layer, WeightConsumer::MlpGate)
-        } else {
-            0
-        };
         self.add_semantic(
             &format!("layer.{layer}.post_attention_rmsnorm"),
-            SemanticOpDescriptor::new_rms_norm_with_quant_scale(
+            SemanticOpDescriptor::new_rms_norm(
                 vec![
                     self.tensors[attention_residual].view.clone(),
                     self.tensors[post_weight].view.clone(),
@@ -4866,7 +4923,6 @@ impl GraphBuilder {
                 vec![self.tensors[post_normed].view.clone()],
                 1.0e-6,
                 RmsNormScaleMode::OffsetOne,
-                post_scale_bits,
             )?,
             vec![attention_residual, post_weight],
             vec![post_normed],

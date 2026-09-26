@@ -638,20 +638,36 @@ deployed binary or change its explicitly configured Phase78 preset.
 See the [Phase82 adoption scope](../history/2026/09/1-10/phase82-default-adoption-scope.md)
 and [validation record](../history/2026/09/1-10/phase82-optimization-cleanup-default-adoption.md).
 
-## Phase84 MTP companion selection
+## Phase84/87 MTP companion selection
 
-The Qwen3.8 NVFP4 profile accepts a verified quantized companion directory via
-`--mtp-weights` on exact `gfx1030` and `gfx1201`, logical device 0. Selection is
-server configuration, not a new Chat Completions request field. Requests reuse
-the configured recipe; target weights and KV encoding remain unchanged. Omitting
-the option preserves the BF16 companion. Combining it with `--draft disabled`
-is rejected before model loading.
+When Qwen3.8 MTP is enabled, the production shared backend resolves the
+reviewed calibrated NVFP4 companion at
+`<artifact_root>/.sllm/mtp-nvfp4-v1/` when `--mtp-weights` is omitted. It
+validates the NVFP4 encoding, the artifact/model-lock binding, and combined
+recipe digest
+`sha256:d9698c41954ef7b53a2937c0f662ac2a273f1bdc40c602f77d4928b63de991e1`.
+Missing, corrupt, or mismatched sidecars fail clearly during loading; the
+backend does not silently fall back to BF16 or another encoding. This default
+was selected by the explicit Phase 87 Stage 3 user decision despite the
+measured whole-graph TPOT regression recorded in the stage history.
+
+The Qwen3.8 NVFP4 profile also accepts a verified MXFP8 or calibrated NVFP4
+companion directory via `--mtp-weights` on exact `gfx1030` and `gfx1201`,
+logical device 0. Selection is server configuration, not a new Chat
+Completions request field. Requests reuse the configured recipe; target weights
+and KV encoding remain unchanged. An explicit `--mtp-weights` value overrides
+the reviewed default. MTP disabled is unaffected. Combining it with
+`--draft disabled` is rejected before model loading.
+The previously supported MXFP6 MTP companion sidecar is retired: supplying an
+existing one returns an explicit unsupported-format error without falling back
+to BF16 or another sidecar. MXFP6 body-model support is unaffected.
 
 The audit records `mtp_weight_encoding` and `mtp_companion_digest`, plus observed
 proposal/acceptance counts and separate prefix/proposal wall times. An encoding
 being selectable does not imply a throughput or full-model quality improvement.
 See [conversion, CLI/API usage and evaluation limits](../development/mtp-companion-quantization.md)
-and the [Phase84 measurements](../history/2026/09/11-20/phase84-mtp-weight-quantization.md).
+and the [Phase84 measurements](../history/2026/09/11-20/phase84-mtp-weight-quantization.md)
+and [Phase87 Stage 3 comparison](../history/2026/09/21-30/phase87-stage3.md).
 
 ## Phase85 Qwen3.5-4B MX weight and KV compatibility scope (2026-09-13)
 

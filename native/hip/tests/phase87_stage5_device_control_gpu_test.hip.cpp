@@ -927,3 +927,6 @@ int main(const int argc, char **const argv) {
     return 1;
   }
 }
+// Historical Stage 5 device-control oracle. The token-major and contiguous
+// provider calls are retired from current Stage 10 CTest; keep this source for
+// the archived control evidence only.

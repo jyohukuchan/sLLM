@@ -327,6 +327,12 @@ pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E4_BLOCK16_TOKEN_MAJOR_V1: u32 = 6;
 pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E5_BLOCK16_TOKEN_MAJOR_V1: u32 = 7;
 pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E4_TOKEN_MAJOR_V1: u32 = 8;
 pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E5_TOKEN_MAJOR_V1: u32 = 9;
+pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_F16_V1: u32 = 108;
+pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_MXFP8_E4_V1: u32 = 109;
+pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_FP8_E4_V1: u32 = 112;
+pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_FP8_STATIC_E4_V1: u32 = 113;
+pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_NVFP4_V1: u32 = 114;
+pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_MXFP8_E5_V1: u32 = 115;
 pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E4_BLOCK16_TOKEN_MAJOR_V2: u32 = 10;
 pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E5_BLOCK16_TOKEN_MAJOR_V2: u32 = 11;
 pub const SLLM_HIP_KV_WORKGROUP_SIZE: u32 = 256;
@@ -335,6 +341,13 @@ pub const SLLM_HIP_KV_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS: u32 = 1;
 pub const SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED: u32 = 0;
 pub const SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT: u32 = 2;
+pub const SLLM_HIP_KV_MEMORY_KIND_PAGED: u32 = 3;
+pub const SLLM_HIP_KV_PAGED_CREATE_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_KV_PAGED_VIEW_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_KV_PAGED_TOKEN_BLOCK_SIZE: u32 = 128;
+pub const SLLM_HIP_KV_PAGED_LAYOUT_VERSION: u32 = 1;
+pub const SLLM_HIP_KV_PAGED_STATE_FORK_VERSION: u32 = 1;
+pub const SLLM_HIP_KV_PAGED_STATE_FORK_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR: u32 = 1;
 pub const SLLM_HIP_KV_ENCODING_FP16_V1: u32 = 0;
 pub const SLLM_HIP_KV_ENCODING_FP8_V1: u32 = 1;
@@ -349,6 +362,15 @@ pub const SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2: u32 = 9;
 pub const SLLM_HIP_STATE_FORK_VERSION: u32 = 1;
 pub const SLLM_HIP_STATE_FORK_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_STATE_IMAGE_SLIDING_VERSION: u32 = 2;
+pub const SLLM_HIP_KV_PAGED_IMAGE_VERSION: u32 = 1;
+pub const SLLM_HIP_KV_PAGED_IMAGE_ENDIAN_LITTLE: u32 = 1;
+pub const SLLM_HIP_KV_PAGED_IMAGE_TABLE_ENTRY_U32: u32 = 1;
+pub const SLLM_HIP_KV_PAGED_IMAGE_FLAG_SLIDING: u32 = 1;
+pub const SLLM_HIP_KV_PAGED_IMAGE_FLAG_STATIC_SCALES: u32 = 2;
+pub const SLLM_HIP_KV_PAGED_IMAGE_SECTION_LOGICAL_TABLE: u32 = 1;
+pub const SLLM_HIP_KV_PAGED_IMAGE_SECTION_RING_TAGS: u32 = 2;
+pub const SLLM_HIP_KV_PAGED_IMAGE_SECTION_RING_TABLE: u32 = 3;
+pub const SLLM_HIP_KV_PAGED_IMAGE_SECTION_PLANE: u32 = 4;
 pub const SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY: u32 = 1;
 pub const SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES: u32 = 2;
 pub const SLLM_HIP_KV_STATE_PLANE_KEY: u32 = 1;
@@ -377,6 +399,13 @@ pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F16_TAIL_GFX1201_V1: 
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_SPLIT_P128_GFX1030_V1: u32 = 78;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_GFX1030_V1: u32 = 80;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_V1: u32 = 93;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_GQA6_V1: u32 = 106;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_GQA6_V1: u32 = 107;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_FP16_V1: u32 = 110;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_FP16_V1: u32 = 111;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_GENERIC_FORMATS_V1: u32 = 116;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_SLIDING_STATIC_FP8_V1: u32 = 117;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_GQA6_C1_M3_V1: u32 = 118;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE: u32 = 256;
@@ -1569,6 +1598,35 @@ pub struct sllm_kv_state_create_info_v2_t {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct sllm_kv_state_paged_create_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub create_info_version: u32,
+    pub reserved0: u32,
+    pub session_id: u64,
+    pub layer_id: u32,
+    pub flags: u32,
+    pub capacity_tokens: u64,
+    pub head_count: u32,
+    pub head_dim: u32,
+    pub memory_kind: u32,
+    pub layout: u32,
+    pub dtype: u32,
+    pub encoding: u32,
+    pub scale_dtype: u32,
+    pub quantization_block_size: u32,
+    pub token_block_size: u32,
+    pub physical_layout_version: u32,
+    pub logical_table_capacity: u64,
+    pub max_physical_blocks: u64,
+    pub sliding_window_tokens: u64,
+    pub static_key_scale_bits: u32,
+    pub static_value_scale_bits: u32,
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct sllm_kv_view_info_t {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -1594,6 +1652,37 @@ pub struct sllm_kv_view_info_t {
     pub state_identity: u64,
     pub k_stride_elements: [u64; 3],
     pub v_stride_elements: [u64; 3],
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_kv_paged_view_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub reserved0: u32,
+    pub session_id: u64,
+    pub layer_id: u32,
+    pub dtype: u32,
+    pub encoding: u32,
+    pub head_count: u32,
+    pub head_dim: u32,
+    pub memory_kind: u32,
+    pub layout: u32,
+    pub token_block_size: u32,
+    pub physical_layout_version: u32,
+    pub reserved1: u32,
+    pub capacity_tokens: u64,
+    pub observed_length: u64,
+    pub generation: u64,
+    pub logical_table_capacity: u64,
+    pub max_physical_blocks: u64,
+    pub allocated_physical_blocks: u64,
+    pub committed_bytes_per_plane: [u64; 6],
+    pub committed_bytes_total: u64,
+    pub context_identity: u64,
+    pub state_identity: u64,
     pub reserved: [u32; 4],
 }
 
@@ -1736,6 +1825,32 @@ pub struct sllm_state_fork_info_t {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct sllm_kv_paged_state_fork_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub reserved0: u32,
+    pub source_state_identity: u64,
+    pub child_state_identity: u64,
+    pub source_owned_bytes: u64,
+    pub child_owned_bytes: u64,
+    pub copied_bytes: u64,
+    pub shared_bytes: u64,
+    pub published_length: u64,
+    pub token_block_size: u32,
+    pub physical_layout_version: u32,
+    pub source_logical_table_capacity: u64,
+    pub child_logical_table_capacity: u64,
+    pub source_physical_blocks: u64,
+    pub child_physical_blocks: u64,
+    pub copied_physical_blocks: u64,
+    pub shared_physical_blocks: u64,
+    pub committed_bytes_total: u64,
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct sllm_state_chunk_t {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -1767,6 +1882,58 @@ pub struct sllm_state_image_info_t {
     pub generation: u64,
     pub plane_count: u32,
     pub reserved: [u32; 7],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_kv_paged_image_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub image_version: u32,
+    pub flags: u32,
+    pub byte_order: u32,
+    pub session_id: u64,
+    pub layer_id: u32,
+    pub dtype: u32,
+    pub encoding: u32,
+    pub head_count: u32,
+    pub head_dim: u32,
+    pub layout: u32,
+    pub token_block_size: u32,
+    pub physical_layout_version: u32,
+    pub capacity_tokens: u64,
+    pub published_length: u64,
+    pub generation: u64,
+    pub retained_start: u64,
+    pub retained_length: u64,
+    pub sliding_window_tokens: u64,
+    pub logical_table_capacity: u64,
+    pub physical_block_count: u64,
+    pub plane_count: u32,
+    pub ring_slot_count: u32,
+    pub table_entry_width: u32,
+    pub reserved0: u32,
+    pub plane_block_stride: [u64; 6],
+    pub plane_bytes: [u64; 6],
+    pub static_key_scale_bits: u32,
+    pub static_value_scale_bits: u32,
+    pub reserved: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_kv_paged_image_chunk_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub image_version: u32,
+    pub section: u32,
+    pub plane: u32,
+    pub reserved0: u32,
+    pub byte_offset: u64,
+    pub byte_length: u64,
+    pub host_pointer: *mut core::ffi::c_void,
+    pub host_capacity: u64,
+    pub reserved: [u32; 4],
 }
 
 #[repr(C)]
@@ -2302,6 +2469,12 @@ unsafe extern "C" {
         state: *mut *mut sllm_kv_state_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
+    pub fn sllm_kv_state_create_paged(
+        context: *const sllm_context_t,
+        info: *const sllm_kv_state_paged_create_info_t,
+        state: *mut *mut sllm_kv_state_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
     pub fn sllm_kv_state_release(
         state: *mut *mut sllm_kv_state_t,
         error_sink: *mut sllm_error_sink_t,
@@ -2309,6 +2482,11 @@ unsafe extern "C" {
     pub fn sllm_kv_state_query(
         state: *const sllm_kv_state_t,
         info: *mut sllm_kv_view_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_query_paged(
+        state: *const sllm_kv_state_t,
+        info: *mut sllm_kv_paged_view_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
     pub fn sllm_kv_state_rewind_last(
@@ -2325,6 +2503,11 @@ unsafe extern "C" {
     pub fn sllm_kv_view_query(
         view: *const sllm_kv_view_t,
         info: *mut sllm_kv_view_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_view_query_paged(
+        view: *const sllm_kv_view_t,
+        info: *mut sllm_kv_paged_view_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
     pub fn sllm_kv_view_release(
@@ -2356,6 +2539,18 @@ unsafe extern "C" {
         fork_info: *mut sllm_state_fork_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
+    pub fn sllm_kv_state_fork_paged(
+        source: *const sllm_kv_state_t,
+        destination_info: *const sllm_kv_state_paged_create_info_t,
+        child: *mut *mut sllm_kv_state_t,
+        fork_info: *mut sllm_kv_paged_state_fork_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_fork_query_paged(
+        state: *const sllm_kv_state_t,
+        fork_info: *mut sllm_kv_paged_state_fork_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
     pub fn sllm_kv_state_export(
         state: *const sllm_kv_state_t,
         chunk: *const sllm_state_chunk_t,
@@ -2380,6 +2575,33 @@ unsafe extern "C" {
     pub fn sllm_kv_state_import_finalize(
         state: *const sllm_kv_state_t,
         image_info: *const sllm_state_image_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_paged_image_query(
+        state: *const sllm_kv_state_t,
+        image_info: *mut sllm_kv_paged_image_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_paged_image_section_size(
+        state: *const sllm_kv_state_t,
+        section: u32,
+        plane: u32,
+        size_bytes: *mut u64,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_paged_image_export(
+        state: *const sllm_kv_state_t,
+        chunk: *const sllm_kv_paged_image_chunk_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_paged_image_import(
+        state: *const sllm_kv_state_t,
+        chunk: *const sllm_kv_paged_image_chunk_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_paged_image_import_finalize(
+        state: *const sllm_kv_state_t,
+        image_info: *const sllm_kv_paged_image_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
     pub fn sllm_causal_attention_execute(

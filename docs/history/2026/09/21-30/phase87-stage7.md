@@ -6,7 +6,7 @@
 
 ## 計画の対象と、実際に行われたこと
 
-[計画の段階7](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#今後の順序2026-09-22整理)は、
+[計画の段階7](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#今後の順序2026-09-22整理)は、
 `rmsnorm`／`residual_rmsnorm`／`elementwise`（SiLU×up）／GDN gated normといった**前段のproducer kernel**へ
 活性値量子化を畳み込み、producerが`(codes, scale)`をconsumerへ直接渡す契約にすることである。
 1 tokenあたり185回の量子化kernelとその起動をnodeごと減らすのが目的で、
@@ -57,4 +57,4 @@ revert後にclang-formatとJSON manifest検査がPASSすることを確認した
 - 着手時にfamiliesごとの上限（削減node数×1 nodeあたりのgap＋量子化kernel自体の時間）を算出し、半分を打切り線とする。
 - commit前に`validate_cpp.py --mode format`、`cargo fmt`、clippy、CI hash連鎖の更新を通す。
 
-計画: [Phase 87計画](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)。
+計画: [Phase 87計画](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)。

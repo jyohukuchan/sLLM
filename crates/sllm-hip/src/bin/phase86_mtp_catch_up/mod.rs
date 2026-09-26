@@ -10,6 +10,9 @@ use super::*;
 
 pub const MODE_ENV: &str = "SLLM_PHASE86_MODE";
 pub const PREPARE_ONLY_ENV: &str = "SLLM_PHASE86_PREPARE_PREFIX_ONLY";
+/// Enables the width-generalized P-mode diagnostic used by Phase 87 Stage 12.
+/// The Phase 86 environment remains the width-two compatibility path.
+pub const STAGE12_M1_ENV: &str = "SLLM_PHASE87_STAGE12_M1";
 const PREFIX_ENV: &str = "SLLM_PHASE86_PREFIX_FILE";
 const MANIFEST_ENV: &str = "SLLM_PHASE86_BENCH_MANIFEST";
 const PREFIX_OUTPUT_ENV: &str = "SLLM_PHASE86_PREFIX_OUTPUT";
@@ -17,7 +20,9 @@ const CATCH_UP_ENV: &str = "SLLM_QWEN_MTP_CATCH_UP";
 const MODE_T: &str = "T";
 const MODE_P: &str = "P";
 const CATCH_UP_SEPARATE: &str = "separate";
-const WIDTH: usize = 2;
+const DEFAULT_WIDTH: usize = 2;
+const STAGE12_MIN_WIDTH: usize = 2;
+const STAGE12_MAX_WIDTH: usize = 4;
 
 fn digest_matches(expected: &str, actual_with_prefix: &str) -> bool {
     let expected = expected
@@ -59,36 +64,56 @@ fn forced_block_decision(
     row0_matches: bool,
     row1_matches: bool,
 ) -> Result<ForcedBlockDecision, String> {
-    let accepted = if row0_matches {
-        if row1_matches { WIDTH } else { 1 }
-    } else {
-        0
-    };
-    forced_block_decision_for_count(input_start, output_len, accepted)
+    forced_block_decision_for_matches(
+        input_start,
+        output_len,
+        &[row0_matches, row1_matches],
+        DEFAULT_WIDTH,
+    )
+}
+
+fn forced_block_decision_for_matches(
+    input_start: usize,
+    output_len: usize,
+    row_matches: &[bool],
+    width: usize,
+) -> Result<ForcedBlockDecision, String> {
+    if !(STAGE12_MIN_WIDTH..=STAGE12_MAX_WIDTH).contains(&width) {
+        return Err("Phase87 Stage12 width must be 2..=4".to_owned());
+    }
+    if row_matches.len() != width {
+        return Err("forced row match vector does not match MTP width".to_owned());
+    }
+    let accepted = row_matches.iter().take_while(|matches| **matches).count();
+    forced_block_decision_for_count(input_start, output_len, accepted, width)
 }
 
 fn forced_block_decision_for_count(
     input_start: usize,
     output_len: usize,
     accepted: usize,
+    width: usize,
 ) -> Result<ForcedBlockDecision, String> {
-    if accepted > WIDTH {
+    if !(STAGE12_MIN_WIDTH..=STAGE12_MAX_WIDTH).contains(&width) {
+        return Err("Phase87 Stage12 width must be 2..=4".to_owned());
+    }
+    if accepted > width {
         return Err("Phase86 accepted count exceeds forced width".to_owned());
     }
     let remaining = output_len
         .checked_sub(input_start)
         .ok_or_else(|| "Phase86 block input start exceeds output length".to_owned())?;
-    if remaining < WIDTH + 1 {
-        return Err("Phase86 forced width-two block has an incomplete tail".to_owned());
+    if remaining < width + 1 {
+        return Err("forced MTP block has an incomplete tail".to_owned());
     }
     let committed_rows = accepted + 1;
-    let rewind_rows = WIDTH.saturating_sub(committed_rows);
+    let rewind_rows = width.saturating_sub(committed_rows);
     let next_input_start = input_start + committed_rows;
     Ok(ForcedBlockDecision {
         accepted,
         committed_rows,
         rewind_rows,
-        needs_bonus_state: accepted == WIDTH,
+        needs_bonus_state: accepted == width,
         next_input_start,
         tail_tokens_omitted: output_len - next_input_start,
     })
@@ -115,6 +140,8 @@ pub struct Phase86BlockReport {
     pub committed_input_rows: usize,
     pub row0_matches: bool,
     pub row1_matches: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_matches: Option<Vec<bool>>,
 }
 
 #[derive(Serialize)]
@@ -601,10 +628,11 @@ fn retain_or_catch_up(
     target_hidden: &[u16],
     hidden_width: usize,
     decision: &ForcedBlockDecision,
+    width: usize,
 ) -> Result<(), String> {
     let committed = decision.committed_rows;
     if mode == MODE_P && separate {
-        for _ in 0..WIDTH {
+        for _ in 0..width {
             draft_request
                 .rewind_last_decode_transition()
                 .map_err(|error| format!("Phase86 catch-up rewind failed: {error}"))?;
@@ -625,10 +653,10 @@ fn retain_or_catch_up(
             .map_err(|error| format!("Phase86 draft rewind failed: {error}"))?;
     }
     if decision.needs_bonus_state {
-        let start = (WIDTH - 1) * hidden_width;
+        let start = (width - 1) * hidden_width;
         draft_request
             .decode_mtp_state_only_batch(
-                &[inputs[WIDTH]],
+                &[inputs[width]],
                 &target_hidden[start..start + hidden_width],
             )
             .map_err(|error| format!("Phase86 all-accept state alignment failed: {error}"))?;
@@ -766,6 +794,7 @@ fn run_entry_t(
             committed_input_rows: 1,
             row0_matches: matches == Some(true),
             row1_matches: false,
+            row_matches: None,
         });
         target_hidden_before = target_hidden.to_vec();
     }
@@ -832,6 +861,8 @@ fn run_entry(
     target: &str,
     mode: &'static str,
     separate: bool,
+    width: usize,
+    stage12: bool,
 ) -> Result<Phase86Entry, String> {
     let mut target_request = target_resident
         .new_request(target_graph.clone())
@@ -857,15 +888,15 @@ fn run_entry(
     let mut target_logits = Vec::new();
     let mut draft_logits = Vec::new();
     let mut block_reports = Vec::new();
-    while cursor + WIDTH < prefix.output_prefix_tokens.len() {
-        let inputs = prefix.output_prefix_tokens[cursor..cursor + WIDTH + 1].to_vec();
+    while cursor + width < prefix.output_prefix_tokens.len() {
+        let inputs = prefix.output_prefix_tokens[cursor..cursor + width + 1].to_vec();
         let target_output = target_request
             .decode_block_with_mtp_state_and_logits(&inputs)
             .map_err(|error| format!("Phase86 target block failed at {cursor}: {error}"))?;
         let target_hidden = target_output
             .hidden_states_bf16()
             .ok_or_else(|| format!("Phase86 target block omitted hidden rows at {cursor}"))?;
-        if target_hidden.len() != (WIDTH + 1) * hidden_width {
+        if target_hidden.len() != (width + 1) * hidden_width {
             return Err(format!("Phase86 target hidden rows differ at {cursor}"));
         }
         for value in target_hidden {
@@ -875,11 +906,11 @@ fn run_entry(
             .logits_bf16()
             .ok_or_else(|| format!("Phase86 target block omitted logits at {cursor}"))?;
         let target_block_logits = bf16_rows_to_f32(target_bf16, QWEN35_VOCAB_SIZE)?;
-        if target_block_logits.len() != WIDTH + 1 {
+        if target_block_logits.len() != width + 1 {
             return Err(format!("Phase86 target logits rows differ at {cursor}"));
         }
-        for row in 0..=WIDTH {
-            let forced = (row < WIDTH).then(|| inputs[row + 1]);
+        for row in 0..=width {
+            let forced = (row < width).then(|| inputs[row + 1]);
             let (top1, top1_value, top2_value, margin) = top_summary(&target_block_logits[row])?;
             target_rows.push(Phase86LogitSummary {
                 sequence_index: cursor + row,
@@ -908,28 +939,35 @@ fn run_entry(
             .last_logits()
             .ok_or_else(|| format!("Phase86 draft row 0 omitted logits at {cursor}"))?
             .to_vec();
-        let q1_hidden_input = if mode == MODE_P {
-            &q0_hidden
-        } else {
-            &target_hidden[..hidden_width]
-        };
-        let q1 = draft_request
-            .decode_mtp(inputs[1], q1_hidden_input)
-            .map_err(|error| format!("Phase86 draft row 1 failed at {cursor}: {error}"))?;
-        let q1_logits = q1
-            .last_logits()
-            .ok_or_else(|| format!("Phase86 draft row 1 omitted logits at {cursor}"))?
-            .to_vec();
-        let mut row_matches = [false; WIDTH];
-        for (row, logits) in [q0_logits.as_slice(), q1_logits.as_slice()]
-            .into_iter()
-            .enumerate()
-        {
+        let mut draft_logits_rows = vec![q0_logits];
+        let mut draft_hidden = q0_hidden;
+        for row in 1..width {
+            let hidden_input = if mode == MODE_P {
+                &draft_hidden
+            } else {
+                &target_hidden[(row - 1) * hidden_width..row * hidden_width]
+            };
+            let draft_output = draft_request
+                .decode_mtp(inputs[row], hidden_input)
+                .map_err(|error| format!("Phase86 draft row {row} failed at {cursor}: {error}"))?;
+            draft_hidden = draft_output
+                .hidden_states_bf16()
+                .ok_or_else(|| format!("Phase86 draft row {row} omitted hidden at {cursor}"))?
+                .to_vec();
+            draft_logits_rows.push(
+                draft_output
+                    .last_logits()
+                    .ok_or_else(|| format!("Phase86 draft row {row} omitted logits at {cursor}"))?
+                    .to_vec(),
+            );
+        }
+        let mut row_matches = Vec::with_capacity(width);
+        for (row, logits) in draft_logits_rows.iter().enumerate() {
             let (top1_local, top1_value, top2_value, margin) = top_summary(logits)?;
             let top1 = global_draft_token(top1_local, draft_map.as_deref())?;
             let forced = inputs[row + 1];
             let matches = top1 == usize::try_from(forced).unwrap_or(usize::MAX);
-            row_matches[row] = matches;
+            row_matches.push(matches);
             draft_rows.push(Phase86LogitSummary {
                 sequence_index: cursor + row,
                 block_row: row,
@@ -940,28 +978,32 @@ fn run_entry(
                 top2_value,
                 margin,
                 top1_matches_forced: Some(matches),
-                hidden_conditioning: if mode == MODE_P && row == 1 {
+                hidden_conditioning: if mode == MODE_P && row > 0 {
                     "draft-hidden"
                 } else {
                     "target-hidden"
                 },
             });
         }
-        draft_logits.push(q0_logits);
-        draft_logits.push(q1_logits);
-        let decision = forced_block_decision(
-            cursor,
-            prefix.output_prefix_tokens.len(),
-            row_matches[0],
-            row_matches[1],
-        )?;
+        draft_logits.extend(draft_logits_rows);
+        let decision = if width == DEFAULT_WIDTH {
+            forced_block_decision(
+                cursor,
+                prefix.output_prefix_tokens.len(),
+                row_matches[0],
+                row_matches[1],
+            )?
+        } else {
+            forced_block_decision_for_matches(
+                cursor,
+                prefix.output_prefix_tokens.len(),
+                &row_matches,
+                width,
+            )?
+        };
         tail_tokens_omitted = decision.tail_tokens_omitted;
-        let row0_matches = draft_rows[draft_rows.len() - 2]
-            .top1_matches_forced
-            .unwrap_or(false);
-        let row1_matches = draft_rows[draft_rows.len() - 1]
-            .top1_matches_forced
-            .unwrap_or(false);
+        let row0_matches = row_matches[0];
+        let row1_matches = row_matches[1];
 
         let committed = decision.committed_rows;
         let replay = target_request
@@ -986,6 +1028,7 @@ fn run_entry(
             target_hidden,
             hidden_width,
             &decision,
+            width,
         )?;
         block_reports.push(Phase86BlockReport {
             input_start: cursor,
@@ -993,6 +1036,7 @@ fn run_entry(
             committed_input_rows: committed,
             row0_matches,
             row1_matches,
+            row_matches: stage12.then_some(row_matches),
         });
         target_hidden_before = next_target_hidden;
         cursor = decision.next_input_start;
@@ -1030,7 +1074,7 @@ fn run_entry(
         target_hidden_sha256: format!("sha256:{:x}", target_hidden_digest.finalize()),
         blocks,
         tail_tokens_omitted,
-        proposed_draft_tokens: blocks * WIDTH,
+        proposed_draft_tokens: blocks * width,
         accepted_draft_tokens: accepted_total,
         block_reports,
         forced_acceptance_contract: "diagnostic teacher-forcing: q top1 equals frozen forced token; p/q is not claimed",
@@ -1049,6 +1093,33 @@ fn run_entry(
     })
 }
 
+fn stage12_m1_enabled() -> Result<bool, String> {
+    match env::var(STAGE12_M1_ENV) {
+        Ok(value) if value == "1" => Ok(true),
+        Ok(value) => Err(format!("{STAGE12_M1_ENV} must be 1 when set, got {value}")),
+        Err(_) => Ok(false),
+    }
+}
+
+fn fixed_column_contract(width: usize, stage12: bool) -> &'static str {
+    match (stage12, width) {
+        (false, 2) => {
+            "block=[c[i],c[i+1],c[i+2]], accepted advances i by accepted+1; incomplete tail is omitted"
+        }
+        (true, 2) => {
+            "block=[c[i],c[i+1],c[i+2]], accepted advances i by accepted+1; incomplete tail is omitted; Stage12 P-mode rows are width-generalized"
+        }
+        (true, 3) => {
+            "block=[c[i],c[i+1],c[i+2],c[i+3]], accepted advances i by accepted+1; incomplete tail is omitted"
+        }
+        (true, 4) => {
+            "block=[c[i],c[i+1],c[i+2],c[i+3],c[i+4]], accepted advances i by accepted+1; incomplete tail is omitted"
+        }
+        _ => "unsupported fixed-column width",
+    }
+}
+
+/// Preserve the Phase 86 width-two entry point and report schema.
 pub fn run(
     target_resident: &QwenResidentModel,
     target_graph: &sllm_core::QwenGraph,
@@ -1057,7 +1128,43 @@ pub fn run(
     output_dir: &Path,
     target: &str,
 ) -> Result<Phase86Report, String> {
+    run_with_width(
+        target_resident,
+        target_graph,
+        draft_resident,
+        draft_graph,
+        output_dir,
+        target,
+        DEFAULT_WIDTH,
+    )
+}
+
+/// Run the fixed-column P-mode diagnostic for a Stage 12 width.
+///
+/// `SLLM_PHASE87_STAGE12_M1=1` is required for widths 2..=4 and forces P-mode.
+/// Without that environment marker this function is the legacy width-two
+/// Phase 86 path, which keeps its original schema and serialized fields.
+pub fn run_with_width(
+    target_resident: &QwenResidentModel,
+    target_graph: &sllm_core::QwenGraph,
+    draft_resident: &QwenResidentModel,
+    draft_graph: &sllm_core::QwenGraph,
+    output_dir: &Path,
+    target: &str,
+    width: usize,
+) -> Result<Phase86Report, String> {
     let mode = parse_mode()?;
+    let stage12 = stage12_m1_enabled()?;
+    if stage12 {
+        if mode != MODE_P {
+            return Err(format!("{STAGE12_M1_ENV}=1 requires Phase86 P mode"));
+        }
+        if !(STAGE12_MIN_WIDTH..=STAGE12_MAX_WIDTH).contains(&width) {
+            return Err("Phase87 Stage12 P-mode width must be 2..=4".to_owned());
+        }
+    } else if width != DEFAULT_WIDTH {
+        return Err("Phase86 width-two mode requires Stage12 M1 marker for width 3/4".to_owned());
+    }
     let separate = parse_catch_up()?;
     if mode == MODE_T && separate {
         return Err("Phase86 T baseline does not accept separate catch-up".to_owned());
@@ -1089,6 +1196,8 @@ pub fn run(
                     target,
                     mode,
                     separate,
+                    width,
+                    stage12,
                 )
             }
         })
@@ -1112,12 +1221,16 @@ pub fn run(
                 && !entry.audit.draft.fallback_used
         });
     Ok(Phase86Report {
-        schema_version: "phase86-mtp-catch-up-v1",
+        schema_version: if stage12 {
+            "phase87-stage12-mtp-catch-up-v1"
+        } else {
+            "phase86-mtp-catch-up-v1"
+        },
         state: if all_valid { "PASS" } else { "FAIL" },
         mode,
         catch_up: if separate { CATCH_UP_SEPARATE } else { "off" },
-        width: WIDTH,
-        fixed_column_contract: "block=[c[i],c[i+1],c[i+2]], accepted advances i by accepted+1; incomplete tail is omitted",
+        width,
+        fixed_column_contract: fixed_column_contract(width, stage12),
         p_q_relationship: "forced-column top1 diagnostic; production p/q acceptance and residual replacement are not measured",
         prefix_file: prefix_path.display().to_string(),
         prefix_file_sha256: super::stage0_file_sha256(&prefix_path)?,
@@ -1191,6 +1304,37 @@ mod tests {
         }
         assert!(super::forced_block_decision(2, 4, true, true).is_err());
         assert!(super::forced_block_decision(0, 2, true, true).is_err());
-        assert!(super::forced_block_decision_for_count(0, 3, 3).is_err());
+        assert!(super::forced_block_decision_for_count(0, 3, 3, 2).is_err());
+    }
+
+    #[test]
+    fn stage12_width_three_acceptance_is_prefix_ordered() {
+        let all = super::forced_block_decision_for_matches(0, 4, &[true, true, true], 3).unwrap();
+        assert_eq!(all.accepted, 3);
+        assert_eq!(all.committed_rows, 4);
+        assert_eq!(all.rewind_rows, 0);
+        assert!(all.needs_bonus_state);
+
+        let rejected =
+            super::forced_block_decision_for_matches(0, 6, &[true, false, true], 3).unwrap();
+        assert_eq!(rejected.accepted, 1);
+        assert_eq!(rejected.committed_rows, 2);
+        assert_eq!(rejected.rewind_rows, 1);
+        assert!(!rejected.needs_bonus_state);
+        assert_eq!(rejected.next_input_start, 2);
+    }
+
+    #[test]
+    fn stage12_width_four_boundaries_and_row_vector_are_checked() {
+        let decision =
+            super::forced_block_decision_for_matches(1, 6, &[true, true, false, true], 4).unwrap();
+        assert_eq!(decision.accepted, 2);
+        assert_eq!(decision.committed_rows, 3);
+        assert_eq!(decision.rewind_rows, 1);
+        assert_eq!(decision.tail_tokens_omitted, 2);
+        assert!(super::forced_block_decision_for_matches(0, 4, &[true, true, true], 4).is_err());
+        assert!(
+            super::forced_block_decision_for_matches(0, 5, &[true, true, true, true], 5).is_err()
+        );
     }
 }

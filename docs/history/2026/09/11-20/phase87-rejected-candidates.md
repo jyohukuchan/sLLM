@@ -4,7 +4,7 @@
 
 Phase87の段階0で、Phase78〜85に試したNVFP4 W4A4、FP8 W8A8 decode、prefill内の量子化・一時展開候補を再提案しないための台帳である。ここでいう「棄却」は、数値検査に失敗したという意味に限らず、候補の対象scopeで性能上の採用根拠がなくなったことも含む。「保留」は、数値・資源・production測定のいずれかが不足し、採否を閉じていないことを示す。
 
-Phase87の正本は[Phase87計画](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)である。Phase82の候補別台帳は[削除したmatmul候補と試行結果](../1-10/phase82-retired-matmul-candidates.md)、既定化しなかった経路は[Phase82の既定採用範囲](../1-10/phase82-default-adoption-scope.md)を正とする。以下の「再検討時に確認すると有用な事項」は追加探索や新しい完了条件を作るものではなく、Phase87で同じ仮説を無条件に繰り返さないための参考情報である。Phase87の測定回数・受入条件はPhase87計画を優先し、過去履歴の4-copy／3+10条件を新しいhard gateへ昇格しない。
+Phase87の正本は[Phase87計画](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)である。Phase82の候補別台帳は[削除したmatmul候補と試行結果](../1-10/phase82-retired-matmul-candidates.md)、既定化しなかった経路は[Phase82の既定採用範囲](../1-10/phase82-default-adoption-scope.md)を正とする。以下の「再検討時に確認すると有用な事項」は追加探索や新しい完了条件を作るものではなく、Phase87で同じ仮説を無条件に繰り返さないための参考情報である。Phase87の測定回数・受入条件はPhase87計画を優先し、過去履歴の4-copy／3+10条件を新しいhard gateへ昇格しない。
 
 変更したkernelについて、Phase87計画が求める独立FP32 oracle、非整列・境界ケース、finite／fallback／cleanupなどの正しさ確認は引き続き必要である。ここで任意扱いにしているのは、過去の性能測定のcopy数・反復数・交互順序であり、正しさ確認そのものではない。
 
@@ -73,4 +73,4 @@ Phase83.5では、W4A4 small-Mの4-row shared-LDS候補が両tuple・M2〜4でor
 - 一時展開・再符号化: NVFP4→int8／FP16、NVFP4→FP8は、stage込みのwallと意味保存を同時に満たす必要がある。ID83の追加飽和をW4A4の正しい代替とみなさない。
 - 再検討時に確認すると有用な項目は、source／binary identity、target、shape／alignment、量子化を含む計時範囲、独立oracle、finite、repeat、cleanupである。これは履歴に基づくnonblockingな証拠設計の提案であり、Phase87に新しい開始gateや追加の測定回数を導入しない。単体速度だけをPhase87の採用根拠へ読み替えない。
 
-参照: [Phase87計画](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md) · [Phase76〜78ロードマップ](../../../../plans/active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md) · [Phase82削除履歴](../1-10/phase82-optimization-cleanup-default-adoption.md) · [Phase82候補台帳](../1-10/phase82-retired-matmul-candidates.md)
+参照: [Phase87計画](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md) · [Phase76〜78ロードマップ](../../../../plans/active/2026/09/1-10/phase76-qwen38-27b-nvfp4-priority-roadmap.md) · [Phase82削除履歴](../1-10/phase82-optimization-cleanup-default-adoption.md) · [Phase82候補台帳](../1-10/phase82-retired-matmul-candidates.md)

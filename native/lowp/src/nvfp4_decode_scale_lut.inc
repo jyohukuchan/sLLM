@@ -141,6 +141,57 @@ sllm_id84_nvfp4_e4m3fn_to_fp16_bits(const uint8_t bits) {
       static_cast<uint16_t>(mantissa) << 7U);
 }
 
+// Forward declarations keep the gfx1030 wrapper near the codec definitions
+// while the templated body remains beside the original ID73 loop.
+__device__ __forceinline__ float
+sllm_id84_nvfp4_fp16_bits_to_float(const uint16_t bits);
+__device__ __forceinline__ void
+sllm_id84_nvfp4_id73_sgpr_body(const uint8_t *, const uint8_t *,
+                               const uint8_t *, const uint8_t *, const float *,
+                               const float *, uint16_t *, uint64_t, uint64_t,
+                               uint64_t, const float *);
+
+// Stage 1 N0 gfx1030 exact-tuple path. The arithmetic is shared with ID84;
+// only the wave-uniform weight and scale column bases are scalarized.
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_nvfp4_w4a4_decode_scale_lut_gfx1030_sgpr_v1(
+    const uint8_t *const packed_activation,
+    const uint8_t *const activation_block_scales,
+    const uint8_t *const packed_weight,
+    const uint8_t *const weight_block_scales,
+    const float *const weight_tensor_scale,
+    const float *const input_tensor_scale, uint16_t *const output,
+    const uint64_t m, const uint64_t k, const uint64_t n) {
+  __shared__ float scale_lut[sllm_id84_nvfp4_scale_lut_detail::kScaleLutSlots];
+  if (threadIdx.x < sllm_id84_nvfp4_scale_lut_detail::kScaleLutEntries) {
+    const uint32_t code = threadIdx.x;
+    scale_lut[code +
+              code / (sllm_id84_nvfp4_scale_lut_detail::kScaleLutStride - 1U)] =
+        sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_fp16_bits_to_float(
+            sllm_id84_nvfp4_scale_lut_detail::
+                sllm_id84_nvfp4_e4m3fn_to_fp16_bits(
+                    static_cast<uint8_t>(code)));
+  }
+  __syncthreads();
+#if defined(__gfx1030__)
+  sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_id73_sgpr_body(
+      packed_activation, activation_block_scales, packed_weight,
+      weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
+      k, n, scale_lut);
+#else
+  (void)packed_activation;
+  (void)activation_block_scales;
+  (void)packed_weight;
+  (void)weight_block_scales;
+  (void)weight_tensor_scale;
+  (void)input_tensor_scale;
+  (void)output;
+  (void)m;
+  (void)k;
+  (void)n;
+#endif
+}
+
 __device__ __forceinline__ float
 sllm_id84_nvfp4_fp16_bits_to_float(const uint16_t bits) {
   const uint32_t sign = static_cast<uint32_t>(bits & UINT16_C(0x8000)) << 16U;
@@ -182,6 +233,26 @@ sllm_id84_nvfp4_load_scale(const uint8_t code, const float *const lds_fp32) {
   const uint32_t index = static_cast<uint32_t>(code) +
                          static_cast<uint32_t>(code) / (kScaleLutStride - 1U);
   return lds_fp32[index];
+}
+
+// The original ID84 wrappers call the same loader templates with
+// Scalarized=false. The gfx1030 exact-tuple path moves only wave-uniform
+// column bases into SGPRs; packed arithmetic stays in the shared helpers.
+template <bool Scalarized>
+__device__ __forceinline__ const uint8_t *
+sllm_id84_nvfp4_scalarized_pointer(const uint8_t *const pointer) {
+  if constexpr (Scalarized) {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+    const uint32_t low = __builtin_bit_cast(
+        uint32_t, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(
+                      int32_t, static_cast<uint32_t>(address))));
+    const uint32_t high = __builtin_bit_cast(
+        uint32_t, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(
+                      int32_t, static_cast<uint32_t>(address >> 32U))));
+    return reinterpret_cast<const uint8_t *>(
+        (static_cast<uint64_t>(high) << 32U) | low);
+  }
+  return pointer;
 }
 
 __device__ __forceinline__ ScaledPacks
@@ -645,9 +716,12 @@ struct sllm_id84_nvfp4_prefetch2_weight_block final {
   uint8_t weight_scale[kColumnsPerWave];
 };
 
+template <bool Scalarized>
 __device__ __forceinline__ void sllm_id84_nvfp4_prefetch2_weight_load(
     const uint8_t *const packed_weight,
-    const uint8_t *const weight_block_scales, const uint64_t blocks_per_row,
+    const uint8_t *const weight_block_scales,
+    const uint8_t *const packed_weight_base,
+    const uint8_t *const weight_scale_base, const uint64_t blocks_per_row,
     const uint64_t column_base, const uint64_t n, const uint64_t block,
     sllm_id84_nvfp4_prefetch2_weight_block *const result) {
   *result = {};
@@ -661,28 +735,41 @@ __device__ __forceinline__ void sllm_id84_nvfp4_prefetch2_weight_load(
     if (column >= n)
       continue;
     const uint64_t weight_offset =
-        column * (blocks_per_row * UINT64_C(8)) + packed_offset;
-    const auto *const weight_words =
-        reinterpret_cast<const uint32_t *>(packed_weight + weight_offset);
+        (Scalarized ? column_offset : column) * (blocks_per_row * UINT64_C(8)) +
+        packed_offset;
+    const auto *const weight_words = reinterpret_cast<const uint32_t *>(
+        (Scalarized ? packed_weight_base : packed_weight) + weight_offset);
     result->weight_word0[column_offset] =
         __builtin_nontemporal_load(weight_words + 0U);
     result->weight_word1[column_offset] =
         __builtin_nontemporal_load(weight_words + 1U);
     result->weight_scale[column_offset] = __builtin_nontemporal_load(
-        weight_block_scales + column * blocks_per_row + block);
+        (Scalarized ? weight_scale_base : weight_block_scales) +
+        (Scalarized ? column_offset : column) * blocks_per_row + block);
   }
 }
 
+__device__ __forceinline__ void sllm_id84_nvfp4_prefetch2_weight_load(
+    const uint8_t *const packed_weight,
+    const uint8_t *const weight_block_scales, const uint64_t blocks_per_row,
+    const uint64_t column_base, const uint64_t n, const uint64_t block,
+    sllm_id84_nvfp4_prefetch2_weight_block *const result) {
+  sllm_id84_nvfp4_prefetch2_weight_load<false>(
+      packed_weight, weight_block_scales, packed_weight, weight_block_scales,
+      blocks_per_row, column_base, n, block, result);
+}
+
+template <bool Scalarized>
 __device__ __forceinline__ void
-sllm_id84_nvfp4_id73_body(const uint8_t *const packed_activation,
-                          const uint8_t *const activation_block_scales,
-                          const uint8_t *const packed_weight,
-                          const uint8_t *const weight_block_scales,
-                          const float *const weight_tensor_scale,
-                          const float *const input_tensor_scale,
-                          uint16_t *const output, const uint64_t m,
-                          const uint64_t k, const uint64_t n,
-                          const float *const scale_lut) {
+sllm_id84_nvfp4_id73_body_impl(const uint8_t *const packed_activation,
+                               const uint8_t *const activation_block_scales,
+                               const uint8_t *const packed_weight,
+                               const uint8_t *const weight_block_scales,
+                               const float *const weight_tensor_scale,
+                               const float *const input_tensor_scale,
+                               uint16_t *const output, const uint64_t m,
+                               const uint64_t k, const uint64_t n,
+                               const float *const scale_lut) {
   if (!sllm_id84_nvfp4_id73_shape(m, k, n))
     return;
   const uint32_t lane = threadIdx.x & (kWave - 1U);
@@ -691,6 +778,14 @@ sllm_id84_nvfp4_id73_body(const uint8_t *const packed_activation,
   const uint64_t column_base =
       static_cast<uint64_t>(blockIdx.x) * kColumnsPerWorkgroup +
       static_cast<uint64_t>(wave) * kColumnsPerWave;
+  const uint8_t *packed_weight_base = packed_weight;
+  const uint8_t *weight_scale_base = weight_block_scales;
+  if constexpr (Scalarized) {
+    packed_weight_base = sllm_id84_nvfp4_scalarized_pointer<true>(
+        packed_weight + column_base * (blocks_per_row * UINT64_C(8)));
+    weight_scale_base = sllm_id84_nvfp4_scalarized_pointer<true>(
+        weight_block_scales + column_base * blocks_per_row);
+  }
 
   extern __shared__ uint32_t shared[];
   int32_t *const activation_packs = reinterpret_cast<int32_t *>(shared);
@@ -722,8 +817,9 @@ sllm_id84_nvfp4_id73_body(const uint8_t *const packed_activation,
     sllm_id84_nvfp4_prefetch2_weight_block prefetched[2];
 #pragma unroll
     for (uint32_t lookahead = 0U; lookahead < 2U; ++lookahead) {
-      sllm_id84_nvfp4_prefetch2_weight_load(
-          packed_weight, weight_block_scales, blocks_per_row, column_base, n,
+      sllm_id84_nvfp4_prefetch2_weight_load<Scalarized>(
+          packed_weight, weight_block_scales, packed_weight_base,
+          weight_scale_base, blocks_per_row, column_base, n,
           group + static_cast<uint64_t>(lookahead) * kWave,
           &prefetched[lookahead]);
     }
@@ -781,6 +877,38 @@ sllm_id84_nvfp4_id73_body(const uint8_t *const packed_activation,
                                                 input_tensor_scale[0]);
     }
   }
+}
+
+__device__ __forceinline__ void
+sllm_id84_nvfp4_id73_body(const uint8_t *const packed_activation,
+                          const uint8_t *const activation_block_scales,
+                          const uint8_t *const packed_weight,
+                          const uint8_t *const weight_block_scales,
+                          const float *const weight_tensor_scale,
+                          const float *const input_tensor_scale,
+                          uint16_t *const output, const uint64_t m,
+                          const uint64_t k, const uint64_t n,
+                          const float *const scale_lut) {
+  sllm_id84_nvfp4_id73_body_impl<false>(
+      packed_activation, activation_block_scales, packed_weight,
+      weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
+      k, n, scale_lut);
+}
+
+__device__ __forceinline__ void
+sllm_id84_nvfp4_id73_sgpr_body(const uint8_t *const packed_activation,
+                               const uint8_t *const activation_block_scales,
+                               const uint8_t *const packed_weight,
+                               const uint8_t *const weight_block_scales,
+                               const float *const weight_tensor_scale,
+                               const float *const input_tensor_scale,
+                               uint16_t *const output, const uint64_t m,
+                               const uint64_t k, const uint64_t n,
+                               const float *const scale_lut) {
+  sllm_id84_nvfp4_id73_body_impl<true>(
+      packed_activation, activation_block_scales, packed_weight,
+      weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
+      k, n, scale_lut);
 }
 
 } // namespace sllm_id84_nvfp4_scale_lut_detail

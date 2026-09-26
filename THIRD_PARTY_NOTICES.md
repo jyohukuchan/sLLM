@@ -9,6 +9,8 @@ Git管理外・ignore対象のscratch copyや実験コードも、実際の流�
 
 | 取込み日時（概算・JST） | 元プロジェクト／元パス | sLLM側パス | 流用区分・概要 | 詳細記録 |
 | --- | --- | --- | --- | --- |
+| 2026-09-26 13:39頃 JST | ggml-org/llama.cpp / repository tree `bf942164697d2d62c2237a17b677dc2c017ea8e7` | `.local-artifacts/benchmark-20260926/llama.cpp-20260826/` | `exact`：2026-08-26時点の旧版と現行固定版の独立HIP／Vulkan性能比較用worktree。sLLM runtime組込みなし、Git管理外 | [詳細](#llama-cpp-month-comparison-20260926) |
+| 2026-09-26 02:29頃 JST | ggml-org/llama.cpp / repository tree `fcc891545b0f06de346d8f67d1e6c61f9bf0e777` | `.local-artifacts/benchmark-20260926/llama.cpp/` | `exact`：Qwen3.8 Q5_K_XLの独立HIP／Vulkan性能比較用worktree。sLLM runtime組込みなし、Git管理外 | [詳細](#llama-cpp-qwen38-q5kxl-benchmark-20260926) |
 | 2026-09-20 16時頃 JST | GGZ14/vllm-mxfp4 / repository root | `reference/vllm-mxfp4/`、独立評価container | `exact` checkout・上流launcherのcontainer内patch適用、sLLM runtime組込みなし | [詳細](#vllm-mxfp4-investigation-20260920) |
 | 2026-09-17 04:20頃 JST | CarouselAether/rocm_exl3 / repository root | `reference/rocm_exl3/`、`docs/references/patches/rocm-exl3-gfx1201.patch` | `exact` clone・許可済み局所修正：独立動作調査、production組込みなし | [詳細](#rocm-exl3-investigation-20260917) |
 | 不明（2026-09-13に確認・補記） | llama.cpp / `ggml/src/ggml-cuda/fattn-vec.cuh` | `.local-artifacts/phase83-5/qtile8-softmax-ilp/fattn-vec.pinned.cuh` | `exact`：Phase 83.5実験用の固定参照コピー。Git管理外 | [詳細](#llama-cpp-phase83-5-fattn-vec-scratch-001) |
@@ -488,3 +490,72 @@ imageの通常依存パッケージ利用とsLLM実装への流用を区別す�
 保存先は `.local-artifacts/vllm-mxfp4/libr4d/b9e42ab-rx9/`（ignored、`adapted`）。
 取込みcommitは適用外。patchとbuild SHA-256は同じ参照identityへ記録した。
 この外部評価用buildもsLLM runtimeへ流用しない。
+
+## llama-cpp-qwen38-q5kxl-benchmark-20260926
+
+ユーザー依頼のQwen3.8-27B Q5_K_XL独立HIP／Vulkan性能比較に使用するため、
+`ggml-org/llama.cpp`の固定HEADを既存の`reference/llama.cpp/`からfetchし、
+別のignored worktreeへ変更なしで配置した。sLLM runtimeへのcopy・adapt・portは行わない。
+
+```yaml
+schema_version: 1
+upstream:
+  repository: https://github.com/ggml-org/llama.cpp
+  commit: fcc891545b0f06de346d8f67d1e6c61f9bf0e777
+  tree: db4d3a421fdd469d51691c1a59157e6b2e8ec496
+  source_path: /
+local:
+  directory: .local-artifacts/benchmark-20260926/llama.cpp/
+  tracked: false
+  ignored: true
+license:
+  spdx: MIT
+  file: .local-artifacts/benchmark-20260926/llama.cpp/LICENSE
+  observed_sha256: 94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d
+  observed_on: '2026-09-26'
+source_observation:
+  file: .local-artifacts/benchmark-20260926/llama.cpp/tools/llama-bench/llama-bench.cpp
+  observed_sha256: 1944ab22165852d502c47d943b46353d7c05b48caa0b56246da051fc6a062ec0
+  observed_on: '2026-09-26'
+reuse:
+  mode: exact independent benchmark checkout
+  modifications: []
+import:
+  commit: null
+  commit_status: not-applicable-ignored-independent-benchmark
+  imported_at: '2026-09-26 02:29 JST (approximate)'
+```
+
+## llama-cpp-month-comparison-20260926
+
+ユーザー依頼の1か月比較用に、2026-08-26 23:59 JST以前の公式履歴から固定revisionを選び、
+既存Git objectを独立ignored worktreeへ変更なしで配置した。sLLM runtimeへの組込みはない。
+
+```yaml
+schema_version: 1
+upstream:
+  repository: https://github.com/ggml-org/llama.cpp
+  commit: bf942164697d2d62c2237a17b677dc2c017ea8e7
+  tree: 4686018ebbff4302d137fe9d4a9067977696398a
+  source_path: /
+local:
+  directory: .local-artifacts/benchmark-20260926/llama.cpp-20260826/
+  tracked: false
+  ignored: true
+license:
+  spdx: MIT
+  file: .local-artifacts/benchmark-20260926/llama.cpp-20260826/LICENSE
+  observed_sha256: 94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d
+  observed_on: '2026-09-26'
+source_observation:
+  file: .local-artifacts/benchmark-20260926/llama.cpp-20260826/tools/llama-bench/llama-bench.cpp
+  observed_sha256: 22fe9ab8eb4d60e23980f51a119cbed5d53eef4d42586f07309fbc84efee6f0c
+  observed_on: '2026-09-26'
+reuse:
+  mode: exact independent benchmark checkout
+  modifications: []
+import:
+  commit: null
+  commit_status: not-applicable-ignored-independent-benchmark
+  imported_at: '2026-09-26 13:39 JST (approximate)'
+```

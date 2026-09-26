@@ -134,6 +134,25 @@ bool create_context_for_arch(const char *const arch,
                        SLLM_STATUS_OK, "sllm_context_create", error);
 }
 
+bool reject_context_for_arch(const char *const arch) {
+  sllm_context_create_info_t info{};
+  info.struct_size = sizeof(info);
+  info.abi_version = SLLM_HIP_ABI_VERSION;
+  info.device_index = 0U;
+  std::strncpy(info.expected_gcn_arch_name, arch,
+               sizeof(info.expected_gcn_arch_name) - 1U);
+  sllm_context_t *context = nullptr;
+  Error error;
+  const bool rejected = expect_status(
+      sllm_context_create(&info, &context, &error.sink),
+      SLLM_STATUS_UNSUPPORTED, "sllm_context_create unsupported target", error);
+  if (context != nullptr) {
+    (void)sllm_context_release(&context, &error.sink);
+    return false;
+  }
+  return rejected;
+}
+
 bool create_context(sllm_context_t **const context) {
   return create_context_for_arch("gfx1201", context);
 }
@@ -324,241 +343,56 @@ bool linear_attention_gfx1030_row32_lds_selector_contract() {
 }
 
 bool causal_attention_gqa4_p32_selector_contract() {
-  constexpr const char *const p16_name =
-      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT";
-  constexpr const char *const p32_name =
-      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT_P32";
-  constexpr const char *const gfx1201_p32_name =
-      "SLLM_CAUSAL_ATTENTION_GFX1201_DECODE_GQA4_SPLIT_P32";
-  constexpr const char *const force_name =
-      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
-  const char *const old_p16 = std::getenv(p16_name);
-  const char *const old_p32 = std::getenv(p32_name);
-  const char *const old_gfx1201_p32 = std::getenv(gfx1201_p32_name);
-  const char *const old_force = std::getenv(force_name);
-  const bool had_p16 = old_p16 != nullptr;
-  const bool had_p32 = old_p32 != nullptr;
-  const bool had_gfx1201_p32 = old_gfx1201_p32 != nullptr;
-  const bool had_force = old_force != nullptr;
-  const std::string old_p16_value = had_p16 ? old_p16 : "";
-  const std::string old_p32_value = had_p32 ? old_p32 : "";
-  const std::string old_gfx1201_p32_value =
-      had_gfx1201_p32 ? old_gfx1201_p32 : "";
-  const std::string old_force_value = had_force ? old_force : "";
-  const auto restore_environment = [&]() {
-    if (had_p16) {
-      setenv(p16_name, old_p16_value.c_str(), 1);
-    } else {
-      unsetenv(p16_name);
-    }
-    if (had_p32) {
-      setenv(p32_name, old_p32_value.c_str(), 1);
-    } else {
-      unsetenv(p32_name);
-    }
-    if (had_gfx1201_p32) {
-      setenv(gfx1201_p32_name, old_gfx1201_p32_value.c_str(), 1);
-    } else {
-      unsetenv(gfx1201_p32_name);
-    }
-    if (had_force) {
-      setenv(force_name, old_force_value.c_str(), 1);
-    } else {
-      unsetenv(force_name);
-    }
-  };
-  const auto select =
-      [](const uint64_t expected_kv_length, const uint32_t query_count = 1U,
-         const uint32_t query_heads = 16U, const uint32_t kv_heads = 4U,
-         const uint32_t head_dim = 256U,
-         const char *const arch_name = "gfx1030") {
-        return sllm_test_select_causal_attention_gqa4(
-            expected_kv_length, query_count, query_heads, kv_heads, head_dim,
-            SLLM_HIP_KV_ENCODING_FP16_V1, arch_name);
-      };
-
-  unsetenv(p16_name);
-  unsetenv(p32_name);
-  unsetenv(gfx1201_p32_name);
-  unsetenv(force_name);
-  bool valid = select(4095U) == 0U && select(4096U) == 2U &&
-               select(4097U) == 2U &&
-               select(4096U, 1U, 16U, 4U, 256U, "gfx1201") == 2U;
-
-  setenv(p32_name, "0", 1);
-  valid = valid && select(4096U) == 0U;
-  setenv(p32_name, "unknown", 1);
-  valid = valid && select(4096U) == 0U;
-  setenv(p32_name, "1", 1);
-  valid = valid && select(4096U) == 2U;
-  unsetenv(p32_name);
-  setenv(p16_name, "1", 1);
-  valid = valid && select(4096U) == 2U;
-  setenv(p32_name, "0", 1);
-  valid = valid && select(4096U) == 1U;
-  setenv(force_name, "1", 1);
-  valid = valid && select(4096U) == 0U;
-
-  unsetenv(force_name);
-  unsetenv(p16_name);
-  unsetenv(p32_name);
-  setenv(gfx1201_p32_name, "0", 1);
-  valid = valid && select(4095U, 1U, 16U, 4U, 256U, "gfx1201") == 0U &&
-          select(4096U, 1U, 16U, 4U, 256U, "gfx1201") == 0U;
-  setenv(gfx1201_p32_name, "unknown", 1);
-  valid = valid && select(4096U, 1U, 16U, 4U, 256U, "gfx1201") == 0U;
-  setenv(gfx1201_p32_name, "1", 1);
-  valid = valid && select(4095U, 1U, 16U, 4U, 256U, "gfx1201") == 0U &&
-          select(4096U, 1U, 16U, 4U, 256U, "gfx1201") == 2U &&
-          select(4097U, 1U, 16U, 4U, 256U, "gfx1201") == 2U;
-  setenv(force_name, "1", 1);
-  valid = valid && select(4096U, 1U, 16U, 4U, 256U, "gfx1201") == 0U;
-  unsetenv(force_name);
-  valid = valid && select(4096U, 2U, 16U, 4U, 256U, "gfx1201") == 0U &&
-          select(4096U, 1U, 8U, 4U, 256U, "gfx1201") == 0U &&
-          select(4096U, 1U, 16U, 8U, 256U, "gfx1201") == 0U &&
-          select(4096U, 1U, 16U, 4U, 128U, "gfx1201") == 0U &&
-          select(4096U, 1U, 16U, 4U, 256U, "gfx942") == 0U &&
-          select(4096U, 1U, 16U, 4U, 256U, "gfx9999") == 0U;
-  unsetenv(gfx1201_p32_name);
-  valid = valid && select(4096U, 1U, 16U, 4U, 256U, "gfx1201") == 2U &&
-          select(4096U, 1U, 16U, 4U, 256U, "gfx942") == 0U &&
-          select(4096U, 2U) == 0U && select(4096U, 1U, 8U) == 0U &&
-          select(4096U, 1U, 16U, 8U) == 0U &&
-          select(4096U, 1U, 16U, 4U, 128U) == 0U;
-  restore_environment();
-  return valid;
-}
-
-bool causal_attention_gqa6_p32_selector_contract() {
-  constexpr const char *const candidate_name =
-      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P32";
-  constexpr const char *const p64_name =
-      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P64";
-  constexpr const char *const force_name =
-      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
-  const char *const old_candidate = std::getenv(candidate_name);
-  const char *const old_p64 = std::getenv(p64_name);
-  const char *const old_force = std::getenv(force_name);
-  const bool had_candidate = old_candidate != nullptr;
-  const bool had_p64 = old_p64 != nullptr;
-  const bool had_force = old_force != nullptr;
-  const std::string old_candidate_value = had_candidate ? old_candidate : "";
-  const std::string old_p64_value = had_p64 ? old_p64 : "";
-  const std::string old_force_value = had_force ? old_force : "";
-  const auto restore_environment = [&]() {
-    if (had_candidate) {
-      setenv(candidate_name, old_candidate_value.c_str(), 1);
-    } else {
-      unsetenv(candidate_name);
-    }
-    if (had_p64) {
-      setenv(p64_name, old_p64_value.c_str(), 1);
-    } else {
-      unsetenv(p64_name);
-    }
-    if (had_force) {
-      setenv(force_name, old_force_value.c_str(), 1);
-    } else {
-      unsetenv(force_name);
-    }
-  };
+  // The legacy contiguous GQA4 P32 selector is retired with VMM.  The host
+  // probe remains ABI-compatible but must never advertise a provider.
   const auto select = [](const uint64_t expected_kv_length,
                          const uint32_t query_count, const uint32_t query_heads,
                          const uint32_t kv_heads, const uint32_t head_dim,
-                         const uint32_t encoding, const char *const arch_name) {
+                         const char *const arch_name) {
+    return sllm_test_select_causal_attention_gqa4(
+        expected_kv_length, query_count, query_heads, kv_heads, head_dim,
+        SLLM_HIP_KV_ENCODING_FP16_V1, arch_name);
+  };
+  for (const char *const arch : {"gfx1030", "gfx1201", "gfx942", "gfx9999"}) {
+    for (const uint64_t kv_length : {4095U, 4096U, 4097U, 8192U}) {
+      if (select(kv_length, 1U, 16U, 4U, 256U, arch) != 0U ||
+          select(kv_length, 2U, 16U, 4U, 256U, arch) != 0U ||
+          select(kv_length, 1U, 8U, 4U, 256U, arch) != 0U ||
+          select(kv_length, 1U, 16U, 4U, 128U, arch) != 0U) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool causal_attention_gqa6_p32_selector_contract() {
+  // The legacy contiguous GQA6 P32 selector is retired with VMM.  Its host
+  // probe must remain fail-closed for every target and shape.
+  const auto select = [](const uint64_t expected_kv_length,
+                         const uint32_t query_count, const uint32_t query_heads,
+                         const uint32_t kv_heads, const uint32_t head_dim,
+                         const char *const arch_name) {
     return sllm_test_select_causal_attention_providers(
         expected_kv_length, query_count, query_heads, kv_heads, head_dim,
-        encoding, arch_name);
+        SLLM_HIP_KV_ENCODING_FP16_V1, arch_name);
   };
-  constexpr uint32_t kGfx1201Wave = 1U << 0U;
-  constexpr uint32_t kDecodeWaveSplit = 1U << 1U;
-  constexpr uint32_t kDecodeWaveQPreload = 1U << 5U;
-  constexpr uint32_t kDecodeGqa6SplitP32 = 1U << 16U;
-
-  unsetenv(candidate_name);
-  unsetenv(p64_name);
-  unsetenv(force_name);
-  bool valid = select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                      "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload) &&
-               select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                      "gfx1201") == (kGfx1201Wave | kDecodeWaveSplit);
-  for (const char *const disabled : {"0", "unknown"}) {
-    setenv(candidate_name, disabled, 1);
-    valid =
-        valid && select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                        "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload);
+  for (const char *const arch : {"gfx1030", "gfx1201", "gfx942", "gfx9999"}) {
+    for (const uint64_t kv_length : {4095U, 4096U, 4097U, 8192U}) {
+      if (select(kv_length, 1U, 24U, 4U, 256U, arch) != 0U ||
+          select(kv_length, 2U, 24U, 4U, 256U, arch) != 0U ||
+          select(kv_length, 1U, 16U, 4U, 256U, arch) != 0U ||
+          select(kv_length, 1U, 24U, 4U, 128U, arch) != 0U) {
+        return false;
+      }
+    }
   }
-  setenv(candidate_name, "1", 1);
-  valid = valid &&
-          select(4095U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload) &&
-          select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") ==
-              (kDecodeWaveSplit | kDecodeWaveQPreload | kDecodeGqa6SplitP32) &&
-          select(9435U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1201") ==
-              (kGfx1201Wave | kDecodeWaveSplit | kDecodeGqa6SplitP32) &&
-          select(4096U, 2U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == 0U &&
-          select(4096U, 1U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") ==
-              (kDecodeWaveSplit | kDecodeWaveQPreload | (1U << 4U)) &&
-          select(4096U, 1U, 24U, 8U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload) &&
-          select(4096U, 1U, 24U, 4U, 128U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == 0U &&
-          select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP8_V1,
-                 "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload) &&
-          select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx942") == 0U;
-  setenv(force_name, "1", 1);
-  valid = valid &&
-          select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload) &&
-          select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1201") == (kGfx1201Wave | kDecodeWaveSplit);
-  restore_environment();
-  return valid;
+  return true;
 }
 
 bool causal_attention_gqa6_p64_and_blocksoftmax_selector_contract() {
-  constexpr std::array<const char *const, 12> variables = {
-      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P32",
-      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P64",
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1030",
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1201",
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_Q8_GFX1201",
-      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4",
-      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K4_FP16",
-      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K8_FP16",
-      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K16_FP16",
-      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K32_FP16",
-      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE",
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1030_ROCBLAS_F32",
-  };
-  std::array<bool, variables.size()> was_present{};
-  std::array<std::string, variables.size()> old_values{};
-  for (std::size_t index = 0U; index < variables.size(); ++index) {
-    const char *const value = std::getenv(variables[index]);
-    was_present[index] = value != nullptr;
-    old_values[index] = value != nullptr ? value : "";
-    unsetenv(variables[index]);
-  }
-  const auto clear = [&]() {
-    for (const char *const variable : variables) {
-      unsetenv(variable);
-    }
-  };
-  const auto restore = [&]() {
-    for (std::size_t index = 0U; index < variables.size(); ++index) {
-      if (was_present[index]) {
-        setenv(variables[index], old_values[index].c_str(), 1);
-      } else {
-        unsetenv(variables[index]);
-      }
-    }
-  };
+  // The contiguous GQA6 split/P64 and block-softmax selectors were retired
+  // with VMM.  The host probe remains fail-closed while Paged owns dispatch.
   const auto select = [](const uint64_t expected_kv_length,
                          const uint32_t query_count, const uint32_t query_heads,
                          const uint32_t kv_heads, const uint32_t head_dim,
@@ -574,845 +408,72 @@ bool causal_attention_gqa6_p64_and_blocksoftmax_selector_contract() {
         128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1, sliding_window,
         explicit_scale, arch_name);
   };
-  constexpr uint32_t kGfx1201Wave = 1U << 0U;
-  constexpr uint32_t kDecodeWaveSplit = 1U << 1U;
-  constexpr uint32_t kDecodeWaveQPreload = 1U << 5U;
-  constexpr uint32_t kDecodeGqa6SplitP32 = 1U << 16U;
-  constexpr uint32_t kDecodeGqa6SplitP64 = 1U << 17U;
-  constexpr uint32_t kPrefillGqa6BlockSoftmax = 1U << 18U;
-  constexpr uint32_t kPrefillGqa6BlockSoftmaxQ8 = 1U << 19U;
-  const uint32_t gfx1030_decode_base = kDecodeWaveSplit | kDecodeWaveQPreload;
-  const uint32_t gfx1201_decode_base = kGfx1201Wave | kDecodeWaveSplit;
-
-  bool valid = select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                      "gfx1030") == gfx1030_decode_base &&
-               select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                      "gfx1201") == gfx1201_decode_base;
-
-  for (const char *const disabled : {"0", "unexpected"}) {
-    setenv(variables[1], disabled, 1);
-    valid = valid &&
-            select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                   "gfx1030") == gfx1030_decode_base &&
-            select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                   "gfx1201") == gfx1201_decode_base;
+  for (const char *const arch : {"gfx1030", "gfx1201", "gfx942", "gfx9999"}) {
+    if (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1, arch) !=
+            0U ||
+        select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1, arch) !=
+            0U ||
+        select_semantics(0U, 0U, arch) != 0U ||
+        select_semantics(1U, 1U, arch) != 0U) {
+      return false;
+    }
   }
-
-  setenv(variables[1], "1", 1);
-  valid = valid &&
-          select(8191U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == gfx1030_decode_base &&
-          select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == (gfx1030_decode_base | kDecodeGqa6SplitP64) &&
-          select(4095U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1201") == gfx1201_decode_base &&
-          select(4096U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1201") == (gfx1201_decode_base | kDecodeGqa6SplitP64) &&
-          (select(8192U, 2U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           kDecodeGqa6SplitP64) == 0U &&
-          (select(8192U, 1U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           kDecodeGqa6SplitP64) == 0U &&
-          (select(8192U, 1U, 24U, 8U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           kDecodeGqa6SplitP64) == 0U &&
-          (select(8192U, 1U, 24U, 4U, 128U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           kDecodeGqa6SplitP64) == 0U &&
-          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP8_V1,
-                  "gfx1030") &
-           kDecodeGqa6SplitP64) == 0U &&
-          select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx942") == 0U;
-
-  setenv(variables[0], "1", 1);
-  valid = valid &&
-          select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == (gfx1030_decode_base | kDecodeGqa6SplitP64) &&
-          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           kDecodeGqa6SplitP32) == 0U;
-  setenv(variables[10], "1", 1);
-  valid =
-      valid && select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                      "gfx1030") == gfx1030_decode_base;
-  clear();
-  setenv(variables[1], "unexpected", 1);
-  valid =
-      valid && select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                      "gfx1030") == gfx1030_decode_base;
-
-  clear();
-  setenv(variables[2], "1", 1);
-  valid = valid &&
-          select(128U, 127U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == 0U &&
-          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == kPrefillGqa6BlockSoftmax &&
-          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1201") == kGfx1201Wave;
-  clear();
-  setenv(variables[3], "1", 1);
-  valid = valid &&
-          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1201") == (kGfx1201Wave | kPrefillGqa6BlockSoftmax) &&
-          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == 0U;
-  for (const char *const disabled : {"0", "unexpected"}) {
-    clear();
-    setenv(variables[3], disabled, 1);
-    valid =
-        valid && select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                        "gfx1201") == kGfx1201Wave;
-  }
-
-  clear();
-  setenv(variables[4], "1", 1);
-  valid = valid &&
-          select(128U, 127U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1201") == kGfx1201Wave &&
-          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1201") == (kGfx1201Wave | kPrefillGqa6BlockSoftmaxQ8);
-  setenv(variables[3], "1", 1);
-  valid =
-      valid && select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                      "gfx1201") == (kGfx1201Wave | kPrefillGqa6BlockSoftmaxQ8);
-
-  clear();
-  setenv(variables[2], "1", 1);
-  valid = valid &&
-          (select(128U, 128U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           kPrefillGqa6BlockSoftmax) == 0U &&
-          (select(128U, 128U, 24U, 8U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           kPrefillGqa6BlockSoftmax) == 0U &&
-          (select(128U, 128U, 24U, 4U, 128U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           kPrefillGqa6BlockSoftmax) == 0U &&
-          (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP8_V1,
-                  "gfx1030") &
-           kPrefillGqa6BlockSoftmax) == 0U &&
-          select_semantics(1U, 0U, "gfx1030") == 0U &&
-          select_semantics(0U, 1U, "gfx1030") == 0U;
-  setenv(variables[10], "1", 1);
-  valid = valid && select(128U, 128U, 24U, 4U, 256U,
-                          SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030") == 0U;
-
-  restore();
-  return valid;
+  return true;
 }
 
 bool causal_attention_gqa6_p128_selector_contract() {
-  constexpr const char *const p128_name =
-      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P128";
-  constexpr const char *const p64_name =
-      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P64";
-  constexpr const char *const p32_name =
-      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P32";
-  constexpr const char *const force_name =
-      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
-  const std::array<const char *const, 4> names = {p128_name, p64_name, p32_name,
-                                                  force_name};
-  std::array<bool, names.size()> was_present{};
-  std::array<std::string, names.size()> old_values{};
-  for (std::size_t index = 0U; index < names.size(); ++index) {
-    const char *const value = std::getenv(names[index]);
-    was_present[index] = value != nullptr;
-    old_values[index] = value != nullptr ? value : "";
-    unsetenv(names[index]);
-  }
-  const auto restore = [&]() {
-    for (std::size_t index = 0U; index < names.size(); ++index) {
-      if (was_present[index]) {
-        setenv(names[index], old_values[index].c_str(), 1);
-      } else {
-        unsetenv(names[index]);
-      }
+  // The contiguous GQA6 split/P128 selector was retired with VMM.
+  for (const char *const arch : {"gfx1030", "gfx1201", "gfx942", "gfx9999"}) {
+    if (sllm_test_select_causal_attention_providers(
+            8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1, arch) !=
+            0U ||
+        sllm_test_select_causal_attention_providers(
+            128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1, arch) !=
+            0U) {
+      return false;
     }
-  };
-  const auto select = [](const uint64_t expected_kv_length,
-                         const uint32_t query_count, const uint32_t query_heads,
-                         const uint32_t kv_heads, const uint32_t head_dim,
-                         const uint32_t encoding, const char *const arch_name) {
-    return sllm_test_select_causal_attention_providers(
-        expected_kv_length, query_count, query_heads, kv_heads, head_dim,
-        encoding, arch_name);
-  };
-  const auto select_semantics = [](const uint64_t sliding_window,
-                                   const uint32_t explicit_scale) {
-    return sllm_test_select_causal_attention_providers_with_semantics(
-        8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1, sliding_window,
-        explicit_scale, "gfx1030");
-  };
-  constexpr uint32_t kGfx1030DecodeBase = (1U << 1U) | (1U << 5U);
-  constexpr uint32_t kP128 = 1U << 22U;
-  bool valid = select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                      "gfx1030") == kGfx1030DecodeBase &&
-               select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                      "gfx1201") == ((1U << 0U) | (1U << 1U));
-
-  setenv(p128_name, "1", 1);
-  valid = valid &&
-          select(8191U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == kGfx1030DecodeBase &&
-          select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == (kGfx1030DecodeBase | kP128) &&
-          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1201") &
-           kP128) == 0U;
-
-  setenv(p64_name, "1", 1);
-  setenv(p32_name, "1", 1);
-  valid = valid &&
-          select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == (kGfx1030DecodeBase | kP128) &&
-          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           (1U << 17U)) == 0U &&
-          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           (1U << 16U)) == 0U;
-
-  for (const char *const value : {"0", "unknown"}) {
-    setenv(p128_name, value, 1);
-    valid =
-        valid && select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                        "gfx1030") == (kGfx1030DecodeBase | (1U << 17U));
   }
-  setenv(p128_name, "1", 1);
-  valid = valid &&
-          select(8192U, 2U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == 0U &&
-          (select(8192U, 1U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           kP128) == 0U &&
-          (select(8192U, 1U, 24U, 8U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           kP128) == 0U &&
-          (select(8192U, 1U, 24U, 4U, 128U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           kP128) == 0U &&
-          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP8_V1,
-                  "gfx1030") &
-           kP128) == 0U &&
-          (select(8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx942") &
-           kP128) == 0U;
-  valid = valid && (select_semantics(1U, 0U) & kP128) == 0U &&
-          (select_semantics(0U, 1U) & kP128) == 0U;
-  setenv(force_name, "1", 1);
-  valid = valid && (select(8192U, 1U, 24U, 4U, 256U,
-                           SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030") &
-                    kP128) == 0U;
-  restore();
-  return valid;
+  return true;
 }
 
 bool causal_attention_gqa6_rocblas_f32_selector_contract() {
-  constexpr const char *const candidate_name =
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1030_ROCBLAS_F32";
-  constexpr const char *const gfx1201_candidate_name =
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1201_ROCBLAS_F32";
-  constexpr const char *const qtile_name =
-      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K32_FP16";
-  constexpr const char *const blocksoftmax_name =
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1030";
-  constexpr const char *const force_name =
-      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
-  constexpr std::array<const char *const, 5> variables = {
-      candidate_name, gfx1201_candidate_name, qtile_name, blocksoftmax_name,
-      force_name};
-  std::array<bool, variables.size()> was_present{};
-  std::array<std::string, variables.size()> old_values{};
-  for (std::size_t index = 0U; index < variables.size(); ++index) {
-    const char *const value = std::getenv(variables[index]);
-    was_present[index] = value != nullptr;
-    old_values[index] = value != nullptr ? value : "";
-    unsetenv(variables[index]);
-  }
-  const auto restore = [&]() {
-    for (std::size_t index = 0U; index < variables.size(); ++index) {
-      if (was_present[index]) {
-        setenv(variables[index], old_values[index].c_str(), 1);
-      } else {
-        unsetenv(variables[index]);
-      }
-    }
-  };
-  const auto select = [](const uint64_t expected_kv_length,
-                         const uint32_t query_count, const uint32_t q_heads,
-                         const uint32_t kv_heads, const uint32_t head_dim,
-                         const char *const arch_name) {
-    return sllm_test_select_causal_attention_providers(
-        expected_kv_length, query_count, q_heads, kv_heads, head_dim,
-        SLLM_HIP_KV_ENCODING_FP16_V1, arch_name);
-  };
-  constexpr uint32_t kProvider = 1U << 20U;
-  constexpr uint32_t kQTile4K32 = 1U << 12U;
-  constexpr uint32_t kBlockSoftmax = 1U << 18U;
-  // rocBLAS F32 is an explicit opt-in; an unset variable must select the
-  // baseline provider.
-  bool valid = (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kProvider) == 0U;
-  for (const char *const disabled : {"0", "unexpected"}) {
-    setenv(candidate_name, disabled, 1);
-    valid = valid &&
-            (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kProvider) == 0U;
-  }
-  setenv(candidate_name, "1", 1);
-  valid = valid && select(128U, 128U, 24U, 4U, 256U, "gfx1030") == kProvider &&
-          select(128U, 128U, 24U, 4U, 256U, "gfx1201") != kProvider &&
-          select(128U, 128U, 16U, 4U, 256U, "gfx1030") != kProvider &&
-          select(1U, 1U, 24U, 4U, 256U, "gfx1030") != kProvider;
-  setenv(qtile_name, "1", 1);
-  valid = valid && select(128U, 128U, 24U, 4U, 256U, "gfx1030") == kProvider;
-  setenv(candidate_name, "0", 1);
-  valid = valid &&
-          (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kQTile4K32) != 0U &&
-          (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kProvider) == 0U;
-  setenv(candidate_name, "1", 1);
-  setenv(blocksoftmax_name, "1", 1);
-  valid = valid && select(128U, 128U, 24U, 4U, 256U, "gfx1030") == kProvider &&
-          (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kBlockSoftmax) == 0U;
-  setenv(force_name, "1", 1);
-  valid =
-      valid && (select(128U, 128U, 24U, 4U, 256U, "gfx1030") & kProvider) == 0U;
-  restore();
-  return valid;
-}
-
-bool causal_attention_gqa6_rocblas_f32_gfx1201_selector_contract() {
-  static_assert(
-      SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F32_GFX1201_V1 == 74U,
-      "gfx1201 GQA6 rocBLAS provider must use the next audit ID");
-  constexpr const char *const candidate_name =
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1201_ROCBLAS_F32";
-  constexpr const char *const gfx1030_candidate_name =
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1030_ROCBLAS_F32";
-  constexpr const char *const q8_name =
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_Q8_GFX1201";
-  constexpr const char *const force_name =
-      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
-  constexpr std::array<const char *const, 4> variables = {
-      candidate_name, gfx1030_candidate_name, q8_name, force_name};
-  std::array<bool, variables.size()> was_present{};
-  std::array<std::string, variables.size()> old_values{};
-  for (std::size_t index = 0U; index < variables.size(); ++index) {
-    const char *const value = std::getenv(variables[index]);
-    was_present[index] = value != nullptr;
-    old_values[index] = value != nullptr ? value : "";
-    unsetenv(variables[index]);
-  }
-  const auto restore = [&]() {
-    for (std::size_t index = 0U; index < variables.size(); ++index) {
-      if (was_present[index]) {
-        setenv(variables[index], old_values[index].c_str(), 1);
-      } else {
-        unsetenv(variables[index]);
-      }
-    }
-  };
-  const auto select = [](const uint64_t expected_kv_length,
-                         const uint32_t query_count, const uint32_t q_heads,
-                         const uint32_t kv_heads, const uint32_t head_dim,
-                         const uint32_t encoding, const char *const target) {
-    return sllm_test_select_causal_attention_providers(
-        expected_kv_length, query_count, q_heads, kv_heads, head_dim, encoding,
-        target);
-  };
-  constexpr uint32_t kProvider = 1U << 21U;
-  // Both rocBLAS providers are explicit opt-ins.  Clearing the environment
-  // must leave both targets on their baseline route.
-  bool valid = (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                       "gfx1201") &
-                kProvider) == 0U &&
-               (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                       "gfx1030") &
-                kProvider) == 0U;
-  for (const char *const disabled : {"0", "unexpected"}) {
-    setenv(candidate_name, disabled, 1);
-    valid = valid && (select(128U, 128U, 24U, 4U, 256U,
-                             SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1201") &
-                      kProvider) == 0U;
-  }
-  setenv(candidate_name, "1", 1);
-  valid = valid &&
-          (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1201") &
-           kProvider) == kProvider &&
-          (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") &
-           kProvider) == 0U &&
-          (select(128U, 128U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1201") &
-           kProvider) == 0U &&
-          (select(128U, 128U, 24U, 8U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1201") &
-           kProvider) == 0U &&
-          (select(128U, 128U, 24U, 4U, 128U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1201") &
-           kProvider) == 0U &&
-          (select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP8_V1,
-                  "gfx1201") &
-           kProvider) == 0U &&
-          (select(128U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1201") &
-           kProvider) == 0U &&
-          (select(129U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1201") &
-           kProvider) == 0U;
-  setenv(q8_name, "1", 1);
-  valid = valid && (select(128U, 128U, 24U, 4U, 256U,
-                           SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1201") &
-                    kProvider) == kProvider;
-  setenv(force_name, "1", 1);
-  valid = valid && (select(128U, 128U, 24U, 4U, 256U,
-                           SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1201") &
-                    kProvider) == 0U;
-  setenv(force_name, "0", 1);
-  setenv(candidate_name, "yes", 1);
-  valid = valid && (select(128U, 128U, 24U, 4U, 256U,
-                           SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1201") &
-                    kProvider) == 0U;
-  restore();
-  return valid;
-}
-
-bool causal_attention_target_scoped_selector_contract() {
-  constexpr uint32_t kGfx1201Wave = 1U << 0U;
-  constexpr uint32_t kDecodeWaveSplit = 1U << 1U;
-  constexpr uint32_t kDecodeWaveQPreload = 1U << 5U;
-  constexpr uint32_t kDecodeGqa4SplitP32 = 1U << 4U;
-  constexpr uint32_t kPrefillGqa4 = 1U << 6U;
-  constexpr uint32_t kPrefillGqa4QTile4 = 1U << 7U;
-  constexpr uint32_t kPrefillGqa6QTile4K32Fp16 = 1U << 12U;
-  constexpr uint32_t kPrefillGqa6QTile4K4Fp16 = 1U << 13U;
-  constexpr uint32_t kPrefillGqa6QTile4K8Fp16 = 1U << 14U;
-  constexpr uint32_t kPrefillGqa6QTile4K16Fp16 = 1U << 15U;
-  constexpr uint32_t kPrefillGqa6QTile8W16 = 1U << 25U;
-  constexpr const char *const kForceBaseline =
-      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
-  constexpr const char *const kGfx1201Gqa4SplitP32 =
-      "SLLM_CAUSAL_ATTENTION_GFX1201_DECODE_GQA4_SPLIT_P32";
-  constexpr const char *const kGqa6QTile4 = "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4";
-  constexpr const char *const kGqa6QTile4K4Fp16 =
-      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K4_FP16";
-  constexpr const char *const kGqa6QTile4K8Fp16 =
-      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K8_FP16";
-  constexpr const char *const kGqa6QTile4K16Fp16 =
-      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K16_FP16";
-  constexpr const char *const kGqa6QTile4K32Fp16 =
-      "SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K32_FP16";
-  constexpr std::array<const char *const, 22> kCandidateVariables = {
-      "SLLM_CAUSAL_ATTENTION_GFX1030_Q_PRELOAD",
-      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT",
-      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT_Q_PRELOAD",
-      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_FP16_PAIR",
-      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT",
-      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT_P32",
-      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P32",
-      "SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P64",
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1030",
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1201",
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_Q8_GFX1201",
-      "SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM",
-      "SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32",
-      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_STAGED",
-      kGqa6QTile4,
-      kGqa6QTile4K4Fp16,
-      kGqa6QTile4K8Fp16,
-      kGqa6QTile4K16Fp16,
-      kGqa6QTile4K32Fp16,
-      kForceBaseline,
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1030_ROCBLAS_F32",
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1201_ROCBLAS_F32"};
-  std::array<bool, kCandidateVariables.size()> had_old_value{};
-  std::array<std::string, kCandidateVariables.size()> old_values{};
-  for (std::size_t index = 0U; index < kCandidateVariables.size(); ++index) {
-    const char *const old_value = std::getenv(kCandidateVariables[index]);
-    had_old_value[index] = old_value != nullptr;
-    if (old_value != nullptr) {
-      old_values[index] = old_value;
-    }
-    unsetenv(kCandidateVariables[index]);
-  }
-  const char *const old_gfx1201_p32 = std::getenv(kGfx1201Gqa4SplitP32);
-  const bool had_old_gfx1201_p32 = old_gfx1201_p32 != nullptr;
-  const std::string old_gfx1201_p32_value =
-      had_old_gfx1201_p32 ? old_gfx1201_p32 : "";
-  unsetenv(kGfx1201Gqa4SplitP32);
-  const auto restore_environment = [&]() {
-    for (std::size_t index = 0U; index < kCandidateVariables.size(); ++index) {
-      if (had_old_value[index]) {
-        setenv(kCandidateVariables[index], old_values[index].c_str(), 1);
-      } else {
-        unsetenv(kCandidateVariables[index]);
-      }
-    }
-    if (had_old_gfx1201_p32) {
-      setenv(kGfx1201Gqa4SplitP32, old_gfx1201_p32_value.c_str(), 1);
-    } else {
-      unsetenv(kGfx1201Gqa4SplitP32);
-    }
-  };
-  const auto clear_environment = [&]() {
-    for (const char *const variable : kCandidateVariables) {
-      unsetenv(variable);
-    }
-    unsetenv(kGfx1201Gqa4SplitP32);
-  };
-  const auto select = [](const uint64_t expected_kv_length,
-                         const uint32_t query_count, const uint32_t query_heads,
-                         const uint32_t kv_heads, const uint32_t head_dim,
-                         const uint32_t encoding, const char *const arch_name) {
-    return sllm_test_select_causal_attention_providers(
-        expected_kv_length, query_count, query_heads, kv_heads, head_dim,
-        encoding, arch_name);
-  };
-  const auto select_position = [](const uint64_t expected_kv_length,
-                                  const uint32_t query_count,
-                                  const uint64_t start_position,
-                                  const char *const arch_name) {
-    return sllm_test_select_causal_attention_providers_with_position(
-        expected_kv_length, query_count, 24U, 4U, 256U,
-        SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, start_position, 0U, 0U, arch_name);
-  };
-  const auto expect_gfx942_zero =
-      [&](const uint64_t expected_kv_length, const uint32_t query_count = 1U,
-          const uint32_t query_heads = 16U, const uint32_t kv_heads = 4U,
-          const uint32_t head_dim = 256U,
-          const uint32_t encoding = SLLM_HIP_KV_ENCODING_FP16_V1) {
-        const uint32_t actual =
-            select(expected_kv_length, query_count, query_heads, kv_heads,
-                   head_dim, encoding, "gfx942");
-        if (actual != 0U) {
-          std::cerr << "gfx942 selector mask " << actual << " at kv "
-                    << expected_kv_length << ", q " << query_count
-                    << ", qheads " << query_heads << ", kvheads " << kv_heads
-                    << ", dim " << head_dim << ", encoding " << encoding
-                    << '\n';
-        }
-        return actual == 0U;
-      };
-  const auto expect_gfx1201 =
-      [&](const uint64_t expected_kv_length, const uint32_t query_count,
-          const uint32_t expected_mask, const uint32_t query_heads = 16U,
-          const uint32_t kv_heads = 4U, const uint32_t head_dim = 256U,
-          const uint32_t encoding = SLLM_HIP_KV_ENCODING_FP16_V1) {
-        const uint32_t actual =
-            select(expected_kv_length, query_count, query_heads, kv_heads,
-                   head_dim, encoding, "gfx1201");
-        if (actual != expected_mask) {
-          std::cerr << "gfx1201 selector mask " << actual << ", expected "
-                    << expected_mask << " at kv " << expected_kv_length
-                    << ", q " << query_count << ", qheads " << query_heads
-                    << ", kvheads " << kv_heads << ", dim " << head_dim
-                    << ", encoding " << encoding << '\n';
-        }
-        return actual == expected_mask;
-      };
-
-  bool valid = true;
-  // Exercise every selector boundary with all target-gated candidates unset.
-  for (const uint64_t expected_kv_length :
-       {31U, 32U, 33U, 1023U, 1024U, 1025U, 4095U, 4096U, 4097U, 10001U}) {
-    for (const uint32_t query_count : {1U, 2U, 32U, 64U, 128U, 1024U}) {
-      valid = valid && expect_gfx942_zero(expected_kv_length, query_count);
-    }
-  }
-  valid = valid && expect_gfx942_zero(4096U, 1U, 8U, 4U, 256U) &&
-          expect_gfx942_zero(4096U, 1U, 16U, 8U, 256U) &&
-          expect_gfx942_zero(4096U, 1U, 16U, 4U, 128U) &&
-          expect_gfx942_zero(4096U, 1U, 16U, 4U, 256U,
-                             SLLM_HIP_KV_ENCODING_FP8_V1) &&
-          select(4096U, 1U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx9999") == 0U;
-
-  // gfx1201 keeps the wave/prefill routes and now defaults the exact-shape
-  // GQA4 P32 candidate on.  The 4095/4096 boundary distinguishes it.
-  valid =
-      valid && expect_gfx1201(4095U, 1U, kGfx1201Wave | kDecodeWaveSplit) &&
-      expect_gfx1201(4096U, 1U,
-                     kGfx1201Wave | kDecodeWaveSplit | kDecodeGqa4SplitP32) &&
-      expect_gfx1201(4097U, 1U,
-                     kGfx1201Wave | kDecodeWaveSplit | kDecodeGqa4SplitP32) &&
-      expect_gfx1201(4096U, 2U, 0U) &&
-      expect_gfx1201(4096U, 32U, kGfx1201Wave) &&
-      expect_gfx1201(4096U, 64U, kGfx1201Wave | kPrefillGqa4) &&
-      expect_gfx1201(4096U, 128U,
-                     kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4) &&
-      expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit, 16U, 4U, 256U,
-                     SLLM_HIP_KV_ENCODING_FP8_V1) &&
-      expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit, 8U, 4U,
-                     256U) &&
-      expect_gfx1201(4096U, 1U, kGfx1201Wave, 16U, 4U, 128U) &&
-      // Explicit OCP MXFP8 decode (M=1) uses the packed-KV generic routes.  It
-      // must not select any prefill-only GQA4/specialized provider.
-      expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit, 16U, 4U, 256U,
-                     SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) &&
-      select(4096U, 1U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E5_V1,
-             "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload);
-
-  // MXFP8 E4 GQA6 prefill uses the format-neutral qtile4 provider by default
-  // at the exact Qwen geometry.  The query-count boundary, E5/FP16 rollback,
-  // and explicit flag=0 rollback remain separate from the FP16-only opt-ins.
-  valid = valid &&
-          select(4096U, 127U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                 "gfx1030") == 0U &&
-          select(4096U, 128U, 12U, 2U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                 "gfx1030") == 0U &&
-          select(4096U, 128U, 48U, 8U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                 "gfx1030") == 0U &&
-          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                 "gfx1030") == kPrefillGqa4QTile4 &&
-          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                 "gfx1201") == (kGfx1201Wave | kPrefillGqa4QTile4) &&
-          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E5_V1,
-                 "gfx1030") == 0U &&
-          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == 0U;
-  setenv(kGqa6QTile4, "0", 1);
-  valid = valid &&
-          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                 "gfx1030") == 0U &&
-          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                 "gfx1201") == kGfx1201Wave;
-  clear_environment();
-
-  // The W16 candidate is exact gfx1030/gfx1201 + MXFP8 E4 + q24/kv4/d256 and
-  // starts only at the long-prefix boundary. Query and prefix boundaries
-  // retain the qtile4 control route.
-  valid =
-      valid && select_position(1151U, 127U, 1024U, "gfx1030") == 0U &&
-      select_position(1151U, 127U, 1023U, "gfx1030") == 0U &&
-      select_position(1152U, 128U, 1023U, "gfx1030") == kPrefillGqa4QTile4 &&
-      select_position(1152U, 128U, 1024U, "gfx1030") == kPrefillGqa6QTile8W16 &&
-      select_position(1153U, 129U, 1025U, "gfx1030") == kPrefillGqa6QTile8W16 &&
-      select_position(1151U, 127U, 1024U, "gfx1201") == kGfx1201Wave &&
-      select_position(1152U, 128U, 1023U, "gfx1201") ==
-          (kGfx1201Wave | kPrefillGqa4QTile4) &&
-      select_position(1152U, 128U, 1024U, "gfx1201") ==
-          (kGfx1201Wave | kPrefillGqa6QTile8W16) &&
-      select_position(1153U, 129U, 1025U, "gfx1201") ==
-          (kGfx1201Wave | kPrefillGqa6QTile8W16);
-  setenv(kGqa6QTile4, "1", 1);
-  valid =
-      valid &&
-      select_position(1152U, 128U, 1024U, "gfx1030") == kPrefillGqa4QTile4 &&
-      select_position(1152U, 128U, 1024U, "gfx1201") ==
-          (kGfx1201Wave | kPrefillGqa4QTile4);
-  setenv(kGqa6QTile4, "0", 1);
-  valid = valid && select_position(1152U, 128U, 1024U, "gfx1030") == 0U &&
-          select_position(1152U, 128U, 1024U, "gfx1201") == kGfx1201Wave;
-  setenv(kForceBaseline, "1", 1);
-  valid = valid && select_position(1152U, 128U, 1024U, "gfx1030") == 0U;
-  clear_environment();
-
-  // Staged32 is the MXFP8 default for the measured small-M geometry.
-  constexpr uint32_t kStaged32 = 1U << 24U;
-  constexpr uint32_t kGqaShared = 1U << 26U;
-  constexpr const char *kStaged32Flag =
-      "SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32";
-  for (const auto target : {"gfx1030", "gfx1201"}) {
-    for (const auto length : {1U, 17U, 1023U, 1024U, 1025U}) {
-      for (const auto queries : {1U, 2U, 3U, 4U, 5U, 8U, 9U, 10U}) {
-        const auto mask = select(length, queries, 24U, 4U, 256U,
-                                 SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, target);
-        valid = valid && (((mask & kStaged32) != 0U) == (queries <= 9U));
-        const bool shared_expected =
-            std::strcmp(target, "gfx1030") == 0 && queries <= 3U;
-        valid = valid && (((mask & kGqaShared) != 0U) == shared_expected);
-      }
-    }
-    for (const auto value : {"0", "yes", ""}) {
-      setenv(kStaged32Flag, value, 1);
-      valid = valid && (select(1024U, 3U, 24U, 4U, 256U,
-                               SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, target) &
-                        kStaged32) == 0U;
-    }
-    unsetenv(kStaged32Flag);
-    setenv(kForceBaseline, "1", 1);
-    valid = valid && (select(1024U, 3U, 24U, 4U, 256U,
-                             SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, target) &
-                      kStaged32) == 0U;
-    unsetenv(kForceBaseline);
-  }
-
-  // WU1.1 split128 is long-context-only and keeps M<=3.  It is available on
-  // gfx1201 and on gfx1030 where the GQA-shared route is selected.
-  constexpr uint32_t kSplit128 = 1U << 27U;
-  for (const auto target : {"gfx1030", "gfx1201"}) {
-    for (const auto length : {8191U, 8192U, 8193U}) {
-      for (const auto queries : {1U, 2U, 3U, 4U}) {
-        const auto mask = select(length, queries, 24U, 4U, 256U,
-                                 SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, target);
-        const bool eligible = length >= 8192U && queries <= 3U &&
-                              (std::strcmp(target, "gfx1201") == 0 ||
-                               std::strcmp(target, "gfx1030") == 0);
-        valid = valid && (((mask & kSplit128) != 0U) == eligible);
-      }
-    }
-  }
-
-  // Every environment spelling must remain inert for gfx942.  Test each
-  // candidate independently and then all candidates together.
-  constexpr std::array<const char *const, 4> kEnvironmentValues = {
-      "1", "0", "unknown", nullptr};
-  for (const char *const variable : kCandidateVariables) {
-    for (const char *const value : kEnvironmentValues) {
-      clear_environment();
-      if (value != nullptr) {
-        setenv(variable, value, 1);
-      }
-      valid = valid && expect_gfx942_zero(4095U) && expect_gfx942_zero(4096U) &&
-              expect_gfx942_zero(4097U) && expect_gfx942_zero(1024U, 1024U) &&
-              expect_gfx942_zero(10001U, 128U, 16U, 4U, 256U,
-                                 SLLM_HIP_KV_ENCODING_FP8_V1);
-    }
-  }
-  // The same environment matrix must not expose gfx1030-only candidates on
-  // gfx1201. FORCE_BASELINE removes the common prefill route and qtile4
-  // control.
-  for (const char *const variable : kCandidateVariables) {
-    for (const char *const value : kEnvironmentValues) {
-      clear_environment();
-      if (value != nullptr) {
-        setenv(variable, value, 1);
-      }
-      const bool force_baseline = std::strcmp(variable, kForceBaseline) == 0 &&
-                                  value != nullptr &&
-                                  std::strcmp(value, "1") == 0;
-      valid = valid &&
-              expect_gfx1201(4095U, 1U, kGfx1201Wave | kDecodeWaveSplit) &&
-              expect_gfx1201(4096U, 2U, 0U) &&
-              expect_gfx1201(4096U, 64U, kGfx1201Wave | kPrefillGqa4) &&
-              expect_gfx1201(4096U, 128U,
-                             kGfx1201Wave | kPrefillGqa4 |
-                                 (force_baseline ? 0U : kPrefillGqa4QTile4));
-    }
-  }
-  clear_environment();
-  for (const char *const variable : kCandidateVariables) {
-    setenv(variable, "1", 1);
-  }
-  valid = valid && expect_gfx942_zero(4095U) && expect_gfx942_zero(4096U) &&
-          expect_gfx942_zero(4097U) && expect_gfx942_zero(1024U, 1024U) &&
-          expect_gfx942_zero(10001U, 128U);
-
-  // FORCE_BASELINE suppresses baseline-gated candidates but cannot make
-  // gfx942 select one; gfx1201 keeps its existing common prefill route.
-  clear_environment();
-  setenv(kForceBaseline, "1", 1);
-  valid = valid && expect_gfx942_zero(4096U) &&
-          expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit) &&
-          expect_gfx1201(4096U, 64U, kGfx1201Wave | kPrefillGqa4) &&
-          expect_gfx1201(4096U, 128U, kGfx1201Wave | kPrefillGqa4) &&
-          expect_gfx1201(4096U, 128U, kGfx1201Wave, 24U, 4U, 256U,
-                         SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) &&
-          select(4096U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-                 "gfx1030") == 0U;
-
-  setenv(kForceBaseline, "1", 1);
-  valid = valid && expect_gfx1201(2048U, 128U, kGfx1201Wave | kPrefillGqa4);
-
-  // GQA6 K4/K8/K16/K32 are separate FP16-only opt-ins.  Their exact q24/kv4
-  // boundary is independent of the existing GQA6 qtile1 control and must
-  // roll back on unsupported semantics, shapes, encodings, targets, or
-  // FORCE_BASELINE.
-  clear_environment();
-  setenv(kGqa6QTile4K32Fp16, "1", 1);
-  const auto expect_gqa6_k32 = [&](const char *const label,
-                                   const uint32_t actual,
-                                   const uint32_t expected) {
-    if (actual != expected) {
-      std::cerr << label << " actual=" << actual << " expected=" << expected
-                << '\n';
+  // The legacy contiguous rocBLAS F32 selector is retired with VMM.
+  for (const char *const arch : {"gfx1030", "gfx1201", "gfx942", "gfx9999"}) {
+    if (sllm_test_select_causal_attention_providers(
+            8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1, arch) !=
+            0U ||
+        sllm_test_select_causal_attention_providers(
+            128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1, arch) !=
+            0U) {
       return false;
     }
-    return true;
-  };
-  valid = valid &&
-          expect_gqa6_k32("gqa6-k32-q127",
-                          select(127U, 127U, 24U, 4U, 256U,
-                                 SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030"),
-                          0U) &&
-          expect_gqa6_k32("gqa6-k32-v620",
-                          select(128U, 128U, 24U, 4U, 256U,
-                                 SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030"),
-                          kPrefillGqa6QTile4K32Fp16) &&
-          expect_gqa6_k32("gqa6-k32-r9700",
-                          select(128U, 128U, 24U, 4U, 256U,
-                                 SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1201"),
-                          kGfx1201Wave | kPrefillGqa6QTile4K32Fp16) &&
-          expect_gqa6_k32("gqa6-k32-encoding",
-                          select(128U, 128U, 24U, 4U, 256,
-                                 SLLM_HIP_KV_ENCODING_FP8_V1, "gfx1030"),
-                          0U) &&
-          expect_gqa6_k32("gqa6-k32-qheads",
-                          select(128U, 128U, 16U, 4U, 256,
-                                 SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030"),
-                          kPrefillGqa4 | kPrefillGqa4QTile4) &&
-          expect_gqa6_k32("gqa6-k32-kvheads",
-                          select(128U, 128U, 24U, 8U, 256,
-                                 SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030"),
-                          0U) &&
-          expect_gqa6_k32("gqa6-k32-headdim",
-                          select(128U, 128U, 24U, 4U, 128,
-                                 SLLM_HIP_KV_ENCODING_FP16_V1, "gfx1030"),
-                          0U) &&
-          expect_gqa6_k32(
-              "gqa6-k32-window",
-              sllm_test_select_causal_attention_providers_with_semantics(
-                  128U, 128U, 24U, 4U, 256, SLLM_HIP_KV_ENCODING_FP16_V1, 1U,
-                  0U, "gfx1030"),
-              0U) &&
-          expect_gqa6_k32(
-              "gqa6-k32-explicit",
-              sllm_test_select_causal_attention_providers_with_semantics(
-                  128U, 128U, 24U, 4U, 256, SLLM_HIP_KV_ENCODING_FP16_V1, 0U,
-                  1U, "gfx1030"),
-              0U);
-  const auto expect_gqa6_key_tile = [&](const char *const variable,
-                                        const uint32_t expected_bit) {
-    clear_environment();
-    setenv(variable, "1", 1);
-    return expect_gfx1201(128U, 128U, kGfx1201Wave | expected_bit, 24U, 4U,
-                          256U, SLLM_HIP_KV_ENCODING_FP16_V1) &&
-           select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                  "gfx1030") == expected_bit;
-  };
-  valid = valid &&
-          expect_gqa6_key_tile(kGqa6QTile4K4Fp16, kPrefillGqa6QTile4K4Fp16) &&
-          expect_gqa6_key_tile(kGqa6QTile4K8Fp16, kPrefillGqa6QTile4K8Fp16) &&
-          expect_gqa6_key_tile(kGqa6QTile4K16Fp16, kPrefillGqa6QTile4K16Fp16) &&
-          expect_gqa6_key_tile(kGqa6QTile4K32Fp16, kPrefillGqa6QTile4K32Fp16);
-  // Explicit mutual precedence: K4 wins if multiple candidate opt-ins are
-  // accidentally inherited by the process environment.
-  clear_environment();
-  setenv(kGqa6QTile4K4Fp16, "1", 1);
-  setenv(kGqa6QTile4K8Fp16, "1", 1);
-  setenv(kGqa6QTile4K16Fp16, "1", 1);
-  setenv(kGqa6QTile4K32Fp16, "1", 1);
-  valid = valid &&
-          expect_gfx1201(128U, 128U, kGfx1201Wave | kPrefillGqa6QTile4K4Fp16,
-                         24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1) &&
-          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == kPrefillGqa6QTile4K4Fp16;
-  setenv(kForceBaseline, "1", 1);
-  valid = valid &&
-          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1030") == 0U &&
-          select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                 "gfx1201") == kGfx1201Wave;
-  clear_environment();
-  setenv(kGqa6QTile4, "1", 1);
-  valid =
-      valid && select(128U, 128U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
-                      "gfx1030") == kPrefillGqa4QTile4;
-
-  restore_environment();
-  return valid;
+  }
+  return true;
+}
+bool causal_attention_gqa6_rocblas_f32_gfx1201_selector_contract() {
+  // The legacy gfx1201 rocBLAS F32 selector is retired with VMM.
+  for (const char *const arch : {"gfx1030", "gfx1201", "gfx942", "gfx9999"}) {
+    if (sllm_test_select_causal_attention_providers(
+            8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1, arch) !=
+        0U) {
+      return false;
+    }
+  }
+  return true;
+}
+bool causal_attention_target_scoped_selector_contract() {
+  // All legacy contiguous target scoped selectors are retired with VMM.
+  for (const char *const arch : {"gfx1030", "gfx1201", "gfx942", "gfx9999"}) {
+    if (sllm_test_select_causal_attention_providers(
+            8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1, arch) !=
+            0U ||
+        sllm_test_select_causal_attention_providers_with_position(
+            8192U, 1U, 24U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 0U, 0U,
+            0U, arch) != 0U) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool create_buffer(const sllm_context_t *const context,
@@ -4480,41 +3541,7 @@ bool qwen38_projection_pack2_public_contract() {
 
   fake_hip::reset();
   fake_hip::set_gcn_arch_name("gfx942");
-  sllm_context_t *context = nullptr;
-  sllm_buffer_t *activation = nullptr;
-  std::array<sllm_buffer_t *, 2> weights{};
-  std::array<sllm_buffer_t *, 2> outputs{};
-  sllm_qwen38_projection_pack2_plan_t *plan = nullptr;
-  valid = create_context_for_arch("gfx942", &context) && valid;
-  valid = create_buffer_sized(context, kActivationBytes, &activation) && valid;
-  valid = create_buffer_sized(context, kWeightBytes, &weights[0]) && valid;
-  valid = create_buffer_sized(context, kWeightBytes, &weights[1]) && valid;
-  valid = create_buffer_sized(context, kOutputBytes, &outputs[0]) && valid;
-  valid = create_buffer_sized(context, kOutputBytes, &outputs[1]) && valid;
-  if (context != nullptr && activation != nullptr && weights[0] != nullptr &&
-      weights[1] != nullptr && outputs[0] != nullptr && outputs[1] != nullptr) {
-    const auto descriptor =
-        qwen38_projection_pack2_descriptor(activation, weights, outputs);
-    Error error;
-    valid =
-        expect_status(sllm_qwen38_projection_pack2_prepare(context, &descriptor,
-                                                           &plan, &error.sink),
-                      SLLM_STATUS_UNSUPPORTED,
-                      "Qwen3.8 projection-pack unsupported target", error) &&
-        plan == nullptr && valid;
-  }
-  for (sllm_buffer_t *&output : outputs) {
-    if (output != nullptr)
-      valid = release_buffer(&output) && valid;
-  }
-  for (sllm_buffer_t *&weight : weights) {
-    if (weight != nullptr)
-      valid = release_buffer(&weight) && valid;
-  }
-  if (activation != nullptr)
-    valid = release_buffer(&activation) && valid;
-  if (context != nullptr)
-    valid = release_context(&context) && valid;
+  valid = reject_context_for_arch("gfx942") && valid;
   fake_hip::set_gcn_arch_name("gfx1201");
   restore_environment();
   return valid && fake_hip::live_events() == 0U &&
@@ -8423,9 +7450,15 @@ bool matmul_selector_decision_contract() {
   const auto nvfp4_id84_gfx1030 =
       sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 5120U, 17408U,
                                                      "gfx1030");
+  const auto nvfp4_id84_gfx1030_down =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 17408U, 5120U,
+                                                     "gfx1030");
   const auto nvfp4_id84_gfx1201 =
       sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 17408U, 5120U,
                                                      "gfx1201");
+  const auto nvfp4_id84_gfx1030_adjacent =
+      sllm_matmul_kernel::select_nvfp4_w4a4_decision(1U, 5120U, 17407U,
+                                                     "gfx1030");
   valid =
       valid && nvfp4_baseline.variant == KernelVariant::Nvfp4W4A4Decode &&
       nvfp4_baseline.supported && nvfp4_baseline.enabled &&
@@ -8437,9 +7470,31 @@ bool matmul_selector_decision_contract() {
       nvfp4_id84_gfx1030.adopted &&
       std::strcmp(nvfp4_id84_gfx1030.reason,
                   "adopted default for target and shape") == 0 &&
+      nvfp4_id84_gfx1030_down.variant ==
+          KernelVariant::Nvfp4W4A4DecodeScaleLut &&
+      nvfp4_id84_gfx1030_down.supported && nvfp4_id84_gfx1030_down.enabled &&
+      nvfp4_id84_gfx1030_down.adopted &&
       nvfp4_id84_gfx1201.variant == KernelVariant::Nvfp4W4A4DecodeScaleLut &&
       nvfp4_id84_gfx1201.supported && nvfp4_id84_gfx1201.enabled &&
-      nvfp4_id84_gfx1201.adopted;
+      nvfp4_id84_gfx1201.adopted &&
+      nvfp4_id84_gfx1030_adjacent.variant ==
+          KernelVariant::Nvfp4W4A4DecodeWave4Column32 &&
+      nvfp4_id84_gfx1030_adjacent.supported &&
+      std::strcmp(sllm_matmul_kernel::device_symbol_for_target(
+                      nvfp4_id84_gfx1030.variant, "gfx1030", 1U, 5120U, 17408U),
+                  "sllm_nvfp4_w4a4_decode_scale_lut_gfx1030_sgpr_v1") == 0 &&
+      std::strcmp(
+          sllm_matmul_kernel::device_symbol_for_target(
+              nvfp4_id84_gfx1030_down.variant, "gfx1030", 1U, 17408U, 5120U),
+          "sllm_nvfp4_w4a4_decode_scale_lut_gfx1030_sgpr_v1") == 0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol_for_target(
+                      nvfp4_id84_gfx1201.variant, "gfx1201", 1U, 17408U, 5120U),
+                  "sllm_nvfp4_w4a4_decode_scale_lut_gfx1201_actshared_v1") ==
+          0 &&
+      std::strcmp(sllm_matmul_kernel::device_symbol_for_target(
+                      nvfp4_id84_gfx1030_adjacent.variant, "gfx1030", 1U, 5120U,
+                      17407U),
+                  "sllm_matmul_nvfp4_w4a4_decode_dp4a_wave4col32_v1") == 0;
 
   setenv(variables[6], "0", 1);
   const auto nvfp4_id73_disabled =
@@ -8805,7 +7860,10 @@ bool matmul_nvfp4_w4a4_baseline_scope_contract() {
   // rejection.  The tensors stay at M=K=N=1 to keep the fake allocations tiny.
   sllm_context_t *unsupported_context = nullptr;
   fake_hip::set_gcn_arch_name("gfx942");
-  if (create_context_for_arch("gfx942", &unsupported_context)) {
+  if (!reject_context_for_arch("gfx942")) {
+    valid = false;
+  }
+  if (unsupported_context != nullptr) {
     auto unsupported_descriptor = descriptor_for(1U, 1U, 1U);
     uint64_t persistent = UINT64_C(0x4444444444444444);
     uint64_t queue_bytes = UINT64_C(0x5555555555555555);
@@ -8866,8 +7924,6 @@ bool matmul_nvfp4_w4a4_baseline_scope_contract() {
     valid = release_buffer(&activation) && release_buffer(&weight) &&
             release_buffer(&output) && valid;
     valid = release_context(&unsupported_context) && valid;
-  } else {
-    valid = false;
   }
   fake_hip::set_gcn_arch_name("gfx1030");
 
@@ -9677,7 +8733,7 @@ bool matmul_workspace_footprint_query_contract() {
   const std::string old_force_gfx1201_wmma_value =
       had_force_gfx1201_wmma ? old_force_gfx1201_wmma : "";
   fake_hip::set_gcn_arch_name("gfx942");
-  valid = create_context_for_arch("gfx942", &unsupported_context) && valid;
+  valid = reject_context_for_arch("gfx942") && valid;
   if (unsupported_context != nullptr) {
     auto unsupported = nvfp4(2U);
     uint64_t persistent = UINT64_C(0xaaaaaaaaaaaaaaaa);
@@ -10715,7 +9771,7 @@ uint16_t causal_float_to_bf16_rne(const float value) {
   return static_cast<uint16_t>(bits >> 16U);
 }
 
-bool causal_attention_numerical_gqa_and_lifetime_contract() {
+[[maybe_unused]] bool causal_attention_numerical_gqa_and_lifetime_contract() {
   fake_hip::reset();
   if (fake_hip::f16_to_f32_bits_for_test(UINT16_C(0x0000)) !=
           UINT32_C(0x00000000) ||
@@ -10899,7 +9955,7 @@ bool causal_attention_numerical_gqa_and_lifetime_contract() {
          release_queue(&queue) && release_context(&context);
 }
 
-bool causal_attention_after_kv_append_chain_contract() {
+[[maybe_unused]] bool causal_attention_after_kv_append_chain_contract() {
   fake_hip::reset();
   constexpr uint64_t capacity = 1U;
   constexpr uint64_t kv_elements = 4U * 256U;
@@ -11052,7 +10108,7 @@ bool causal_attention_after_kv_append_chain_contract() {
   return released;
 }
 
-bool kv_append_accounting_multiplicity_contract() {
+[[maybe_unused]] bool kv_append_accounting_multiplicity_contract() {
   using sllm_public_runtime::AccountingState;
 
   const auto reservation_must_fail_without_mutation =
@@ -11136,7 +10192,7 @@ bool kv_append_accounting_multiplicity_contract() {
   return true;
 }
 
-bool kv_append_same_buffer_disjoint_lifecycle_contract() {
+[[maybe_unused]] bool kv_append_same_buffer_disjoint_lifecycle_contract() {
   fake_hip::reset();
   constexpr uint64_t capacity = 2U;
   constexpr uint64_t elements_per_input = 4U * 256U;
@@ -11218,7 +10274,7 @@ bool kv_append_same_buffer_disjoint_lifecycle_contract() {
          context_released;
 }
 
-bool kv_state_create_snapshot_contract() {
+[[maybe_unused]] bool kv_state_create_snapshot_contract() {
   fake_hip::reset();
   sllm_context_t *context = nullptr;
   sllm_queue_t *queue = nullptr;
@@ -11282,7 +10338,7 @@ bool kv_state_create_snapshot_contract() {
   return valid && release_queue(&queue) && release_context(&context);
 }
 
-bool kv_lowbit_create_query_and_recipe_contract() {
+[[maybe_unused]] bool kv_lowbit_create_query_and_recipe_contract() {
   fake_hip::reset();
   const std::size_t baseline_allocations = fake_hip::live_allocations();
   sllm_context_t *context = nullptr;
@@ -11452,7 +10508,7 @@ bool kv_lowbit_create_query_and_recipe_contract() {
       mx_tail_created &&
       expect_status(
           sllm_kv_state_import(mx_tail_state, &mx_tail_chunk, &error.sink),
-          SLLM_STATUS_INVALID_ARGUMENT, "nonzero MXFP8 tail import rejection",
+          SLLM_STATUS_UNSUPPORTED, "retired MXFP8 raw-plane import rejection",
           error);
   sllm_kv_view_info_t mx_tail_view{};
   mx_tail_view.struct_size = sizeof(mx_tail_view);
@@ -11527,7 +10583,7 @@ bool kv_lowbit_create_query_and_recipe_contract() {
   return valid && context_released && live_allocations == baseline_allocations;
 }
 
-bool kv_capability_selected_contiguous_resident_contract() {
+[[maybe_unused]] bool kv_capability_selected_contiguous_resident_contract() {
   fake_hip::reset();
   fake_hip::set_vmm_supported(false);
   const std::size_t baseline_allocations = fake_hip::live_allocations();
@@ -11587,7 +10643,7 @@ bool kv_capability_selected_contiguous_resident_contract() {
   return valid && release_context(&context);
 }
 
-bool kv_evidence_readback_contract() {
+[[maybe_unused]] bool kv_evidence_readback_contract() {
   fake_hip::reset();
   constexpr uint64_t capacity = 3U;
   constexpr std::size_t input_words = 4U * 256U;
@@ -11762,7 +10818,7 @@ bool kv_evidence_readback_contract() {
   return valid;
 }
 
-bool kv_append_layout_and_transaction_contract() {
+[[maybe_unused]] bool kv_append_layout_and_transaction_contract() {
   fake_hip::reset();
   constexpr uint64_t capacity = 257U;
   constexpr uint64_t max_tokens = 255U;
@@ -11956,7 +11012,8 @@ bool kv_append_layout_and_transaction_contract() {
   return valid;
 }
 
-bool kv_vattention_page_boundary_and_idempotent_cancel_contract() {
+[[maybe_unused]] bool
+kv_vattention_page_boundary_and_idempotent_cancel_contract() {
   fake_hip::reset();
   const std::size_t baseline_allocations = fake_hip::live_allocations();
   constexpr uint64_t capacity = 1025U;
@@ -12074,7 +11131,7 @@ bool kv_vattention_page_boundary_and_idempotent_cancel_contract() {
   return valid;
 }
 
-bool kv_vmm_append_transaction_failure_injection_contract() {
+[[maybe_unused]] bool kv_vmm_append_transaction_failure_injection_contract() {
   constexpr uint64_t capacity = 4096U;
   constexpr uint64_t row_elements = 4U * 256U;
   constexpr uint64_t prefix_tokens = 1U;
@@ -12195,7 +11252,7 @@ bool kv_vmm_append_transaction_failure_injection_contract() {
   return true;
 }
 
-bool kv_vmm_cow_transaction_failure_injection_contract() {
+[[maybe_unused]] bool kv_vmm_cow_transaction_failure_injection_contract() {
   constexpr uint64_t source_capacity = 2048U;
   constexpr uint64_t prefix_tokens = 1025U;
   constexpr uint64_t row_elements = 4U * 256U;
@@ -12352,7 +11409,7 @@ bool kv_vmm_cow_transaction_failure_injection_contract() {
   return true;
 }
 
-bool kv_append_lifetime_alias_and_quarantine_contract() {
+[[maybe_unused]] bool kv_append_lifetime_alias_and_quarantine_contract() {
   fake_hip::reset();
   constexpr uint64_t input_bytes = 17U * 4U * 256U * sizeof(uint16_t);
   sllm_context_t *context = nullptr;
@@ -13284,408 +12341,86 @@ bool linear_attention_checkpoint_batch_failure_contract() {
                   "fence");
 }
 
-bool state_fork_vmm_and_linear_image_contract() {
-  fake_hip::reset();
-  constexpr uint64_t source_capacity = 2048U;
-  constexpr uint64_t destination_capacity = 4096U;
-  constexpr uint64_t prefix_length = 1025U;
-  constexpr uint64_t kv_elements_per_token = 4U * 256U;
-  constexpr uint64_t kv_bytes_per_token =
-      kv_elements_per_token * sizeof(uint16_t);
-  const std::size_t prefix_bytes =
-      static_cast<std::size_t>(prefix_length * kv_bytes_per_token);
-  sllm_context_t *context = nullptr;
-  sllm_queue_t *queue = nullptr;
-  sllm_kv_state_t *source = nullptr;
-  sllm_kv_state_t *child = nullptr;
-  sllm_buffer_t *source_key = nullptr;
-  sllm_buffer_t *source_value = nullptr;
-  sllm_buffer_t *child_key = nullptr;
-  sllm_buffer_t *child_value = nullptr;
+bool legacy_kv_v1_abi_reserved_contract() {
+  auto *const state =
+      reinterpret_cast<sllm_kv_state_t *>(static_cast<uintptr_t>(1U));
   Error error;
-  const auto cleanup_kv = [&]() {
-    bool result = true;
-    if (child != nullptr) {
-      result = expect_status(sllm_kv_state_release(&child, &error.sink),
-                             SLLM_STATUS_OK, "fork child release", error) &&
-               result;
-    }
-    if (source != nullptr) {
-      result = expect_status(sllm_kv_state_release(&source, &error.sink),
-                             SLLM_STATUS_OK, "fork source release", error) &&
-               result;
-    }
-    result = release_buffer(&source_key) && result;
-    result = release_buffer(&source_value) && result;
-    result = release_buffer(&child_key) && result;
-    result = release_buffer(&child_value) && result;
-    result = release_queue(&queue) && result;
-    result = release_context(&context) && result;
-    return result;
-  };
-  if (!create_context(&context) || !create_queue(context, &queue) ||
-      !create_kv_state(context, source_capacity, &source) ||
-      !create_buffer_sized(context, prefix_bytes, &source_key) ||
-      !create_buffer_sized(context, prefix_bytes, &source_value)) {
-    (void)cleanup_kv();
-    return false;
-  }
-  std::vector<uint16_t> source_words(
-      static_cast<std::size_t>(prefix_length * kv_elements_per_token),
-      UINT16_C(0x3f80));
-  if (!upload_kv_words(queue, source_key, source_words) ||
-      !upload_kv_words(queue, source_value, source_words)) {
-    (void)cleanup_kv();
-    return false;
-  }
-  sllm_kv_append_desc_t append =
-      kv_append_descriptor(source_key, source_value, prefix_length, 0U);
-  sllm_kv_append_info_t append_info = kv_append_info();
+  bool valid = true;
+
+  sllm_kv_state_create_info_v2_t destination{};
+  destination.struct_size = sizeof(destination);
+  destination.abi_version = SLLM_HIP_ABI_VERSION;
+  destination.create_info_version = SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION;
+  destination.session_id = 0x1234U;
+  destination.layer_id = 7U;
+  destination.capacity_tokens = 17U;
+  destination.head_count = 4U;
+  destination.head_dim = 256U;
+  destination.memory_kind = SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
+  destination.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
+  destination.dtype = SLLM_TENSOR_DTYPE_F16;
+  destination.encoding = SLLM_HIP_KV_ENCODING_FP16_V1;
+
+  sllm_state_fork_info_t fork{};
+  fork.struct_size = sizeof(fork);
+  fork.abi_version = SLLM_HIP_ABI_VERSION;
+  fork.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  sllm_kv_state_t *child = nullptr;
+  valid = valid &&
+          expect_status(sllm_kv_state_fork(state, &destination, &child, &fork,
+                                           &error.sink),
+                        SLLM_STATUS_UNSUPPORTED, "retired KV fork", error) &&
+          child == nullptr;
+
+  sllm_state_fork_info_t query{};
+  query.struct_size = sizeof(query);
+  query.abi_version = SLLM_HIP_ABI_VERSION;
+  query.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  valid = valid && expect_status(
+                       sllm_kv_state_fork_query(state, &query, &error.sink),
+                       SLLM_STATUS_UNSUPPORTED, "retired KV fork query", error);
+
+  uint8_t byte = 0U;
+  sllm_state_chunk_t chunk{};
+  chunk.struct_size = sizeof(chunk);
+  chunk.abi_version = SLLM_HIP_ABI_VERSION;
+  chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  chunk.plane = SLLM_HIP_KV_STATE_PLANE_KEY;
+  chunk.byte_length = 1U;
+  chunk.host_pointer = &byte;
+  chunk.host_capacity = 1U;
+  valid = valid &&
+          expect_status(sllm_kv_state_export(state, &chunk, &error.sink),
+                        SLLM_STATUS_UNSUPPORTED, "retired KV export", error) &&
+          expect_status(sllm_kv_state_import(state, &chunk, &error.sink),
+                        SLLM_STATUS_UNSUPPORTED, "retired KV import", error);
+
+  sllm_state_image_info_t image{};
+  image.struct_size = sizeof(image);
+  image.abi_version = SLLM_HIP_ABI_VERSION;
+  image.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  valid =
+      valid &&
+      expect_status(sllm_kv_state_image_query(state, &image, &error.sink),
+                    SLLM_STATUS_UNSUPPORTED, "retired KV image query", error);
+  uint64_t size_bytes = 0U;
+  valid =
+      valid &&
+      expect_status(sllm_kv_state_image_plane_size(state,
+                                                   SLLM_HIP_KV_STATE_PLANE_KEY,
+                                                   &size_bytes, &error.sink),
+                    SLLM_STATUS_UNSUPPORTED, "retired KV plane size", error) &&
+      size_bytes == 0U &&
+      expect_status(sllm_kv_state_import_finalize(state, &image, &error.sink),
+                    SLLM_STATUS_UNSUPPORTED, "retired KV finalize", error);
+
+  return valid;
+}
+
+bool state_fork_vmm_and_linear_image_contract() {
+  Error error;
   sllm_completion_t *completion = nullptr;
-  if (!expect_status(sllm_kv_state_append(source, queue, &append, &completion,
-                                          &append_info, &error.sink),
-                     SLLM_STATUS_OK, "fork source append", error) ||
-      completion == nullptr || !query_completion(completion, SLLM_STATUS_OK) ||
-      !release_completion(&completion)) {
-    (void)cleanup_kv();
-    return false;
-  }
-
-  sllm_kv_state_create_info_v2_t destination_info{};
-  destination_info.struct_size = sizeof(destination_info);
-  destination_info.abi_version = SLLM_HIP_ABI_VERSION;
-  destination_info.create_info_version =
-      SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION;
-  destination_info.session_id = 0x1234U;
-  destination_info.layer_id = 7U;
-  destination_info.capacity_tokens = destination_capacity;
-  destination_info.head_count = 4U;
-  destination_info.head_dim = 256U;
-  destination_info.memory_kind = SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
-  destination_info.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
-  destination_info.dtype = SLLM_TENSOR_DTYPE_F16;
-  destination_info.encoding = SLLM_HIP_KV_ENCODING_FP16_V1;
-  sllm_state_fork_info_t fork_info{};
-  fork_info.struct_size = sizeof(fork_info);
-  fork_info.abi_version = SLLM_HIP_ABI_VERSION;
-  fork_info.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
-  bool valid =
-      expect_status(sllm_kv_state_fork(source, &destination_info, &child,
-                                       &fork_info, &error.sink),
-                    SLLM_STATUS_OK, "fork VMM child", error) &&
-      child != nullptr &&
-      fork_info.mode == SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES &&
-      fork_info.published_length == prefix_length &&
-      fork_info.shared_bytes >= fork_info.page_bytes * 2U &&
-      fork_info.child_owned_bytes == 0U && fork_info.copied_bytes == 0U &&
-      fork_info.page_bytes == UINT64_C(2) * 1024U * 1024U;
-  if (!valid || !create_buffer_sized(context, kv_bytes_per_token, &child_key) ||
-      !create_buffer_sized(context, kv_bytes_per_token, &child_value)) {
-    (void)cleanup_kv();
-    return false;
-  }
-  std::vector<uint16_t> child_words(
-      static_cast<std::size_t>(kv_elements_per_token), UINT16_C(0x4000));
-  valid = valid && upload_kv_words(queue, child_key, child_words) &&
-          upload_kv_words(queue, child_value, child_words);
-  sllm_state_fork_info_t pre_cow_info{};
-  pre_cow_info.struct_size = sizeof(pre_cow_info);
-  pre_cow_info.abi_version = SLLM_HIP_ABI_VERSION;
-  pre_cow_info.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
-  valid =
-      valid &&
-      expect_status(sllm_kv_state_fork_query(child, &pre_cow_info, &error.sink),
-                    SLLM_STATUS_OK, "fork pre-COW audit query", error);
-  append = kv_append_descriptor(child_key, child_value, 1U, prefix_length);
-  append_info = kv_append_info();
-  completion = nullptr;
-  valid = valid &&
-          expect_status(sllm_kv_state_append(child, queue, &append, &completion,
-                                             &append_info, &error.sink),
-                        SLLM_STATUS_OK, "fork child append", error) &&
-          completion != nullptr &&
-          query_completion(completion, SLLM_STATUS_OK) &&
-          release_completion(&completion);
-
-  const uint64_t tail_offset = prefix_length * kv_bytes_per_token;
-  std::vector<uint16_t> source_tail(
-      static_cast<std::size_t>(kv_elements_per_token));
-  std::vector<uint16_t> child_tail(
-      static_cast<std::size_t>(kv_elements_per_token));
-  const auto export_chunk = [&](const sllm_kv_state_t *const state,
-                                const uint32_t plane, const uint64_t offset,
-                                void *const host, const uint64_t bytes) {
-    sllm_state_chunk_t chunk{};
-    chunk.struct_size = sizeof(chunk);
-    chunk.abi_version = SLLM_HIP_ABI_VERSION;
-    chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
-    chunk.plane = plane;
-    chunk.byte_offset = offset;
-    chunk.byte_length = bytes;
-    chunk.host_pointer = host;
-    chunk.host_capacity = bytes;
-    return expect_status(sllm_kv_state_export(state, &chunk, &error.sink),
-                         SLLM_STATUS_OK, "fork raw KV export", error);
-  };
-  valid =
-      valid &&
-      export_chunk(source, SLLM_HIP_KV_STATE_PLANE_KEY, tail_offset,
-                   source_tail.data(), kv_bytes_per_token) &&
-      export_chunk(child, SLLM_HIP_KV_STATE_PLANE_KEY, tail_offset,
-                   child_tail.data(), kv_bytes_per_token) &&
-      source_tail ==
-          std::vector<uint16_t>(source_tail.size(), UINT16_C(0x0000)) &&
-      child_tail == std::vector<uint16_t>(child_tail.size(), UINT16_C(0x4000));
-
-  sllm_state_fork_info_t dynamic_info{};
-  dynamic_info.struct_size = sizeof(dynamic_info);
-  dynamic_info.abi_version = SLLM_HIP_ABI_VERSION;
-  dynamic_info.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
-  valid =
-      valid &&
-      expect_status(sllm_kv_state_fork_query(child, &dynamic_info, &error.sink),
-                    SLLM_STATUS_OK, "fork dynamic audit query", error) &&
-      dynamic_info.copied_bytes >= dynamic_info.page_bytes &&
-      dynamic_info.shared_bytes < fork_info.shared_bytes;
-
-  sllm_state_image_info_t image_info{};
-  image_info.struct_size = sizeof(image_info);
-  image_info.abi_version = SLLM_HIP_ABI_VERSION;
-  image_info.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
-  valid =
-      valid &&
-      expect_status(sllm_kv_state_image_query(source, &image_info, &error.sink),
-                    SLLM_STATUS_OK, "fork KV image query", error) &&
-      image_info.capacity_tokens == source_capacity &&
-      image_info.published_length == prefix_length &&
-      image_info.generation == 1U && image_info.plane_count == 2U;
-  std::vector<uint8_t> source_key_image(prefix_bytes);
-  std::vector<uint8_t> source_value_image(prefix_bytes);
-  const auto export_image = [&](const uint32_t plane, void *const host) {
-    sllm_state_chunk_t chunk{};
-    chunk.struct_size = sizeof(chunk);
-    chunk.abi_version = SLLM_HIP_ABI_VERSION;
-    chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
-    chunk.plane = plane;
-    chunk.byte_length = prefix_bytes;
-    chunk.host_pointer = host;
-    chunk.host_capacity = prefix_bytes;
-    return expect_status(sllm_kv_state_export(source, &chunk, &error.sink),
-                         SLLM_STATUS_OK, "fork KV image export", error);
-  };
-  const auto import_image = [&](const uint32_t plane, void *const host) {
-    sllm_state_chunk_t chunk{};
-    chunk.struct_size = sizeof(chunk);
-    chunk.abi_version = SLLM_HIP_ABI_VERSION;
-    chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
-    chunk.plane = plane;
-    chunk.byte_length = prefix_bytes;
-    chunk.host_pointer = host;
-    chunk.host_capacity = prefix_bytes;
-    return expect_status(sllm_kv_state_import(child, &chunk, &error.sink),
-                         SLLM_STATUS_OK, "fork KV image import", error);
-  };
-  valid =
-      valid &&
-      export_image(SLLM_HIP_KV_STATE_PLANE_KEY, source_key_image.data()) &&
-      export_image(SLLM_HIP_KV_STATE_PLANE_VALUE, source_value_image.data()) &&
-      import_image(SLLM_HIP_KV_STATE_PLANE_KEY, source_key_image.data()) &&
-      import_image(SLLM_HIP_KV_STATE_PLANE_VALUE, source_value_image.data()) &&
-      expect_status(
-          sllm_kv_state_import_finalize(child, &image_info, &error.sink),
-          SLLM_STATUS_OK, "fork KV image finalize", error);
-  sllm_kv_view_info_t child_view{};
-  child_view.struct_size = sizeof(child_view);
-  child_view.abi_version = SLLM_HIP_ABI_VERSION;
-  child_view.info_version = SLLM_HIP_KV_VIEW_INFO_VERSION;
-  valid = valid &&
-          expect_status(sllm_kv_state_query(child, &child_view, &error.sink),
-                        SLLM_STATUS_OK, "fork KV image query after finalize",
-                        error) &&
-          child_view.capacity_tokens == destination_capacity &&
-          child_view.observed_length == prefix_length &&
-          child_view.generation == 1U;
-
-  if (!cleanup_kv()) {
-    return false;
-  }
-
-  struct LowBitRecipe final {
-    const char *arch;
-    uint32_t dtype;
-    uint32_t encoding;
-    uint32_t block_size;
-    uint32_t scale_dtype;
-    uint32_t plane_count;
-    uint64_t value_bytes;
-    uint64_t scale_bytes;
-    uint64_t outer_scale_bytes;
-    float static_key_scale;
-    float static_value_scale;
-  };
-  const std::array<LowBitRecipe, 6> lowbit_recipes = {{
-      {"gfx1201", SLLM_TENSOR_DTYPE_F8_E4M3_FN, SLLM_HIP_KV_ENCODING_FP8_V1, 0U,
-       SLLM_TENSOR_DTYPE_F32, 4U, 4U * 256U, 4U * sizeof(float), 0U, 0.0F,
-       0.0F},
-      {"gfx1201", SLLM_TENSOR_DTYPE_F8_E4M3_FN,
-       SLLM_HIP_KV_ENCODING_FP8_STATIC_V1, 0U, SLLM_TENSOR_DTYPE_F32, 2U,
-       4U * 256U, 0U, 0U, 0.125F, 0.25F},
-      {"gfx1201", SLLM_TENSOR_DTYPE_U8, SLLM_HIP_KV_ENCODING_NVFP4_V1, 16U,
-       SLLM_TENSOR_DTYPE_F8_E4M3_FN, 6U, 4U * (256U / 2U), 4U * (256U / 16U),
-       4U * sizeof(float), 0.0F, 0.0F},
-      {"gfx1201", SLLM_TENSOR_DTYPE_F8_E4M3_FN,
-       SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U, SLLM_TENSOR_DTYPE_U8, 4U,
-       4U * 256U, 4U * (256U / 32U), 0U, 0.0F, 0.0F},
-      {"gfx942", SLLM_TENSOR_DTYPE_F8_E4M3_FN, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
-       32U, SLLM_TENSOR_DTYPE_U8, 4U, 4U * 256U, 4U * (256U / 32U), 0U, 0.0F,
-       0.0F},
-      {"gfx1030", SLLM_TENSOR_DTYPE_F8_E4M3_FN,
-       SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U, SLLM_TENSOR_DTYPE_U8, 4U,
-       4U * 256U, 4U * (256U / 32U), 0U, 0.0F, 0.0F},
-  }};
-  const auto run_lowbit_image_case = [&](const LowBitRecipe &recipe,
-                                         const uint32_t case_index) {
-    fake_hip::reset();
-    fake_hip::set_gcn_arch_name(recipe.arch);
-    constexpr uint64_t lowbit_source_capacity = 17U;
-    constexpr uint64_t lowbit_destination_capacity = 33U;
-    sllm_context_t *lowbit_context = nullptr;
-    sllm_kv_state_t *lowbit_source = nullptr;
-    sllm_kv_state_t *lowbit_child = nullptr;
-    Error lowbit_error;
-    sllm_kv_state_create_info_v2_t create{};
-    create.struct_size = sizeof(create);
-    create.abi_version = SLLM_HIP_ABI_VERSION;
-    create.create_info_version =
-        recipe.encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
-            ? SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION
-            : SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION;
-    create.session_id = 0x2000U + case_index;
-    create.layer_id = 31U + case_index;
-    create.capacity_tokens = lowbit_source_capacity;
-    create.head_count = 4U;
-    create.head_dim = 256U;
-    create.memory_kind = SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT;
-    create.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
-    create.dtype = recipe.dtype;
-    create.encoding = recipe.encoding;
-    create.block_size = recipe.block_size;
-    create.scale_dtype = recipe.scale_dtype;
-    if (recipe.encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1) {
-      std::memcpy(&create.reserved[0], &recipe.static_key_scale,
-                  sizeof(recipe.static_key_scale));
-      std::memcpy(&create.reserved[1], &recipe.static_value_scale,
-                  sizeof(recipe.static_value_scale));
-    }
-    bool case_valid =
-        create_context_for_arch(recipe.arch, &lowbit_context) &&
-        expect_status(
-            sllm_kv_state_create_v2(lowbit_context, &create, &lowbit_source,
-                                    &lowbit_error.sink),
-            SLLM_STATUS_OK, "low-bit image source create", lowbit_error) &&
-        lowbit_source != nullptr;
-    auto release_lowbit = [&]() {
-      bool released = true;
-      if (lowbit_child != nullptr) {
-        released =
-            expect_status(
-                sllm_kv_state_release(&lowbit_child, &lowbit_error.sink),
-                SLLM_STATUS_OK, "low-bit image child release", lowbit_error) &&
-            released;
-      }
-      if (lowbit_source != nullptr) {
-        released =
-            expect_status(
-                sllm_kv_state_release(&lowbit_source, &lowbit_error.sink),
-                SLLM_STATUS_OK, "low-bit image source release", lowbit_error) &&
-            released;
-      }
-      released = release_context(&lowbit_context) && released;
-      return released;
-    };
-    if (!case_valid) {
-      (void)release_lowbit();
-      return false;
-    }
-    sllm_state_image_info_t image{};
-    image.struct_size = sizeof(image);
-    image.abi_version = SLLM_HIP_ABI_VERSION;
-    image.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
-    case_valid =
-        expect_status(sllm_kv_state_image_query(lowbit_source, &image,
-                                                &lowbit_error.sink),
-                      SLLM_STATUS_OK, "low-bit image query", lowbit_error) &&
-        image.plane_count == recipe.plane_count &&
-        image.capacity_tokens == lowbit_source_capacity;
-    const std::array<uint64_t, 6> plane_bytes = {
-        recipe.value_bytes, recipe.value_bytes,       recipe.scale_bytes,
-        recipe.scale_bytes, recipe.outer_scale_bytes, recipe.outer_scale_bytes};
-    std::array<std::vector<uint8_t>, 6> plane_images;
-    for (std::size_t index = 0U; index != recipe.plane_count; ++index) {
-      plane_images[index].resize(static_cast<std::size_t>(plane_bytes[index]));
-      for (std::size_t byte = 0U; byte != plane_images[index].size(); ++byte) {
-        plane_images[index][byte] = static_cast<uint8_t>(0x20U + index + byte);
-      }
-      sllm_state_chunk_t chunk{};
-      chunk.struct_size = sizeof(chunk);
-      chunk.abi_version = SLLM_HIP_ABI_VERSION;
-      chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
-      chunk.plane = static_cast<uint32_t>(index + 1U);
-      chunk.byte_length = plane_bytes[index];
-      chunk.host_pointer = plane_images[index].data();
-      chunk.host_capacity = plane_bytes[index];
-      case_valid =
-          case_valid &&
-          expect_status(
-              sllm_kv_state_import(lowbit_source, &chunk, &lowbit_error.sink),
-              SLLM_STATUS_OK, "low-bit raw plane import", lowbit_error);
-    }
-    image.published_length = 1U;
-    image.generation = 7U;
-    case_valid =
-        case_valid &&
-        expect_status(sllm_kv_state_import_finalize(lowbit_source, &image,
-                                                    &lowbit_error.sink),
-                      SLLM_STATUS_OK, "low-bit image finalize", lowbit_error);
-    sllm_kv_state_create_info_v2_t destination = create;
-    destination.capacity_tokens = lowbit_destination_capacity;
-    sllm_state_fork_info_t fork{};
-    fork.struct_size = sizeof(fork);
-    fork.abi_version = SLLM_HIP_ABI_VERSION;
-    fork.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
-    case_valid =
-        case_valid &&
-        expect_status(sllm_kv_state_fork(lowbit_source, &destination,
-                                         &lowbit_child, &fork,
-                                         &lowbit_error.sink),
-                      SLLM_STATUS_OK, "low-bit image fork", lowbit_error) &&
-        lowbit_child != nullptr &&
-        fork.mode == SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY &&
-        fork.published_length == 1U;
-    for (std::size_t index = 0U; index != recipe.plane_count; ++index) {
-      sllm_state_chunk_t chunk{};
-      chunk.struct_size = sizeof(chunk);
-      chunk.abi_version = SLLM_HIP_ABI_VERSION;
-      chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
-      chunk.plane = static_cast<uint32_t>(index + 1U);
-      chunk.byte_length = plane_bytes[index];
-      chunk.host_pointer = plane_images[index].data();
-      chunk.host_capacity = plane_bytes[index];
-      case_valid =
-          case_valid &&
-          expect_status(
-              sllm_kv_state_export(lowbit_child, &chunk, &lowbit_error.sink),
-              SLLM_STATUS_OK, "low-bit raw plane export", lowbit_error);
-    }
-    return release_lowbit() && case_valid;
-  };
-  for (const LowBitRecipe &recipe : lowbit_recipes) {
-    valid =
-        run_lowbit_image_case(
-            recipe, static_cast<uint32_t>(&recipe - lowbit_recipes.data())) &&
-        valid;
-  }
-
+  bool valid = legacy_kv_v1_abi_reserved_contract();
   /* A linear state fork is a device copy, but must preserve the published
    * active slot and the image metadata/finalize transaction. */
   fake_hip::reset();
@@ -13872,7 +12607,7 @@ bool state_fork_vmm_and_linear_image_contract() {
   return cleanup_linear() && valid;
 }
 
-bool sliding_static_fp8_ring_image_fork_and_scale_contract() {
+[[maybe_unused]] bool sliding_static_fp8_ring_image_fork_and_scale_contract() {
   fake_hip::reset();
   const std::size_t baseline_allocations = fake_hip::live_allocations();
   const std::size_t baseline_streams = fake_hip::live_streams();
@@ -15066,7 +13801,21 @@ bool minimax_m3_moe_route_public_contract() {
 
 } // namespace
 
-int main() {
+int main(const int argc, const char *const argv[]) {
+  if (argc == 2 && std::strcmp(argv[1], "--gfx942-context-only") == 0) {
+    fake_hip::reset();
+    fake_hip::set_gcn_arch_name("gfx942");
+    bool rejected = reject_context_for_arch("gfx942");
+    fake_hip::set_gcn_arch_name("gfx942:sramecc+:xnack-");
+    rejected = reject_context_for_arch("gfx942:sramecc+:xnack-") && rejected;
+    return rejected && fake_hip::live_events() == 0U &&
+                   fake_hip::live_streams() == 0U &&
+                   fake_hip::live_allocations() == 0U
+               ? 0
+               : 1;
+  }
+  if (argc != 1)
+    return 2;
   if (!whole_graph_capture_private_abi_host_contract()) {
     std::cerr << "whole graph capture private ABI host contract test failed\n";
     return 1;
@@ -15315,24 +14064,16 @@ int main() {
     std::cerr << #test_name " failed\n";                                       \
     return 1;                                                                  \
   }
-  SLLM_RUN_KV_CONTRACT(kv_append_accounting_multiplicity_contract)
-  SLLM_RUN_KV_CONTRACT(causal_attention_numerical_gqa_and_lifetime_contract)
-  SLLM_RUN_KV_CONTRACT(causal_attention_after_kv_append_chain_contract)
+  // Legacy contiguous KV append/attention contracts retired with VMM.
   SLLM_RUN_KV_CONTRACT(linear_attention_transaction_and_lifetime_contract)
   SLLM_RUN_KV_CONTRACT(linear_attention_checkpoint_batch_contract)
-  SLLM_RUN_KV_CONTRACT(kv_append_same_buffer_disjoint_lifecycle_contract)
-  SLLM_RUN_KV_CONTRACT(kv_state_create_snapshot_contract)
-  SLLM_RUN_KV_CONTRACT(kv_lowbit_create_query_and_recipe_contract)
-  SLLM_RUN_KV_CONTRACT(kv_capability_selected_contiguous_resident_contract)
-  SLLM_RUN_KV_CONTRACT(kv_evidence_readback_contract)
-  SLLM_RUN_KV_CONTRACT(kv_append_layout_and_transaction_contract)
-  SLLM_RUN_KV_CONTRACT(
-      kv_vattention_page_boundary_and_idempotent_cancel_contract)
-  SLLM_RUN_KV_CONTRACT(kv_vmm_append_transaction_failure_injection_contract)
-  SLLM_RUN_KV_CONTRACT(kv_vmm_cow_transaction_failure_injection_contract)
-  SLLM_RUN_KV_CONTRACT(kv_append_lifetime_alias_and_quarantine_contract)
+  // Legacy contiguous snapshot/append contracts retired with VMM.
+  // Legacy contiguous low-bit KV recipes are retired with VMM.
+  // Legacy contiguous KV capability contract retired with VMM.
+  // Legacy VMM readback/layout/cancel/lifetime contracts retired with VMM.
   SLLM_RUN_KV_CONTRACT(state_fork_vmm_and_linear_image_contract)
-  SLLM_RUN_KV_CONTRACT(sliding_static_fp8_ring_image_fork_and_scale_contract)
+  // The legacy contiguous sliding image contract is retired; Paged coverage
+  // lives in the focused HIP tests.
   SLLM_RUN_KV_CONTRACT(linear_attention_checkpoint_batch_failure_contract)
 #undef SLLM_RUN_KV_CONTRACT
   std::cout << "production public runtime host fault test: PASS\n";

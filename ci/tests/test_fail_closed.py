@@ -968,6 +968,32 @@ class NetworkRouteNormalizationTests(unittest.TestCase):
             for name, value in EXECUTION_ENVIRONMENT_DEFAULTS.items():
                 self.assertEqual(environment.get(name), value)
 
+    def test_network_guard_cargo_overrides_are_explicit_arguments_only(self) -> None:
+        # The local fast host run passes its Cargo controls as an argument; the
+        # ambient environment, including the local fast marker, never changes them.
+        with patch.dict(
+            os.environ,
+            {"SLLM_HOST_LOCAL_FAST": "1", **{name: "9" for name in EXECUTION_ENVIRONMENT_DEFAULTS}},
+            clear=False,
+        ):
+            fixed = _candidate_plans("net:[4026531840]")
+            overridden = _candidate_plans(
+                "net:[4026531840]",
+                resource_overrides={"CARGO_BUILD_JOBS": "64", "CARGO_INCREMENTAL": "1"},
+            )
+        for plan in fixed:
+            self.assertEqual(
+                {name: dict(plan.execution_environment)[name] for name in EXECUTION_ENVIRONMENT_DEFAULTS},
+                EXECUTION_ENVIRONMENT_DEFAULTS,
+            )
+        for plan in overridden:
+            environment = dict(plan.execution_environment)
+            self.assertEqual(environment["CARGO_BUILD_JOBS"], "64")
+            self.assertEqual(environment["CARGO_INCREMENTAL"], "1")
+            self.assertEqual(environment["CARGO_PROFILE_DEV_DEBUG"], EXECUTION_ENVIRONMENT_DEFAULTS["CARGO_PROFILE_DEV_DEBUG"])
+        with self.assertRaises(NetworkIsolationError):
+            _candidate_plans("net:[4026531840]", resource_overrides={"PATH": "/tmp"})
+
     def test_counter_changes_are_ignored_but_semantic_changes_are_not(self) -> None:
         baseline = _normalize_ipv4_routes([self.IPV4_HEADER, " ".join(self.IPV4_FIELDS)])
         counters_changed = self.IPV4_FIELDS.copy()

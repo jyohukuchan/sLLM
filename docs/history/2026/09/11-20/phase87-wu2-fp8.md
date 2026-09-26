@@ -20,7 +20,7 @@ R9700の現行hipBLASLtに対し、native packed FP8変換を使う専用GEMV（
 現行sourceのhipBLASLt controlはM1で形状ごとのrank7/8/9（lm_head等はrank0）、M2〜3で
 pinned libraryのalgorithm indexを使う。古い履歴のrank7固定という説明へ戻さず、現在の選択をそのまま測る。
 
-計画: [Phase87 WU2](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu2-r9700-fp8-w8a8-decode-projectionwu-c1の後に渡す)
+計画: [Phase87 WU2](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#wu2-r9700-fp8-w8a8-decode-projectionwu-c1の後に渡す)
 
 ## 単体結果と採用範囲
 

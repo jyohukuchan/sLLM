@@ -18,6 +18,16 @@ pub const QWEN38_MTP_HIDDEN_SIZE: u64 = 5_120;
 pub const QWEN38_MTP_INTERMEDIATE_SIZE: u64 = 17_408;
 pub const QWEN38_MTP_DRAFT_WIDTH: usize = 2;
 
+/// Returns the `(target_token_count, checkpoint_rows)` pair for a supported
+/// GDN checkpoint width.  The default remains width two; this helper only
+/// describes the additional width-three and width-four contracts.
+pub const fn qwen_mtp_linear_checkpoint_shape(width: usize) -> Option<(usize, usize)> {
+    match width {
+        2..=4 => Some((width + 1, width)),
+        _ => None,
+    }
+}
+
 const MANIFEST_DOMAIN: &[u8] = b"sLLM-qwen35-mtp-manifest-v1\0";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -404,5 +414,14 @@ mod tests {
             [8_192, 2_560]
         );
         assert!(!shapes.keys().any(|name| name.contains("embed_tokens")));
+    }
+
+    #[test]
+    fn linear_checkpoint_width_contract_keeps_default_and_bounds_extra_widths() {
+        assert_eq!(qwen_mtp_linear_checkpoint_shape(2), Some((3, 2)));
+        assert_eq!(qwen_mtp_linear_checkpoint_shape(3), Some((4, 3)));
+        assert_eq!(qwen_mtp_linear_checkpoint_shape(4), Some((5, 4)));
+        assert_eq!(qwen_mtp_linear_checkpoint_shape(1), None);
+        assert_eq!(qwen_mtp_linear_checkpoint_shape(5), None);
     }
 }

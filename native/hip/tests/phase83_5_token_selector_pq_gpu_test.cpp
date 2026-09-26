@@ -641,6 +641,22 @@ void test_valid_cases(TestContext *const test, const Runtime &runtime) {
                        1.0e-15,
                "residual replacement reports target-p logprob");
 
+  const SupportRecordV1 width4_target =
+      make_support({{10U, 0.50}, {11U, 0.30}, {12U, 0.20}});
+  const SupportRecordV1 width4_draft =
+      make_support({{10U, 0.80}, {11U, 0.10}, {13U, 0.10}});
+  const CaseData width4_partial =
+      repeat_case(4U, width4_target, width4_draft, 10U, bonus);
+  (void)compare_valid(test, runtime, "width4 partial residual", width4_partial,
+                      2U, 7U, &observed);
+  test->expect(observed.accepted_count == 3U && observed.rejected_at == 3U &&
+                   observed.emitted_count == 4U,
+               "width4 partial rejection shape");
+  test->expect(observed.emitted_ids[3] == 11U &&
+                   std::fabs(observed.target_logprobs[3] - std::log(0.30)) <
+                       1.0e-15,
+               "width4 residual replacement follows target oracle");
+
   const CaseData first_reject =
       repeat_case(3U, make_support({{1U, 0.0}, {2U, 1.0}}),
                   make_support({{1U, 1.0}}), 1U, bonus);
@@ -874,9 +890,9 @@ int main() {
   }
   std::cout << "{\"state\":\"PASS\",\"target\":\"" << SLLM_TEST_EXPECTED_TARGET
             << "\",\"wrapper\":\"sllm_token_selector_verify_fixed_k20_mtp_v1\""
-               ",\"widths\":[1,2,3,8],\"support_bytes\":256"
+               ",\"widths\":[1,2,3,4,8],\"support_bytes\":256"
                ",\"decision_bytes\":144,\"d2h_bytes_per_case\":144"
-               ",\"counter\":\"position*9+row\",\"valid_cases\":10"
+               ",\"counter\":\"position*9+row\",\"valid_cases\":11"
                ",\"device_error_cases\":15,\"wrapper_error_cases\":10"
                ",\"oracle\":\"independent_dense_long_double\""
                ",\"fallback_allowed\":0,\"fallback_used\":0}\n";

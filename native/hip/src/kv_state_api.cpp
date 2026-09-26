@@ -265,6 +265,97 @@ validate_state_create_info_v2(const sllm_kv_state_create_info_v2_t *const info,
   return SLLM_STATUS_OK;
 }
 
+sllm_status_t validate_state_create_info_paged(
+    const sllm_kv_state_paged_create_info_t *const info,
+    sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
+        "paged KV state create info is null");
+  }
+  const sllm_status_t struct_status =
+      exact_struct(info->struct_size, info->abi_version, sizeof(*info), sink,
+                   "paged KV state create info has an unsupported struct size");
+  if (struct_status != SLLM_STATUS_OK)
+    return struct_status;
+  const uint32_t head_count =
+      info->head_count == 0U ? SLLM_HIP_KV_HEAD_COUNT : info->head_count;
+  const uint32_t head_dim =
+      info->head_dim == 0U ? SLLM_HIP_KV_HEAD_DIM : info->head_dim;
+  float static_key_scale = 0.0F;
+  float static_value_scale = 0.0F;
+  std::memcpy(&static_key_scale, &info->static_key_scale_bits, sizeof(float));
+  std::memcpy(&static_value_scale, &info->static_value_scale_bits,
+              sizeof(float));
+  const bool static_fp8 =
+      info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 &&
+      info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
+      info->quantization_block_size == 0U &&
+      info->scale_dtype == SLLM_TENSOR_DTYPE_F32 &&
+      std::isfinite(static_key_scale) && static_key_scale > 0.0F &&
+      std::isfinite(static_value_scale) && static_value_scale > 0.0F;
+  const bool storage_recipe =
+      (info->encoding == SLLM_HIP_KV_ENCODING_FP16_V1 &&
+       info->dtype == SLLM_TENSOR_DTYPE_F16 &&
+       info->quantization_block_size == 0U && info->scale_dtype == 0U) ||
+      (info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 &&
+       info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
+       info->quantization_block_size == 0U &&
+       info->scale_dtype == SLLM_TENSOR_DTYPE_F32) ||
+      static_fp8 ||
+      (info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 &&
+       info->dtype == SLLM_TENSOR_DTYPE_U8 &&
+       info->quantization_block_size == 16U &&
+       info->scale_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN) ||
+      (info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
+       info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
+       info->quantization_block_size == 32U &&
+       info->scale_dtype == SLLM_TENSOR_DTYPE_U8) ||
+      (info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1 &&
+       info->dtype == SLLM_TENSOR_DTYPE_F8_E5M2 &&
+       info->quantization_block_size == 32U &&
+       info->scale_dtype == SLLM_TENSOR_DTYPE_U8);
+  const bool scale_bits_valid =
+      static_fp8 || (info->static_key_scale_bits == 0U &&
+                     info->static_value_scale_bits == 0U);
+  const bool sliding_valid =
+      info->sliding_window_tokens == 0U ||
+      (static_fp8 &&
+       info->sliding_window_tokens == SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4 &&
+       static_key_scale == 1.0F && static_value_scale == 1.0F &&
+       info->capacity_tokens <= SLLM_HIP_KV_SLIDING_MAX_CAPACITY &&
+       info->capacity_tokens >= info->sliding_window_tokens);
+  const uint64_t required_logical_blocks =
+      info->capacity_tokens / SLLM_HIP_KV_PAGED_TOKEN_BLOCK_SIZE +
+      (info->capacity_tokens % SLLM_HIP_KV_PAGED_TOKEN_BLOCK_SIZE != 0U);
+  if (info->create_info_version != SLLM_HIP_KV_PAGED_CREATE_INFO_VERSION ||
+      info->reserved0 != 0U || !all_zero(info->reserved, 4U) ||
+      info->flags != 0U || info->session_id == 0U ||
+      info->capacity_tokens == 0U ||
+      info->capacity_tokens > SLLM_HIP_KV_MAX_CAPACITY ||
+      (head_count != 1U && head_count != 2U && head_count != 4U &&
+       head_count != 8U) ||
+      head_dim == 0U || head_dim > SLLM_HIP_KV_MAX_HEAD_DIM ||
+      info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_PAGED ||
+      info->layout != SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR || !storage_recipe ||
+      !scale_bits_valid || !sliding_valid ||
+      info->token_block_size != SLLM_HIP_KV_PAGED_TOKEN_BLOCK_SIZE ||
+      info->physical_layout_version != SLLM_HIP_KV_PAGED_LAYOUT_VERSION ||
+      info->logical_table_capacity < required_logical_blocks ||
+      info->logical_table_capacity > UINT32_MAX ||
+      info->max_physical_blocks < required_logical_blocks ||
+      info->max_physical_blocks >= UINT32_MAX) {
+    return sllm_public_runtime::write_error(
+        sink,
+        info->reserved0 != 0U || !all_zero(info->reserved, 4U)
+            ? SLLM_STATUS_RESERVED_NONZERO
+            : SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
+        "paged KV state create info has an invalid version, shape, pool, or "
+        "encoding recipe");
+  }
+  return SLLM_STATUS_OK;
+}
+
 sllm_status_t
 validate_append_prefix(const sllm_kv_append_desc_t *const descriptor,
                        sllm_error_sink_t *const sink) noexcept {

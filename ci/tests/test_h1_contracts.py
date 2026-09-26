@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,9 +23,9 @@ from common import (  # noqa: E402
     sha256_json,
 )
 from local_hygiene import WARN_WORKTREES, classify_worktrees  # noqa: E402
-from run_host_suite import actual_counts  # noqa: E402
+from run_host_suite import _cargo_lane, actual_counts  # noqa: E402
 from validate_matrix import main as validate_matrix_main  # noqa: E402
-from validate_rust import MSRV_TARGET, RUSTUP_AUTO_INSTALL, command_for_mode  # noqa: E402
+from validate_rust import MSRV_TARGET, RUSTUP_AUTO_INSTALL, command_for_mode, local_fast_command  # noqa: E402
 
 
 class HostContractTests(unittest.TestCase):
@@ -140,6 +141,28 @@ class HostContractTests(unittest.TestCase):
         )
         self.assertEqual(list(zip(msrv_command, msrv_command[1:])).count(("--jobs", "1")), 1)
         self.assertEqual(RUSTUP_AUTO_INSTALL, "0")
+
+    def test_local_fast_mode_only_drops_jobs_outside_ci(self) -> None:
+        clippy = command_for_mode("clippy")
+        without_jobs = [part for index, part in enumerate(clippy) if clippy[index : index + 2] != ["--jobs", "1"] and clippy[index - 1 : index + 1] != ["--jobs", "1"]]
+        with unittest.mock.patch.dict(os.environ, {"SLLM_HOST_LOCAL_FAST": "1"}, clear=False):
+            os.environ.pop("GITHUB_ACTIONS", None)
+            self.assertEqual(local_fast_command(clippy), without_jobs)
+        with unittest.mock.patch.dict(os.environ, {"SLLM_HOST_LOCAL_FAST": "1", "GITHUB_ACTIONS": "true"}, clear=False):
+            self.assertEqual(local_fast_command(clippy), clippy)
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SLLM_HOST_LOCAL_FAST", None)
+            self.assertEqual(local_fast_command(clippy), clippy)
+
+    def test_local_fast_cargo_lanes_follow_target_directories(self) -> None:
+        python = sys.executable
+        self.assertEqual(_cargo_lane([python, "ci/tools/validate_rust.py", "--mode", "clippy"]), "dev")
+        self.assertEqual(_cargo_lane([python, "ci/tools/validate_rust.py", "--mode", "format"]), "dev")
+        self.assertEqual(_cargo_lane([python, "ci/tools/validate_rust.py", "--mode", "msrv"]), "msrv")
+        self.assertEqual(_cargo_lane([python, "ci/tools/validate_rust_dependencies.py"]), "msrv")
+        self.assertEqual(_cargo_lane([python, "ci/tests/test_rust_dependencies.py"]), "msrv")
+        self.assertEqual(_cargo_lane(["cargo", "test", "--workspace"]), "dev")
+        self.assertIsNone(_cargo_lane([python, "ci/tools/validate_markdown_links.py"]))
 
     def test_h1_build_and_test_budgets_are_distinct_and_local_defaults_match_ci(self) -> None:
         suites, _, _ = load_manifests(ROOT)

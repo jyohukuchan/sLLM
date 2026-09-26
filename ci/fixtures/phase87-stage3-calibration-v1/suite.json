@@ -1,0 +1,41 @@
+{
+  "seeds": [123],
+  "cases": [
+    {
+      "id": "en-systems-note",
+      "task": "restart-recovery",
+      "language": "en",
+      "message": "Explain how a bounded event journal can recover after a process restart. Use the terms checkpoint, replay cursor, and idempotent consumer. Give one short example with a full journal and a cursor that points between two records."
+    },
+    {
+      "id": "ja-release-note",
+      "task": "release-summary",
+      "language": "ja",
+      "message": "次の運用メモを、開発者向けの短いリリースノートにまとめてください。新しいキャッシュは起動時に世代番号を確認し、古い世代なら読み込まずに作り直します。確認結果、再作成の理由、利用者が見る影響を順番に説明してください。"
+    },
+    {
+      "id": "zh-data-contract",
+      "task": "retry-idempotency",
+      "language": "zh",
+      "message": "请说明一个分批上传接口如何保证重复请求不会产生重复记录。回答中要区分请求编号、批次校验和以及服务端提交标记,并给出一次超时后客户端重试的具体过程。"
+    },
+    {
+      "id": "en-python-stream",
+      "task": "review-python",
+      "language": "en",
+      "message": "Review this Python helper and propose a small fix. It should emit each complete frame once, retain bytes after the delimiter for the next frame, and raise ValueError when the buffer grows past the configured limit. Keep the public function signature unchanged.\n\n```python\ndef frames(chunks, delimiter=b\"\\n\", limit=4096):\n    pending = b\"\"\n    for chunk in chunks:\n        pending += chunk\n        while delimiter in pending:\n            frame, pending = pending.split(delimiter, 1)\n            yield frame\n    if len(pending) > limit:\n        raise ValueError(\"frame buffer is too large\")\n```"
+    },
+    {
+      "id": "ja-rust-parser",
+      "task": "review-rust",
+      "language": "ja",
+      "message": "次のRust関数を、入力の末尾に区切り文字がない場合も安全に扱えるよう修正してください。所有権を余分にコピーせず、空のフィールドは許可し、変換できない数値では行番号を含むエラーを返す方針にします。修正版の考え方を日本語で説明してください。\n\n```rust\nfn read_pair(line: &str) -> Result<(u32, u32), String> {\n    let mut fields = line.split(',');\n    let left = fields.next().unwrap().parse::<u32>().map_err(|e| e.to_string())?;\n    let right = fields.next().unwrap().parse::<u32>().map_err(|e| e.to_string())?;\n    Ok((left, right))\n}\n```"
+    },
+    {
+      "id": "zh-hip-reducer",
+      "task": "review-hip",
+      "language": "zh",
+      "message": "请检查下面的HIP归约片段。目标是在wave32中把每个lane的局部和合并到lane 0,同时让非整齐的元素数量不会读取越界。请指出同步和边界判断应放在哪里,并说明为什么最后的写入只需要一个lane执行。\n\n```cpp\n__global__ void reduce_sum(const float* input, float* output, int count) {\n  int index = blockIdx.x * blockDim.x + threadIdx.x;\n  float value = index < count ? input[index] : 0.0f;\n  for (int offset = 16; offset > 0; offset >>= 1) {\n    value += __shfl_down(value, offset, 32);\n  }\n  if ((threadIdx.x & 31) == 0) output[blockIdx.x] = value;\n}\n```"
+    }
+  ]
+}

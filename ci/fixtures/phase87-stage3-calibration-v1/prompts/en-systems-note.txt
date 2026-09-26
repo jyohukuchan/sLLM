@@ -1,0 +1,1 @@
+Explain how a bounded event journal can recover after a process restart. Use the terms checkpoint, replay cursor, and idempotent consumer. Give one short example with a full journal and a cursor that points between two records.

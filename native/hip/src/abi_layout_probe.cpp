@@ -291,6 +291,13 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_HEAD_DIM);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_MAX_HEAD_DIM);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_MAX_CAPACITY);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_MEMORY_KIND_PAGED);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_PAGED_CREATE_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_PAGED_VIEW_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_PAGED_TOKEN_BLOCK_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_PAGED_LAYOUT_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_PAGED_STATE_FORK_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_PAGED_STATE_FORK_INFO_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_STATE_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION);
@@ -311,6 +318,12 @@ int main() {
       SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E5_BLOCK16_TOKEN_MAJOR_V2);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E4_TOKEN_MAJOR_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E5_TOKEN_MAJOR_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_F16_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_MXFP8_E4_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_FP8_E4_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_FP8_STATIC_E4_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_NVFP4_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_MXFP8_E5_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_ENCODING_FP16_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_ENCODING_FP8_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_ENCODING_FP8_STATIC_V1);
@@ -322,6 +335,16 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_ENCODING_MXFP8_E4_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_ENCODING_MXFP8_E5_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_GQA6_V1);
+  SLLM_PRINT_CONSTANT(
+      SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_GQA6_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_FP16_V1);
+  SLLM_PRINT_CONSTANT(
+      SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_FP16_V1);
+  SLLM_PRINT_CONSTANT(
+      SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_GENERIC_FORMATS_V1);
+  SLLM_PRINT_CONSTANT(
+      SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_SLIDING_STATIC_FP8_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_STATE_IMAGE_SLIDING_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_CAUSAL_ATTENTION_SLIDING_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_CAUSAL_ATTENTION_EXPLICIT_SCALE_VERSION);
@@ -1466,6 +1489,51 @@ int main() {
       << " reserved=" << offsetof(sllm_kv_state_create_info_v2_t, reserved)
       << '\n';
   std::cout
+      << "layout sllm_kv_state_paged_create_info_t size="
+      << sizeof(sllm_kv_state_paged_create_info_t)
+      << " align=" << alignof(sllm_kv_state_paged_create_info_t)
+      << " struct_size="
+      << offsetof(sllm_kv_state_paged_create_info_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_kv_state_paged_create_info_t, abi_version)
+      << " create_info_version="
+      << offsetof(sllm_kv_state_paged_create_info_t, create_info_version)
+      << " reserved0=" << offsetof(sllm_kv_state_paged_create_info_t, reserved0)
+      << " session_id="
+      << offsetof(sllm_kv_state_paged_create_info_t, session_id)
+      << " layer_id=" << offsetof(sllm_kv_state_paged_create_info_t, layer_id)
+      << " flags=" << offsetof(sllm_kv_state_paged_create_info_t, flags)
+      << " capacity_tokens="
+      << offsetof(sllm_kv_state_paged_create_info_t, capacity_tokens)
+      << " head_count="
+      << offsetof(sllm_kv_state_paged_create_info_t, head_count)
+      << " head_dim=" << offsetof(sllm_kv_state_paged_create_info_t, head_dim)
+      << " memory_kind="
+      << offsetof(sllm_kv_state_paged_create_info_t, memory_kind)
+      << " layout=" << offsetof(sllm_kv_state_paged_create_info_t, layout)
+      << " dtype=" << offsetof(sllm_kv_state_paged_create_info_t, dtype)
+      << " encoding=" << offsetof(sllm_kv_state_paged_create_info_t, encoding)
+      << " scale_dtype="
+      << offsetof(sllm_kv_state_paged_create_info_t, scale_dtype)
+      << " quantization_block_size="
+      << offsetof(sllm_kv_state_paged_create_info_t, quantization_block_size)
+      << " token_block_size="
+      << offsetof(sllm_kv_state_paged_create_info_t, token_block_size)
+      << " physical_layout_version="
+      << offsetof(sllm_kv_state_paged_create_info_t, physical_layout_version)
+      << " logical_table_capacity="
+      << offsetof(sllm_kv_state_paged_create_info_t, logical_table_capacity)
+      << " max_physical_blocks="
+      << offsetof(sllm_kv_state_paged_create_info_t, max_physical_blocks)
+      << " sliding_window_tokens="
+      << offsetof(sllm_kv_state_paged_create_info_t, sliding_window_tokens)
+      << " static_key_scale_bits="
+      << offsetof(sllm_kv_state_paged_create_info_t, static_key_scale_bits)
+      << " static_value_scale_bits="
+      << offsetof(sllm_kv_state_paged_create_info_t, static_value_scale_bits)
+      << " reserved=" << offsetof(sllm_kv_state_paged_create_info_t, reserved)
+      << '\n';
+  std::cout
       << "layout sllm_kv_view_info_t size=" << sizeof(sllm_kv_view_info_t)
       << " align=" << alignof(sllm_kv_view_info_t)
       << " struct_size=" << offsetof(sllm_kv_view_info_t, struct_size)
@@ -1493,6 +1561,47 @@ int main() {
       << " v_stride_elements="
       << offsetof(sllm_kv_view_info_t, v_stride_elements)
       << " reserved=" << offsetof(sllm_kv_view_info_t, reserved) << '\n';
+  std::cout
+      << "layout sllm_kv_paged_view_info_t size="
+      << sizeof(sllm_kv_paged_view_info_t)
+      << " align=" << alignof(sllm_kv_paged_view_info_t)
+      << " struct_size=" << offsetof(sllm_kv_paged_view_info_t, struct_size)
+      << " abi_version=" << offsetof(sllm_kv_paged_view_info_t, abi_version)
+      << " info_version=" << offsetof(sllm_kv_paged_view_info_t, info_version)
+      << " reserved0=" << offsetof(sllm_kv_paged_view_info_t, reserved0)
+      << " session_id=" << offsetof(sllm_kv_paged_view_info_t, session_id)
+      << " layer_id=" << offsetof(sllm_kv_paged_view_info_t, layer_id)
+      << " dtype=" << offsetof(sllm_kv_paged_view_info_t, dtype)
+      << " encoding=" << offsetof(sllm_kv_paged_view_info_t, encoding)
+      << " head_count=" << offsetof(sllm_kv_paged_view_info_t, head_count)
+      << " head_dim=" << offsetof(sllm_kv_paged_view_info_t, head_dim)
+      << " memory_kind=" << offsetof(sllm_kv_paged_view_info_t, memory_kind)
+      << " layout=" << offsetof(sllm_kv_paged_view_info_t, layout)
+      << " token_block_size="
+      << offsetof(sllm_kv_paged_view_info_t, token_block_size)
+      << " physical_layout_version="
+      << offsetof(sllm_kv_paged_view_info_t, physical_layout_version)
+      << " reserved1=" << offsetof(sllm_kv_paged_view_info_t, reserved1)
+      << " capacity_tokens="
+      << offsetof(sllm_kv_paged_view_info_t, capacity_tokens)
+      << " observed_length="
+      << offsetof(sllm_kv_paged_view_info_t, observed_length)
+      << " generation=" << offsetof(sllm_kv_paged_view_info_t, generation)
+      << " logical_table_capacity="
+      << offsetof(sllm_kv_paged_view_info_t, logical_table_capacity)
+      << " max_physical_blocks="
+      << offsetof(sllm_kv_paged_view_info_t, max_physical_blocks)
+      << " allocated_physical_blocks="
+      << offsetof(sllm_kv_paged_view_info_t, allocated_physical_blocks)
+      << " committed_bytes_per_plane="
+      << offsetof(sllm_kv_paged_view_info_t, committed_bytes_per_plane)
+      << " committed_bytes_total="
+      << offsetof(sllm_kv_paged_view_info_t, committed_bytes_total)
+      << " context_identity="
+      << offsetof(sllm_kv_paged_view_info_t, context_identity)
+      << " state_identity="
+      << offsetof(sllm_kv_paged_view_info_t, state_identity)
+      << " reserved=" << offsetof(sllm_kv_paged_view_info_t, reserved) << '\n';
   std::cout
       << "layout sllm_kv_append_desc_t size=" << sizeof(sllm_kv_append_desc_t)
       << " align=" << alignof(sllm_kv_append_desc_t)
@@ -1756,6 +1865,52 @@ int main() {
       << offsetof(sllm_state_fork_info_t, published_length)
       << " page_bytes=" << offsetof(sllm_state_fork_info_t, page_bytes)
       << " reserved=" << offsetof(sllm_state_fork_info_t, reserved) << '\n';
+  std::cout
+      << "layout sllm_kv_paged_state_fork_info_t size="
+      << sizeof(sllm_kv_paged_state_fork_info_t)
+      << " align=" << alignof(sllm_kv_paged_state_fork_info_t)
+      << " struct_size="
+      << offsetof(sllm_kv_paged_state_fork_info_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_kv_paged_state_fork_info_t, abi_version)
+      << " info_version="
+      << offsetof(sllm_kv_paged_state_fork_info_t, info_version)
+      << " reserved0=" << offsetof(sllm_kv_paged_state_fork_info_t, reserved0)
+      << " source_state_identity="
+      << offsetof(sllm_kv_paged_state_fork_info_t, source_state_identity)
+      << " child_state_identity="
+      << offsetof(sllm_kv_paged_state_fork_info_t, child_state_identity)
+      << " source_owned_bytes="
+      << offsetof(sllm_kv_paged_state_fork_info_t, source_owned_bytes)
+      << " child_owned_bytes="
+      << offsetof(sllm_kv_paged_state_fork_info_t, child_owned_bytes)
+      << " copied_bytes="
+      << offsetof(sllm_kv_paged_state_fork_info_t, copied_bytes)
+      << " shared_bytes="
+      << offsetof(sllm_kv_paged_state_fork_info_t, shared_bytes)
+      << " published_length="
+      << offsetof(sllm_kv_paged_state_fork_info_t, published_length)
+      << " token_block_size="
+      << offsetof(sllm_kv_paged_state_fork_info_t, token_block_size)
+      << " physical_layout_version="
+      << offsetof(sllm_kv_paged_state_fork_info_t, physical_layout_version)
+      << " source_logical_table_capacity="
+      << offsetof(sllm_kv_paged_state_fork_info_t,
+                  source_logical_table_capacity)
+      << " child_logical_table_capacity="
+      << offsetof(sllm_kv_paged_state_fork_info_t, child_logical_table_capacity)
+      << " source_physical_blocks="
+      << offsetof(sllm_kv_paged_state_fork_info_t, source_physical_blocks)
+      << " child_physical_blocks="
+      << offsetof(sllm_kv_paged_state_fork_info_t, child_physical_blocks)
+      << " copied_physical_blocks="
+      << offsetof(sllm_kv_paged_state_fork_info_t, copied_physical_blocks)
+      << " shared_physical_blocks="
+      << offsetof(sllm_kv_paged_state_fork_info_t, shared_physical_blocks)
+      << " committed_bytes_total="
+      << offsetof(sllm_kv_paged_state_fork_info_t, committed_bytes_total)
+      << " reserved=" << offsetof(sllm_kv_paged_state_fork_info_t, reserved)
+      << '\n';
   std::cout << "layout sllm_state_chunk_t size=" << sizeof(sllm_state_chunk_t)
             << " align=" << alignof(sllm_state_chunk_t)
             << " struct_size=" << offsetof(sllm_state_chunk_t, struct_size)
@@ -1787,5 +1942,70 @@ int main() {
             << " plane_count=" << offsetof(sllm_state_image_info_t, plane_count)
             << " reserved=" << offsetof(sllm_state_image_info_t, reserved)
             << '\n';
+  std::cout
+      << "layout sllm_kv_paged_image_info_t size="
+      << sizeof(sllm_kv_paged_image_info_t)
+      << " align=" << alignof(sllm_kv_paged_image_info_t)
+      << " struct_size=" << offsetof(sllm_kv_paged_image_info_t, struct_size)
+      << " abi_version=" << offsetof(sllm_kv_paged_image_info_t, abi_version)
+      << " image_version="
+      << offsetof(sllm_kv_paged_image_info_t, image_version)
+      << " flags=" << offsetof(sllm_kv_paged_image_info_t, flags)
+      << " session_id=" << offsetof(sllm_kv_paged_image_info_t, session_id)
+      << " layer_id=" << offsetof(sllm_kv_paged_image_info_t, layer_id)
+      << " dtype=" << offsetof(sllm_kv_paged_image_info_t, dtype)
+      << " encoding=" << offsetof(sllm_kv_paged_image_info_t, encoding)
+      << " head_count=" << offsetof(sllm_kv_paged_image_info_t, head_count)
+      << " head_dim=" << offsetof(sllm_kv_paged_image_info_t, head_dim)
+      << " layout=" << offsetof(sllm_kv_paged_image_info_t, layout)
+      << " token_block_size="
+      << offsetof(sllm_kv_paged_image_info_t, token_block_size)
+      << " physical_layout_version="
+      << offsetof(sllm_kv_paged_image_info_t, physical_layout_version)
+      << " capacity_tokens="
+      << offsetof(sllm_kv_paged_image_info_t, capacity_tokens)
+      << " published_length="
+      << offsetof(sllm_kv_paged_image_info_t, published_length)
+      << " generation=" << offsetof(sllm_kv_paged_image_info_t, generation)
+      << " retained_start="
+      << offsetof(sllm_kv_paged_image_info_t, retained_start)
+      << " retained_length="
+      << offsetof(sllm_kv_paged_image_info_t, retained_length)
+      << " sliding_window_tokens="
+      << offsetof(sllm_kv_paged_image_info_t, sliding_window_tokens)
+      << " logical_table_capacity="
+      << offsetof(sllm_kv_paged_image_info_t, logical_table_capacity)
+      << " physical_block_count="
+      << offsetof(sllm_kv_paged_image_info_t, physical_block_count)
+      << " plane_count=" << offsetof(sllm_kv_paged_image_info_t, plane_count)
+      << " ring_slot_count="
+      << offsetof(sllm_kv_paged_image_info_t, ring_slot_count)
+      << " table_entry_width="
+      << offsetof(sllm_kv_paged_image_info_t, table_entry_width)
+      << " plane_block_stride="
+      << offsetof(sllm_kv_paged_image_info_t, plane_block_stride)
+      << " plane_bytes=" << offsetof(sllm_kv_paged_image_info_t, plane_bytes)
+      << " static_key_scale_bits="
+      << offsetof(sllm_kv_paged_image_info_t, static_key_scale_bits)
+      << " static_value_scale_bits="
+      << offsetof(sllm_kv_paged_image_info_t, static_value_scale_bits)
+      << " reserved=" << offsetof(sllm_kv_paged_image_info_t, reserved) << '\n';
+  std::cout
+      << "layout sllm_kv_paged_image_chunk_t size="
+      << sizeof(sllm_kv_paged_image_chunk_t)
+      << " align=" << alignof(sllm_kv_paged_image_chunk_t)
+      << " struct_size=" << offsetof(sllm_kv_paged_image_chunk_t, struct_size)
+      << " abi_version=" << offsetof(sllm_kv_paged_image_chunk_t, abi_version)
+      << " image_version="
+      << offsetof(sllm_kv_paged_image_chunk_t, image_version)
+      << " section=" << offsetof(sllm_kv_paged_image_chunk_t, section)
+      << " plane=" << offsetof(sllm_kv_paged_image_chunk_t, plane)
+      << " byte_offset=" << offsetof(sllm_kv_paged_image_chunk_t, byte_offset)
+      << " byte_length=" << offsetof(sllm_kv_paged_image_chunk_t, byte_length)
+      << " host_pointer=" << offsetof(sllm_kv_paged_image_chunk_t, host_pointer)
+      << " host_capacity="
+      << offsetof(sllm_kv_paged_image_chunk_t, host_capacity)
+      << " reserved=" << offsetof(sllm_kv_paged_image_chunk_t, reserved)
+      << '\n';
   return 0;
 }

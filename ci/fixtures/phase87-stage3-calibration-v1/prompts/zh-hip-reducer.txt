@@ -1,0 +1,12 @@
+请检查下面的HIP归约片段。目标是在wave32中把每个lane的局部和合并到lane 0,同时让非整齐的元素数量不会读取越界。请指出同步和边界判断应放在哪里,并说明为什么最后的写入只需要一个lane执行。
+
+```cpp
+__global__ void reduce_sum(const float* input, float* output, int count) {
+  int index = blockIdx.x * blockDim.x + threadIdx.x;
+  float value = index < count ? input[index] : 0.0f;
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    value += __shfl_down(value, offset, 32);
+  }
+  if ((threadIdx.x & 31) == 0) output[blockIdx.x] = value;
+}
+```

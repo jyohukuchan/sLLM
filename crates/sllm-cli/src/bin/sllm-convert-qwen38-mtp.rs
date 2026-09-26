@@ -11,10 +11,11 @@ use std::process::ExitCode;
 use serde_json::json;
 use sllm_core::{
     MtpBf16RoundtripEncoding, MtpWeightEncoding, convert_qwen38_mtp_bf16_roundtrip_sidecar,
-    convert_qwen38_mtp_quantized_sidecar, parse_model_lock, verify_unsloth_qwen38_nvfp4,
+    convert_qwen38_mtp_nvfp4_sidecar, convert_qwen38_mtp_quantized_sidecar, parse_model_lock,
+    verify_unsloth_qwen38_nvfp4,
 };
 
-const USAGE: &str = "usage: sllm-convert-qwen38-mtp --artifact-root ABSOLUTE_DIRECTORY --encoding mxfp8|mxfp6|bf16-roundtrip-mxfp8|bf16-roundtrip-mxfp6 --output-dir ABSOLUTE_DIRECTORY";
+const USAGE: &str = "usage: sllm-convert-qwen38-mtp --artifact-root ABSOLUTE_DIRECTORY --encoding mxfp8|nvfp4|bf16-roundtrip-mxfp8 --output-dir ABSOLUTE_DIRECTORY [--activation-scale-manifest ABSOLUTE_JSON for nvfp4]";
 
 fn main() -> ExitCode {
     match run(env::args_os().skip(1).collect()) {
@@ -38,12 +39,13 @@ fn parse_encoding(
             Some(MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale),
             None,
         ),
-        "mxfp6" | "mxfp6-w6a6-e3m2-block32-e8m0" => (
-            Some(MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale),
-            None,
-        ),
+        "mxfp6" | "mxfp6-w6a6-e3m2-block32-e8m0" | "bf16-roundtrip-mxfp6" => {
+            return Err("retired MTP MXFP6 sidecar encoding".to_owned());
+        }
+        "nvfp4" | "nvfp4-w4a4-e2m1-block16-e4m3fn-f32" => {
+            (Some(MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32), None)
+        }
         "bf16-roundtrip-mxfp8" => (None, Some(MtpBf16RoundtripEncoding::Mxfp8)),
-        "bf16-roundtrip-mxfp6" => (None, Some(MtpBf16RoundtripEncoding::Mxfp6)),
         value => return Err(format!("unsupported --encoding value {value:?}")),
     })
 }
@@ -52,13 +54,17 @@ fn run(args: Vec<std::ffi::OsString>) -> Result<String, String> {
     let mut artifact_root = None;
     let mut encoding = None;
     let mut output_dir = None;
+    let mut activation_scale_manifest = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].to_str().ok_or("arguments must be UTF-8")?;
         if flag == "--help" || flag == "-h" {
             return Ok(USAGE.to_owned());
         }
-        if !matches!(flag, "--artifact-root" | "--encoding" | "--output-dir") {
+        if !matches!(
+            flag,
+            "--artifact-root" | "--encoding" | "--output-dir" | "--activation-scale-manifest"
+        ) {
             return Err(format!("unknown argument {flag}"));
         }
         let value = args
@@ -68,6 +74,7 @@ fn run(args: Vec<std::ffi::OsString>) -> Result<String, String> {
             "--artifact-root" => artifact_root = Some(PathBuf::from(value)),
             "--encoding" => encoding = Some(value.to_str().ok_or("encoding must be UTF-8")?),
             "--output-dir" => output_dir = Some(PathBuf::from(value)),
+            "--activation-scale-manifest" => activation_scale_manifest = Some(PathBuf::from(value)),
             _ => return Err(format!("unknown argument {flag}")),
         }
         index += 2;
@@ -78,6 +85,19 @@ fn run(args: Vec<std::ffi::OsString>) -> Result<String, String> {
         return Err("artifact and output paths must be absolute".to_owned());
     }
     let encoding = parse_encoding(encoding.ok_or("--encoding is required")?)?;
+    let is_nvfp4 = encoding.0 == Some(MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32);
+    if is_nvfp4 {
+        let path = activation_scale_manifest
+            .as_ref()
+            .ok_or("--encoding nvfp4 requires --activation-scale-manifest")?;
+        if !path.is_absolute() {
+            return Err("--activation-scale-manifest must be absolute".to_owned());
+        }
+    } else if activation_scale_manifest.is_some() {
+        return Err(
+            "--activation-scale-manifest is supported only with --encoding nvfp4".to_owned(),
+        );
+    }
     if output_dir.exists() {
         return Err("--output-dir already exists; choose a new directory".to_owned());
     }
@@ -87,7 +107,16 @@ fn run(args: Vec<std::ffi::OsString>) -> Result<String, String> {
     .map_err(|error| format!("embedded reviewed Qwen3.5-27B lock is invalid: {error}"))?;
     let artifact = verify_unsloth_qwen38_nvfp4(&artifact_root)
         .map_err(|error| format!("Qwen3.8 NVFP4 artifact verification failed: {error}"))?;
-    let verified = if let Some(encoding) = encoding.0 {
+    let verified = if is_nvfp4 {
+        convert_qwen38_mtp_nvfp4_sidecar(
+            &lock,
+            &artifact,
+            activation_scale_manifest
+                .as_deref()
+                .expect("NVFP4 manifest was validated above"),
+            &output_dir,
+        )
+    } else if let Some(encoding) = encoding.0 {
         convert_qwen38_mtp_quantized_sidecar(&lock, &artifact, encoding, &output_dir)
     } else {
         convert_qwen38_mtp_bf16_roundtrip_sidecar(
@@ -128,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn default_mx_recipes_stay_non_saturating() {
+    fn supported_mx_recipe_stays_non_saturating_and_mxfp6_is_retired() {
         for value in ["mxfp8", "mxfp8-w8a8-e4m3-block32-e8m0"] {
             assert!(matches!(
                 parse_encoding(value).unwrap(),
@@ -138,22 +167,51 @@ mod tests {
                 )
             ));
         }
-        for value in ["mxfp6", "mxfp6-w6a6-e3m2-block32-e8m0"] {
-            assert!(matches!(
-                parse_encoding(value).unwrap(),
-                (
-                    Some(MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale),
-                    None
-                )
-            ));
-        }
         assert!(matches!(
             parse_encoding("bf16-roundtrip-mxfp8").unwrap(),
             (None, Some(MtpBf16RoundtripEncoding::Mxfp8))
         ));
+        for retired in [
+            "mxfp6",
+            "mxfp6-w6a6-e3m2-block32-e8m0",
+            "bf16-roundtrip-mxfp6",
+        ] {
+            assert!(
+                parse_encoding(retired)
+                    .unwrap_err()
+                    .contains("retired MTP MXFP6")
+            );
+        }
         assert!(matches!(
-            parse_encoding("bf16-roundtrip-mxfp6").unwrap(),
-            (None, Some(MtpBf16RoundtripEncoding::Mxfp6))
+            parse_encoding("nvfp4").unwrap(),
+            (Some(MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32), None)
         ));
+    }
+
+    #[test]
+    fn nvfp4_requires_an_absolute_activation_manifest() {
+        let error = run(vec![
+            "--artifact-root".into(),
+            "/tmp/artifact".into(),
+            "--encoding".into(),
+            "nvfp4".into(),
+            "--output-dir".into(),
+            "/tmp/output".into(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("requires --activation-scale-manifest"));
+
+        let error = run(vec![
+            "--artifact-root".into(),
+            "/tmp/artifact".into(),
+            "--encoding".into(),
+            "nvfp4".into(),
+            "--activation-scale-manifest".into(),
+            "relative.json".into(),
+            "--output-dir".into(),
+            "/tmp/output".into(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("must be absolute"));
     }
 }

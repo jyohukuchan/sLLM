@@ -30,17 +30,18 @@ use crate::prepared_execution::{
     require_terminal_success,
 };
 use crate::session_checkpoint::{
-    CheckpointIdentity, CheckpointPayload, OpaqueStatePlane, SessionCheckpoint,
-    StateLayerMetadataV1, StateOwnerKindV1, StatePlaneKindV1,
+    CheckpointIdentity, CheckpointPayload, CheckpointPayloadV2, OpaqueStatePlane,
+    SessionCheckpoint, SessionCheckpointV2, StateLayerMetadataV1, StateOwnerKindV1,
+    StatePlaneKindV1,
 };
 use crate::weights::{WeightClassification, WeightLoadEntry, WeightLoadPlan};
 use crate::{
     AccessMode, AllocationCategory, BoundSemanticOp, DType, DeviceTokenSelectorRequestV1, Encoding,
     ExecutionBuffer, ExecutionQueue, ExecutionSession, ExecutionState, ExecutionStateImageV1,
-    KvState, OwnedTensorBinding, PrepareSupport, QuantizedTensorEncoding, SamplingSelectionV1,
-    ScalePlaneRole, StateForkAuditV1, TensorDType, TensorView, VerifiedCache,
-    VerifiedGgufGemmaSource, VerifiedNvfp4Sidecar, VerifiedUnslothGemma4Nvfp4, WeightConsumer,
-    WeightUploadRequest, upload_verified_weight,
+    ExecutionStateImageV2, KvPagedImageTopologyV1, KvState, OwnedTensorBinding, PrepareSupport,
+    QuantizedTensorEncoding, SamplingSelectionV1, ScalePlaneRole, StateForkAuditV1, TensorDType,
+    TensorView, VerifiedCache, VerifiedGgufGemmaSource, VerifiedNvfp4Sidecar,
+    VerifiedUnslothGemma4Nvfp4, WeightConsumer, WeightUploadRequest, upload_verified_weight,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -592,6 +593,271 @@ impl Gemma4SlidingStateImageV1 {
             capacity: self.capacity,
             retention_window: self.retention_window,
         }
+    }
+}
+
+/// One topology-aware Paged full-attention KV layer in the additive Gemma
+/// state-image contract.  The V1 image remains the compatibility path for
+/// resident/VMM state and is intentionally not converted implicitly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Gemma4KvStateImageV2 {
+    descriptor: KvStateDescriptor,
+    image: ExecutionStateImageV2,
+}
+
+impl Gemma4KvStateImageV2 {
+    pub const fn descriptor(&self) -> KvStateDescriptor {
+        self.descriptor
+    }
+
+    pub const fn image(&self) -> &ExecutionStateImageV2 {
+        &self.image
+    }
+
+    pub const fn paged_metadata(&self) -> &crate::KvPagedImageMetadataV1 {
+        self.image.paged_metadata()
+    }
+}
+
+/// One topology-aware Paged sliding-attention KV layer.  Sliding images must
+/// carry a native ring table and a descriptor with the reviewed static-FP8
+/// sliding contract; a BF16 resident buffer cannot be reinterpreted as this
+/// type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Gemma4SlidingStateImageV2 {
+    descriptor: KvStateDescriptor,
+    image: ExecutionStateImageV2,
+}
+
+impl Gemma4SlidingStateImageV2 {
+    pub const fn descriptor(&self) -> KvStateDescriptor {
+        self.descriptor
+    }
+
+    pub const fn image(&self) -> &ExecutionStateImageV2 {
+        &self.image
+    }
+
+    pub const fn paged_metadata(&self) -> &crate::KvPagedImageMetadataV1 {
+        self.image.paged_metadata()
+    }
+
+    pub const fn retention_window(&self) -> Option<u64> {
+        self.descriptor.sliding_window()
+    }
+}
+
+/// Complete topology-aware Gemma request state.  Both full and sliding
+/// layers use `ExecutionStateImageV2`; the latter additionally require a
+/// validated ring table.  This is additive to [`Gemma4StateImageV1`].
+#[derive(Clone, PartialEq)]
+pub struct Gemma4StateImageV2 {
+    session_id: crate::ExecutionSessionId,
+    model_fingerprint: String,
+    plan_digest: [u8; 32],
+    state_capacity: u64,
+    committed_length: u64,
+    rope_position_delta: i64,
+    full_kv_layers: BTreeMap<u32, Gemma4KvStateImageV2>,
+    sliding_layers: BTreeMap<u32, Gemma4SlidingStateImageV2>,
+    cached_terminal_output: Option<Gemma4ExecutionOutput>,
+}
+
+impl fmt::Debug for Gemma4StateImageV2 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Gemma4StateImageV2")
+            .field("session_id", &self.session_id)
+            .field("model_fingerprint", &"<redacted>")
+            .field("state_capacity", &self.state_capacity)
+            .field("committed_length", &self.committed_length)
+            .field("full_attention_layers", &self.full_kv_layers.len())
+            .field("sliding_attention_layers", &self.sliding_layers.len())
+            .field(
+                "has_cached_terminal_output",
+                &self.cached_terminal_output.is_some(),
+            )
+            .finish()
+    }
+}
+
+impl Gemma4StateImageV2 {
+    pub const fn session_id(&self) -> crate::ExecutionSessionId {
+        self.session_id
+    }
+
+    pub fn model_fingerprint(&self) -> &str {
+        &self.model_fingerprint
+    }
+
+    pub const fn plan_digest(&self) -> &[u8; 32] {
+        &self.plan_digest
+    }
+
+    pub const fn state_capacity(&self) -> u64 {
+        self.state_capacity
+    }
+
+    pub const fn committed_length(&self) -> u64 {
+        self.committed_length
+    }
+
+    pub const fn rope_position_delta(&self) -> i64 {
+        self.rope_position_delta
+    }
+
+    pub fn full_kv_layers(&self) -> &BTreeMap<u32, Gemma4KvStateImageV2> {
+        &self.full_kv_layers
+    }
+
+    pub fn sliding_layers(&self) -> &BTreeMap<u32, Gemma4SlidingStateImageV2> {
+        &self.sliding_layers
+    }
+
+    pub fn cached_terminal_output(&self) -> Option<&Gemma4ExecutionOutput> {
+        self.cached_terminal_output.as_ref()
+    }
+
+    pub fn kv_encoding(&self) -> Result<KvCacheEncoding, Gemma4ExecutionLayoutError> {
+        gemma_paged_image_kv_encoding(&self.full_kv_layers, &self.sliding_layers)
+    }
+
+    pub fn kv_descriptor_digest(&self) -> Result<[u8; 32], Gemma4ExecutionLayoutError> {
+        let full = self
+            .full_kv_layers
+            .iter()
+            .map(|(&layer, entry)| (layer, entry.descriptor))
+            .collect::<BTreeMap<_, _>>();
+        let sliding = self
+            .sliding_layers
+            .iter()
+            .map(|(&layer, entry)| {
+                Ok((
+                    layer,
+                    Gemma4SlidingLayerIdentity {
+                        heads: entry.descriptor.layout().heads() as u32,
+                        head_dim: entry.descriptor.layout().head_dim() as u32,
+                        capacity: entry.descriptor.capacity(),
+                        retention_window: entry.descriptor.sliding_window().ok_or_else(|| {
+                            Gemma4ExecutionLayoutError::invalid(
+                                "Gemma Paged sliding descriptor has no ring window",
+                            )
+                        })?,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        Ok(gemma_checkpoint_descriptor_digest_from_parts(
+            self.kv_encoding()?,
+            &full,
+            &sliding,
+        ))
+    }
+
+    pub fn without_terminal_output(mut self) -> Self {
+        self.cached_terminal_output = None;
+        self
+    }
+
+    /// Flattens both Paged full and ring-topology sliding images into the
+    /// additive V2 checkpoint envelope. V1 wire semantics remain untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn to_checkpoint_v2(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpointV2, Gemma4ExecutionLayoutError> {
+        validate_gemma_state_image_v2(self, false)?;
+        if token_history.len() as u64 != self.committed_length
+            || logical_position != self.committed_length
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "V2 checkpoint token history or logical position differs from Gemma state",
+            ));
+        }
+        let rope_delta = absolute_position
+            .checked_sub(logical_position)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(
+                    "V2 checkpoint absolute/logical position delta is invalid",
+                )
+            })?;
+        if rope_delta != self.rope_position_delta
+            || identity.model_lock_fingerprint != self.model_fingerprint
+            || identity.plan_digest != gemma_hex_digest(&self.plan_digest)
+            || identity.kv_encoding != self.kv_encoding()?
+            || identity.kv_descriptor_digest != self.kv_descriptor_digest()?
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "V2 checkpoint identity or position differs from Gemma state",
+            ));
+        }
+        let mut paged_state_layers = Vec::with_capacity(
+            self.full_kv_layers
+                .len()
+                .saturating_add(self.sliding_layers.len()),
+        );
+        paged_state_layers.extend(
+            self.full_kv_layers
+                .values()
+                .map(|entry| entry.image.clone()),
+        );
+        paged_state_layers.extend(
+            self.sliding_layers
+                .values()
+                .map(|entry| entry.image.clone()),
+        );
+        SessionCheckpointV2::new(
+            identity,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+            CheckpointPayloadV2 {
+                token_history: token_history.to_vec(),
+                conversation: conversation.to_vec(),
+                paged_state_layers,
+                linear_state_layers: Vec::new(),
+                linear_state_planes: Vec::new(),
+                sampler_state: sampler_state.to_vec(),
+                grammar_state: grammar_state.to_vec(),
+                stop_state: stop_state.to_vec(),
+            },
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint_v2(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpointV2, Gemma4ExecutionLayoutError> {
+        self.to_checkpoint_v2(
+            identity,
+            token_history,
+            conversation,
+            sampler_state,
+            grammar_state,
+            stop_state,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+        )
     }
 }
 
@@ -1316,6 +1582,29 @@ fn gemma_image_kv_encoding(
     Ok(encoding)
 }
 
+fn gemma_paged_image_kv_encoding(
+    full_layers: &BTreeMap<u32, Gemma4KvStateImageV2>,
+    sliding_layers: &BTreeMap<u32, Gemma4SlidingStateImageV2>,
+) -> Result<KvCacheEncoding, Gemma4ExecutionLayoutError> {
+    let encoding = full_layers
+        .values()
+        .next()
+        .map(|entry| entry.descriptor.cache_encoding())
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma Paged image has no full KV"))?;
+    if full_layers
+        .values()
+        .any(|entry| entry.descriptor.cache_encoding() != encoding)
+        || sliding_layers
+            .values()
+            .any(|entry| entry.descriptor.cache_encoding() != encoding)
+    {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma Paged KV encodings are not uniform",
+        ));
+    }
+    Ok(encoding)
+}
+
 fn gemma_checkpoint_descriptor_digest(
     full_layers: &BTreeMap<u32, Gemma4KvStateImageV1>,
     sliding_layers: &BTreeMap<u32, Gemma4SlidingStateImageV1>,
@@ -1557,6 +1846,141 @@ fn validate_gemma_state_image(
     Ok(())
 }
 
+fn validate_gemma_paged_layer_image(
+    image: &ExecutionStateImageV2,
+    layer: u32,
+    descriptor: KvStateDescriptor,
+    expected_length: u64,
+    sliding: bool,
+) -> Result<(), Gemma4ExecutionLayoutError> {
+    let metadata = image.metadata();
+    let paged = image.paged_metadata();
+    if metadata.owner != StateOwnerKindV1::Kv
+        || metadata.layer_id != layer
+        || metadata.active_slot.is_some()
+        || metadata.published_length != expected_length
+        || paged.observed_length() != expected_length
+        || expected_length > descriptor.capacity()
+        || paged.descriptor() != descriptor
+        || metadata.generation != paged.generation()
+    {
+        return Err(Gemma4ExecutionLayoutError::invalid(format!(
+            "Gemma Paged layer {layer} metadata, descriptor, or length differs"
+        )));
+    }
+    if descriptor.layer_id() != layer || descriptor.sliding_window().is_some() != sliding {
+        return Err(Gemma4ExecutionLayoutError::invalid(format!(
+            "Gemma Paged layer {layer} sliding descriptor contract differs"
+        )));
+    }
+    match (sliding, paged.topology()) {
+        (false, KvPagedImageTopologyV1::LogicalTable(_))
+        | (true, KvPagedImageTopologyV1::SlidingRing(_)) => {}
+        _ => {
+            return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                "Gemma Paged layer {layer} topology does not match full/sliding role"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_gemma_state_image_v2(
+    image: &Gemma4StateImageV2,
+    require_terminal_output: bool,
+) -> Result<(), Gemma4ExecutionLayoutError> {
+    if image.committed_length == 0 || image.committed_length > image.state_capacity {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma Paged state image length or capacity is invalid",
+        ));
+    }
+    let encoding = image.kv_encoding()?;
+    let full_keys = image
+        .full_kv_layers
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let sliding_keys = image
+        .sliding_layers
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let (expected_full_keys, expected_sliding_keys) = crate::reviewed_layer_schedule()
+        .into_iter()
+        .enumerate()
+        .try_fold(
+            (BTreeSet::new(), BTreeSet::new()),
+            |(mut full, mut sliding), (layer, kind)| {
+                let layer = u32::try_from(layer).map_err(|_| {
+                    Gemma4ExecutionLayoutError::invalid("Gemma layer index does not fit u32")
+                })?;
+                match kind {
+                    Gemma4LayerType::FullAttention => {
+                        full.insert(layer);
+                    }
+                    Gemma4LayerType::SlidingAttention => {
+                        sliding.insert(layer);
+                    }
+                }
+                Ok((full, sliding))
+            },
+        )?;
+    if full_keys != expected_full_keys
+        || sliding_keys != expected_sliding_keys
+        || !full_keys.is_disjoint(&sliding_keys)
+    {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma Paged state image layer topology is invalid",
+        ));
+    }
+    for (&layer, entry) in &image.full_kv_layers {
+        if entry.descriptor.capacity() != image.state_capacity
+            || entry.descriptor.cache_encoding() != encoding
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged full descriptor differs from image identity",
+            ));
+        }
+        validate_gemma_paged_layer_image(
+            &entry.image,
+            layer,
+            entry.descriptor,
+            image.committed_length,
+            false,
+        )?;
+    }
+    for (&layer, entry) in &image.sliding_layers {
+        if entry.descriptor.capacity() != image.state_capacity
+            || entry.descriptor.cache_encoding() != encoding
+            || entry.descriptor.static_fp8_scales() != Some((1.0, 1.0))
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged sliding descriptor scale or identity differs",
+            ));
+        }
+        validate_gemma_paged_layer_image(
+            &entry.image,
+            layer,
+            entry.descriptor,
+            image.committed_length,
+            true,
+        )?;
+    }
+    if let Some(output) = image.cached_terminal_output.as_ref() {
+        if output.state().committed_length != image.committed_length {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged cached terminal output length differs",
+            ));
+        }
+    }
+    if require_terminal_output && image.cached_terminal_output.is_none() {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma Paged state image has no terminal output",
+        ));
+    }
+    Ok(())
+}
+
 fn gemma_checkpoint_layer_image(
     checkpoint: &SessionCheckpoint,
     layer: u32,
@@ -1759,6 +2183,19 @@ impl Gemma4ResidentModel {
             state_capacity,
             crate::RotaryPositionModeV1::Contiguous,
         )
+    }
+
+    /// Creates an opt-in request whose full and sliding attention layers are
+    /// native Paged KV states. The ordinary `new_request` path remains the
+    /// established V1 resident-buffer contract.
+    pub fn new_paged_request(
+        &self,
+        prefill_token_count: u64,
+        state_capacity: u64,
+    ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
+        let mut request = self.new_request(prefill_token_count, state_capacity)?;
+        request.enable_paged_state_images()?;
+        Ok(request)
     }
 
     fn new_request_with_position_mode(
@@ -1995,6 +2432,24 @@ impl Gemma4ResidentModel {
         Ok(request)
     }
 
+    /// Creates a fresh Paged request and imports every full and ring-topology
+    /// sliding image from a same-session V2 state image.
+    pub fn new_request_from_state_image_v2(
+        &self,
+        image: &Gemma4StateImageV2,
+        suffix_token_count: u64,
+        state_capacity: u64,
+    ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
+        if suffix_token_count == 0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Paged V2 state-image restore requires a non-empty suffix",
+            ));
+        }
+        let mut request = self.new_paged_request(suffix_token_count, state_capacity)?;
+        request.restore_state_image_v2(image)?;
+        Ok(request)
+    }
+
     pub fn restore_request_from_state_image(
         &self,
         image: &Gemma4StateImageV1,
@@ -2002,6 +2457,15 @@ impl Gemma4ResidentModel {
         state_capacity: u64,
     ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
         self.new_request_from_state_image(image, suffix_token_count, state_capacity)
+    }
+
+    pub fn restore_request_from_state_image_v2(
+        &self,
+        image: &Gemma4StateImageV2,
+        suffix_token_count: u64,
+        state_capacity: u64,
+    ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
+        self.new_request_from_state_image_v2(image, suffix_token_count, state_capacity)
     }
 
     /// Restores an authenticated backend-neutral checkpoint into a fresh
@@ -2026,6 +2490,24 @@ impl Gemma4ResidentModel {
         Ok(request)
     }
 
+    /// Restores a topology-aware Paged V2 checkpoint into a fresh request.
+    pub fn new_request_from_checkpoint_v2(
+        &self,
+        checkpoint: &SessionCheckpointV2,
+        expected_identity: &CheckpointIdentity,
+        suffix_token_count: u64,
+        state_capacity: u64,
+    ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
+        if suffix_token_count == 0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Paged V2 checkpoint restore requires a non-empty suffix",
+            ));
+        }
+        let mut request = self.new_paged_request(suffix_token_count, state_capacity)?;
+        request.restore_checkpoint_v2(checkpoint, expected_identity)?;
+        Ok(request)
+    }
+
     pub fn restore_request_from_checkpoint(
         &self,
         checkpoint: &SessionCheckpoint,
@@ -2034,6 +2516,21 @@ impl Gemma4ResidentModel {
         state_capacity: u64,
     ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
         self.new_request_from_checkpoint(
+            checkpoint,
+            expected_identity,
+            suffix_token_count,
+            state_capacity,
+        )
+    }
+
+    pub fn restore_request_from_checkpoint_v2(
+        &self,
+        checkpoint: &SessionCheckpointV2,
+        expected_identity: &CheckpointIdentity,
+        suffix_token_count: u64,
+        state_capacity: u64,
+    ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
+        self.new_request_from_checkpoint_v2(
             checkpoint,
             expected_identity,
             suffix_token_count,
@@ -2534,6 +3031,70 @@ impl Gemma4ExecutionRequest {
         self.state.cancel();
     }
 
+    /// Upgrades a fresh request to the additive Paged state-image contract.
+    /// Existing V1 requests retain their BF16 sliding buffers and never enter
+    /// this path implicitly.
+    fn enable_paged_state_images(&mut self) -> Result<(), Gemma4ExecutionLayoutError> {
+        let snapshot = self
+            .state
+            .snapshot()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if snapshot.poisoned || self.committed_length != 0 || self.last_output.is_some() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Paged state-image mode requires a fresh request",
+            ));
+        }
+        let graph = crate::build_gemma4_graph(&self.lock, &self.plan, 1, 0, self.state_capacity()?)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let expected_layers = graph
+            .kv_descriptors()
+            .iter()
+            .map(|descriptor| descriptor.layer)
+            .collect::<BTreeSet<_>>();
+        let mut states = self.opaque_kv_states.take().ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("Gemma Paged state map is absent")
+        })?;
+        let expected_full = gemma_full_attention_layers(&graph);
+        if states.keys().copied().collect::<BTreeSet<_>>() != expected_full
+            || states.values().any(|state| {
+                state.descriptor().cache_encoding() != KvCacheEncoding::Fp8E4M3FnStatic
+            })
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma dense Paged mode requires static-FP8 full KV states",
+            ));
+        }
+        for descriptor in graph
+            .kv_descriptors()
+            .iter()
+            .filter(|descriptor| descriptor.retention_window.is_some())
+        {
+            let window = descriptor.retention_window.ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("Gemma sliding window is absent")
+            })?;
+            let state_descriptor = KvStateDescriptor::new_with_static_fp8_sliding(
+                descriptor.layer,
+                descriptor.capacity,
+                descriptor.heads as usize,
+                descriptor.head_dim as usize,
+                window,
+            )
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            let state = self
+                .session
+                .create_kv_state(state_descriptor)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            states.insert(descriptor.layer, state);
+        }
+        if states.keys().copied().collect::<BTreeSet<_>>() != expected_layers {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged state layer set differs from graph",
+            ));
+        }
+        self.opaque_kv_states = Some(states);
+        Ok(())
+    }
+
     /// Exports every quiescent full- and sliding-attention state layer into a
     /// backend-neutral, encoding-native image. No workspace, queue, prepared
     /// operation, or native handle is retained.
@@ -2670,6 +3231,102 @@ impl Gemma4ExecutionRequest {
         self.state_image()
     }
 
+    /// Exports topology-aware Paged images for every full and sliding layer.
+    /// A legacy request with BF16 resident sliding buffers fails closed rather
+    /// than serializing those buffers as if they were a Paged ring.
+    pub fn state_image_v2(&self) -> Result<Gemma4StateImageV2, Gemma4ExecutionLayoutError> {
+        if self.pending_mtp_block.is_some() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged state export cannot observe a pending MTP block",
+            ));
+        }
+        let state_snapshot = self
+            .state
+            .snapshot()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if state_snapshot.poisoned
+            || self.committed_length == 0
+            || state_snapshot.committed_length != self.committed_length
+            || self.last_output.is_none()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged state export requires a completed quiescent transition",
+            ));
+        }
+        let state_capacity = self.state_capacity()?;
+        let graph = crate::build_gemma4_graph(&self.lock, &self.plan, 1, 0, state_capacity)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let expected_layers = graph
+            .kv_descriptors()
+            .iter()
+            .map(|descriptor| descriptor.layer)
+            .collect::<BTreeSet<_>>();
+        let states = self.opaque_kv_states.as_ref().ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("Gemma Paged KV states are absent")
+        })?;
+        if states.keys().copied().collect::<BTreeSet<_>>() != expected_layers {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged export requires full and sliding KV states",
+            ));
+        }
+        let mut full_kv_layers = BTreeMap::new();
+        let mut sliding_layers = BTreeMap::new();
+        for (&layer, state) in states {
+            let image = self
+                .session
+                .export_kv_state_image_v2(state)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            if state.descriptor().sliding_window().is_some() {
+                let entry = Gemma4SlidingStateImageV2 {
+                    descriptor: state.descriptor(),
+                    image,
+                };
+                validate_gemma_paged_layer_image(
+                    &entry.image,
+                    layer,
+                    entry.descriptor,
+                    self.committed_length,
+                    true,
+                )?;
+                sliding_layers.insert(layer, entry);
+            } else {
+                let entry = Gemma4KvStateImageV2 {
+                    descriptor: state.descriptor(),
+                    image,
+                };
+                validate_gemma_paged_layer_image(
+                    &entry.image,
+                    layer,
+                    entry.descriptor,
+                    self.committed_length,
+                    false,
+                )?;
+                full_kv_layers.insert(layer, entry);
+            }
+        }
+        let image = Gemma4StateImageV2 {
+            session_id: self.session.id(),
+            model_fingerprint: self.lock.fingerprint().to_owned(),
+            plan_digest: *self.plan.digest(),
+            state_capacity,
+            committed_length: self.committed_length,
+            rope_position_delta: self.rope_position_delta,
+            full_kv_layers,
+            sliding_layers,
+            cached_terminal_output: self.last_output.clone(),
+        };
+        validate_gemma_state_image_v2(&image, true)?;
+        Ok(image)
+    }
+
+    pub fn export_state_image_v2(&self) -> Result<Gemma4StateImageV2, Gemma4ExecutionLayoutError> {
+        self.state_image_v2()
+    }
+
+    pub fn save_state_image_v2(&self) -> Result<Gemma4StateImageV2, Gemma4ExecutionLayoutError> {
+        self.state_image_v2()
+    }
+
     /// Captures this request as a persistent checkpoint. Terminal output is
     /// intentionally omitted, so restore requires a non-empty suffix.
     #[allow(clippy::too_many_arguments)]
@@ -2686,6 +3343,34 @@ impl Gemma4ExecutionRequest {
         generation_state_version: u32,
     ) -> Result<SessionCheckpoint, Gemma4ExecutionLayoutError> {
         self.state_image()?.to_checkpoint(
+            identity,
+            token_history,
+            conversation,
+            sampler_state,
+            grammar_state,
+            stop_state,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+        )
+    }
+
+    /// Captures a topology-aware Paged V2 checkpoint. V1 checkpoints and their
+    /// opaque plane tags remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint_v2(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpointV2, Gemma4ExecutionLayoutError> {
+        self.state_image_v2()?.to_checkpoint_v2(
             identity,
             token_history,
             conversation,
@@ -2718,6 +3403,93 @@ impl Gemma4ExecutionRequest {
         }
         validate_gemma_state_image(image, true)?;
         self.restore_validated_state_image(image)
+    }
+
+    fn restore_state_image_v2(
+        &mut self,
+        image: &Gemma4StateImageV2,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        let state_snapshot = self
+            .state
+            .snapshot()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if state_snapshot.poisoned || self.committed_length != 0 || self.last_output.is_some() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged state restore requires a fresh, quiescent request",
+            ));
+        }
+        if image.session_id != self.session.id() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged state image belongs to a different execution session",
+            ));
+        }
+        // A raw image normally carries the terminal output; a V2 checkpoint
+        // deliberately omits it and resumes through a non-empty suffix.
+        validate_gemma_state_image_v2(image, image.cached_terminal_output.is_some())?;
+        if image.model_fingerprint != self.lock.fingerprint()
+            || image.plan_digest != *self.plan.digest()
+            || image.state_capacity != self.state_capacity()?
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged state image model, plan, or capacity differs",
+            ));
+        }
+        let destinations = self.opaque_kv_states.as_ref().ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("Gemma Paged destination states are absent")
+        })?;
+        if destinations.keys().copied().collect::<BTreeSet<_>>()
+            != image
+                .full_kv_layers
+                .keys()
+                .chain(image.sliding_layers.keys())
+                .copied()
+                .collect::<BTreeSet<_>>()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged state image layer topology differs",
+            ));
+        }
+        for (&layer, destination) in destinations {
+            let entry = image
+                .full_kv_layers
+                .get(&layer)
+                .map(|entry| (&entry.descriptor, &entry.image))
+                .or_else(|| {
+                    image
+                        .sliding_layers
+                        .get(&layer)
+                        .map(|entry| (&entry.descriptor, &entry.image))
+                })
+                .ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid(format!(
+                        "Gemma Paged state image layer {layer} is absent"
+                    ))
+                })?;
+            if *entry.0 != destination.descriptor() {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "Gemma Paged state image layer {layer} descriptor differs"
+                )));
+            }
+            self.session
+                .import_kv_state_image_v2(destination, entry.1)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            let snapshot = self
+                .session
+                .kv_state_snapshot(destination)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            if snapshot.length() != image.committed_length {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "restored Gemma Paged layer {layer} length differs"
+                )));
+            }
+        }
+        self.state
+            .restore_prefix(image.committed_length)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        self.committed_length = image.committed_length;
+        self.rope_position_delta = image.rope_position_delta;
+        self.last_output = image.cached_terminal_output.clone();
+        Ok(())
     }
 
     fn restore_checkpoint(
@@ -2894,6 +3666,134 @@ impl Gemma4ExecutionRequest {
         };
         validate_gemma_state_image(&image, false)?;
         self.restore_validated_state_image(&image)
+    }
+
+    fn restore_checkpoint_v2(
+        &mut self,
+        checkpoint: &SessionCheckpointV2,
+        expected_identity: &CheckpointIdentity,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        let state_snapshot = self
+            .state
+            .snapshot()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if state_snapshot.poisoned || self.committed_length != 0 || self.last_output.is_some() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged checkpoint restore requires a fresh, quiescent request",
+            ));
+        }
+        checkpoint
+            .validate()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if checkpoint.header.identity != *expected_identity {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged checkpoint identity differs from restore caller",
+            ));
+        }
+        let logical_position = checkpoint.header.logical_position;
+        if logical_position == 0
+            || logical_position != checkpoint.header.token_count
+            || logical_position != checkpoint.payload.token_history.len() as u64
+            || logical_position > self.state_capacity()?
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged checkpoint position or token history differs",
+            ));
+        }
+        let rope_position_delta = checkpoint
+            .header
+            .absolute_position
+            .checked_sub(logical_position)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(
+                    "Gemma Paged checkpoint RoPE position delta is invalid",
+                )
+            })?;
+        let destinations = self.opaque_kv_states.as_ref().ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("Gemma Paged destination states are absent")
+        })?;
+        let expected_keys = destinations.keys().copied().collect::<BTreeSet<_>>();
+        let actual_keys = checkpoint
+            .payload
+            .paged_state_layers
+            .iter()
+            .map(|image| image.metadata().layer_id)
+            .collect::<BTreeSet<_>>();
+        if actual_keys.len() != checkpoint.payload.paged_state_layers.len()
+            || actual_keys != expected_keys
+            || !checkpoint.payload.linear_state_layers.is_empty()
+            || !checkpoint.payload.linear_state_planes.is_empty()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged checkpoint layer topology differs",
+            ));
+        }
+        let mut full_kv_layers = BTreeMap::new();
+        let mut sliding_layers = BTreeMap::new();
+        for (&layer, destination) in destinations {
+            let image = checkpoint
+                .payload
+                .paged_state_layers
+                .iter()
+                .find(|image| image.metadata().layer_id == layer)
+                .ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid(format!(
+                        "Gemma Paged checkpoint layer {layer} is absent"
+                    ))
+                })?;
+            if image.paged_metadata().descriptor() != destination.descriptor() {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "Gemma Paged checkpoint layer {layer} descriptor differs"
+                )));
+            }
+            let sliding = destination.descriptor().sliding_window().is_some();
+            validate_gemma_paged_layer_image(
+                image,
+                layer,
+                destination.descriptor(),
+                logical_position,
+                sliding,
+            )?;
+            if sliding {
+                sliding_layers.insert(
+                    layer,
+                    Gemma4SlidingStateImageV2 {
+                        descriptor: destination.descriptor(),
+                        image: image.clone(),
+                    },
+                );
+            } else {
+                full_kv_layers.insert(
+                    layer,
+                    Gemma4KvStateImageV2 {
+                        descriptor: destination.descriptor(),
+                        image: image.clone(),
+                    },
+                );
+            }
+        }
+        let image = Gemma4StateImageV2 {
+            session_id: self.session.id(),
+            model_fingerprint: self.lock.fingerprint().to_owned(),
+            plan_digest: *self.plan.digest(),
+            state_capacity: self.state_capacity()?,
+            committed_length: logical_position,
+            rope_position_delta,
+            full_kv_layers,
+            sliding_layers,
+            cached_terminal_output: None,
+        };
+        if expected_identity.model_lock_fingerprint != image.model_fingerprint
+            || expected_identity.plan_digest != gemma_hex_digest(&image.plan_digest)
+            || expected_identity.kv_encoding != image.kv_encoding()?
+            || expected_identity.kv_descriptor_digest != image.kv_descriptor_digest()?
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma Paged checkpoint model, plan, or KV identity differs",
+            ));
+        }
+        self.restore_state_image_v2(&image)
     }
 
     /// Imports a fully validated image into this fresh request. Publication
@@ -3256,6 +4156,46 @@ impl Gemma4ExecutionRequest {
         suffix: &[i32],
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         self.decode_continuation(suffix)
+    }
+
+    /// Continues a restored prefix while retaining the final logits row for
+    /// sampler and grammar paths that require it.
+    pub fn continue_from_prefix_with_last_logits(
+        &mut self,
+        suffix: &[i32],
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        if suffix.is_empty() {
+            return self.last_output.clone().ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(
+                    "empty continuation has no cached terminal output",
+                )
+            });
+        }
+        if self.committed_length == 0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "continuation requires an installed non-empty prefix",
+            ));
+        }
+        validate_gemma_input_token_ids(suffix)?;
+        let end = self
+            .committed_length
+            .checked_add(u64::try_from(suffix.len()).map_err(|_| {
+                Gemma4ExecutionLayoutError::invalid("continuation length overflowed")
+            })?)
+            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("continuation length overflowed"))?;
+        if end > self.state_capacity()? {
+            return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                "continuation end {end} exceeds request capacity {}",
+                self.state_capacity()?
+            )));
+        }
+        let mut final_output = None;
+        for &token_id in suffix {
+            final_output = Some(self.decode_with_last_logits(token_id)?);
+        }
+        final_output.ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("continuation produced no terminal output")
+        })
     }
 
     fn install_prefix(
@@ -4627,13 +5567,10 @@ impl Gemma4ProvisionedBuffers {
                     return Ok(());
                 }
 
-                let full_attention = matches!(
-                    graph_node.kind(),
-                    Gemma4GraphNodeKind::CausalAttention(contract)
-                        if contract.sliding_window.is_none()
-                );
+                let stateful_attention =
+                    matches!(graph_node.kind(), Gemma4GraphNodeKind::CausalAttention(_));
                 if let (true, Some(states)) = (
-                    node.descriptor.kind() == SemanticOpKind::CausalAttention && full_attention,
+                    node.descriptor.kind() == SemanticOpKind::CausalAttention && stateful_attention,
                     opaque_kv_states,
                 ) {
                     if planned.boundary_after().is_some()
@@ -4689,11 +5626,31 @@ impl Gemma4ProvisionedBuffers {
                     drop(append);
                     let query = self.bind(layout, node.inputs[0], AccessMode::Read)?;
                     let output = self.bind(layout, node.outputs[0], AccessMode::Write)?;
-                    let descriptor = crate::CausalAttentionDescriptor::new(
-                        graph.start_position(),
-                        graph.token_count(),
-                        graph.expected_length(),
-                    )
+                    let descriptor = if let Some(window) = state.descriptor().sliding_window() {
+                        crate::CausalAttentionDescriptor::new_sliding_scaled(
+                            graph.start_position(),
+                            graph.token_count(),
+                            graph.expected_length(),
+                            window,
+                            1.0,
+                        )
+                    } else if state.descriptor().static_fp8_scales() == Some((1.0, 1.0)) {
+                        crate::CausalAttentionDescriptor::new_scaled(
+                            graph.start_position(),
+                            graph.token_count(),
+                            graph.expected_length(),
+                            1.0,
+                        )
+                    } else {
+                        // Non-unit static KV scales use the native implicit
+                        // score scale; explicit score scaling is rejected by
+                        // the reviewed Paged provider for this recipe.
+                        crate::CausalAttentionDescriptor::new(
+                            graph.start_position(),
+                            graph.token_count(),
+                            graph.expected_length(),
+                        )
+                    }
                     .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
                     let attention = self
                         .session
@@ -7499,6 +8456,129 @@ mod tests {
         }
     }
 
+    fn synthetic_paged_state_image() -> Gemma4StateImageV2 {
+        let committed_length = 129_u64;
+        let state_capacity = 2_048_u64;
+        let block_capacity = state_capacity.div_ceil(128);
+        let mut full_kv_layers = BTreeMap::new();
+        let mut sliding_layers = BTreeMap::new();
+        for (layer, kind) in crate::reviewed_layer_schedule().into_iter().enumerate() {
+            let layer = u32::try_from(layer).unwrap();
+            let metadata = StateLayerMetadataV1 {
+                owner: StateOwnerKindV1::Kv,
+                layer_id: layer,
+                published_length: committed_length,
+                generation: u64::from(layer) + 1,
+                active_slot: None,
+            };
+            let (descriptor, topology, physical_capacity, sliding) = match kind {
+                Gemma4LayerType::FullAttention => {
+                    let descriptor = KvStateDescriptor::new_with_static_fp8(
+                        layer,
+                        state_capacity,
+                        1,
+                        1,
+                        0.5,
+                        0.75,
+                    )
+                    .unwrap();
+                    let table = (0..block_capacity)
+                        .map(|block| u32::try_from(block).unwrap())
+                        .collect();
+                    (
+                        descriptor,
+                        KvPagedImageTopologyV1::LogicalTable(table),
+                        block_capacity,
+                        false,
+                    )
+                }
+                Gemma4LayerType::SlidingAttention => {
+                    let descriptor = KvStateDescriptor::new_with_static_fp8_sliding(
+                        layer,
+                        state_capacity,
+                        1,
+                        1,
+                        1_024,
+                    )
+                    .unwrap();
+                    let mut block_ids =
+                        [crate::KV_PAGED_INVALID_BLOCK_ID; crate::KV_PAGED_RING_SLOT_COUNT];
+                    let mut absolute_tags =
+                        [crate::KV_PAGED_INVALID_TAG; crate::KV_PAGED_RING_SLOT_COUNT];
+                    block_ids[0] = 0;
+                    block_ids[1] = 1;
+                    absolute_tags[0] = 0;
+                    absolute_tags[1] = 1;
+                    (
+                        descriptor,
+                        KvPagedImageTopologyV1::SlidingRing(crate::KvPagedRingTableV1::new(
+                            block_ids,
+                            absolute_tags,
+                        )),
+                        crate::KV_PAGED_RING_SLOT_COUNT as u64,
+                        true,
+                    )
+                }
+            };
+            let strides = [128, 128, 0, 0, 0, 0];
+            let paged_metadata = crate::KvPagedImageMetadataV1::new(
+                descriptor,
+                committed_length,
+                u64::from(layer) + 1,
+                0,
+                if sliding { 1_024 } else { 0 },
+                physical_capacity,
+                strides,
+                topology,
+            )
+            .unwrap();
+            let planes = std::array::from_fn(|index| {
+                vec![layer as u8, index as u8]
+                    .into_iter()
+                    .cycle()
+                    .take((physical_capacity * strides[index]) as usize)
+                    .collect::<Vec<_>>()
+            });
+            let image = ExecutionStateImageV2::new(metadata, paged_metadata, planes).unwrap();
+            if sliding {
+                sliding_layers.insert(layer, Gemma4SlidingStateImageV2 { descriptor, image });
+            } else {
+                full_kv_layers.insert(layer, Gemma4KvStateImageV2 { descriptor, image });
+            }
+        }
+        Gemma4StateImageV2 {
+            session_id: crate::ExecutionSessionId::new(92),
+            model_fingerprint: format!("sha256:{}", "2".repeat(64)),
+            plan_digest: [4; 32],
+            state_capacity,
+            committed_length,
+            rope_position_delta: 4,
+            full_kv_layers,
+            sliding_layers,
+            cached_terminal_output: None,
+        }
+    }
+
+    fn synthetic_paged_checkpoint_identity(
+        image: &Gemma4StateImageV2,
+        tokens: &[u32],
+    ) -> CheckpointIdentity {
+        CheckpointIdentity::for_tokens(
+            image.model_fingerprint(),
+            "derived",
+            "adapter",
+            "renderer",
+            "tokenizer",
+            "gfx1201:wave32",
+            gemma_hex_digest(image.plan_digest()),
+            tokens,
+            image.kv_encoding().unwrap(),
+            image.kv_descriptor_digest().unwrap(),
+            [5; 32],
+        )
+        .unwrap()
+    }
+
     fn synthetic_checkpoint_identity(
         image: &Gemma4StateImageV1,
         tokens: &[u32],
@@ -7886,6 +8966,98 @@ mod tests {
         assert_eq!(checkpoint.header.logical_position, 1);
         let encoded = checkpoint.encode().unwrap();
         assert_eq!(SessionCheckpoint::decode(&encoded).unwrap(), checkpoint);
+    }
+
+    #[test]
+    fn paged_v2_state_image_covers_full_and_sliding_ring_topology() {
+        let image = synthetic_paged_state_image();
+        assert_eq!(image.full_kv_layers().len(), 8);
+        assert_eq!(image.sliding_layers().len(), 40);
+        assert_eq!(image.committed_length(), 129);
+        assert_eq!(
+            image.kv_encoding().unwrap(),
+            KvCacheEncoding::Fp8E4M3FnStatic
+        );
+        assert!(image.full_kv_layers().values().all(|entry| matches!(
+            entry.paged_metadata().topology(),
+            KvPagedImageTopologyV1::LogicalTable(_)
+        )));
+        assert!(image.sliding_layers().values().all(|entry| {
+            entry.retention_window() == Some(1_024)
+                && matches!(
+                    entry.paged_metadata().topology(),
+                    KvPagedImageTopologyV1::SlidingRing(_)
+                )
+        }));
+        validate_gemma_state_image_v2(&image, false).unwrap();
+    }
+
+    #[test]
+    fn paged_v2_checkpoint_round_trip_preserves_ring_and_scale_identity() {
+        let image = synthetic_paged_state_image();
+        let tokens = vec![7_u32; image.committed_length() as usize];
+        let checkpoint = image
+            .to_checkpoint_v2(
+                synthetic_paged_checkpoint_identity(&image, &tokens),
+                &tokens,
+                b"conversation",
+                b"sampler",
+                b"grammar",
+                b"stop",
+                133,
+                129,
+                9,
+            )
+            .unwrap();
+        assert_eq!(checkpoint.payload.paged_state_layers.len(), 48);
+        let encoded = checkpoint.encode().unwrap();
+        let decoded = SessionCheckpointV2::decode(&encoded).unwrap();
+        assert_eq!(decoded, checkpoint);
+        let decoded_layers = decoded
+            .payload
+            .paged_state_layers
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.paged_metadata().topology(),
+                    KvPagedImageTopologyV1::SlidingRing(_)
+                )
+            })
+            .count();
+        assert_eq!(decoded_layers, 40);
+    }
+
+    #[test]
+    fn paged_v2_validation_rejects_ring_scale_and_length_drift() {
+        let image = synthetic_paged_state_image();
+        let mut wrong_scale = image.clone();
+        let layer = *wrong_scale.sliding_layers.keys().next().unwrap();
+        wrong_scale
+            .sliding_layers
+            .get_mut(&layer)
+            .unwrap()
+            .descriptor = KvStateDescriptor::new_with_static_fp8(
+            layer,
+            wrong_scale.state_capacity,
+            1,
+            1,
+            0.5,
+            0.75,
+        )
+        .unwrap();
+        assert!(validate_gemma_state_image_v2(&wrong_scale, false).is_err());
+
+        let mut wrong_role = image.clone();
+        let layer = *wrong_role.full_kv_layers.keys().next().unwrap();
+        let entry = wrong_role.full_kv_layers.remove(&layer).unwrap();
+        wrong_role.sliding_layers.insert(
+            layer,
+            Gemma4SlidingStateImageV2 {
+                descriptor: entry.descriptor,
+                image: entry.image,
+            },
+        );
+        assert!(validate_gemma_state_image_v2(&wrong_role, false).is_err());
     }
 
     #[test]

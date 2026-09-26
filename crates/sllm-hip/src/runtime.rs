@@ -1835,19 +1835,6 @@ pub(crate) fn enqueue_kv_state_cleanup(
     });
 }
 
-pub(crate) fn enqueue_kv_view_cleanup(
-    raw: NonNull<sys::sllm_kv_view_t>,
-    context: Context,
-    status: RuntimeStatus,
-) {
-    let (_, disposition, _) = classify_release(status, Some(raw));
-    enqueue_cleanup(PendingCleanup::KvView {
-        raw: Some(raw),
-        context,
-        disposition,
-    });
-}
-
 pub(crate) fn enqueue_kv_completion_cleanup(
     raw: NonNull<sys::sllm_completion_t>,
     context: Context,

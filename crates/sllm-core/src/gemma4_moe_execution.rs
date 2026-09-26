@@ -42,12 +42,14 @@ use crate::weights::{
 use crate::{
     AccessMode, AllocationCategory, CausalAttentionDescriptor, DType, DeviceTokenSelectorRequestV1,
     Encoding, ExecutionBuffer, ExecutionQueue, ExecutionSession, ExecutionSessionId,
-    ExecutionState, ExecutionStateImageV1, KvCacheEncoding, KvPhysicalMemorySnapshot, KvState,
+    ExecutionState, ExecutionStateImageV1, ExecutionStateImageV2, KvCacheEncoding,
+    KvPagedImageTopologyV1, KvPhysicalMemoryMetadata, KvPhysicalMemorySnapshot, KvState,
     KvStateDescriptor, OwnedTensorBinding, PreparedExecutionAudit, PreparedOperation,
     SamplingSelectionV1, StateForkAuditV1, StateForkModeV1, TensorDType, TensorView,
 };
 use crate::{
-    CheckpointIdentity, CheckpointPayload, SessionCheckpoint, StateOwnerKindV1, StatePlaneKindV1,
+    CheckpointIdentity, CheckpointPayload, CheckpointPayloadV2, SessionCheckpoint,
+    SessionCheckpointV2, StateOwnerKindV1, StatePlaneKindV1,
 };
 
 const ROUTE_EXPERT_COUNT: u64 = 128;
@@ -1565,6 +1567,29 @@ impl Gemma4MoeKvStateImageV1 {
     }
 }
 
+/// One topology-aware Paged static-FP8 KV layer in the additive Gemma MoE
+/// state-image contract. The descriptor retains whether the layer is full or
+/// a 1024-token sliding ring; the V2 image carries the physical topology.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Gemma4MoeKvStateImageV2 {
+    descriptor: KvStateDescriptor,
+    image: ExecutionStateImageV2,
+}
+
+impl Gemma4MoeKvStateImageV2 {
+    pub const fn descriptor(&self) -> KvStateDescriptor {
+        self.descriptor
+    }
+
+    pub const fn image(&self) -> &ExecutionStateImageV2 {
+        &self.image
+    }
+
+    pub const fn paged_metadata(&self) -> &crate::KvPagedImageMetadataV1 {
+        self.image.paged_metadata()
+    }
+}
+
 /// Complete state of all 30 opaque Gemma 4 MoE KV layers.  Sliding layers
 /// carry the backend's retained W+1 ring image while full-attention layers
 /// carry their complete prefix; native state handles are never serialized.
@@ -1734,6 +1759,165 @@ impl Gemma4MoeStateImageV1 {
     }
 }
 
+/// Complete topology-aware Paged image for all 30 heterogeneous Gemma MoE
+/// KV layers. V1 state images remain the compatibility path.
+#[derive(Clone, PartialEq)]
+pub struct Gemma4MoeStateImageV2 {
+    session_id: ExecutionSessionId,
+    identity: Gemma4MoePrefixIdentityV1,
+    committed_length: u64,
+    kv_layers: BTreeMap<u32, Gemma4MoeKvStateImageV2>,
+    cached_terminal_output: Option<Gemma4MoeExecutionOutput>,
+}
+
+impl fmt::Debug for Gemma4MoeStateImageV2 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Gemma4MoeStateImageV2")
+            .field("session_id", &self.session_id)
+            .field("identity", &"<redacted>")
+            .field("committed_length", &self.committed_length)
+            .field("kv_layer_count", &self.kv_layers.len())
+            .field(
+                "has_cached_terminal_output",
+                &self.cached_terminal_output.is_some(),
+            )
+            .finish()
+    }
+}
+
+impl Gemma4MoeStateImageV2 {
+    pub const fn session_id(&self) -> ExecutionSessionId {
+        self.session_id
+    }
+
+    pub const fn committed_length(&self) -> u64 {
+        self.committed_length
+    }
+
+    pub fn model_fingerprint(&self) -> &str {
+        &self.identity.model_fingerprint
+    }
+
+    pub fn source_container_identity(&self) -> &str {
+        &self.identity.source_container_identity
+    }
+
+    pub const fn plan_digest(&self) -> &[u8; 32] {
+        &self.identity.plan_digest
+    }
+
+    pub const fn config_digest(&self) -> &[u8; 32] {
+        &self.identity.config_digest
+    }
+
+    pub const fn state_capacity(&self) -> u64 {
+        self.identity.state_capacity
+    }
+
+    pub const fn kv_layers(&self) -> &BTreeMap<u32, Gemma4MoeKvStateImageV2> {
+        &self.kv_layers
+    }
+
+    pub const fn cached_terminal_output(&self) -> Option<&Gemma4MoeExecutionOutput> {
+        self.cached_terminal_output.as_ref()
+    }
+
+    pub fn without_terminal_output(mut self) -> Self {
+        self.cached_terminal_output = None;
+        self
+    }
+
+    pub fn kv_descriptor_digest(&self) -> [u8; 32] {
+        gemma4_moe_kv_descriptor_digest(
+            &self.identity,
+            self.kv_layers
+                .iter()
+                .map(|(layer, image)| (*layer, image.descriptor)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn to_checkpoint_v2(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpointV2, Gemma4MoeExecutionError> {
+        validate_gemma4_moe_state_image_topology_v2(self)?;
+        if token_history.len() as u64 != self.committed_length
+            || logical_position != self.committed_length
+            || absolute_position != logical_position
+        {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "V2 checkpoint positions or token history differ from Gemma 4 MoE state",
+            ));
+        }
+        if identity.model_lock_fingerprint != self.identity.model_fingerprint
+            || identity.plan_digest != gemma4_moe_hex_digest(&self.identity.plan_digest)
+            || identity.kv_encoding != KvCacheEncoding::Fp8E4M3FnStatic
+            || identity.kv_descriptor_digest != self.kv_descriptor_digest()
+        {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "V2 checkpoint identity differs from Gemma 4 MoE state",
+            ));
+        }
+        SessionCheckpointV2::new(
+            identity,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+            CheckpointPayloadV2 {
+                token_history: token_history.to_vec(),
+                conversation: conversation.to_vec(),
+                paged_state_layers: self
+                    .kv_layers
+                    .values()
+                    .map(|entry| entry.image.clone())
+                    .collect(),
+                linear_state_layers: Vec::new(),
+                linear_state_planes: Vec::new(),
+                sampler_state: sampler_state.to_vec(),
+                grammar_state: grammar_state.to_vec(),
+                stop_state: stop_state.to_vec(),
+            },
+        )
+        .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint_v2(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpointV2, Gemma4MoeExecutionError> {
+        self.to_checkpoint_v2(
+            identity,
+            token_history,
+            conversation,
+            sampler_state,
+            grammar_state,
+            stop_state,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+        )
+    }
+}
+
 /// Aggregated, redacted ownership evidence for all 30 prefix forks.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Gemma4MoePrefixForkAuditV1 {
@@ -1776,6 +1960,11 @@ impl Gemma4MoePrefixForkAuditV1 {
         physical: Option<KvPhysicalMemorySnapshot>,
         fallback_resident_bytes: u64,
     ) -> Result<(), Gemma4MoeExecutionError> {
+        if audit.mode() == StateForkModeV1::SharedPagedBlocks {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "Gemma4 MoE does not use Paged KV fork metadata",
+            ));
+        }
         self.kv_states = self
             .kv_states
             .checked_add(1)
@@ -1807,6 +1996,11 @@ impl Gemma4MoePrefixForkAuditV1 {
                 .and_then(|snapshot| snapshot.committed_bytes_per_plane().checked_mul(2))
                 .unwrap_or(fallback_resident_bytes),
             StateForkModeV1::DeviceCopy => audit.destination_owned_bytes(),
+            StateForkModeV1::SharedPagedBlocks => {
+                return Err(Gemma4MoeExecutionError::invalid(
+                    "Gemma4 MoE does not use Paged KV fork metadata",
+                ));
+            }
         };
         self.cache_resident_bytes = self
             .cache_resident_bytes
@@ -2038,6 +2232,18 @@ impl Gemma4MoeResidentModel {
         Ok(request)
     }
 
+    /// Creates a fresh request and imports all 30 topology-aware Paged KV
+    /// layers from a same-session V2 image.
+    pub fn new_request_from_state_image_v2(
+        &self,
+        image: &Gemma4MoeStateImageV2,
+        graph: Gemma4MoeGraph,
+    ) -> Result<Gemma4MoeExecutionRequest, Gemma4MoeExecutionError> {
+        let mut request = self.new_request(graph)?;
+        request.restore_state_image_v2(image)?;
+        Ok(request)
+    }
+
     pub fn restore_request_from_state_image(
         &self,
         image: &Gemma4MoeStateImageV1,
@@ -2093,6 +2299,18 @@ impl Gemma4MoeResidentModel {
     ) -> Result<Gemma4MoeExecutionRequest, Gemma4MoeExecutionError> {
         let mut request = self.new_request(graph)?;
         request.restore_checkpoint(checkpoint, expected_identity)?;
+        Ok(request)
+    }
+
+    /// Restores a topology-aware Paged V2 checkpoint into a fresh request.
+    pub fn new_request_from_checkpoint_v2(
+        &self,
+        checkpoint: &SessionCheckpointV2,
+        graph: Gemma4MoeGraph,
+        expected_identity: &CheckpointIdentity,
+    ) -> Result<Gemma4MoeExecutionRequest, Gemma4MoeExecutionError> {
+        let mut request = self.new_request(graph)?;
+        request.restore_checkpoint_v2(checkpoint, expected_identity)?;
         Ok(request)
     }
 
@@ -2416,6 +2634,24 @@ impl Gemma4MoeExecutionRequest {
         self.transition_committed
     }
 
+    /// Returns the backend-reported physical metadata for every opaque KV
+    /// layer.  The request owns heterogeneous sliding/full attention layers,
+    /// so callers must not assume one layer's table or plane-byte values apply
+    /// to all 30 layers.
+    pub fn kv_physical_memory_audit(
+        &self,
+    ) -> Result<Vec<(u32, Option<KvPhysicalMemoryMetadata>)>, Gemma4MoeExecutionError> {
+        self.kv_states
+            .iter()
+            .map(|state| {
+                let snapshot = state
+                    .snapshot(self._resident.session.as_ref())
+                    .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+                Ok((state.layer_id(), snapshot.physical_metadata()))
+            })
+            .collect()
+    }
+
     /// Exports all 30 quiescent opaque KV states. Publication is rejected
     /// during a transition and after any fail-closed poisoning.
     pub fn state_image(&self) -> Result<Gemma4MoeStateImageV1, Gemma4MoeExecutionError> {
@@ -2477,6 +2713,67 @@ impl Gemma4MoeExecutionRequest {
         self.state_image()
     }
 
+    /// Exports all 30 quiescent static-FP8 Paged KV layers with full logical
+    /// or sliding-ring topology preserved.
+    pub fn state_image_v2(&self) -> Result<Gemma4MoeStateImageV2, Gemma4MoeExecutionError> {
+        if self.poisoned {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "poisoned request state cannot be exported",
+            ));
+        }
+        if !self.transition_committed {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "Paged V2 state image export requires a completed transition",
+            ));
+        }
+        let committed_length = self.committed_length()?;
+        if committed_length == 0 {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "Paged V2 state image export requires a non-empty prefix",
+            ));
+        }
+        let capacity = self.state_capacity()?;
+        let identity = gemma4_moe_prefix_identity(&self._resident, capacity);
+        let mut kv_layers = BTreeMap::new();
+        for state in &self.kv_states {
+            let image = self
+                ._resident
+                .session
+                .export_kv_state_image_v2(state)
+                .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+            validate_gemma4_moe_paged_layer_image(
+                &image,
+                state.layer_id(),
+                state.descriptor(),
+                committed_length,
+            )?;
+            kv_layers.insert(
+                state.layer_id(),
+                Gemma4MoeKvStateImageV2 {
+                    descriptor: state.descriptor(),
+                    image,
+                },
+            );
+        }
+        let image = Gemma4MoeStateImageV2 {
+            session_id: self._resident.session.id(),
+            identity,
+            committed_length,
+            kv_layers,
+            cached_terminal_output: self.last_output.clone(),
+        };
+        validate_gemma4_moe_state_image_topology_v2(&image)?;
+        Ok(image)
+    }
+
+    pub fn export_state_image_v2(&self) -> Result<Gemma4MoeStateImageV2, Gemma4MoeExecutionError> {
+        self.state_image_v2()
+    }
+
+    pub fn save_state_image_v2(&self) -> Result<Gemma4MoeStateImageV2, Gemma4MoeExecutionError> {
+        self.state_image_v2()
+    }
+
     /// Captures the completed request directly into the common persistent
     /// checkpoint envelope. Terminal output remains request-local.
     #[allow(clippy::too_many_arguments)]
@@ -2493,6 +2790,32 @@ impl Gemma4MoeExecutionRequest {
         generation_state_version: u32,
     ) -> Result<SessionCheckpoint, Gemma4MoeExecutionError> {
         self.state_image()?.without_terminal_output().to_checkpoint(
+            identity,
+            token_history,
+            conversation,
+            sampler_state,
+            grammar_state,
+            stop_state,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint_v2(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpointV2, Gemma4MoeExecutionError> {
+        self.state_image_v2()?.to_checkpoint_v2(
             identity,
             token_history,
             conversation,
@@ -3204,6 +3527,70 @@ impl Gemma4MoeExecutionRequest {
         Ok(())
     }
 
+    fn restore_state_image_v2(
+        &mut self,
+        image: &Gemma4MoeStateImageV2,
+    ) -> Result<(), Gemma4MoeExecutionError> {
+        self.ensure_fresh_restore_destination()?;
+        if image.session_id != self._resident.session.id() {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "Paged V2 state image belongs to a different execution session",
+            ));
+        }
+        let expected_identity = gemma4_moe_prefix_identity(&self._resident, self.state_capacity()?);
+        if image.identity != expected_identity {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "Paged V2 state image model/source/config/plan/capacity identity differs",
+            ));
+        }
+        validate_gemma4_moe_state_image_topology_v2(image)?;
+        if image
+            .kv_layers
+            .keys()
+            .copied()
+            .ne(self.kv_states.iter().map(KvState::layer_id))
+        {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "Paged V2 state image layer topology differs from the fresh graph",
+            ));
+        }
+        for destination in &self.kv_states {
+            let entry = image
+                .kv_layers
+                .get(&destination.layer_id())
+                .ok_or_else(|| {
+                    Gemma4MoeExecutionError::invalid(format!(
+                        "Paged V2 state image KV layer {} is absent",
+                        destination.layer_id()
+                    ))
+                })?;
+            if entry.descriptor != destination.descriptor() {
+                return Err(Gemma4MoeExecutionError::invalid(format!(
+                    "Paged V2 state image KV layer {} descriptor differs",
+                    destination.layer_id()
+                )));
+            }
+            self._resident
+                .session
+                .import_kv_state_image_v2(destination, &entry.image)
+                .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+            let snapshot = destination
+                .snapshot(self._resident.session.as_ref())
+                .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+            if snapshot.length() != image.committed_length {
+                return Err(Gemma4MoeExecutionError::invalid(format!(
+                    "restored Paged V2 KV layer {} length differs",
+                    destination.layer_id()
+                )));
+            }
+        }
+        self.publish_restored_boundary(
+            image.committed_length,
+            image.cached_terminal_output.clone(),
+        );
+        Ok(())
+    }
+
     fn restore_checkpoint(
         &mut self,
         checkpoint: &SessionCheckpoint,
@@ -3307,6 +3694,108 @@ impl Gemma4MoeExecutionRequest {
             cached_terminal_output: None,
         };
         self.restore_state_image(&image)
+    }
+
+    fn restore_checkpoint_v2(
+        &mut self,
+        checkpoint: &SessionCheckpointV2,
+        expected_identity: &CheckpointIdentity,
+    ) -> Result<(), Gemma4MoeExecutionError> {
+        self.ensure_fresh_restore_destination()?;
+        checkpoint
+            .validate()
+            .map_err(|error| Gemma4MoeExecutionError::invalid(error.to_string()))?;
+        if checkpoint.header.identity != *expected_identity {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "V2 checkpoint frontend identity differs from restore caller",
+            ));
+        }
+        let identity = gemma4_moe_prefix_identity(&self._resident, self.state_capacity()?);
+        if expected_identity.model_lock_fingerprint != identity.model_fingerprint
+            || expected_identity.plan_digest != gemma4_moe_hex_digest(&identity.plan_digest)
+            || expected_identity.kv_encoding != KvCacheEncoding::Fp8E4M3FnStatic
+            || expected_identity.kv_descriptor_digest
+                != gemma4_moe_kv_descriptor_digest(
+                    &identity,
+                    self.kv_states
+                        .iter()
+                        .map(|state| (state.layer_id(), state.descriptor())),
+                )
+        {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "V2 checkpoint model, plan, or KV descriptor identity differs",
+            ));
+        }
+        let committed_length = checkpoint.header.logical_position;
+        if committed_length == 0
+            || committed_length != checkpoint.header.token_count
+            || committed_length != checkpoint.payload.token_history.len() as u64
+            || checkpoint.header.absolute_position != committed_length
+            || committed_length > identity.state_capacity
+            || !checkpoint.payload.linear_state_layers.is_empty()
+            || !checkpoint.payload.linear_state_planes.is_empty()
+        {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "V2 checkpoint position, topology, or linear state differs",
+            ));
+        }
+        let actual_keys = checkpoint
+            .payload
+            .paged_state_layers
+            .iter()
+            .map(|image| image.metadata().layer_id)
+            .collect::<BTreeSet<_>>();
+        let expected_keys = self
+            .kv_states
+            .iter()
+            .map(KvState::layer_id)
+            .collect::<BTreeSet<_>>();
+        if actual_keys.len() != checkpoint.payload.paged_state_layers.len()
+            || actual_keys != expected_keys
+        {
+            return Err(Gemma4MoeExecutionError::invalid(
+                "V2 checkpoint layer topology differs from the fresh graph",
+            ));
+        }
+        let mut kv_layers = BTreeMap::new();
+        for destination in &self.kv_states {
+            let layer = destination.layer_id();
+            let paged = checkpoint
+                .payload
+                .paged_state_layers
+                .iter()
+                .find(|image| image.metadata().layer_id == layer)
+                .ok_or_else(|| {
+                    Gemma4MoeExecutionError::invalid(format!(
+                        "V2 checkpoint KV layer {layer} is absent"
+                    ))
+                })?;
+            if paged.paged_metadata().descriptor() != destination.descriptor() {
+                return Err(Gemma4MoeExecutionError::invalid(format!(
+                    "V2 checkpoint KV layer {layer} descriptor differs"
+                )));
+            }
+            validate_gemma4_moe_paged_layer_image(
+                paged,
+                layer,
+                destination.descriptor(),
+                committed_length,
+            )?;
+            kv_layers.insert(
+                layer,
+                Gemma4MoeKvStateImageV2 {
+                    descriptor: destination.descriptor(),
+                    image: paged.clone(),
+                },
+            );
+        }
+        self.restore_state_image_v2(&Gemma4MoeStateImageV2 {
+            session_id: self._resident.session.id(),
+            identity,
+            committed_length,
+            kv_layers,
+            cached_terminal_output: None,
+        })
     }
 
     fn install_prefix(
@@ -3788,6 +4277,80 @@ fn validate_gemma4_moe_state_image_topology(
             )));
         }
         validate_gemma4_moe_layer_image(
+            &entry.image,
+            layer,
+            entry.descriptor,
+            image.committed_length,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_gemma4_moe_paged_layer_image(
+    image: &ExecutionStateImageV2,
+    layer: u32,
+    descriptor: KvStateDescriptor,
+    expected_length: u64,
+) -> Result<(), Gemma4MoeExecutionError> {
+    let metadata = image.metadata();
+    let paged = image.paged_metadata();
+    if metadata.owner != StateOwnerKindV1::Kv
+        || metadata.layer_id != layer
+        || metadata.active_slot.is_some()
+        || metadata.published_length != expected_length
+        || paged.observed_length() != expected_length
+        || expected_length > descriptor.capacity()
+        || paged.descriptor() != descriptor
+        || metadata.generation != paged.generation()
+        || descriptor.cache_encoding() != KvCacheEncoding::Fp8E4M3FnStatic
+        || descriptor.static_fp8_scales() != Some((1.0, 1.0))
+    {
+        return Err(Gemma4MoeExecutionError::invalid(format!(
+            "Paged Gemma MoE layer {layer} metadata or static-FP8 descriptor differs"
+        )));
+    }
+    match descriptor.sliding_window() {
+        Some(1_024) => {
+            if !matches!(paged.topology(), KvPagedImageTopologyV1::SlidingRing(_)) {
+                return Err(Gemma4MoeExecutionError::invalid(format!(
+                    "Paged Gemma MoE sliding layer {layer} lacks ring topology"
+                )));
+            }
+        }
+        None => {
+            if !matches!(paged.topology(), KvPagedImageTopologyV1::LogicalTable(_)) {
+                return Err(Gemma4MoeExecutionError::invalid(format!(
+                    "Paged Gemma MoE full layer {layer} lacks logical topology"
+                )));
+            }
+        }
+        Some(_) => {
+            return Err(Gemma4MoeExecutionError::invalid(format!(
+                "Paged Gemma MoE layer {layer} has an unsupported sliding window"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_gemma4_moe_state_image_topology_v2(
+    image: &Gemma4MoeStateImageV2,
+) -> Result<(), Gemma4MoeExecutionError> {
+    if image.committed_length == 0
+        || image.committed_length > image.identity.state_capacity
+        || image.kv_layers.len() != 30
+        || image.kv_layers.keys().copied().ne(0_u32..30)
+        || image
+            .cached_terminal_output
+            .as_ref()
+            .is_some_and(|output| output.committed_length != image.committed_length)
+    {
+        return Err(Gemma4MoeExecutionError::invalid(
+            "Paged Gemma MoE state image topology or terminal output length differs",
+        ));
+    }
+    for (&layer, entry) in &image.kv_layers {
+        validate_gemma4_moe_paged_layer_image(
             &entry.image,
             layer,
             entry.descriptor,
@@ -4679,6 +5242,109 @@ mod tests {
         .unwrap()
     }
 
+    fn synthetic_paged_state_image(
+        request: &Gemma4MoeExecutionRequest,
+        committed_length: u64,
+    ) -> Gemma4MoeStateImageV2 {
+        let capacity = request.state_capacity().unwrap();
+        let identity = gemma4_moe_prefix_identity(&request._resident, capacity);
+        let graph = fresh_graph(1, capacity);
+        let mut kv_layers = BTreeMap::new();
+        for descriptor in graph.kv_descriptors() {
+            let state_descriptor = if let Some(window) = descriptor.retention_window {
+                KvStateDescriptor::new_with_static_fp8_sliding(
+                    descriptor.layer,
+                    capacity,
+                    descriptor.heads as usize,
+                    descriptor.head_dim as usize,
+                    window,
+                )
+                .unwrap()
+            } else {
+                KvStateDescriptor::new_with_static_fp8(
+                    descriptor.layer,
+                    capacity,
+                    descriptor.heads as usize,
+                    descriptor.head_dim as usize,
+                    1.0,
+                    1.0,
+                )
+                .unwrap()
+            };
+            let block_capacity = if descriptor.retention_window.is_some() {
+                capacity.div_ceil(128).max(9)
+            } else {
+                capacity.div_ceil(128)
+            };
+            let stride = u64::from(descriptor.heads) * u64::from(descriptor.head_dim) * 128;
+            let (topology, retained_start, sliding_window) =
+                if descriptor.retention_window.is_some() {
+                    let mut block_ids =
+                        [crate::KV_PAGED_INVALID_BLOCK_ID; crate::KV_PAGED_RING_SLOT_COUNT];
+                    let mut tags = [crate::KV_PAGED_INVALID_TAG; crate::KV_PAGED_RING_SLOT_COUNT];
+                    block_ids[0] = 0;
+                    block_ids[1] = 1;
+                    tags[0] = 0;
+                    tags[1] = 1;
+                    (
+                        KvPagedImageTopologyV1::SlidingRing(crate::KvPagedRingTableV1::new(
+                            block_ids, tags,
+                        )),
+                        committed_length.saturating_sub(1_024),
+                        1_024,
+                    )
+                } else {
+                    let table = (0..capacity.div_ceil(128))
+                        .map(|block| u32::try_from(block).unwrap())
+                        .collect();
+                    (KvPagedImageTopologyV1::LogicalTable(table), 0, 0)
+                };
+            let metadata = crate::KvPagedImageMetadataV1::new(
+                state_descriptor,
+                committed_length,
+                u64::from(descriptor.layer) + 1,
+                retained_start,
+                sliding_window,
+                block_capacity,
+                [stride, stride, 0, 0, 0, 0],
+                topology,
+            )
+            .unwrap();
+            let planes = std::array::from_fn(|index| {
+                vec![
+                    descriptor.layer as u8;
+                    (block_capacity * [stride, stride, 0, 0, 0, 0][index]) as usize
+                ]
+            });
+            let image = ExecutionStateImageV2::new(
+                crate::StateLayerMetadataV1 {
+                    owner: StateOwnerKindV1::Kv,
+                    layer_id: descriptor.layer,
+                    published_length: committed_length,
+                    generation: u64::from(descriptor.layer) + 1,
+                    active_slot: None,
+                },
+                metadata,
+                planes,
+            )
+            .unwrap();
+            kv_layers.insert(
+                descriptor.layer,
+                Gemma4MoeKvStateImageV2 {
+                    descriptor: state_descriptor,
+                    image,
+                },
+            );
+        }
+        Gemma4MoeStateImageV2 {
+            session_id: request._resident.session.id(),
+            identity,
+            committed_length,
+            kv_layers,
+            cached_terminal_output: None,
+        }
+    }
+
     #[test]
     fn state_image_mixes_retained_sliding_and_full_layers_and_resumes_without_reappend() {
         let (mut source, adapter, model) = test_request(1_017, 2_048);
@@ -4838,6 +5504,72 @@ mod tests {
                 .new_request_from_checkpoint(&wrong_checkpoint, fresh_graph(1, 2_048), &wrong)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn paged_v2_state_image_and_checkpoint_preserve_heterogeneous_topology() {
+        let (request, _adapter, _model) = test_request(1, 2_048);
+        let image = synthetic_paged_state_image(&request, 129);
+        validate_gemma4_moe_state_image_topology_v2(&image).unwrap();
+        assert_eq!(image.kv_layers().len(), 30);
+        assert_eq!(
+            image
+                .kv_layers()
+                .values()
+                .filter(|entry| entry.descriptor().sliding_window().is_some())
+                .count(),
+            25
+        );
+        assert_eq!(
+            image
+                .kv_layers()
+                .values()
+                .filter(|entry| entry.descriptor().sliding_window().is_none())
+                .count(),
+            5
+        );
+        let tokens = vec![0_u32; 129];
+        let identity = CheckpointIdentity::for_tokens(
+            image.model_fingerprint(),
+            image.source_container_identity(),
+            "no-adapter",
+            "test-renderer",
+            "test-tokenizer",
+            "test-gemma4-moe",
+            gemma4_moe_hex_digest(image.plan_digest()),
+            &tokens,
+            KvCacheEncoding::Fp8E4M3FnStatic,
+            image.kv_descriptor_digest(),
+            *image.config_digest(),
+        )
+        .unwrap();
+        let checkpoint = image
+            .to_checkpoint_v2(
+                identity,
+                &tokens,
+                b"conversation",
+                b"sampler",
+                b"grammar",
+                b"stop",
+                129,
+                129,
+                1,
+            )
+            .unwrap();
+        assert_eq!(checkpoint.payload.paged_state_layers.len(), 30);
+        let decoded = SessionCheckpointV2::decode(&checkpoint.encode().unwrap()).unwrap();
+        assert_eq!(decoded, checkpoint);
+    }
+
+    #[test]
+    fn paged_v2_rejects_wrong_ring_role_and_non_unit_scale() {
+        let (request, _adapter, _model) = test_request(1, 2_048);
+        let image = synthetic_paged_state_image(&request, 129);
+        let mut wrong = image.clone();
+        let layer = *wrong.kv_layers.keys().next().unwrap();
+        wrong.kv_layers.get_mut(&layer).unwrap().descriptor =
+            KvStateDescriptor::new_with_static_fp8(layer, 2_048, 1, 1, 0.5, 0.75).unwrap();
+        assert!(validate_gemma4_moe_state_image_topology_v2(&wrong).is_err());
     }
 
     #[test]

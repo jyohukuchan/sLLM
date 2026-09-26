@@ -30,14 +30,15 @@ use crate::device_sampling::{
 };
 use crate::execution::{
     ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, ExecutionStateImageV1,
-    KvState, KvStateAppendSubmission, LinearAttentionBindings, LinearAttentionState,
-    OwnedTensorBinding, PrepareSupport, PreparedOperation, Submission,
+    ExecutionStateImageV2, KvState, KvStateAppendSubmission, LinearAttentionBindings,
+    LinearAttentionState, OwnedTensorBinding, PrepareSupport, PreparedOperation, Submission,
 };
 use crate::final_output::QWEN35_VOCAB_SIZE;
 #[cfg(feature = "phase54-research")]
 use crate::kv_state::KvFp8PhysicalVariant;
 use crate::kv_state::{
-    CausalAttentionDescriptor, KvCacheEncoding, KvPhysicalMemorySnapshot, KvStateDescriptor,
+    CausalAttentionDescriptor, KvCacheEncoding, KvPagedImageMetadataV1, KvPhysicalMemoryMetadata,
+    KvStateDescriptor,
 };
 use crate::linear_attention::{LinearAttentionDescriptor, LinearAttentionStateDescriptor};
 use crate::model::{QWEN35_4B_FINGERPRINT, TensorDType, VerifiedCache};
@@ -75,7 +76,8 @@ use crate::qwen_graph::{
     QwenGraphTensorBacking, QwenGraphWeightBinding,
 };
 use crate::session_checkpoint::{
-    CheckpointIdentity, CheckpointPayload, SessionCheckpoint, StateOwnerKindV1, StatePlaneKindV1,
+    CheckpointIdentity, CheckpointPayload, CheckpointPayloadV2, SessionCheckpoint,
+    SessionCheckpointV2, StateOwnerKindV1, StatePlaneKindV1,
 };
 use crate::tensor::{TensorError, TensorView};
 use crate::weights::{
@@ -121,6 +123,7 @@ pub struct QwenPrefixForkAuditV1 {
     kv_states: u32,
     linear_states: u32,
     shared_pages: u64,
+    shared_blocks: u64,
     copied_bytes: u64,
     destination_owned_bytes: u64,
     cache_resident_bytes: u64,
@@ -139,6 +142,12 @@ impl QwenPrefixForkAuditV1 {
         self.shared_pages
     }
 
+    /// Number of shared 128-token physical blocks in a paged KV prefix.
+    /// Legacy VMM page counts remain in [`Self::shared_pages`].
+    pub const fn shared_blocks(self) -> u64 {
+        self.shared_blocks
+    }
+
     pub const fn copied_bytes(self) -> u64 {
         self.copied_bytes
     }
@@ -148,10 +157,11 @@ impl QwenPrefixForkAuditV1 {
     }
 
     /// Resident bytes attributable to this immutable prefix owner. Shared
-    /// VMM KV pages are charged from backend physical-memory metadata; a
-    /// backend without that optional metadata is charged the full descriptor
-    /// footprint as a conservative compatibility fallback. Device-copy KV
-    /// and all linear state use their destination-owned audit bytes.
+    /// VMM KV pages use tagged physical metadata, while paged KV uses the
+    /// native shared-block byte audit. A backend without VMM metadata is
+    /// charged the full descriptor footprint as a conservative compatibility
+    /// fallback. Device-copy KV and all linear state use their
+    /// destination-owned audit bytes.
     pub const fn cache_resident_bytes(self) -> u64 {
         self.cache_resident_bytes
     }
@@ -160,7 +170,7 @@ impl QwenPrefixForkAuditV1 {
         &mut self,
         audit: StateForkAuditV1,
         linear: bool,
-        kv_physical: Option<KvPhysicalMemorySnapshot>,
+        kv_physical: Option<KvPhysicalMemoryMetadata>,
         kv_fallback_resident_bytes: u64,
     ) -> Result<(), QwenExecutionError> {
         if linear {
@@ -177,6 +187,12 @@ impl QwenPrefixForkAuditV1 {
             .checked_add(audit.shared_pages())
             .ok_or_else(|| {
                 QwenExecutionError::InvalidRequest("shared page count overflowed".to_owned())
+            })?;
+        self.shared_blocks = self
+            .shared_blocks
+            .checked_add(audit.shared_blocks())
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("shared block count overflowed".to_owned())
             })?;
         self.copied_bytes = self
             .copied_bytes
@@ -195,9 +211,21 @@ impl QwenPrefixForkAuditV1 {
         } else {
             match audit.mode() {
                 crate::StateForkModeV1::SharedReadOnlyPages => kv_physical
-                    .map(|physical| physical.committed_bytes_per_plane())
-                    .and_then(|bytes| bytes.checked_mul(2))
+                    .and_then(|physical| match physical {
+                        KvPhysicalMemoryMetadata::Vmm(physical) => {
+                            physical.committed_bytes_per_plane().checked_mul(2)
+                        }
+                        KvPhysicalMemoryMetadata::Paged(_) => None,
+                    })
                     .unwrap_or(kv_fallback_resident_bytes),
+                crate::StateForkModeV1::SharedPagedBlocks => kv_physical
+                    .and_then(|physical| match physical {
+                        KvPhysicalMemoryMetadata::Paged(physical) => {
+                            Some(physical.committed_bytes_total())
+                        }
+                        KvPhysicalMemoryMetadata::Vmm(_) => None,
+                    })
+                    .unwrap_or(audit.shared_bytes()),
                 crate::StateForkModeV1::DeviceCopy => audit.destination_owned_bytes(),
             }
         };
@@ -248,6 +276,29 @@ impl QwenKvStateImageV1 {
 
     pub fn image(&self) -> &ExecutionStateImageV1 {
         &self.image
+    }
+}
+
+/// One topology-aware Paged KV layer in a versioned Qwen state image. The
+/// additive V2 image keeps the six Paged planes and their block table outside
+/// the legacy [`ExecutionStateImageV1`] plane tags.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QwenKvStateImageV2 {
+    descriptor: KvStateDescriptor,
+    image: ExecutionStateImageV2,
+}
+
+impl QwenKvStateImageV2 {
+    pub fn descriptor(&self) -> KvStateDescriptor {
+        self.descriptor
+    }
+
+    pub fn image(&self) -> &ExecutionStateImageV2 {
+        &self.image
+    }
+
+    pub fn paged_metadata(&self) -> &KvPagedImageMetadataV1 {
+        self.image.paged_metadata()
     }
 }
 
@@ -480,6 +531,245 @@ impl QwenStateImageV1 {
         generation_state_version: u32,
     ) -> Result<SessionCheckpoint, QwenExecutionError> {
         self.to_checkpoint(
+            identity,
+            token_history,
+            conversation,
+            sampler_state,
+            grammar_state,
+            stop_state,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+        )
+    }
+}
+
+/// Complete, in-memory Qwen V2 state image. Paged full-attention KV layers
+/// use [`ExecutionStateImageV2`], while linear/GDN layers deliberately retain
+/// the established V1 image contract. Persistence uses the additive
+/// `SessionCheckpointV2` envelope, which keeps Paged topology separate while
+/// carrying the existing linear/GDN V1 planes.
+#[derive(Clone, PartialEq)]
+pub struct QwenStateImageV2 {
+    session_id: crate::ExecutionSessionId,
+    identity: QwenPrefixIdentityV1,
+    committed_length: u64,
+    rope_position_delta: i64,
+    kv_layers: BTreeMap<u32, QwenKvStateImageV2>,
+    linear_layers: BTreeMap<u32, QwenLinearStateImageV1>,
+    cached_terminal_output: Option<QwenExecutionOutput>,
+}
+
+impl fmt::Debug for QwenStateImageV2 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QwenStateImageV2")
+            .field("session_id", &self.session_id)
+            .field("identity", &"<redacted>")
+            .field("committed_length", &self.committed_length)
+            .field("kv_layer_count", &self.kv_layers.len())
+            .field("linear_layer_count", &self.linear_layers.len())
+            .field(
+                "has_cached_terminal_output",
+                &self.cached_terminal_output.is_some(),
+            )
+            .finish()
+    }
+}
+
+impl QwenStateImageV2 {
+    pub fn session_id(&self) -> crate::ExecutionSessionId {
+        self.session_id
+    }
+
+    pub fn committed_length(&self) -> u64 {
+        self.committed_length
+    }
+
+    pub fn rope_position_delta(&self) -> i64 {
+        self.rope_position_delta
+    }
+
+    pub fn model_fingerprint(&self) -> &str {
+        &self.identity.model_fingerprint
+    }
+
+    pub fn plan_digest(&self) -> &[u8; 32] {
+        &self.identity.plan_digest
+    }
+
+    pub fn graph_semantics_digest(&self) -> &[u8; 32] {
+        &self.identity.graph_semantics_digest
+    }
+
+    pub fn adapter_identity(&self) -> &str {
+        &self.identity.adapter_identity
+    }
+
+    pub fn state_capacity(&self) -> u64 {
+        self.identity.state_capacity
+    }
+
+    pub fn kv_layers(&self) -> &BTreeMap<u32, QwenKvStateImageV2> {
+        &self.kv_layers
+    }
+
+    pub fn linear_layers(&self) -> &BTreeMap<u32, QwenLinearStateImageV1> {
+        &self.linear_layers
+    }
+
+    pub fn cached_terminal_output(&self) -> Option<&QwenExecutionOutput> {
+        self.cached_terminal_output.as_ref()
+    }
+
+    pub fn without_terminal_output(mut self) -> Self {
+        self.cached_terminal_output = None;
+        self
+    }
+
+    pub fn kv_descriptor_digest(&self) -> [u8; 32] {
+        qwen_kv_descriptor_digest(
+            self.kv_layers
+                .iter()
+                .map(|(layer, image)| (*layer, image.descriptor)),
+        )
+    }
+
+    /// Flattens the topology-aware Paged KV image and the existing V1
+    /// linear/GDN state planes into the additive V2 checkpoint envelope.
+    #[allow(clippy::too_many_arguments)]
+    pub fn to_checkpoint_v2(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpointV2, QwenExecutionError> {
+        if token_history.len() as u64 != self.committed_length {
+            return Err(QwenExecutionError::InvalidRequest(
+                "V2 checkpoint token history length differs from Qwen state length".to_owned(),
+            ));
+        }
+        if logical_position != self.committed_length {
+            return Err(QwenExecutionError::InvalidRequest(
+                "V2 checkpoint logical position differs from Qwen state length".to_owned(),
+            ));
+        }
+        let rope_delta = absolute_position
+            .checked_sub(logical_position)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "V2 checkpoint absolute position precedes logical position".to_owned(),
+                )
+            })?;
+        let rope_delta = i64::try_from(rope_delta).map_err(|_| {
+            QwenExecutionError::InvalidRequest(
+                "V2 checkpoint RoPE position delta exceeds i64".to_owned(),
+            )
+        })?;
+        if rope_delta != self.rope_position_delta {
+            return Err(QwenExecutionError::InvalidRequest(
+                "V2 checkpoint RoPE position delta differs from Qwen state".to_owned(),
+            ));
+        }
+        if identity.model_lock_fingerprint != self.identity.model_fingerprint
+            || identity.plan_digest != qwen_hex_digest(&self.identity.plan_digest)
+            || identity.adapter_identity != self.identity.adapter_identity
+            || identity.kv_descriptor_digest != self.kv_descriptor_digest()
+            || self
+                .kv_layers
+                .values()
+                .any(|layer| layer.descriptor.cache_encoding() != identity.kv_encoding)
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "V2 checkpoint identity does not match Qwen model, plan, or KV recipe".to_owned(),
+            ));
+        }
+        for (&layer, image) in &self.kv_layers {
+            if image.descriptor != image.paged_metadata().descriptor()
+                || image.paged_metadata().descriptor().layer_id() != layer
+            {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "V2 checkpoint Paged descriptor does not match its layer entry".to_owned(),
+                ));
+            }
+            if image.image.metadata().published_length != logical_position
+                || image.paged_metadata().observed_length() != logical_position
+            {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "V2 checkpoint Paged length differs from logical position".to_owned(),
+                ));
+            }
+        }
+        for (&layer, image) in &self.linear_layers {
+            if image.image.metadata().owner != StateOwnerKindV1::LinearAttention
+                || image.image.metadata().layer_id != layer
+                || image.image.metadata().published_length != logical_position
+            {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "V2 checkpoint linear/GDN metadata differs from logical state".to_owned(),
+                ));
+            }
+            validate_qwen_layer_image(
+                &image.image,
+                StateOwnerKindV1::LinearAttention,
+                layer,
+                image.descriptor,
+                logical_position,
+            )?;
+        }
+        let payload = CheckpointPayloadV2 {
+            token_history: token_history.to_vec(),
+            conversation: conversation.to_vec(),
+            paged_state_layers: self
+                .kv_layers
+                .values()
+                .map(|image| image.image.clone())
+                .collect(),
+            linear_state_layers: self
+                .linear_layers
+                .values()
+                .map(|image| image.image.metadata().clone())
+                .collect(),
+            linear_state_planes: self
+                .linear_layers
+                .values()
+                .flat_map(|image| image.image.planes().iter().cloned())
+                .collect(),
+            sampler_state: sampler_state.to_vec(),
+            grammar_state: grammar_state.to_vec(),
+            stop_state: stop_state.to_vec(),
+        };
+        SessionCheckpointV2::new(
+            identity,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+            payload,
+        )
+        .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))
+    }
+
+    /// Compatibility spelling for persistent checkpoint callers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint_v2(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpointV2, QwenExecutionError> {
+        self.to_checkpoint_v2(
             identity,
             token_history,
             conversation,
@@ -752,6 +1042,18 @@ const QWEN_GDN_PROJECTION_BUNDLE_GFX1201_ENV: &str = "SLLM_QWEN_GFX1201_GDN_PROJ
 const QWEN_MLP_GATE_UP_SILU_BUNDLE_ENV: &str = "SLLM_QWEN_GFX1030_MLP_GATE_UP_SILU_BUNDLE";
 const QWEN_MLP_GATE_UP_SILU_BUNDLE_GFX1201_ENV: &str = "SLLM_QWEN_GFX1201_MLP_GATE_UP_SILU_BUNDLE";
 const QWEN_SHORT_TERMINAL_LAST_ROW_ENV: &str = "SLLM_QWEN_GFX1030_SHORT_TERMINAL_LAST_ROW";
+const PHASE87_STAGE3_CALIBRATION_ENV: &str = "SLLM_PHASE87_STAGE3_CALIBRATION";
+const PHASE87_STAGE3_SITE_NAMES: [&str; 5] = [
+    "mtp.concat.output",
+    "layer.64.input_rmsnorm.output",
+    "layer.64.post_attention_rmsnorm.output",
+    "layer.64.mlp.silu_mul.output",
+    "layer.64.full.sigmoid_mul.output",
+];
+
+fn phase87_stage3_calibration_enabled_from_env() -> bool {
+    std::env::var_os(PHASE87_STAGE3_CALIBRATION_ENV).is_some_and(|value| value == OsStr::new("1"))
+}
 
 fn default_on_env(value: Option<&OsStr>) -> bool {
     value.is_none_or(|value| value == OsStr::new("1"))
@@ -1734,7 +2036,7 @@ pub struct QwenKvLayerMemoryAudit {
     layer: u32,
     logical_capacity_tokens: u64,
     observed_length_tokens: u64,
-    physical: KvPhysicalMemorySnapshot,
+    physical: KvPhysicalMemoryMetadata,
 }
 
 impl QwenKvLayerMemoryAudit {
@@ -1750,7 +2052,14 @@ impl QwenKvLayerMemoryAudit {
         self.observed_length_tokens
     }
 
-    pub const fn physical(self) -> KvPhysicalMemorySnapshot {
+    pub const fn physical(self) -> KvPhysicalMemoryMetadata {
+        self.physical
+    }
+
+    /// Returns the tagged physical metadata exactly as reported by the KV
+    /// state. VMM and paged pools have different accounting fields and must
+    /// stay distinguishable at the audit boundary.
+    pub const fn physical_metadata(self) -> KvPhysicalMemoryMetadata {
         self.physical
     }
 }
@@ -1783,16 +2092,22 @@ impl QwenRequestMemoryAudit {
 
     pub fn committed_kv_bytes(&self) -> Result<u64, QwenExecutionError> {
         self.kv_layers.iter().try_fold(0_u64, |total, layer| {
-            layer
-                .physical
-                .committed_bytes_per_plane()
-                .checked_mul(2)
-                .and_then(|bytes| total.checked_add(bytes))
-                .ok_or_else(|| {
-                    QwenExecutionError::InvalidRequest(
-                        "request KV committed-byte audit overflowed u64".to_string(),
-                    )
-                })
+            let bytes = match layer.physical {
+                KvPhysicalMemoryMetadata::Vmm(physical) => physical
+                    .committed_bytes_per_plane()
+                    .checked_mul(2)
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "request VMM KV committed-byte audit overflowed u64".to_string(),
+                        )
+                    })?,
+                KvPhysicalMemoryMetadata::Paged(physical) => physical.committed_bytes_total(),
+            };
+            total.checked_add(bytes).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "request KV committed-byte audit overflowed u64".to_string(),
+                )
+            })
         })
     }
 }
@@ -2725,6 +3040,18 @@ impl QwenResidentModel {
         Ok(request)
     }
 
+    /// Creates a fresh request and imports a topology-aware Paged V2 image.
+    /// Linear/GDN layers in the image continue to use their V1 state images.
+    pub fn new_request_from_state_image_v2(
+        &self,
+        image: &QwenStateImageV2,
+        graph: QwenGraph,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        let mut request = self.new_request(graph)?;
+        request.core.restore_state_image_v2(image)?;
+        Ok(request)
+    }
+
     /// Restores a backend-neutral checkpoint into a fresh request.  Unlike a
     /// raw [`QwenStateImageV1`], the checkpoint carries no source session ID;
     /// therefore this is the only state-image path that may cross process or
@@ -2759,6 +3086,46 @@ impl QwenResidentModel {
         Ok(request)
     }
 
+    /// Restores an additive Paged V2 checkpoint into a fresh request. The V2
+    /// checkpoint is intentionally session-independent; model, plan, adapter,
+    /// KV recipe, and graph topology are checked against the fresh request.
+    pub fn new_request_from_checkpoint_v2(
+        &self,
+        checkpoint: &SessionCheckpointV2,
+        graph: QwenGraph,
+        expected_identity: &CheckpointIdentity,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        self.new_request_from_checkpoint_v2_with_adapters(
+            checkpoint,
+            graph,
+            expected_identity,
+            AdapterRequestSetV1::disabled(),
+        )
+    }
+
+    pub fn new_request_from_checkpoint_v2_with_adapters(
+        &self,
+        checkpoint: &SessionCheckpointV2,
+        graph: QwenGraph,
+        expected_identity: &CheckpointIdentity,
+        adapters: AdapterRequestSetV1,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        let mut request = self.new_request_with_adapters(graph, adapters)?;
+        request
+            .core
+            .restore_checkpoint_v2(checkpoint, expected_identity)?;
+        Ok(request)
+    }
+
+    pub fn restore_request_from_checkpoint_v2(
+        &self,
+        checkpoint: &SessionCheckpointV2,
+        graph: QwenGraph,
+        expected_identity: &CheckpointIdentity,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        self.new_request_from_checkpoint_v2(checkpoint, graph, expected_identity)
+    }
+
     /// Compatibility spelling for persistent-session factories.
     pub fn restore_request_from_checkpoint(
         &self,
@@ -2785,6 +3152,23 @@ impl QwenResidentModel {
         graph: QwenGraph,
     ) -> Result<QwenExecutionRequest, QwenExecutionError> {
         self.new_request_from_state_image(image, graph)
+    }
+
+    /// Alias for the topology-aware Paged V2 state-image factory.
+    pub fn request_from_state_image_v2(
+        &self,
+        image: &QwenStateImageV2,
+        graph: QwenGraph,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        self.new_request_from_state_image_v2(image, graph)
+    }
+
+    pub fn restore_request_from_state_image_v2(
+        &self,
+        image: &QwenStateImageV2,
+        graph: QwenGraph,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        self.new_request_from_state_image_v2(image, graph)
     }
 
     /// Compatibility spelling for callers that use a factory-oriented name.
@@ -2920,6 +3304,11 @@ impl QwenExecutionRequest {
     /// Keeps the eager warmup from building partial graphs that the following
     /// whole-decode graph would supersede. Configure before generation starts.
     pub fn prepare_whole_decode_warmup(&mut self) -> Result<(), QwenExecutionError> {
+        if self.core.phase87_stage3_calibration_active() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE87_STAGE3_CALIBRATION_ENV} rejects graph capture/replay"
+            )));
+        }
         if self.core.lifecycle.is_poisoned() || self.core.committed_length != 0 {
             return Err(QwenExecutionError::InvalidRequest(
                 "whole-decode warmup must be configured on a fresh request".to_owned(),
@@ -2943,6 +3332,11 @@ impl QwenExecutionRequest {
         output_limit: u64,
         stop_ids: &[u32],
     ) -> Result<bool, QwenExecutionError> {
+        if self.core.phase87_stage3_calibration_active() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE87_STAGE3_CALIBRATION_ENV} rejects graph capture/replay"
+            )));
+        }
         self.core
             .configure_whole_target_decode(output_limit, stop_ids)
     }
@@ -2957,6 +3351,11 @@ impl QwenExecutionRequest {
         output_limit: u64,
         stop_ids: &[u32],
     ) -> Result<(), QwenExecutionError> {
+        if self.core.phase87_stage3_calibration_active() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE87_STAGE3_CALIBRATION_ENV} rejects graph capture/replay"
+            )));
+        }
         self.core.start_whole_target_decode(
             pending_token,
             selector,
@@ -2979,6 +3378,13 @@ impl QwenExecutionRequest {
         initial_target_hidden: &[u16],
         draft_width: usize,
     ) -> Result<crate::DecodeReplayController, QwenExecutionError> {
+        if self.core.phase87_stage3_calibration_active()
+            || companion.core.phase87_stage3_calibration_active()
+        {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE87_STAGE3_CALIBRATION_ENV} rejects graph capture/replay"
+            )));
+        }
         if self.core.lifecycle.is_poisoned() || companion.core.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
         }
@@ -3118,14 +3524,28 @@ impl QwenExecutionRequest {
         self.core.export_state_image()
     }
 
+    /// Exports a topology-aware Paged V2 image. The V1 export remains the
+    /// compatibility path for contiguous KV state and its existing wire use.
+    pub fn state_image_v2(&self) -> Result<QwenStateImageV2, QwenExecutionError> {
+        self.core.export_state_image_v2()
+    }
+
     /// Compatibility spelling for checkpoint writers.
     pub fn export_state_image(&self) -> Result<QwenStateImageV1, QwenExecutionError> {
         self.state_image()
     }
 
+    pub fn export_state_image_v2(&self) -> Result<QwenStateImageV2, QwenExecutionError> {
+        self.state_image_v2()
+    }
+
     /// Compatibility spelling for persistent-session callers.
     pub fn save_state_image(&self) -> Result<QwenStateImageV1, QwenExecutionError> {
         self.state_image()
+    }
+
+    pub fn save_state_image_v2(&self) -> Result<QwenStateImageV2, QwenExecutionError> {
+        self.state_image_v2()
     }
 
     /// Captures this request as a backend-neutral checkpoint. Terminal output
@@ -3157,6 +3577,34 @@ impl QwenExecutionRequest {
         )
     }
 
+    /// Captures a topology-aware Paged V2 checkpoint together with the
+    /// existing V1 linear/GDN state planes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint_v2(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpointV2, QwenExecutionError> {
+        self.state_image_v2()?.to_checkpoint_v2(
+            identity,
+            token_history,
+            conversation,
+            sampler_state,
+            grammar_state,
+            stop_state,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+        )
+    }
+
     /// Continues a prefix-derived request using DecodeContinuation chunks.
     /// Empty suffixes are resolved from the immutable cached terminal output.
     pub fn decode_continuation(
@@ -3172,6 +3620,15 @@ impl QwenExecutionRequest {
         suffix: &[i32],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.decode_continuation(suffix)
+    }
+
+    /// Continues a restored prefix while retaining the final BF16 logits row
+    /// required by host sampler/grammar paths.
+    pub fn continue_from_prefix_with_last_logits(
+        &mut self,
+        suffix: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.decode_continuation_with_last_logits(suffix)
     }
 
     /// Compatibility alias for generation adapters that call the suffix a
@@ -3376,6 +3833,16 @@ impl QwenExecutionRequest {
         &self,
     ) -> Result<Vec<QwenKvPayloadEvidence>, QwenExecutionError> {
         self.core.kv_payload_bytes_for_evidence()
+    }
+
+    /// Evidence-only Phase 87 Stage3 calibration result. The map contains the
+    /// finite BF16 absolute maxima for the five fixed MTP producer outputs;
+    /// capture/replay and non-BF16 MTP graphs are rejected when calibration
+    /// is enabled through `SLLM_PHASE87_STAGE3_CALIBRATION=1`.
+    pub fn phase87_stage3_mtp_activation_amax(
+        &self,
+    ) -> Result<BTreeMap<String, f32>, QwenExecutionError> {
+        self.core.phase87_stage3_calibration_amax()
     }
 
     /// Runs one MTP row. `target_hidden_bf16` must contain exactly one BF16
@@ -3667,15 +4134,15 @@ impl QwenExecutionRequest {
     }
 
     /// Captures all request-local state at one quiescent boundary. HIP-backed
-    /// KV states must include physical virtual-memory metadata; a backend that
-    /// omits it fails closed instead of producing inferred evidence.
+    /// KV states must include tagged physical metadata; a backend that omits it
+    /// fails closed instead of producing inferred evidence.
     pub fn memory_audit_snapshot(&self) -> Result<QwenRequestMemoryAudit, QwenExecutionError> {
         let mut kv_layers = Vec::with_capacity(self.core.kv_states.len());
         for (&layer, state) in &self.core.kv_states {
             let snapshot = state.snapshot(self.core.session.as_ref())?;
-            let physical = snapshot.physical_memory().ok_or_else(|| {
+            let physical = snapshot.physical_metadata().ok_or_else(|| {
                 QwenExecutionError::InvalidRequest(format!(
-                    "KV layer {layer} did not report physical-memory metadata"
+                    "KV layer {layer} did not report tagged physical-memory metadata"
                 ))
             })?;
             kv_layers.push(QwenKvLayerMemoryAudit {
@@ -3758,6 +4225,51 @@ fn qwen38_graph_node_layer(node: &QwenGraphNode) -> Option<u32> {
         .ok()
 }
 
+fn phase87_stage3_graph_is_bf16_mtp(graph: &QwenGraph) -> bool {
+    if !graph.is_mtp() {
+        return false;
+    }
+    const MATRIX_NAMES: [&str; 8] = [
+        "mtp.fc.weight",
+        "mtp.layers.0.mlp.down_proj.weight",
+        "mtp.layers.0.mlp.gate_proj.weight",
+        "mtp.layers.0.mlp.up_proj.weight",
+        "mtp.layers.0.self_attn.k_proj.weight",
+        "mtp.layers.0.self_attn.o_proj.weight",
+        "mtp.layers.0.self_attn.q_proj.weight",
+        "mtp.layers.0.self_attn.v_proj.weight",
+    ];
+    MATRIX_NAMES.iter().all(|name| {
+        graph
+            .tensor_metadata()
+            .iter()
+            .find(|tensor| tensor.name() == *name)
+            .is_some_and(|tensor| {
+                tensor.view().dtype() == DType::Bf16
+                    && tensor.view().encoding() == Encoding::Unquantized
+            })
+    }) && PHASE87_STAGE3_SITE_NAMES.iter().all(|name| {
+        graph
+            .tensor_metadata()
+            .iter()
+            .find(|tensor| tensor.name() == *name)
+            .is_some_and(|tensor| {
+                tensor.view().dtype() == DType::Bf16
+                    && tensor.view().encoding() == Encoding::Unquantized
+            })
+    })
+}
+
+fn phase87_stage3_is_last_concat_hidden_row(label: &str, token_count: u64) -> bool {
+    let Some(row) = label
+        .strip_prefix("mtp.concat.copy_hidden.")
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    row.checked_add(1) == Some(token_count)
+}
+
 fn qwen38_graph_node_is_stateless(node: &QwenGraphNode) -> bool {
     matches!(
         node.kind(),
@@ -3828,6 +4340,13 @@ struct QwenExecutionCore {
     phase54_kq_transform: Phase54KqTransformConfig,
     #[cfg(feature = "phase54-research")]
     phase54_vo_transform: Phase54VoTransformConfig,
+    phase87_stage3_calibration: Option<Mutex<Phase87Stage3CalibrationState>>,
+}
+
+#[derive(Default)]
+struct Phase87Stage3CalibrationState {
+    absolute_max: BTreeMap<String, f32>,
+    sample_count: BTreeMap<String, u64>,
 }
 
 struct QwenAdapterRuntime {
@@ -5602,6 +6121,26 @@ impl QwenProvisionSource for Qwen38Nvfp4ProvisionSource {
                 binding.tensor_name()
             )));
         }
+        const QWEN38_MTP_MATRIX_NAMES: [&str; 8] = [
+            "mtp.fc.weight",
+            "mtp.layers.0.mlp.down_proj.weight",
+            "mtp.layers.0.mlp.gate_proj.weight",
+            "mtp.layers.0.mlp.up_proj.weight",
+            "mtp.layers.0.self_attn.k_proj.weight",
+            "mtp.layers.0.self_attn.o_proj.weight",
+            "mtp.layers.0.self_attn.q_proj.weight",
+            "mtp.layers.0.self_attn.v_proj.weight",
+        ];
+        if self.companion.as_ref().is_some_and(|sidecar| {
+            sidecar.encoding() == crate::MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32
+                && QWEN38_MTP_MATRIX_NAMES.contains(&binding.tensor_name())
+                && sidecar.tensor(binding.tensor_name()).is_none()
+        }) {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "Qwen3.8 MTP NVFP4 sidecar tensor is absent: {}",
+                binding.tensor_name()
+            )));
+        }
         if let Some((sidecar, tensor)) = self.companion.as_ref().and_then(|sidecar| {
             sidecar
                 .tensor(binding.tensor_name())
@@ -5610,8 +6149,7 @@ impl QwenProvisionSource for Qwen38Nvfp4ProvisionSource {
             let expected_dtype = match sidecar.encoding() {
                 crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0
                 | crate::MtpWeightEncoding::Mxfp8W8A8Block32E8M0NoClippingScale => DType::F8E4M3Fn,
-                crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0
-                | crate::MtpWeightEncoding::Mxfp6W6A6Block32E8M0NoClippingScale => DType::U8,
+                crate::MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32 => DType::U8,
                 crate::MtpWeightEncoding::Bf16 => DType::Bf16,
             };
             if tensor.logical_shape.as_slice() != binding.shape()
@@ -5621,10 +6159,103 @@ impl QwenProvisionSource for Qwen38Nvfp4ProvisionSource {
                     "Qwen3.8 MTP sidecar and resident layout differ".to_owned(),
                 ));
             }
-            let (mut bytes, scales) = sidecar
-                .read_tensor_bytes(binding.tensor_name())
-                .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
-            bytes.extend_from_slice(&scales);
+            let bytes = match sidecar.encoding() {
+                crate::MtpWeightEncoding::Nvfp4W4A4Block16E2M1E4M3FnF32 => {
+                    let (weight_scale_bits, input_global_scale_bits) = sidecar
+                        .nvfp4_scale_bits(binding.tensor_name())
+                        .ok_or_else(|| {
+                            QwenExecutionError::InvalidRequest(format!(
+                                "Qwen3.8 MTP NVFP4 scales are absent: {}",
+                                binding.tensor_name()
+                            ))
+                        })?;
+                    let input_global_scale = f32::from_bits(input_global_scale_bits);
+                    if !input_global_scale.is_finite() || input_global_scale <= 0.0 {
+                        return Err(QwenExecutionError::InvalidRequest(format!(
+                            "Qwen3.8 MTP NVFP4 input scale is non-positive or non-finite: {}",
+                            binding.tensor_name()
+                        )));
+                    }
+                    let (values, block_scales, tensor_scale) = sidecar
+                        .read_nvfp4_tensor_bytes(binding.tensor_name())
+                        .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                    if u32::from_le_bytes(tensor_scale) != weight_scale_bits {
+                        return Err(QwenExecutionError::InvalidRequest(format!(
+                            "Qwen3.8 MTP NVFP4 weight tensor scale differs from sidecar metadata: {}",
+                            binding.tensor_name()
+                        )));
+                    }
+                    let rows = usize::try_from(binding.shape()[0]).map_err(|_| {
+                        QwenExecutionError::InvalidRequest(
+                            "Qwen3.8 MTP NVFP4 row count does not fit usize".to_owned(),
+                        )
+                    })?;
+                    let columns = usize::try_from(binding.shape()[1]).map_err(|_| {
+                        QwenExecutionError::InvalidRequest(
+                            "Qwen3.8 MTP NVFP4 column count does not fit usize".to_owned(),
+                        )
+                    })?;
+                    let expected_values =
+                        rows.checked_mul(columns.div_ceil(2)).ok_or_else(|| {
+                            QwenExecutionError::InvalidRequest(
+                                "Qwen3.8 MTP NVFP4 packed value size overflowed".to_owned(),
+                            )
+                        })?;
+                    let expected_block_scales =
+                        rows.checked_mul(columns.div_ceil(16)).ok_or_else(|| {
+                            QwenExecutionError::InvalidRequest(
+                                "Qwen3.8 MTP NVFP4 block-scale size overflowed".to_owned(),
+                            )
+                        })?;
+                    if columns % 16 != 0
+                        || values.len() != expected_values
+                        || block_scales.len() != expected_block_scales
+                    {
+                        return Err(QwenExecutionError::InvalidRequest(format!(
+                            "Qwen3.8 MTP NVFP4 sidecar planes do not match shape: {}",
+                            binding.tensor_name()
+                        )));
+                    }
+                    let unaligned =
+                        values
+                            .len()
+                            .checked_add(block_scales.len())
+                            .ok_or_else(|| {
+                                QwenExecutionError::InvalidRequest(
+                                    "Qwen3.8 MTP NVFP4 resident size overflowed".to_owned(),
+                                )
+                            })?;
+                    let tensor_scale_offset = unaligned.checked_add(3).ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "Qwen3.8 MTP NVFP4 scale alignment overflowed".to_owned(),
+                        )
+                    })? & !3;
+                    let expected = tensor_scale_offset.checked_add(8).ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "Qwen3.8 MTP NVFP4 resident size overflowed".to_owned(),
+                        )
+                    })?;
+                    if u64::try_from(expected).ok() != Some(destination.size_bytes()) {
+                        return Err(QwenExecutionError::InvalidRequest(format!(
+                            "Qwen3.8 MTP NVFP4 resident allocation differs for {}",
+                            binding.tensor_name()
+                        )));
+                    }
+                    let mut bytes = values;
+                    bytes.extend_from_slice(&block_scales);
+                    bytes.resize(tensor_scale_offset, 0);
+                    bytes.extend_from_slice(&tensor_scale);
+                    bytes.extend_from_slice(&input_global_scale.to_le_bytes());
+                    bytes
+                }
+                _ => {
+                    let (mut bytes, scales) = sidecar
+                        .read_tensor_bytes(binding.tensor_name())
+                        .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                    bytes.extend_from_slice(&scales);
+                    bytes
+                }
+            };
             if bytes.len() as u64 != destination.size_bytes() {
                 return Err(QwenExecutionError::InvalidRequest(
                     "Qwen3.8 MTP packed resident size differs".to_owned(),
@@ -6211,6 +6842,145 @@ impl QwenResidentInner {
 }
 
 impl QwenExecutionCore {
+    fn phase87_stage3_calibration_active(&self) -> bool {
+        self.phase87_stage3_calibration.is_some()
+    }
+
+    fn phase87_stage3_calibration_amax(&self) -> Result<BTreeMap<String, f32>, QwenExecutionError> {
+        let audit = self.audit_snapshot()?;
+        if audit.selected_backend() != "hip" || audit.fallback_used() || !audit.all_dispatches_hip()
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Stage3 calibration GPU evidence is not HIP-only and fallback-free".to_owned(),
+            ));
+        }
+        let state = self
+            .phase87_stage3_calibration
+            .as_ref()
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "{PHASE87_STAGE3_CALIBRATION_ENV} requires a BF16 MTP request"
+                ))
+            })?
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        let mut result = BTreeMap::new();
+        for name in PHASE87_STAGE3_SITE_NAMES {
+            let count = state.sample_count.get(name).copied().unwrap_or(0);
+            let maximum = state.absolute_max.get(name).copied().unwrap_or(0.0);
+            if count == 0 || !maximum.is_finite() || maximum <= 0.0 {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "Stage3 calibration has no non-zero finite evidence for {name}"
+                )));
+            }
+            result.insert(name.to_owned(), maximum);
+        }
+        Ok(result)
+    }
+
+    fn phase87_stage3_record_bf16_site(
+        &self,
+        pending: &mut ExecutionSegment,
+        tensor_name: &str,
+        token_count: u64,
+    ) -> Result<(), QwenExecutionError> {
+        if !self.phase87_stage3_calibration_active() {
+            return Ok(());
+        }
+        if pending.is_capturing() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE87_STAGE3_CALIBRATION_ENV} rejects graph capture"
+            )));
+        }
+        if !PHASE87_STAGE3_SITE_NAMES.contains(&tensor_name) {
+            return Err(QwenExecutionError::InvalidGraph(format!(
+                "unknown Stage3 calibration tensor: {tensor_name}"
+            )));
+        }
+        self.close_boundary(pending, ExecutionBoundaryKind::PrefillChunkCompletion)?;
+        let tensor_id = self.tensor_id(tensor_name)?;
+        let view = self.view(tensor_id, token_count)?;
+        if view.dtype() != DType::Bf16
+            || view.encoding() != Encoding::Unquantized
+            || !view.is_contiguous()
+            || view.shape().is_empty()
+            || view.shape().contains(&0)
+        {
+            return Err(QwenExecutionError::InvalidGraph(format!(
+                "Stage3 calibration tensor {tensor_name} is not active contiguous BF16"
+            )));
+        }
+        let allocation = self.tensors.get(tensor_id).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph(format!(
+                "Stage3 calibration tensor allocation is absent: {tensor_name}"
+            ))
+        })?;
+        let bytes = read_exact_bytes(
+            self.session.as_ref(),
+            &self.queue,
+            &allocation.buffer,
+            &view,
+            self.completion_timeout,
+            &format!("Stage3 calibration {tensor_name} readback"),
+        )?;
+        if bytes.len() % 2 != 0 || bytes.is_empty() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "Stage3 calibration tensor {tensor_name} readback is empty or unaligned"
+            )));
+        }
+        let mut maximum = 0.0_f32;
+        let mut count = 0_u64;
+        for pair in bytes.chunks_exact(2) {
+            let bits = u16::from_le_bytes([pair[0], pair[1]]);
+            let value = f32::from_bits(u32::from(bits & 0x7fff) << 16);
+            if !value.is_finite() {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "Stage3 calibration tensor {tensor_name} contains non-finite BF16"
+                )));
+            }
+            maximum = maximum.max(value.abs());
+            count = count.checked_add(1).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "Stage3 calibration sample count overflowed".to_owned(),
+                )
+            })?;
+        }
+        if count == 0 || !maximum.is_finite() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "Stage3 calibration tensor {tensor_name} has no finite samples"
+            )));
+        }
+        let mut state = self
+            .phase87_stage3_calibration
+            .as_ref()
+            .expect("Stage3 calibration state checked above")
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        let entry = state
+            .absolute_max
+            .entry(tensor_name.to_owned())
+            .or_insert(0.0);
+        *entry = entry.max(maximum);
+        let samples = state
+            .sample_count
+            .entry(tensor_name.to_owned())
+            .or_insert(0);
+        *samples = samples.checked_add(count).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest(
+                "Stage3 calibration sample count overflowed".to_owned(),
+            )
+        })?;
+        Ok(())
+    }
+
+    fn phase87_stage3_site_for_node(&self, node: &QwenGraphNode) -> Option<&'static str> {
+        PHASE87_STAGE3_SITE_NAMES.iter().copied().find(|name| {
+            self.tensor_ids
+                .get(*name)
+                .is_some_and(|tensor_id| node.outputs().contains(tensor_id))
+        })
+    }
+
     fn resident_draft_vocab_ids(&self) -> Option<&[u32]> {
         self.draft_vocab_ids.as_deref()
     }
@@ -6750,6 +7520,18 @@ impl QwenExecutionCore {
         adapters: AdapterRequestSetV1,
         shared_queue: Option<ExecutionQueue>,
     ) -> Result<Self, QwenExecutionError> {
+        // The target request shares this process with the BF16 companion.
+        // Only the companion graph owns the activation-calibration probe.
+        let phase87_stage3_calibration =
+            phase87_stage3_calibration_enabled_from_env() && graph.is_mtp();
+        if phase87_stage3_calibration
+            && (resident.session.backend_name() != "hip"
+                || !phase87_stage3_graph_is_bf16_mtp(&graph))
+        {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE87_STAGE3_CALIBRATION_ENV} requires a HIP BF16 Qwen3.8 MTP graph"
+            )));
+        }
         if shared_queue
             .as_ref()
             .is_some_and(|queue| queue.session_id() != resident.session.id())
@@ -7006,10 +7788,11 @@ impl QwenExecutionCore {
         let execution_plan = qwen_prepared_execution_plan(&graph)?;
         let graph_span_env =
             qwen38_graph_spans_env_name(resident.session.expected_target().as_deref());
-        let qwen38_graph_spans_enabled = qwen38_graph_spans_enabled_with_env(
-            qwen38_deferred_completion,
-            graph_span_env.and_then(std::env::var_os).as_deref(),
-        );
+        let qwen38_graph_spans_enabled = !phase87_stage3_calibration
+            && qwen38_graph_spans_enabled_with_env(
+                qwen38_deferred_completion,
+                graph_span_env.and_then(std::env::var_os).as_deref(),
+            );
         let core = Self {
             whole_decode: Mutex::new(None),
             whole_decode_audit: Mutex::new(None),
@@ -7059,6 +7842,8 @@ impl QwenExecutionCore {
             phase54_kq_transform,
             #[cfg(feature = "phase54-research")]
             phase54_vo_transform,
+            phase87_stage3_calibration: phase87_stage3_calibration
+                .then(|| Mutex::new(Phase87Stage3CalibrationState::default())),
         };
         core.ensure_state_lengths(0)?;
         Ok(core)
@@ -7126,6 +7911,67 @@ impl QwenExecutionCore {
         })
     }
 
+    fn export_state_image_v2(&self) -> Result<QwenStateImageV2, QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        #[cfg(feature = "phase54-research")]
+        self.ensure_phase54_reuse_safe("Paged V2 state image export")?;
+        if self.pending_speculative.is_some() {
+            return Err(QwenExecutionError::Busy);
+        }
+        if self.committed_length == 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Paged V2 state image export requires a non-empty committed request".to_owned(),
+            ));
+        }
+        self.ensure_state_lengths(self.committed_length)?;
+        let mut kv_layers = BTreeMap::new();
+        for (&layer, state) in &self.kv_states {
+            let image = self.session.export_kv_state_image_v2(state)?;
+            validate_qwen_paged_layer_image(
+                &image,
+                layer,
+                state.descriptor(),
+                self.committed_length,
+            )?;
+            kv_layers.insert(
+                layer,
+                QwenKvStateImageV2 {
+                    descriptor: state.descriptor(),
+                    image,
+                },
+            );
+        }
+        let mut linear_layers = BTreeMap::new();
+        for (&layer, state) in &self.linear_states {
+            let image = self.session.export_linear_attention_state_image(state)?;
+            validate_qwen_layer_image(
+                &image,
+                StateOwnerKindV1::LinearAttention,
+                layer,
+                state.descriptor(),
+                self.committed_length,
+            )?;
+            linear_layers.insert(
+                layer,
+                QwenLinearStateImageV1 {
+                    descriptor: state.descriptor(),
+                    image,
+                },
+            );
+        }
+        Ok(QwenStateImageV2 {
+            session_id: self.session.id(),
+            identity: qwen_prefix_identity(&self.graph, &self.plan, &self.adapters.identity),
+            committed_length: self.committed_length,
+            rope_position_delta: self.rope_position_delta,
+            kv_layers,
+            linear_layers,
+            cached_terminal_output: self.last_output.clone(),
+        })
+    }
+
     fn restore_state_image(&mut self, image: &QwenStateImageV1) -> Result<(), QwenExecutionError> {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
@@ -7173,6 +8019,99 @@ impl QwenExecutionCore {
                 return Err(QwenExecutionError::StateLength {
                     layer,
                     state: "restored linear",
+                    expected: image.committed_length,
+                    actual: snapshot.length(),
+                });
+            }
+            imported_linear.insert(layer, destination.clone());
+        }
+
+        self.kv_states = imported_kv;
+        self.linear_states = imported_linear;
+        self.committed_length = image.committed_length;
+        self.rope_position_delta = image.rope_position_delta;
+        self.last_output = image.cached_terminal_output.clone();
+        Ok(())
+    }
+
+    fn restore_state_image_v2(
+        &mut self,
+        image: &QwenStateImageV2,
+    ) -> Result<(), QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        #[cfg(feature = "phase54-research")]
+        self.ensure_phase54_reuse_safe("Paged V2 state image import")?;
+        if self.pending_speculative.is_some() {
+            return Err(QwenExecutionError::Busy);
+        }
+        self.validate_state_image_identity_v2(image)?;
+
+        // Validate every layer before the first backend import. Publication of
+        // the request maps and terminal metadata remains the final step; a
+        // failed layer therefore cannot make a partially imported request
+        // appear committed to the Qwen execution core.
+        for (&layer, destination) in &self.kv_states {
+            let entry = image.kv_layers.get(&layer).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "Paged V2 state image KV layer {layer} is absent"
+                ))
+            })?;
+            validate_qwen_paged_layer_image(
+                &entry.image,
+                layer,
+                destination.descriptor(),
+                image.committed_length,
+            )?;
+        }
+        for (&layer, destination) in &self.linear_states {
+            let entry = image.linear_layers.get(&layer).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "Paged V2 state image linear layer {layer} is absent"
+                ))
+            })?;
+            validate_qwen_layer_image(
+                &entry.image,
+                StateOwnerKindV1::LinearAttention,
+                layer,
+                destination.descriptor(),
+                image.committed_length,
+            )?;
+        }
+
+        let mut imported_kv = BTreeMap::new();
+        for (&layer, destination) in &self.kv_states {
+            let entry = image
+                .kv_layers
+                .get(&layer)
+                .expect("validated Paged V2 KV layer topology");
+            self.session
+                .import_kv_state_image_v2(destination, &entry.image)?;
+            let snapshot = self.session.kv_state_snapshot(destination)?;
+            if snapshot.length() != image.committed_length {
+                return Err(QwenExecutionError::StateLength {
+                    layer,
+                    state: "restored Paged V2 KV",
+                    expected: image.committed_length,
+                    actual: snapshot.length(),
+                });
+            }
+            imported_kv.insert(layer, destination.clone());
+        }
+        let mut imported_linear = BTreeMap::new();
+        for (&layer, destination) in &self.linear_states {
+            let entry = image
+                .linear_layers
+                .get(&layer)
+                .expect("validated Paged V2 linear layer topology");
+            self.session
+                .import_linear_attention_state_image(destination, &entry.image)?;
+            let snapshot = self.session.linear_attention_state_snapshot(destination)?;
+            if snapshot.length() != image.committed_length {
+                return Err(QwenExecutionError::StateLength {
+                    layer,
+                    state: "restored V2 linear",
                     expected: image.committed_length,
                     actual: snapshot.length(),
                 });
@@ -7369,6 +8308,161 @@ impl QwenExecutionCore {
         })
     }
 
+    fn restore_checkpoint_v2(
+        &mut self,
+        checkpoint: &SessionCheckpointV2,
+        expected_identity: &CheckpointIdentity,
+    ) -> Result<(), QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        #[cfg(feature = "phase54-research")]
+        self.ensure_phase54_reuse_safe("Paged V2 checkpoint import")?;
+        if self.pending_speculative.is_some() {
+            return Err(QwenExecutionError::Busy);
+        }
+        checkpoint
+            .validate()
+            .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        if checkpoint.header.identity != *expected_identity {
+            return Err(QwenExecutionError::InvalidRequest(
+                "V2 checkpoint frontend identity differs from the restore caller".to_owned(),
+            ));
+        }
+        let identity = &checkpoint.header.identity;
+        if identity.model_lock_fingerprint != self.graph.model_fingerprint()
+            || identity.plan_digest != self.plan.digest_hex()
+            || identity.adapter_identity != self.adapters.identity
+            || identity.kv_descriptor_digest
+                != qwen_kv_descriptor_digest(
+                    self.kv_states
+                        .iter()
+                        .map(|(layer, state)| (*layer, state.descriptor())),
+                )
+            || self
+                .kv_states
+                .values()
+                .any(|state| state.descriptor().cache_encoding() != identity.kv_encoding)
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "V2 checkpoint model, plan, or KV recipe identity differs".to_owned(),
+            ));
+        }
+        let logical_position = checkpoint.header.logical_position;
+        if logical_position == 0
+            || logical_position != checkpoint.header.token_count
+            || logical_position != checkpoint.payload.token_history.len() as u64
+            || logical_position > self.graph.state_capacity()
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "V2 checkpoint logical position is inconsistent with token history or capacity"
+                    .to_owned(),
+            ));
+        }
+        let rope_delta = checkpoint
+            .header
+            .absolute_position
+            .checked_sub(logical_position)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "V2 checkpoint absolute position precedes logical position".to_owned(),
+                )
+            })?;
+        let rope_position_delta = i64::try_from(rope_delta).map_err(|_| {
+            QwenExecutionError::InvalidRequest(
+                "V2 checkpoint RoPE position delta exceeds i64".to_owned(),
+            )
+        })?;
+        if checkpoint.payload.paged_state_layers.len() != self.kv_states.len()
+            || checkpoint.payload.linear_state_layers.len() != self.linear_states.len()
+            || checkpoint
+                .payload
+                .paged_state_layers
+                .iter()
+                .any(|image| image.metadata().published_length != logical_position)
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "V2 checkpoint Paged layer topology or length differs from the Qwen graph"
+                    .to_owned(),
+            ));
+        }
+        let mut kv_layers = BTreeMap::new();
+        for (&layer, destination) in &self.kv_states {
+            let image = checkpoint
+                .payload
+                .paged_state_layers
+                .iter()
+                .find(|image| image.metadata().layer_id == layer)
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(format!(
+                        "V2 checkpoint Paged KV layer {layer} is absent"
+                    ))
+                })?;
+            if image.paged_metadata().descriptor() != destination.descriptor() {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "V2 checkpoint Paged KV layer {layer} descriptor or recipe differs"
+                )));
+            }
+            validate_qwen_paged_layer_image(
+                image,
+                layer,
+                destination.descriptor(),
+                logical_position,
+            )?;
+            kv_layers.insert(
+                layer,
+                QwenKvStateImageV2 {
+                    descriptor: destination.descriptor(),
+                    image: image.clone(),
+                },
+            );
+        }
+        let mut linear_layers = BTreeMap::new();
+        for (&layer, destination) in &self.linear_states {
+            let metadata = checkpoint
+                .payload
+                .linear_state_layers
+                .iter()
+                .find(|metadata| metadata.layer_id == layer)
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(format!(
+                        "V2 checkpoint linear/GDN layer {layer} is absent"
+                    ))
+                })?;
+            let planes = checkpoint
+                .payload
+                .linear_state_planes
+                .iter()
+                .filter(|plane| plane.layer_id == layer)
+                .cloned()
+                .collect::<Vec<_>>();
+            let image = ExecutionStateImageV1::new(metadata.clone(), planes);
+            validate_qwen_layer_image(
+                &image,
+                StateOwnerKindV1::LinearAttention,
+                layer,
+                destination.descriptor(),
+                logical_position,
+            )?;
+            linear_layers.insert(
+                layer,
+                QwenLinearStateImageV1 {
+                    descriptor: destination.descriptor(),
+                    image,
+                },
+            );
+        }
+        self.restore_state_image_v2(&QwenStateImageV2 {
+            session_id: self.session.id(),
+            identity: qwen_prefix_identity(&self.graph, &self.plan, &self.adapters.identity),
+            committed_length: logical_position,
+            rope_position_delta,
+            kv_layers,
+            linear_layers,
+            cached_terminal_output: None,
+        })
+    }
+
     fn validate_state_image_identity(
         &self,
         image: &QwenStateImageV1,
@@ -7449,6 +8543,85 @@ impl QwenExecutionCore {
         Ok(())
     }
 
+    fn validate_state_image_identity_v2(
+        &self,
+        image: &QwenStateImageV2,
+    ) -> Result<(), QwenExecutionError> {
+        if image.session_id != self.session.id() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Paged V2 state image belongs to a different execution session".to_owned(),
+            ));
+        }
+        let expected_identity =
+            qwen_prefix_identity(&self.graph, &self.plan, &self.adapters.identity);
+        if image.identity != expected_identity {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Paged V2 state image model, plan, graph, or capacity identity differs".to_owned(),
+            ));
+        }
+        if image.committed_length == 0 || image.committed_length > self.graph.state_capacity() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "Paged V2 state image length {} exceeds request capacity {}",
+                image.committed_length,
+                self.graph.state_capacity()
+            )));
+        }
+        if let Some(output) = &image.cached_terminal_output {
+            if output.committed_length() != image.committed_length {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "cached Paged V2 output length differs from committed length".to_owned(),
+                ));
+            }
+        }
+        if image.kv_layers.len() != self.kv_states.len()
+            || image.linear_layers.len() != self.linear_states.len()
+            || image.kv_layers.keys().ne(self.kv_states.keys())
+            || image.linear_layers.keys().ne(self.linear_states.keys())
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Paged V2 state image layer set differs from the request graph".to_owned(),
+            ));
+        }
+        for (&layer, destination) in &self.kv_states {
+            let entry = image.kv_layers.get(&layer).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "Paged V2 state image KV layer {layer} is absent"
+                ))
+            })?;
+            if entry.descriptor != destination.descriptor() {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "Paged V2 state image KV layer {layer} descriptor or recipe differs"
+                )));
+            }
+            validate_qwen_paged_layer_image(
+                &entry.image,
+                layer,
+                destination.descriptor(),
+                image.committed_length,
+            )?;
+        }
+        for (&layer, destination) in &self.linear_states {
+            let entry = image.linear_layers.get(&layer).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "Paged V2 state image linear layer {layer} is absent"
+                ))
+            })?;
+            if entry.descriptor != destination.descriptor() {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "Paged V2 state image linear layer {layer} descriptor differs"
+                )));
+            }
+            validate_qwen_layer_image(
+                &entry.image,
+                StateOwnerKindV1::LinearAttention,
+                layer,
+                destination.descriptor(),
+                image.committed_length,
+            )?;
+        }
+        Ok(())
+    }
+
     fn publish_prefix(&self) -> Result<QwenPrefixStateV1, QwenExecutionError> {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
@@ -7496,7 +8669,7 @@ impl QwenExecutionCore {
             audit.add(
                 fork_audit,
                 false,
-                snapshot.physical_memory(),
+                snapshot.physical_metadata(),
                 fallback_resident_bytes,
             )?;
             kv_states.insert(layer, forked);
@@ -7661,6 +8834,21 @@ impl QwenExecutionCore {
         &mut self,
         suffix: &[i32],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.decode_continuation_impl(suffix, false)
+    }
+
+    fn decode_continuation_with_last_logits(
+        &mut self,
+        suffix: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.decode_continuation_impl(suffix, true)
+    }
+
+    fn decode_continuation_impl(
+        &mut self,
+        suffix: &[i32],
+        include_last_logits: bool,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
         }
@@ -7707,7 +8895,7 @@ impl QwenExecutionCore {
             let output = self.run_transition(
                 chunk,
                 AttentionPreprocessPositionMode::DecodeContinuation,
-                false,
+                include_last_logits && final_chunk,
                 false,
                 false,
                 false,
@@ -7891,6 +9079,7 @@ impl QwenExecutionCore {
             phase54_kq_transform,
             #[cfg(feature = "phase54-research")]
             phase54_vo_transform,
+            phase87_stage3_calibration: None,
         };
         core.ensure_state_lengths(0)?;
         Ok(core)
@@ -8313,26 +9502,36 @@ impl QwenExecutionCore {
         self.decode_impl(token_id, false, false, true, None, Some(selector))
     }
 
+    /// Returns the private GDN checkpoint metadata for a target verify block.
+    /// A target block contains one more row than the draft width.  Width two
+    /// remains the default; widths three and four are accepted for explicit
+    /// MTP requests and retain the same checkpoint/rollback protocol.
+    fn mtp_linear_checkpoint_shape(token_count: usize) -> Option<(u32, u32)> {
+        let width = token_count.checked_sub(1)?;
+        let (target_rows, checkpoint_rows) =
+            crate::qwen_mtp::qwen_mtp_linear_checkpoint_shape(width)?;
+        Some((target_rows as u32, checkpoint_rows as u32))
+    }
+
     fn prepare_mtp_prefix_checkpoint(
         &self,
         start_length: u64,
         token_count: usize,
     ) -> Result<bool, QwenExecutionError> {
-        if token_count != 3 || self.linear_states.is_empty() {
+        let Some((token_count, checkpoint_rows)) = Self::mtp_linear_checkpoint_shape(token_count)
+        else {
+            return Ok(false);
+        };
+        if self.linear_states.is_empty() {
             return Ok(false);
         }
-        let token_count = u32::try_from(token_count).map_err(|_| {
-            QwenExecutionError::InvalidRequest(
-                "MTP checkpoint token count does not fit native metadata".to_owned(),
-            )
-        })?;
         let mut prepared = Vec::with_capacity(self.linear_states.len());
         for state in self.linear_states.values() {
             match self.session.prepare_linear_attention_prefix_checkpoint(
                 state,
                 start_length,
                 token_count,
-                2,
+                checkpoint_rows,
             ) {
                 Ok(()) => prepared.push(state),
                 Err(error) => {
@@ -8602,12 +9801,22 @@ impl QwenExecutionCore {
             Ok(output) => output,
             Err(error) => return Err(self.abort_mtp_prefix_checkpoint(&states, error)),
         };
+        let checkpoint_rows = Self::mtp_linear_checkpoint_shape(pending.token_ids.len())
+            .map(|(_, rows)| rows)
+            .ok_or_else(|| {
+                self.abort_mtp_prefix_checkpoint(
+                    &states,
+                    QwenExecutionError::InvalidRequest(
+                        "pending MTP block has no supported GDN checkpoint shape".to_owned(),
+                    ),
+                )
+            })?;
         for state in &states {
             if let Err(error) = self.session.validate_linear_attention_prefix_checkpoint(
                 state,
                 pending.start_length,
                 expected_length,
-                2,
+                checkpoint_rows,
             ) {
                 self.lifecycle.cancel();
                 let primary = QwenExecutionError::from(error);
@@ -9170,6 +10379,22 @@ impl QwenExecutionCore {
         stop_after_kv_append: bool,
         capture: Option<&mut crate::ExecutionWholeDecodeCapture>,
     ) -> Result<TerminalSelection, QwenExecutionError> {
+        if self.phase87_stage3_calibration_active() {
+            if capture.is_some() {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "{PHASE87_STAGE3_CALIBRATION_ENV} rejects graph capture"
+                )));
+            }
+            let graph_state = self
+                .graph_replay
+                .lock()
+                .map_err(|_| QwenExecutionError::Poisoned)?;
+            if graph_state.ready || !graph_state.spans.is_empty() {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "{PHASE87_STAGE3_CALIBRATION_ENV} rejects graph replay"
+                )));
+            }
+        }
         let capturing = capture.is_some();
         let plan = self.execution_plan.clone();
         self.chain_active.store(false, Ordering::Release);
@@ -9286,6 +10511,11 @@ impl QwenExecutionCore {
                     self.concat_mtp_rows(transition.token_count())?;
                     self.bf16_row_concat_count.fetch_add(1, Ordering::Relaxed);
                     mtp_row_concat_done = true;
+                    self.phase87_stage3_record_bf16_site(
+                        &mut pending,
+                        "mtp.concat.output",
+                        transition.token_count(),
+                    )?;
                     return Ok(());
                 }
                 self.graph_collect_node.store(false, Ordering::Release);
@@ -9326,6 +10556,24 @@ impl QwenExecutionCore {
                                 device_selector,
                                 &mut pending,
                             )?;
+                            if self.phase87_stage3_calibration_active() {
+                                if let Some(site) = self.phase87_stage3_site_for_node(node) {
+                                    self.phase87_stage3_record_bf16_site(
+                                        &mut pending,
+                                        site,
+                                        transition.token_count(),
+                                    )?;
+                                } else if phase87_stage3_is_last_concat_hidden_row(
+                                    node.label(),
+                                    transition.token_count(),
+                                ) {
+                                    self.phase87_stage3_record_bf16_site(
+                                        &mut pending,
+                                        "mtp.concat.output",
+                                        transition.token_count(),
+                                    )?;
+                                }
+                            }
                             if let Some(output) = output {
                                 if argmax.replace(output).is_some() {
                                     return Err(QwenExecutionError::InvalidGraph(
@@ -11659,7 +12907,7 @@ impl QwenExecutionCore {
                         "KV fork resident-byte footprint overflowed".to_owned(),
                     )
                 })?;
-            let physical = self.session.kv_state_snapshot(state)?.physical_memory();
+            let physical = self.session.kv_state_snapshot(state)?.physical_metadata();
             aggregate.add(audit, false, physical, fallback_resident_bytes)?;
         }
         Ok(aggregate)
@@ -14537,6 +15785,44 @@ fn validate_qwen_layer_image<D: QwenStateImageDescriptor>(
     Ok(())
 }
 
+fn validate_qwen_paged_layer_image(
+    image: &ExecutionStateImageV2,
+    layer: u32,
+    descriptor: KvStateDescriptor,
+    expected_length: u64,
+) -> Result<(), QwenExecutionError> {
+    let metadata = image.metadata();
+    let paged = image.paged_metadata();
+    if metadata.owner != StateOwnerKindV1::Kv
+        || metadata.layer_id != layer
+        || metadata.active_slot.is_some()
+    {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "Paged V2 state image layer {layer} owner or layer identity differs"
+        )));
+    }
+    if metadata.published_length != expected_length
+        || paged.observed_length() != expected_length
+        || expected_length > descriptor.capacity()
+    {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "Paged V2 state image layer {layer} published length differs"
+        )));
+    }
+    if paged.descriptor() != descriptor
+        || metadata.layer_id != paged.descriptor().layer_id()
+        || metadata.generation != paged.generation()
+    {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "Paged V2 state image layer {layer} descriptor or recipe differs"
+        )));
+    }
+    // `PagedStateImageV2::new` has already checked the six plane sizes and
+    // topology. Keep this helper focused on the Qwen graph/session identity
+    // that is not represented by that backend-neutral constructor.
+    Ok(())
+}
+
 fn decode_argmax_bytes(bytes: &[u8]) -> Result<Vec<i32>, QwenExecutionError> {
     if bytes.is_empty() || bytes.len() % std::mem::size_of::<i32>() != 0 {
         return Err(QwenExecutionError::InvalidRequest(
@@ -14589,7 +15875,7 @@ mod tests {
         ExecutionTransferAdapter, PreparedMatmulFootprint, PreparedOperation, QueueCompletionMode,
         ShutdownReport,
     };
-    use crate::kv_state::{KvStateAppendRequest, KvStateSnapshot};
+    use crate::kv_state::{KvPhysicalMemorySnapshot, KvStateAppendRequest, KvStateSnapshot};
     use crate::linear_attention::{LinearAttentionRequest, LinearAttentionStateSnapshot};
 
     #[test]
@@ -14862,6 +16148,23 @@ mod tests {
     }
 
     #[test]
+    fn resident_nvfp4_w4a4_bytes_include_alignment_and_two_f32_scales() {
+        let view = TensorView::with_encoding(
+            DType::U8,
+            Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            },
+            &[3, 64],
+        )
+        .unwrap();
+        assert!(is_nvfp4_weight_view(&view));
+        // 3*64/2 packed values + 3*4 block scales, already 4-byte aligned,
+        // followed by the weight tensor scale and calibrated input scale.
+        assert_eq!(resident_weight_bytes(&view).unwrap(), 96 + 12 + 8);
+    }
+
+    #[test]
     fn fnuz_resident_rebase_preserves_every_finite_ocp_value() {
         let values = (0_u8..=u8::MAX)
             .filter(|bits| bits & 0x7f != 0x7f)
@@ -15030,6 +16333,7 @@ mod tests {
         kv_lengths: BTreeMap<u64, u64>,
         linear_lengths: BTreeMap<u64, u64>,
         linear_checkpoints: BTreeMap<u64, u64>,
+        linear_checkpoint_shapes: BTreeMap<u64, (u32, u32)>,
         argmax_sequences: VecDeque<Vec<i32>>,
         preprocess: Vec<(AttentionPreprocessPositionMode, u32, u32)>,
         uploads: Vec<Vec<u8>>,
@@ -15597,6 +16901,77 @@ mod tests {
             ))
         }
 
+        fn export_kv_state_image_v2(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &KvState,
+        ) -> Result<ExecutionStateImageV2, ExecutionError> {
+            let length = *self
+                .state
+                .lock()
+                .expect("recorder lock")
+                .kv_lengths
+                .get(&state.id().raw())
+                .expect("created KV state");
+            let descriptor = state.descriptor();
+            let block_size = u64::from(crate::KV_PAGED_IMAGE_TOKEN_BLOCK_SIZE);
+            let observed_blocks = length.div_ceil(block_size);
+            let table_capacity = descriptor.capacity().div_ceil(block_size);
+            let table = (0..table_capacity)
+                .map(|block| {
+                    if block < observed_blocks {
+                        u32::try_from(block).expect("fixture block ID fits u32")
+                    } else {
+                        crate::KV_PAGED_INVALID_BLOCK_ID
+                    }
+                })
+                .collect();
+            let heads = u64::try_from(descriptor.layout().heads()).expect("fixture heads fit");
+            let head_dim =
+                u64::try_from(descriptor.layout().head_dim()).expect("fixture head dim fits");
+            let stride = heads
+                .checked_mul(head_dim)
+                .and_then(|bytes| bytes.checked_mul(2))
+                .and_then(|bytes| bytes.checked_mul(block_size))
+                .expect("fixture Paged stride fits");
+            let paged_metadata = crate::KvPagedImageMetadataV1::new(
+                descriptor,
+                length,
+                1,
+                0,
+                0,
+                observed_blocks.max(1),
+                [stride, stride, 0, 0, 0, 0],
+                crate::KvPagedImageTopologyV1::LogicalTable(table),
+            )
+            .map_err(|error| ExecutionError::InvalidRequest {
+                reason: error.to_string(),
+            })?;
+            let plane_strides = [stride, stride, 0, 0, 0, 0];
+            let planes = std::array::from_fn(|index| {
+                let bytes = observed_blocks
+                    .max(1)
+                    .checked_mul(plane_strides[index])
+                    .expect("fixture Paged plane size fits");
+                let bytes = usize::try_from(bytes).expect("fixture plane fits usize");
+                vec![state.layer_id() as u8; bytes]
+            });
+            ExecutionStateImageV2::new(
+                crate::StateLayerMetadataV1 {
+                    owner: StateOwnerKindV1::Kv,
+                    layer_id: state.layer_id(),
+                    published_length: length,
+                    generation: 1,
+                    active_slot: None,
+                },
+                paged_metadata,
+                planes,
+            )
+            .map_err(|error| ExecutionError::InvalidRequest {
+                reason: error.to_string(),
+            })
+        }
+
         fn import_kv_state_image(
             &self,
             _access: &ExecutionAdapterAccess<'_>,
@@ -15610,6 +16985,29 @@ mod tests {
                 return Err(ExecutionError::BackendStatus {
                     status: 91,
                     diagnostic: "recorder KV image import failure".to_owned(),
+                });
+            }
+            self.state
+                .lock()
+                .expect("recorder lock")
+                .kv_lengths
+                .insert(state.id().raw(), image.metadata().published_length);
+            Ok(())
+        }
+
+        fn import_kv_state_image_v2(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &KvState,
+            image: &ExecutionStateImageV2,
+        ) -> Result<(), ExecutionError> {
+            self.state_image_import_calls
+                .fetch_add(1, Ordering::Relaxed);
+            self.event(format!("import-kv-image-v2:{}", state.layer_id()));
+            if self.state_image_failure.load(Ordering::Relaxed) {
+                return Err(ExecutionError::BackendStatus {
+                    status: 93,
+                    diagnostic: "recorder Paged V2 image import failure".to_owned(),
                 });
             }
             self.state
@@ -15808,16 +17206,21 @@ mod tests {
             token_count: u32,
             rows: u32,
         ) -> Result<(), ExecutionError> {
-            if !self.checkpoint_supported.load(Ordering::Relaxed) || token_count != 3 || rows != 2 {
+            if !self.checkpoint_supported.load(Ordering::Relaxed)
+                || !matches!((token_count, rows), (3, 2) | (4, 3) | (5, 4))
+            {
                 return Err(ExecutionError::Unsupported {
-                    reason: "recorder only supports the M3 checkpoint shape".to_owned(),
+                    reason: "recorder only supports MTP checkpoint widths 2..=4".to_owned(),
                 });
             }
-            self.state
-                .lock()
-                .expect("recorder lock")
+            let mut recorder = self.state.lock().expect("recorder lock");
+            recorder
                 .linear_checkpoints
                 .insert(state.id().raw(), expected_start);
+            recorder
+                .linear_checkpoint_shapes
+                .insert(state.id().raw(), (token_count, rows));
+            drop(recorder);
             self.event(format!(
                 "checkpoint-prepare:{}:{}",
                 state.layer_id(),
@@ -15835,8 +17238,12 @@ mod tests {
             rows: u32,
         ) -> Result<(), ExecutionError> {
             let recorder = self.state.lock().expect("recorder lock");
-            if rows != 2
+            if !matches!(rows, 2..=4)
                 || recorder.linear_checkpoints.get(&state.id().raw()) != Some(&expected_start)
+                || recorder
+                    .linear_checkpoint_shapes
+                    .get(&state.id().raw())
+                    .is_none_or(|(_, checkpoint_rows)| *checkpoint_rows != rows)
                 || recorder.linear_lengths.get(&state.id().raw()) != Some(&expected_end)
             {
                 return Err(ExecutionError::InvalidRequest {
@@ -15864,7 +17271,10 @@ mod tests {
             row_index: u32,
         ) -> Result<(), ExecutionError> {
             let mut recorder = self.state.lock().expect("recorder lock");
-            if row_index > 1
+            if recorder
+                .linear_checkpoint_shapes
+                .get(&state.id().raw())
+                .is_none_or(|(_, rows)| row_index >= *rows)
                 || recorder.linear_checkpoints.get(&state.id().raw()) != Some(&expected_start)
                 || recorder.linear_lengths.get(&state.id().raw()) != Some(&expected_end)
             {
@@ -15874,6 +17284,7 @@ mod tests {
             }
             recorder.linear_lengths.insert(state.id().raw(), prefix_end);
             recorder.linear_checkpoints.remove(&state.id().raw());
+            recorder.linear_checkpoint_shapes.remove(&state.id().raw());
             drop(recorder);
             self.event(format!(
                 "checkpoint-commit:{}:{}:{}",
@@ -15897,7 +17308,10 @@ mod tests {
             self.checkpoint_batch_calls.fetch_add(1, Ordering::Relaxed);
             let mut recorder = self.state.lock().expect("recorder lock");
             for state in states {
-                if row_index > 1
+                if recorder
+                    .linear_checkpoint_shapes
+                    .get(&state.id().raw())
+                    .is_none_or(|(_, rows)| row_index >= *rows)
                     || recorder.linear_checkpoints.get(&state.id().raw()) != Some(&expected_start)
                     || recorder.linear_lengths.get(&state.id().raw()) != Some(&expected_end)
                 {
@@ -15917,6 +17331,7 @@ mod tests {
             for state in states {
                 recorder.linear_lengths.insert(state.id().raw(), prefix_end);
                 recorder.linear_checkpoints.remove(&state.id().raw());
+                recorder.linear_checkpoint_shapes.remove(&state.id().raw());
             }
             drop(recorder);
             self.event(format!(
@@ -15933,11 +17348,10 @@ mod tests {
             _access: &ExecutionAdapterAccess<'_>,
             state: &LinearAttentionState,
         ) -> Result<(), ExecutionError> {
-            self.state
-                .lock()
-                .expect("recorder lock")
-                .linear_checkpoints
-                .remove(&state.id().raw());
+            let mut recorder = self.state.lock().expect("recorder lock");
+            recorder.linear_checkpoints.remove(&state.id().raw());
+            recorder.linear_checkpoint_shapes.remove(&state.id().raw());
+            drop(recorder);
             self.event(format!("checkpoint-discard:{}", state.layer_id()));
             Ok(())
         }
@@ -19015,6 +20429,119 @@ mod tests {
     }
 
     #[test]
+    fn mtp_width_three_and_four_checkpoints_support_partial_and_all_acceptance() {
+        for width in [3_usize, 4] {
+            let target_rows = width + 1;
+            let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+                vec![11],
+                (21..).take(target_rows).collect(),
+            ]));
+            recorder.set_checkpoint_supported(true);
+            let (graph, plan) =
+                crate::qwen_graph::qwen35_execution_fixture_with_token_count(target_rows as u64);
+            let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+            let mut core = QwenExecutionCore::provision(
+                session,
+                graph,
+                plan,
+                Duration::from_millis(1),
+                &TestProvisionSource::default(),
+            )
+            .expect("target fixture provisions");
+            core.prefill(&[1]).expect("prefill succeeds");
+            let token_ids = (2..).take(target_rows).collect::<Vec<_>>();
+            core.decode_block_with_mtp_state(&token_ids)
+                .expect("variable-width block succeeds");
+            let output = core
+                .resolve_decode_block(1)
+                .expect("partial variable-width block restores row zero");
+            assert_eq!(output.token_ids(), &[21]);
+            assert_eq!(output.committed_length(), 2);
+            assert_eq!(recorder.checkpoint_batch_calls(), 1);
+            assert!(
+                recorder
+                    .events()
+                    .iter()
+                    .any(|event| event.starts_with("checkpoint-commit-batch:")),
+                "width {width} partial acceptance commits a checkpoint batch"
+            );
+
+            let all_recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+                vec![11],
+                (31..).take(target_rows).collect(),
+            ]));
+            all_recorder.set_checkpoint_supported(true);
+            let (all_graph, all_plan) =
+                crate::qwen_graph::qwen35_execution_fixture_with_token_count(target_rows as u64);
+            let all_session = Arc::new(ExecutionSession::new("recorder", all_recorder.clone()));
+            let mut all_core = QwenExecutionCore::provision(
+                all_session,
+                all_graph,
+                all_plan,
+                Duration::from_millis(1),
+                &TestProvisionSource::default(),
+            )
+            .expect("all-acceptance fixture provisions");
+            all_core
+                .prefill(&[1])
+                .expect("all-acceptance prefill succeeds");
+            all_core
+                .decode_block_with_mtp_state(&token_ids)
+                .expect("all-acceptance variable-width block succeeds");
+            let all_output = all_core
+                .resolve_decode_block(target_rows)
+                .expect("all rows are accepted");
+            assert_eq!(all_output.token_ids().len(), target_rows);
+            assert_eq!(all_recorder.checkpoint_batch_calls(), 0);
+            assert!(
+                all_recorder
+                    .events()
+                    .iter()
+                    .any(|event| event.starts_with("checkpoint-discard:")),
+                "width {width} all acceptance disarms its checkpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn mtp_width_four_checkpoint_batch_failure_poisoned_request() {
+        let target_rows = 5_usize;
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+            vec![11],
+            (21..).take(target_rows).collect(),
+        ]));
+        recorder.set_checkpoint_supported(true);
+        recorder.set_checkpoint_batch_failure(true);
+        let (graph, plan) =
+            crate::qwen_graph::qwen35_execution_fixture_with_token_count(target_rows as u64);
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let mut core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &TestProvisionSource::default(),
+        )
+        .expect("width-four fixture provisions");
+        core.prefill(&[1]).expect("prefill succeeds");
+        core.decode_block_with_mtp_state(&(2..).take(target_rows).collect::<Vec<_>>())
+            .expect("width-four block succeeds before commit");
+        let error = core
+            .resolve_decode_block(1)
+            .expect_err("width-four batch failure is returned");
+        assert!(matches!(
+            error,
+            QwenExecutionError::Execution(ExecutionError::BackendStatus { status: 92, .. })
+        ));
+        assert!(core.lifecycle.is_poisoned());
+        assert_eq!(recorder.checkpoint_batch_calls(), 1);
+        assert!(matches!(
+            core.decode_block_with_mtp_state(&[5, 6, 7, 8, 9]),
+            Err(QwenExecutionError::Poisoned)
+        ));
+    }
+
+    #[test]
     fn mtp_target_prefill_preserves_every_argmax_and_hidden_row() {
         let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![11, 12, 13]]));
         let (mut core, _) = provisioned_core(recorder);
@@ -19571,6 +21098,211 @@ mod tests {
             .expect("resident state-image factory restores");
         assert_eq!(request.committed_length(), 3);
         assert_eq!(request.last_output(), image.cached_terminal_output());
+    }
+
+    #[test]
+    fn qwen_paged_v2_state_image_preserves_128_and_129_block_topology() {
+        for token_count in [128_u64, 129] {
+            let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![
+                101;
+                token_count
+                    as usize
+            ]]));
+            let (graph, plan) =
+                crate::qwen_graph::qwen35_execution_fixture_with_token_count(token_count);
+            let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+            let source = TestProvisionSource::default();
+            let mut core = QwenExecutionCore::provision(
+                Arc::clone(&session),
+                graph.clone(),
+                plan.clone(),
+                Duration::from_millis(1),
+                &source,
+            )
+            .expect("Paged V2 fixture provisions");
+            core.prefill(&vec![1; token_count as usize])
+                .expect("Paged V2 fixture prefill");
+            let image = core
+                .export_state_image_v2()
+                .expect("Paged V2 state image exports");
+            let expected_blocks = token_count.div_ceil(128);
+            assert_eq!(image.committed_length(), token_count);
+            assert_eq!(image.kv_layers().len(), 8);
+            assert_eq!(image.linear_layers().len(), 24);
+            for entry in image.kv_layers().values() {
+                assert_eq!(entry.paged_metadata().observed_length(), token_count);
+                assert_eq!(
+                    entry.paged_metadata().physical_block_capacity(),
+                    expected_blocks
+                );
+                let crate::KvPagedImageTopologyV1::LogicalTable(table) =
+                    entry.paged_metadata().topology()
+                else {
+                    panic!("fixture must use a logical Paged table");
+                };
+                assert_eq!(table.len(), expected_blocks as usize);
+                assert!(
+                    table
+                        .iter()
+                        .enumerate()
+                        .all(|(index, block)| *block == index as u32)
+                );
+                let strides = entry.paged_metadata().plane_strides();
+                for (plane, stride) in entry.image().planes().iter().zip(strides) {
+                    assert_eq!(plane.len() as u64, stride * expected_blocks);
+                }
+            }
+            let mut destination = QwenExecutionCore::provision(
+                Arc::clone(&session),
+                graph,
+                plan,
+                Duration::from_millis(1),
+                &source,
+            )
+            .expect("Paged V2 destination provisions");
+            destination
+                .restore_state_image_v2(&image)
+                .expect("Paged V2 state image restores all layers");
+            assert_eq!(destination.committed_length, token_count);
+            assert_eq!(recorder.state_image_import_calls(), 32);
+        }
+    }
+
+    #[test]
+    fn qwen_paged_v2_rejects_missing_layer_before_any_import() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![101; 129]]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture_with_token_count(129);
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let source = TestProvisionSource::default();
+        let mut source_core = QwenExecutionCore::provision(
+            Arc::clone(&session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("Paged V2 source provisions");
+        source_core
+            .prefill(&vec![1; 129])
+            .expect("Paged V2 source prefill");
+        let mut malformed = source_core
+            .export_state_image_v2()
+            .expect("Paged V2 image exports");
+        let first_layer = *malformed.kv_layers.keys().next().expect("KV layer");
+        malformed
+            .kv_layers
+            .get_mut(&first_layer)
+            .expect("first Paged V2 layer")
+            .descriptor =
+            KvStateDescriptor::new_with_storage(first_layer, 128, 4, 256, KvCacheEncoding::Fp16)
+                .expect("invalid recipe descriptor");
+
+        let mut destination = QwenExecutionCore::provision(
+            Arc::clone(&session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("Paged V2 destination provisions");
+        assert!(matches!(
+            destination.restore_state_image_v2(&malformed),
+            Err(QwenExecutionError::InvalidRequest(reason))
+                if reason.contains("descriptor") || reason.contains("recipe")
+        ));
+        assert_eq!(recorder.state_image_import_calls(), 0);
+        assert_eq!(destination.committed_length, 0);
+
+        let mut malformed = source_core
+            .export_state_image_v2()
+            .expect("Paged V2 image re-exports");
+        malformed.kv_layers.remove(&first_layer);
+
+        let mut destination =
+            QwenExecutionCore::provision(session, graph, plan, Duration::from_millis(1), &source)
+                .expect("Paged V2 destination provisions");
+        assert!(matches!(
+            destination.restore_state_image_v2(&malformed),
+            Err(QwenExecutionError::InvalidRequest(reason))
+                if reason.contains("layer set")
+        ));
+        assert_eq!(recorder.state_image_import_calls(), 0);
+        assert_eq!(destination.committed_length, 0);
+        assert!(destination.last_output.is_none());
+    }
+
+    #[test]
+    fn qwen_paged_v2_checkpoint_round_trips_linear_state_planes() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![
+            101, 102, 103,
+        ]]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder));
+        let source = TestProvisionSource::default();
+        let mut core = QwenExecutionCore::provision(
+            Arc::clone(&session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("Paged V2 checkpoint fixture provisions");
+        core.prefill(&[1, 2, 3])
+            .expect("Paged V2 checkpoint fixture prefill");
+        let image = core
+            .export_state_image_v2()
+            .expect("Paged V2 image exports");
+        let encoding = image
+            .kv_layers()
+            .values()
+            .next()
+            .expect("Paged KV layer")
+            .descriptor()
+            .cache_encoding();
+        let identity = CheckpointIdentity::for_tokens(
+            image.model_fingerprint(),
+            "artifact-v2",
+            image.adapter_identity(),
+            "renderer-v2",
+            "tokenizer-v2",
+            "recorder",
+            qwen_hex_digest(image.plan_digest()),
+            &[1, 2, 3],
+            encoding,
+            image.kv_descriptor_digest(),
+            [9; 32],
+        )
+        .expect("V2 checkpoint identity");
+        let checkpoint = image
+            .to_checkpoint_v2(identity.clone(), &[1, 2, 3], &[], &[], &[], &[], 3, 3, 1)
+            .expect("V2 checkpoint includes linear/GDN planes");
+        assert_eq!(checkpoint.payload.linear_state_layers.len(), 24);
+        assert_eq!(checkpoint.payload.linear_state_planes.len(), 120);
+        let encoded = checkpoint.encode().expect("V2 checkpoint wire encode");
+        let decoded = SessionCheckpointV2::decode(&encoded).expect("V2 checkpoint wire decode");
+        assert_eq!(decoded, checkpoint);
+        let mut missing_linear_plane = decoded.clone();
+        missing_linear_plane.payload.linear_state_planes.pop();
+        assert!(missing_linear_plane.validate().is_err());
+
+        let destination_recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![201]]));
+        let destination_session =
+            Arc::new(ExecutionSession::new("destination", destination_recorder));
+        let mut destination = QwenExecutionCore::provision(
+            destination_session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("V2 destination provisions");
+        destination
+            .restore_checkpoint_v2(&decoded, &identity)
+            .expect("V2 checkpoint restores all Qwen state layers");
+        assert_eq!(destination.committed_length, 3);
+        destination
+            .ensure_state_lengths(3)
+            .expect("restored KV and linear lengths match");
     }
 
     #[test]
@@ -20822,5 +22554,92 @@ mod tests {
         );
         assert!(gather_qwen38_fp8_rows(&values, &scales, &[4, 3], &[4]).is_err());
         assert!(gather_qwen38_fp8_rows(&values[..11], &scales, &[4, 3], &[1]).is_err());
+    }
+
+    #[test]
+    fn qwen_memory_audit_preserves_vmm_and_paged_metadata_accounting() {
+        let vmm = KvPhysicalMemorySnapshot::new(256, 129, 4096, 1, 256, 8192)
+            .expect("valid VMM metadata");
+        let paged = crate::kv_state::KvPagedPhysicalMemorySnapshot::new(
+            256,
+            129,
+            crate::kv_state::KV_PAGED_TOKEN_BLOCK_SIZE,
+            crate::kv_state::KV_PAGED_PHYSICAL_LAYOUT_VERSION,
+            2,
+            4,
+            2,
+            [1_048_576, 1_048_576, 32_768, 32_768, 0, 0],
+            2_162_688,
+        )
+        .expect("valid paged metadata");
+
+        let vmm_audit = QwenRequestMemoryAudit {
+            kv_layers: vec![QwenKvLayerMemoryAudit {
+                layer: 0,
+                logical_capacity_tokens: 256,
+                observed_length_tokens: 129,
+                physical: KvPhysicalMemoryMetadata::Vmm(vmm),
+            }],
+            linear_attention_layers: 0,
+            linear_attention_capacity_tokens: None,
+            linear_attention_observed_length_tokens: None,
+        };
+        assert!(matches!(
+            vmm_audit.kv_layers()[0].physical_metadata(),
+            KvPhysicalMemoryMetadata::Vmm(value) if value == vmm
+        ));
+        assert_eq!(vmm_audit.committed_kv_bytes().unwrap(), 16_384);
+
+        let paged_audit = QwenRequestMemoryAudit {
+            kv_layers: vec![QwenKvLayerMemoryAudit {
+                layer: 0,
+                logical_capacity_tokens: 256,
+                observed_length_tokens: 129,
+                physical: KvPhysicalMemoryMetadata::Paged(paged),
+            }],
+            linear_attention_layers: 0,
+            linear_attention_capacity_tokens: None,
+            linear_attention_observed_length_tokens: None,
+        };
+        assert!(matches!(
+            paged_audit.kv_layers()[0].physical_metadata(),
+            KvPhysicalMemoryMetadata::Paged(value) if value == paged
+        ));
+        assert_eq!(paged_audit.committed_kv_bytes().unwrap(), 2_162_688);
+    }
+
+    #[test]
+    fn qwen_prefix_audit_reports_paged_blocks_and_shared_bytes() {
+        let paged = crate::kv_state::KvPagedPhysicalMemorySnapshot::new(
+            256,
+            129,
+            crate::kv_state::KV_PAGED_TOKEN_BLOCK_SIZE,
+            crate::kv_state::KV_PAGED_PHYSICAL_LAYOUT_VERSION,
+            2,
+            4,
+            2,
+            [1_048_576, 1_048_576, 32_768, 32_768, 0, 0],
+            2_162_688,
+        )
+        .expect("valid paged metadata");
+        let fork =
+            StateForkAuditV1::new_paged(129, 2, 2_112, 0, 0).expect("valid paged fork audit");
+        let mut audit = QwenPrefixForkAuditV1::default();
+        audit
+            .add(
+                fork,
+                false,
+                Some(KvPhysicalMemoryMetadata::Paged(paged)),
+                u64::MAX,
+            )
+            .expect("paged prefix audit");
+        assert_eq!(audit.shared_pages(), 0);
+        assert_eq!(audit.shared_blocks(), 2);
+        assert_eq!(audit.cache_resident_bytes(), 2_162_688);
+        let mut without_snapshot = QwenPrefixForkAuditV1::default();
+        without_snapshot
+            .add(fork, false, None, u64::MAX)
+            .expect("paged prefix audit fallback");
+        assert_eq!(without_snapshot.cache_resident_bytes(), 2_112);
     }
 }

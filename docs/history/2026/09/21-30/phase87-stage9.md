@@ -109,4 +109,4 @@ HIP-only、fallbackなし、cleanup zeroでPASS。通常128出力のR9700 AB/BA�
 参考runは`.local-artifacts/phase87/stage9/long512-gfx1201-{full,reduced}.json`、診断binary SHA-256は
 `5fb7b119db18d32ed32e7428c4c8a6b5b61fa2c1e6b30f5ae333068fdb754814`。
 
-計画: [Phase 87単一要求NVFP4計画](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)。
+計画: [Phase 87単一要求NVFP4計画](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md)。

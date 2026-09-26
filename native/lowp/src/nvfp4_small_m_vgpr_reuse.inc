@@ -16,7 +16,7 @@ __device__ __forceinline__ void sllm_nvfp4_w4a4_small_m_vgpr_reuse_body(
     const float *const input_tensor_scale, uint16_t *const output,
     const uint64_t m, const uint64_t k, const uint64_t n,
     const float *const scale_lut) {
-  static_assert(Rows >= 2U && Rows <= 4U);
+  static_assert(Rows >= 2U && Rows <= 5U);
   constexpr uint32_t wave_size = 32U;
   constexpr uint32_t columns_per_wave = 4U;
   constexpr uint32_t waves_per_workgroup = 8U;
@@ -380,6 +380,11 @@ __launch_bounds__(256, 1) void sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1(
         packed_activation, activation_block_scales, packed_weight,
         weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
         k, n, scale_lut);
+  } else if (m == 5U) {
+    sllm_nvfp4_w4a4_small_m_vgpr_reuse_body<5U>(
+        packed_activation, activation_block_scales, packed_weight,
+        weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
+        k, n, scale_lut);
   }
 #else
   (void)packed_activation;
@@ -394,3 +399,40 @@ __launch_bounds__(256, 1) void sllm_nvfp4_w4a4_small_m_vgpr_reuse_v1(
   (void)n;
 #endif
 }
+
+// WU-12C M=5 probe symbol.  Production ID94 now dispatches M=5 directly, but
+// this guarded symbol remains available to the existing isolated comparison
+// launcher. It reuses the exact ID94 arithmetic body and therefore keeps
+// decode, scale, FMA, reduction, and BF16 rounding order identical.
+#if defined(SLLM_PHASE87_STAGE12_M5_PROBE)
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_nvfp4_w4a4_small_m_vgpr_reuse_m5_probe_v1(
+    const uint8_t *const packed_activation,
+    const uint8_t *const activation_block_scales,
+    const uint8_t *const packed_weight,
+    const uint8_t *const weight_block_scales,
+    const float *const weight_tensor_scale,
+    const float *const input_tensor_scale, uint16_t *const output,
+    const uint64_t m, const uint64_t k, const uint64_t n) {
+#if defined(__gfx1030__) || defined(__gfx1201__)
+  __shared__ float scale_lut[sllm_id84_nvfp4_scale_lut_detail::kScaleLutSlots];
+  sllm_id84_nvfp4_scale_lut_detail::sllm_id84_nvfp4_populate_constant_lut(
+      scale_lut);
+  sllm_nvfp4_w4a4_small_m_vgpr_reuse_body<5U>(
+      packed_activation, activation_block_scales, packed_weight,
+      weight_block_scales, weight_tensor_scale, input_tensor_scale, output, m,
+      k, n, scale_lut);
+#else
+  (void)packed_activation;
+  (void)activation_block_scales;
+  (void)packed_weight;
+  (void)weight_block_scales;
+  (void)weight_tensor_scale;
+  (void)input_tensor_scale;
+  (void)output;
+  (void)m;
+  (void)k;
+  (void)n;
+#endif
+}
+#endif

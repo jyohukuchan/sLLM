@@ -25,6 +25,11 @@
 #include "moe_route_api.hpp"
 #include "moe_route_kernel_internal.hpp"
 #include "public_runtime_internal.hpp"
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+#include "paged_kv_device_pool.hpp"
+#include "paged_kv_pool_state.hpp"
+#include "paged_kv_slab_plan.hpp"
+#endif
 #include "residual_rmsnorm_api.hpp"
 #include "rmsnorm_api.hpp"
 #include "rmsnorm_kernel_internal.hpp"
@@ -840,6 +845,10 @@ struct MatmulScratchSlot final {
 };
 struct Completion;
 void release_pinned_host_storage(Completion *completion) noexcept;
+void release_pinned_device_status_storage(Completion *completion) noexcept;
+void poison_context(Context *context) noexcept;
+sllm_status_t hip_failure(sllm_error_sink_t *sink, hipError_t error,
+                          const char *operation) noexcept;
 bool release_graph_span_active(Completion *completion) noexcept;
 bool release_graph_span_completion(Completion *completion) noexcept;
 bool rollback_graph_span_completion(Completion *completion) noexcept;
@@ -991,6 +1000,9 @@ struct Queue final : QuarantineNode {
   std::array<void *, 2> pinned_d2h_slots;
   std::array<bool, 2> pinned_d2h_in_use;
   std::atomic<bool> whole_graph_result_readback_required;
+  std::mutex pinned_status_mutex;
+  uint32_t *pinned_status_storage;
+  std::array<bool, 512> pinned_status_in_use;
 
   Queue(Context *const context_value, const hipStream_t stream_value)
       : QuarantineNode(HandleKind::Queue), context(context_value),
@@ -1001,7 +1013,8 @@ struct Queue final : QuarantineNode {
         next_submission_serial(0U), graph_capture_active(false),
         pinned_d2h_mutex(), pinned_d2h_slots{nullptr, nullptr},
         pinned_d2h_in_use{false, false},
-        whole_graph_result_readback_required(false) {}
+        whole_graph_result_readback_required(false), pinned_status_mutex(),
+        pinned_status_storage(nullptr), pinned_status_in_use{} {}
 
   ~Queue() {
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
@@ -1010,6 +1023,8 @@ struct Queue final : QuarantineNode {
         (void)hipHostFree(slot);
       }
     }
+    if (pinned_status_storage != nullptr)
+      (void)hipHostFree(pinned_status_storage);
 #endif
   }
 };
@@ -1021,6 +1036,45 @@ struct Queue final : QuarantineNode {
 thread_local Queue *graph_capture_queue = nullptr;
 
 constexpr std::size_t kWholeDecodeResultReadbackBytes = 192U;
+
+bool reserve_pinned_device_status_slot(Queue *const queue,
+                                       uint32_t **const pointer,
+                                       uint32_t *const slot) noexcept {
+  if (queue == nullptr || pointer == nullptr || slot == nullptr)
+    return false;
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  return false;
+#else
+  std::lock_guard<std::mutex> lock(queue->pinned_status_mutex);
+  if (queue->pinned_status_storage == nullptr) {
+    void *allocation = nullptr;
+    if (hipHostMalloc(&allocation,
+                      queue->pinned_status_in_use.size() * sizeof(uint32_t),
+                      hipHostMallocPortable) != hipSuccess)
+      return false;
+    queue->pinned_status_storage = static_cast<uint32_t *>(allocation);
+  }
+  for (std::size_t index = 0U; index < queue->pinned_status_in_use.size();
+       ++index) {
+    if (queue->pinned_status_in_use[index])
+      continue;
+    queue->pinned_status_in_use[index] = true;
+    *pointer = queue->pinned_status_storage + index;
+    *slot = static_cast<uint32_t>(index);
+    **pointer = 0U;
+    return true;
+  }
+  return false;
+#endif
+}
+
+void release_pinned_device_status_slot(Queue *const queue,
+                                       const uint32_t slot) noexcept {
+  if (queue == nullptr || slot >= queue->pinned_status_in_use.size())
+    return;
+  std::lock_guard<std::mutex> lock(queue->pinned_status_mutex);
+  queue->pinned_status_in_use[slot] = false;
+}
 
 bool reserve_pinned_d2h_slot(Queue *const queue, void **const pointer,
                              uint32_t *const slot) noexcept {
@@ -1126,571 +1180,6 @@ struct Buffer final : QuarantineNode {
         release_active(false) {}
 };
 
-struct KvVmmPlane final {
-  void *address;
-  uint64_t logical_bytes;
-  uint64_t reservation_bytes;
-  uint64_t mapped_bytes;
-  uint64_t page_bytes;
-  std::vector<hipMemGenericAllocationHandle_t> handles;
-  std::vector<uint8_t> shared_pages;
-  /* During a COW transaction the current handle is the replacement and this
-   * side vector retains the old shared handle until commit or rollback.  A
-   * shared_pages value of 2 denotes that pending state. */
-  std::vector<hipMemGenericAllocationHandle_t> cow_old_handles;
-  bool contiguous;
-
-  KvVmmPlane() noexcept
-      : address(nullptr), logical_bytes(0U), reservation_bytes(0U),
-        mapped_bytes(0U), page_bytes(0U), handles(), shared_pages(),
-        cow_old_handles(), contiguous(false) {}
-  KvVmmPlane(const KvVmmPlane &) = delete;
-  KvVmmPlane &operator=(const KvVmmPlane &) = delete;
-  KvVmmPlane(KvVmmPlane &&other) noexcept
-      : address(other.address), logical_bytes(other.logical_bytes),
-        reservation_bytes(other.reservation_bytes),
-        mapped_bytes(other.mapped_bytes), page_bytes(other.page_bytes),
-        handles(std::move(other.handles)),
-        shared_pages(std::move(other.shared_pages)),
-        cow_old_handles(std::move(other.cow_old_handles)),
-        contiguous(other.contiguous) {
-    other.address = nullptr;
-    other.logical_bytes = 0U;
-    other.reservation_bytes = 0U;
-    other.mapped_bytes = 0U;
-    other.page_bytes = 0U;
-    other.shared_pages.clear();
-    other.cow_old_handles.clear();
-    other.contiguous = false;
-  }
-
-  hipError_t reserve_contiguous(const uint64_t logical,
-                                const uint64_t page) noexcept {
-    if (logical == 0U || page == 0U ||
-        logical > std::numeric_limits<std::size_t>::max()) {
-      return hipErrorInvalidValue;
-    }
-    void *candidate = nullptr;
-    const hipError_t status =
-        hipMalloc(&candidate, static_cast<std::size_t>(logical));
-    if (status != hipSuccess) {
-      return status;
-    }
-    address = candidate;
-    logical_bytes = logical;
-    reservation_bytes = logical;
-    mapped_bytes = logical;
-    page_bytes = page;
-    contiguous = true;
-    return hipSuccess;
-  }
-  ~KvVmmPlane() { release_noexcept(); }
-
-  hipError_t reserve(const uint64_t logical, const uint64_t reservation,
-                     const uint64_t page) noexcept {
-    if (logical == 0U || reservation < logical || page == 0U ||
-        reservation % page != 0U ||
-        reservation > std::numeric_limits<std::size_t>::max()) {
-      return hipErrorInvalidValue;
-    }
-    void *candidate = nullptr;
-    const hipError_t status =
-        hipMemAddressReserve(&candidate, static_cast<std::size_t>(reservation),
-                             static_cast<std::size_t>(page), nullptr, 0U);
-    if (status != hipSuccess) {
-      return status;
-    }
-    address = candidate;
-    logical_bytes = logical;
-    reservation_bytes = reservation;
-    page_bytes = page;
-    try {
-      handles.reserve(static_cast<std::size_t>(reservation / page));
-      shared_pages.reserve(static_cast<std::size_t>(reservation / page));
-      cow_old_handles.reserve(static_cast<std::size_t>(reservation / page));
-    } catch (...) {
-      (void)hipMemAddressFree(address,
-                              static_cast<std::size_t>(reservation_bytes));
-      address = nullptr;
-      logical_bytes = 0U;
-      reservation_bytes = 0U;
-      page_bytes = 0U;
-      handles.clear();
-      shared_pages.clear();
-      cow_old_handles.clear();
-      return hipErrorUnknown;
-    }
-    return hipSuccess;
-  }
-
-  hipError_t grow(const uint64_t required_bytes,
-                  const hipMemAllocationProp &properties,
-                  const hipMemAccessDesc &access) noexcept {
-    if (required_bytes > reservation_bytes || address == nullptr) {
-      return hipErrorInvalidValue;
-    }
-    if (contiguous) {
-      return hipSuccess;
-    }
-    while (mapped_bytes < required_bytes) {
-      hipMemGenericAllocationHandle_t handle = nullptr;
-      hipError_t status = hipMemCreate(
-          &handle, static_cast<std::size_t>(page_bytes), &properties, 0U);
-      if (status != hipSuccess) {
-        return status;
-      }
-      void *const target =
-          static_cast<char *>(address) + static_cast<std::size_t>(mapped_bytes);
-      status = hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
-                         handle, 0U);
-      if (status != hipSuccess) {
-        (void)hipMemRelease(handle);
-        return status;
-      }
-      status = hipMemSetAccess(target, static_cast<std::size_t>(page_bytes),
-                               &access, 1U);
-      if (status != hipSuccess) {
-        (void)hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
-        (void)hipMemRelease(handle);
-        return status;
-      }
-      const std::size_t handles_before = handles.size();
-      const std::size_t shared_before = shared_pages.size();
-      const std::size_t cow_before = cow_old_handles.size();
-      try {
-        handles.push_back(handle);
-        shared_pages.push_back(0U);
-        cow_old_handles.push_back(nullptr);
-      } catch (...) {
-        handles.resize(handles_before);
-        shared_pages.resize(shared_before);
-        cow_old_handles.resize(cow_before);
-        (void)hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
-        (void)hipMemRelease(handle);
-        return hipErrorUnknown;
-      }
-      mapped_bytes += page_bytes;
-    }
-    return hipSuccess;
-  }
-
-  hipError_t mark_read_only(const uint64_t visible_bytes,
-                            const int device_index) noexcept {
-    if (contiguous || address == nullptr || mapped_bytes == 0U) {
-      return hipSuccess;
-    }
-    (void)device_index;
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-    const hipError_t status = hipSuccess;
-#else
-    hipMemAccessDesc access{};
-    access.location.type = hipMemLocationTypeDevice;
-    access.location.id = device_index;
-    access.flags = hipMemAccessFlagsProtRead;
-    const std::size_t page_count = std::min(
-        handles.size(), static_cast<std::size_t>(
-                            (visible_bytes + page_bytes - 1U) / page_bytes));
-    const hipError_t status =
-        page_count == 0U
-            ? hipSuccess
-            : hipMemSetAccess(address,
-                              page_count * static_cast<std::size_t>(page_bytes),
-                              &access, 1U);
-#endif
-    if (status == hipSuccess) {
-      shared_pages.assign(handles.size(), 0U);
-      cow_old_handles.assign(handles.size(), nullptr);
-      const std::size_t shared_page_count = std::min(
-          handles.size(), static_cast<std::size_t>(
-                              (visible_bytes + page_bytes - 1U) / page_bytes));
-      std::fill(shared_pages.begin(),
-                shared_pages.begin() +
-                    static_cast<std::ptrdiff_t>(shared_page_count),
-                uint8_t{1});
-    }
-    return status;
-  }
-
-  /* Retain every source VMM allocation and map it in a fresh reservation.
-   * The child mappings are read-only until an append performs COW. */
-  hipError_t clone_shared_from(const KvVmmPlane &source,
-                               const uint64_t destination_logical_bytes,
-                               const uint64_t visible_bytes,
-                               const int device_index) noexcept {
-    if (source.contiguous || source.address == nullptr ||
-        source.page_bytes == 0U || source.mapped_bytes == 0U) {
-      return hipErrorInvalidValue;
-    }
-    const uint64_t destination_reservation =
-        ((destination_logical_bytes + source.page_bytes - 1U) /
-         source.page_bytes) *
-        source.page_bytes;
-    hipError_t status = reserve(destination_logical_bytes,
-                                destination_reservation, source.page_bytes);
-    if (status != hipSuccess) {
-      return status;
-    }
-    hipMemAccessDesc access{};
-    access.location.type = hipMemLocationTypeDevice;
-    access.location.id = device_index;
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-    access.flags = hipMemAccessFlagsProtReadWrite;
-#else
-    access.flags = hipMemAccessFlagsProtRead;
-#endif
-    const std::size_t visible_pages = std::min(
-        source.handles.size(),
-        static_cast<std::size_t>((visible_bytes + source.page_bytes - 1U) /
-                                 source.page_bytes));
-    for (std::size_t index = 0U; index < visible_pages; ++index) {
-#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      const void *const source_address =
-          static_cast<const char *>(source.address) +
-          index * static_cast<std::size_t>(source.page_bytes);
-#endif
-      hipMemGenericAllocationHandle_t retained = nullptr;
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      hipMemAllocationProp properties{};
-      properties.type = hipMemAllocationTypePinned;
-      properties.location.type = hipMemLocationTypeDevice;
-      properties.location.id = device_index;
-      status = hipMemCreate(&retained, static_cast<std::size_t>(page_bytes),
-                            &properties, 0U);
-#else
-      status = hipMemRetainAllocationHandle(&retained,
-                                            const_cast<void *>(source_address));
-#endif
-      if (status != hipSuccess) {
-        release_noexcept();
-        return status;
-      }
-      void *const target = static_cast<char *>(address) +
-                           index * static_cast<std::size_t>(page_bytes);
-      status = hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
-                         retained, 0U);
-      if (status == hipSuccess) {
-        status = hipMemSetAccess(target, static_cast<std::size_t>(page_bytes),
-                                 &access, 1U);
-      }
-      if (status != hipSuccess) {
-        (void)hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
-        (void)hipMemRelease(retained);
-        release_noexcept();
-        return status;
-      }
-      const std::size_t handles_before = handles.size();
-      const std::size_t shared_before = shared_pages.size();
-      const std::size_t cow_before = cow_old_handles.size();
-      try {
-        handles.push_back(retained);
-        shared_pages.push_back(1U);
-        cow_old_handles.push_back(nullptr);
-      } catch (...) {
-        handles.resize(handles_before);
-        shared_pages.resize(shared_before);
-        cow_old_handles.resize(cow_before);
-        (void)hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
-        (void)hipMemRelease(retained);
-        return hipErrorUnknown;
-      }
-      mapped_bytes += page_bytes;
-    }
-    return hipSuccess;
-  }
-
-  static constexpr uint8_t kCowPending = 2U;
-
-  bool has_pending_cow() const noexcept {
-    return std::any_of(
-        shared_pages.begin(), shared_pages.end(),
-        [](const uint8_t value) { return value == kCowPending; });
-  }
-
-  /* Make all shared pages intersecting [start_bytes, end_bytes) private.  Old
-   * retained handles remain owned by this plane until commit_pending_cow(),
-   * allowing a caller to restore every replacement if a later plane fails. */
-  hipError_t make_private(const uint64_t start_bytes, const uint64_t end_bytes,
-                          const hipMemAllocationProp &properties,
-                          const hipMemAccessDesc &rw_access,
-                          const hipMemAccessDesc &shared_access) noexcept {
-    if (contiguous || start_bytes >= end_bytes || shared_pages.empty()) {
-      return hipSuccess;
-    }
-    if (handles.size() != shared_pages.size() ||
-        cow_old_handles.size() != handles.size() || has_pending_cow()) {
-      return hipErrorInvalidValue;
-    }
-    const std::size_t first_page =
-        static_cast<std::size_t>(start_bytes / page_bytes);
-    const std::size_t page_count = std::min(
-        shared_pages.size(),
-        static_cast<std::size_t>((end_bytes + page_bytes - 1U) / page_bytes));
-    for (std::size_t index = first_page; index < page_count; ++index) {
-      if (shared_pages[index] != 1U) {
-        continue;
-      }
-      void *temporary = nullptr;
-      hipError_t status = hipMemAddressReserve(
-          &temporary, static_cast<std::size_t>(page_bytes),
-          static_cast<std::size_t>(page_bytes), nullptr, 0U);
-      if (status != hipSuccess) {
-        return status;
-      }
-      hipMemGenericAllocationHandle_t replacement = nullptr;
-      status = hipMemCreate(&replacement, static_cast<std::size_t>(page_bytes),
-                            &properties, 0U);
-      if (status == hipSuccess) {
-        status = hipMemMap(temporary, static_cast<std::size_t>(page_bytes), 0U,
-                           replacement, 0U);
-      }
-      if (status == hipSuccess) {
-        status = hipMemSetAccess(
-            temporary, static_cast<std::size_t>(page_bytes), &rw_access, 1U);
-      }
-      void *const target = static_cast<char *>(address) +
-                           index * static_cast<std::size_t>(page_bytes);
-      if (status == hipSuccess) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-        std::memcpy(temporary, target, static_cast<std::size_t>(page_bytes));
-#else
-        status =
-            hipMemcpy(temporary, target, static_cast<std::size_t>(page_bytes),
-                      hipMemcpyDeviceToDevice);
-#endif
-      }
-      if (status != hipSuccess) {
-        (void)hipMemUnmap(temporary, static_cast<std::size_t>(page_bytes));
-        if (replacement != nullptr) {
-          (void)hipMemRelease(replacement);
-        }
-        (void)hipMemAddressFree(temporary,
-                                static_cast<std::size_t>(page_bytes));
-        return status;
-      }
-      status = hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
-      if (status == hipSuccess) {
-        status = hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
-                           replacement, 0U);
-      }
-      if (status == hipSuccess) {
-        status = hipMemSetAccess(target, static_cast<std::size_t>(page_bytes),
-                                 &rw_access, 1U);
-      }
-      if (status != hipSuccess) {
-        /* The old handle is retained, so restore the old mapping before
-         * releasing the replacement.  If restoration itself fails the caller
-         * poisons the context rather than exposing a partially mapped plane. */
-        (void)hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
-        const hipError_t restore_map =
-            hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
-                      handles[index], 0U);
-        const hipError_t restore_access =
-            restore_map == hipSuccess
-                ? hipMemSetAccess(target, static_cast<std::size_t>(page_bytes),
-                                  &shared_access, 1U)
-                : restore_map;
-        (void)hipMemUnmap(temporary, static_cast<std::size_t>(page_bytes));
-        (void)hipMemRelease(replacement);
-        (void)hipMemAddressFree(temporary,
-                                static_cast<std::size_t>(page_bytes));
-        return restore_access == hipSuccess ? status : restore_access;
-      }
-      cow_old_handles[index] = handles[index];
-      handles[index] = replacement;
-      shared_pages[index] = kCowPending;
-      const hipError_t temporary_unmap =
-          hipMemUnmap(temporary, static_cast<std::size_t>(page_bytes));
-      const hipError_t temporary_free =
-          hipMemAddressFree(temporary, static_cast<std::size_t>(page_bytes));
-      if (temporary_unmap != hipSuccess || temporary_free != hipSuccess) {
-        return temporary_unmap != hipSuccess ? temporary_unmap : temporary_free;
-      }
-    }
-    return hipSuccess;
-  }
-
-  hipError_t make_private(const uint64_t start_bytes, const uint64_t end_bytes,
-                          const hipMemAllocationProp &properties,
-                          const hipMemAccessDesc &rw_access) noexcept {
-    hipMemAccessDesc shared_access = rw_access;
-    shared_access.flags = hipMemAccessFlagsProtRead;
-    const hipError_t status = make_private(start_bytes, end_bytes, properties,
-                                           rw_access, shared_access);
-    if (status != hipSuccess) {
-      return status;
-    }
-    return commit_pending_cow();
-  }
-
-  hipError_t commit_pending_cow() noexcept {
-    if (handles.size() != shared_pages.size() ||
-        cow_old_handles.size() != handles.size()) {
-      return hipErrorInvalidValue;
-    }
-    hipError_t first = hipSuccess;
-    for (std::size_t index = 0U; index != shared_pages.size(); ++index) {
-      if (shared_pages[index] != kCowPending) {
-        continue;
-      }
-      const hipError_t status = hipMemRelease(cow_old_handles[index]);
-      if (first == hipSuccess && status != hipSuccess) {
-        first = status;
-      }
-      if (status == hipSuccess) {
-        cow_old_handles[index] = nullptr;
-        shared_pages[index] = 0U;
-      }
-    }
-    return first;
-  }
-
-  hipError_t
-  rollback_pending_cow(const hipMemAccessDesc &shared_access) noexcept {
-    if (handles.size() != shared_pages.size() ||
-        cow_old_handles.size() != handles.size()) {
-      return hipErrorInvalidValue;
-    }
-    hipError_t first = hipSuccess;
-    for (std::size_t index = shared_pages.size(); index > 0U; --index) {
-      const std::size_t page = index - 1U;
-      if (shared_pages[page] != kCowPending) {
-        continue;
-      }
-      void *const target = static_cast<char *>(address) +
-                           page * static_cast<std::size_t>(page_bytes);
-      const hipError_t unmap_status =
-          hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
-      if (unmap_status != hipSuccess) {
-        if (first == hipSuccess) {
-          first = unmap_status;
-        }
-        continue;
-      }
-      const hipError_t map_status =
-          hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
-                    cow_old_handles[page], 0U);
-      const hipError_t access_status =
-          map_status == hipSuccess
-              ? hipMemSetAccess(target, static_cast<std::size_t>(page_bytes),
-                                &shared_access, 1U)
-              : map_status;
-      if (access_status != hipSuccess) {
-        if (first == hipSuccess) {
-          first = access_status;
-        }
-        continue;
-      }
-      const hipError_t release_status = hipMemRelease(handles[page]);
-      if (release_status != hipSuccess) {
-        if (first == hipSuccess) {
-          first = release_status;
-        }
-        continue;
-      }
-      handles[page] = cow_old_handles[page];
-      cow_old_handles[page] = nullptr;
-      shared_pages[page] = 1U;
-    }
-    return first;
-  }
-
-  hipError_t rollback_growth_to(const uint64_t target_mapped_bytes) noexcept {
-    if (contiguous || target_mapped_bytes > mapped_bytes || page_bytes == 0U ||
-        target_mapped_bytes % page_bytes != 0U ||
-        handles.size() != shared_pages.size() ||
-        cow_old_handles.size() != handles.size()) {
-      return target_mapped_bytes == mapped_bytes ? hipSuccess
-                                                 : hipErrorInvalidValue;
-    }
-    hipError_t first = hipSuccess;
-    while (mapped_bytes > target_mapped_bytes) {
-      if (handles.empty()) {
-        return first == hipSuccess ? hipErrorInvalidValue : first;
-      }
-      const std::size_t index = handles.size() - 1U;
-      void *const target = static_cast<char *>(address) +
-                           index * static_cast<std::size_t>(page_bytes);
-      const hipError_t unmap_status =
-          hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
-      if (unmap_status != hipSuccess) {
-        return first == hipSuccess ? unmap_status : first;
-      }
-      const hipError_t release_status = hipMemRelease(handles[index]);
-      if (release_status != hipSuccess) {
-        return first == hipSuccess ? release_status : first;
-      }
-      handles.pop_back();
-      shared_pages.pop_back();
-      cow_old_handles.pop_back();
-      mapped_bytes -= page_bytes;
-    }
-    return first;
-  }
-
-  uint64_t shared_page_count() const noexcept {
-    return static_cast<uint64_t>(
-        std::count(shared_pages.begin(), shared_pages.end(), uint8_t{1}));
-  }
-
-  hipError_t release_checked() noexcept {
-    if (contiguous) {
-      const hipError_t status =
-          address == nullptr ? hipSuccess : hipFree(address);
-      address = nullptr;
-      logical_bytes = 0U;
-      reservation_bytes = 0U;
-      mapped_bytes = 0U;
-      page_bytes = 0U;
-      shared_pages.clear();
-      cow_old_handles.clear();
-      contiguous = false;
-      return status;
-    }
-    hipError_t first = hipSuccess;
-    for (std::size_t index = handles.size(); index > 0U; --index) {
-      void *const target = static_cast<char *>(address) +
-                           (index - 1U) * static_cast<std::size_t>(page_bytes);
-      const hipError_t unmap =
-          hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
-      const hipError_t release = hipMemRelease(handles[index - 1U]);
-      if (first == hipSuccess && unmap != hipSuccess) {
-        first = unmap;
-      }
-      if (first == hipSuccess && release != hipSuccess) {
-        first = release;
-      }
-    }
-    for (hipMemGenericAllocationHandle_t &old_handle : cow_old_handles) {
-      if (old_handle == nullptr) {
-        continue;
-      }
-      const hipError_t release = hipMemRelease(old_handle);
-      if (first == hipSuccess && release != hipSuccess) {
-        first = release;
-      }
-      old_handle = nullptr;
-    }
-    handles.clear();
-    shared_pages.clear();
-    cow_old_handles.clear();
-    mapped_bytes = 0U;
-    if (address != nullptr) {
-      const hipError_t free_status = hipMemAddressFree(
-          address, static_cast<std::size_t>(reservation_bytes));
-      if (first == hipSuccess && free_status != hipSuccess) {
-        first = free_status;
-      }
-    }
-    address = nullptr;
-    logical_bytes = 0U;
-    reservation_bytes = 0U;
-    page_bytes = 0U;
-    return first;
-  }
-
-  void release_noexcept() noexcept { (void)release_checked(); }
-};
-
 struct KvState final : QuarantineNode {
   Context *context;
   uint64_t context_identity;
@@ -1705,12 +1194,6 @@ struct KvState final : QuarantineNode {
   uint32_t head_dim;
   Buffer *key_buffer;
   Buffer *value_buffer;
-  KvVmmPlane key_plane;
-  KvVmmPlane value_plane;
-  KvVmmPlane key_scale_plane;
-  KvVmmPlane value_scale_plane;
-  KvVmmPlane key_outer_scale_plane;
-  KvVmmPlane value_outer_scale_plane;
   uint32_t dtype;
   uint32_t encoding;
   float static_key_scale;
@@ -1718,16 +1201,9 @@ struct KvState final : QuarantineNode {
   uint64_t value_bytes_per_token;
   uint64_t scale_bytes_per_token;
   uint64_t outer_scale_bytes_per_token;
-  uint64_t physical_page_bytes;
-  uint64_t tokens_per_page;
-  uint64_t mapped_token_capacity;
-  uint64_t committed_bytes_per_plane;
-  uint32_t memory_kind;
-  uint32_t fork_mode;
   sllm_public_runtime::AccountingState accounting;
   uint64_t published_length;
   uint64_t generation;
-  uint64_t shared_page_count;
   uint64_t cow_copied_bytes;
   uint32_t import_plane_mask;
   uint64_t last_published_start;
@@ -1740,180 +1216,160 @@ struct KvState final : QuarantineNode {
   bool commit_allowed;
   uint64_t view_count;
   bool release_active;
+  bool paged = false;
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  // Paged state owns a fixed device descriptor table and one logical table.
+  // The tables are released before the pool so their device pointers remain
+  // valid for the whole state lifetime.
+  uint32_t paged_token_block_size = 0U;
+  uint32_t paged_physical_layout_version = 0U;
+  uint64_t paged_logical_table_capacity = 0U;
+  uint64_t paged_max_physical_blocks = 0U;
+  uint64_t paged_allocated_physical_blocks = 0U;
+  // Number of physical blocks replaced by a committed append COW.  This is
+  // separate from pool refcounts: the latter describe current sharing, while
+  // this counter records the copy work already performed by the state.
+  uint64_t paged_cow_block_count = 0U;
+  std::array<uint64_t, 6U> paged_committed_bytes_per_plane{};
+  uint32_t *paged_device_status = nullptr;
+  std::shared_ptr<sllm_paged_kv::DevicePool> paged_device_pool;
+  std::unique_ptr<sllm_paged_kv::DevicePool::LogicalTable> paged_logical_table;
+  std::shared_ptr<sllm_paged_kv::Pool> paged_host_pool;
+  std::unique_ptr<sllm_paged_kv::State> paged_host_state;
+  std::shared_ptr<sllm_paged_kv::Pool> paged_sliding_host_pool;
+  std::unique_ptr<sllm_paged_kv::SlidingState> paged_sliding_host_state;
+  uint64_t *paged_sliding_ring_tags_device = nullptr;
+  uint64_t *paged_sliding_ring_tags_host = nullptr;
+  // The host append reservation remains owned by the state until a
+  // Completion has been registered.  This closes every pre-registration
+  // failure path without exposing a partially prepared Append.
+  std::unique_ptr<sllm_paged_kv::State::Append> paged_pending_append;
+  std::unique_ptr<sllm_paged_kv::SlidingState::Append>
+      paged_sliding_pending_append;
+#endif
 
-  KvState(Context *const context_value, const uint64_t session_value,
-          const uint32_t layer_value, const uint64_t capacity_value,
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  KvState(Context *const context_value,
+          const sllm_kv_state_paged_create_info_t &info,
           const uint32_t head_count_value, const uint32_t head_dim_value,
           Buffer *const key_value, Buffer *const value_value,
-          KvVmmPlane &&key_plane_value, KvVmmPlane &&value_plane_value,
-          KvVmmPlane &&key_scale_plane_value,
-          KvVmmPlane &&value_scale_plane_value,
-          KvVmmPlane &&key_outer_scale_plane_value,
-          KvVmmPlane &&value_outer_scale_plane_value,
-          const uint32_t dtype_value, const uint32_t encoding_value,
-          const float static_key_scale_value,
-          const float static_value_scale_value,
+          std::shared_ptr<sllm_paged_kv::DevicePool> &&device_pool_value,
+          std::unique_ptr<sllm_paged_kv::DevicePool::LogicalTable>
+              &&logical_table_value,
+          std::shared_ptr<sllm_paged_kv::Pool> &&host_pool_value,
+          std::unique_ptr<sllm_paged_kv::State> &&host_state_value,
           const uint64_t value_bytes_per_token_value,
           const uint64_t scale_bytes_per_token_value,
-          const uint64_t outer_scale_bytes_per_token_value,
-          const uint64_t page_bytes_value, const uint64_t context_token,
-          const uint64_t storage_capacity_value = 0U,
-          const uint64_t sliding_window_value = 0U)
+          const uint64_t context_token, uint32_t *const device_status_value)
       : QuarantineNode(HandleKind::KvState), context(context_value),
         context_identity(context_token), state_identity(0U),
-        session_id(session_value), layer_id(layer_value),
-        capacity_tokens(capacity_value),
-        storage_capacity_tokens(storage_capacity_value == 0U
-                                    ? capacity_value
-                                    : storage_capacity_value),
-        sliding_window(sliding_window_value), retained_start(0U),
-        head_count(head_count_value), head_dim(head_dim_value),
-        key_buffer(key_value), value_buffer(value_value),
-        key_plane(std::move(key_plane_value)),
-        value_plane(std::move(value_plane_value)),
-        key_scale_plane(std::move(key_scale_plane_value)),
-        value_scale_plane(std::move(value_scale_plane_value)),
-        key_outer_scale_plane(std::move(key_outer_scale_plane_value)),
-        value_outer_scale_plane(std::move(value_outer_scale_plane_value)),
-        dtype(dtype_value), encoding(encoding_value),
-        static_key_scale(static_key_scale_value),
-        static_value_scale(static_value_scale_value),
+        session_id(info.session_id), layer_id(info.layer_id),
+        capacity_tokens(info.capacity_tokens),
+        storage_capacity_tokens(info.capacity_tokens), sliding_window(0U),
+        retained_start(0U), head_count(head_count_value),
+        head_dim(head_dim_value), key_buffer(key_value),
+        value_buffer(value_value), dtype(info.dtype), encoding(info.encoding),
+        static_key_scale(1.0F), static_value_scale(1.0F),
         value_bytes_per_token(value_bytes_per_token_value),
         scale_bytes_per_token(scale_bytes_per_token_value),
-        outer_scale_bytes_per_token(outer_scale_bytes_per_token_value),
-        physical_page_bytes(page_bytes_value),
-        tokens_per_page(encoding_value == SLLM_HIP_KV_ENCODING_FP16_V1
-                            ? page_bytes_value / value_bytes_per_token_value
-                            : 1U),
-        mapped_token_capacity(
-            std::min(storage_capacity_tokens,
-                     key_plane.mapped_bytes / value_bytes_per_token_value)),
-        committed_bytes_per_plane(
-            std::min(key_plane.mapped_bytes, value_plane.mapped_bytes)),
-        memory_kind(key_plane.contiguous
-                        ? SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
-                        : SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS),
-        fork_mode(key_plane.contiguous
-                      ? SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY
-                      : SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES),
-        accounting(), published_length(0U), generation(0U),
-        shared_page_count(0U), cow_copied_bytes(0U), import_plane_mask(0U),
+        outer_scale_bytes_per_token(0U), accounting(), published_length(0U),
+        generation(0U), cow_copied_bytes(0U), import_plane_mask(0U),
         last_published_start(0U), last_published_end(0U),
         last_published_generation(0U), transition_token(0U),
         transition_start(0U), transition_count(0U), transition_end(0U),
-        commit_allowed(false), view_count(0U), release_active(false) {
-    const auto include_plane = [this](const KvVmmPlane &key,
-                                      const KvVmmPlane &value,
-                                      const uint64_t bytes_per_token) {
-      if (bytes_per_token == 0U) {
-        return;
-      }
-      mapped_token_capacity = std::min(
-          mapped_token_capacity,
-          std::min(key.mapped_bytes, value.mapped_bytes) / bytes_per_token);
-      committed_bytes_per_plane +=
-          std::min(key.mapped_bytes, value.mapped_bytes);
-    };
-    include_plane(key_scale_plane, value_scale_plane, scale_bytes_per_token);
-    include_plane(key_outer_scale_plane, value_outer_scale_plane,
-                  outer_scale_bytes_per_token);
-    if (memory_kind == SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT &&
-        encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
-      physical_page_bytes = value_bytes_per_token + scale_bytes_per_token +
-                            outer_scale_bytes_per_token;
-    } else if (memory_kind == SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
-               encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
-      tokens_per_page =
-          std::max(UINT64_C(1), page_bytes_value / value_bytes_per_token);
-    }
-  }
+        commit_allowed(false), view_count(0U), release_active(false),
+        paged(true), paged_token_block_size(info.token_block_size),
+        paged_physical_layout_version(info.physical_layout_version),
+        paged_logical_table_capacity(info.logical_table_capacity),
+        paged_max_physical_blocks(info.max_physical_blocks),
+        paged_allocated_physical_blocks(0U), paged_committed_bytes_per_plane{},
+        paged_device_status(device_status_value),
+        paged_device_pool(std::move(device_pool_value)),
+        paged_logical_table(std::move(logical_table_value)),
+        paged_host_pool(std::move(host_pool_value)),
+        paged_host_state(std::move(host_state_value)),
+        paged_sliding_host_pool(), paged_sliding_host_state(nullptr),
+        paged_sliding_ring_tags_device(nullptr),
+        paged_sliding_ring_tags_host(nullptr), paged_pending_append(nullptr),
+        paged_sliding_pending_append(nullptr) {}
+#endif
 };
+
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+sllm_status_t
+release_paged_state_resources(KvState *const state,
+                              sllm_error_sink_t *const sink) noexcept {
+  if (state == nullptr || !state->paged || state->context == nullptr)
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "Paged KV release state is invalid");
+  const auto fail = [&](const sllm_status_t status,
+                        const char *const message) noexcept {
+    state->context->poisoned.store(true);
+    return sllm_public_runtime::write_error(sink, status, message);
+  };
+  if (state->paged_pending_append != nullptr ||
+      state->paged_sliding_pending_append != nullptr)
+    return fail(SLLM_STATUS_PUBLIC_BUSY,
+                "Paged KV release has an unfinished append");
+  if (hipDeviceSynchronize() != hipSuccess)
+    return fail(SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                "Paged KV release device synchronization failed");
+
+  if (state->paged_host_state != nullptr) {
+    if (state->paged_host_state->release() != sllm_paged_kv::Status::Ok)
+      return fail(SLLM_STATUS_INTERNAL_ERROR,
+                  "Paged KV host ownership release failed");
+    state->paged_host_state.reset();
+  }
+  if (state->paged_sliding_host_state != nullptr) {
+    if (state->paged_sliding_host_state->release() != sllm_paged_kv::Status::Ok)
+      return fail(SLLM_STATUS_INTERNAL_ERROR,
+                  "Paged sliding KV host ownership release failed");
+    state->paged_sliding_host_state.reset();
+  }
+  if (state->paged_logical_table != nullptr) {
+    if (state->paged_logical_table->release(nullptr) !=
+        sllm_paged_kv::DeviceStatus::Ok)
+      return fail(SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                  "Paged KV logical table release failed");
+    state->paged_logical_table.reset();
+  }
+  if (state->paged_sliding_ring_tags_device != nullptr) {
+    if (free_allocation_with_fault_injection(
+            state->paged_sliding_ring_tags_device) != hipSuccess)
+      return fail(SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                  "Paged sliding KV device tags release failed");
+    state->paged_sliding_ring_tags_device = nullptr;
+  }
+  if (state->paged_sliding_ring_tags_host != nullptr) {
+    if (hipHostFree(state->paged_sliding_ring_tags_host) != hipSuccess)
+      return fail(SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                  "Paged sliding KV host tags release failed");
+    state->paged_sliding_ring_tags_host = nullptr;
+  }
+  if (state->paged_device_status != nullptr) {
+    if (free_allocation_with_fault_injection(state->paged_device_status) !=
+        hipSuccess)
+      return fail(SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                  "Paged KV device status release failed");
+    state->paged_device_status = nullptr;
+  }
+  if (state->paged_device_pool != nullptr) {
+    if (state->paged_device_pool.use_count() == 1U &&
+        state->paged_device_pool->release(nullptr) !=
+            sllm_paged_kv::DeviceStatus::Ok)
+      return fail(SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                  "Paged KV physical pool release failed");
+    state->paged_device_pool.reset();
+  }
+  state->paged_host_pool.reset();
+  state->paged_sliding_host_pool.reset();
+  return SLLM_STATUS_OK;
+}
+#endif
 
 void poison_context_locked(Context *const context) noexcept;
-
-struct KvVmmAppendTransaction final {
-  KvState *state;
-  std::array<KvVmmPlane *, 6> planes;
-  std::array<uint64_t, 6> mapped_before;
-  hipMemAccessDesc shared_access;
-  uint64_t mapped_token_capacity_before;
-  uint64_t committed_bytes_before;
-  uint64_t shared_page_count_before;
-  uint64_t cow_copied_bytes_before;
-  bool finished;
-
-  KvVmmAppendTransaction(KvState *const state_value,
-                         const hipMemAccessDesc &shared_access_value) noexcept
-      : state(state_value), planes{&state_value->key_plane,
-                                   &state_value->value_plane,
-                                   &state_value->key_scale_plane,
-                                   &state_value->value_scale_plane,
-                                   &state_value->key_outer_scale_plane,
-                                   &state_value->value_outer_scale_plane},
-        mapped_before{}, shared_access(shared_access_value),
-        mapped_token_capacity_before(state_value->mapped_token_capacity),
-        committed_bytes_before(state_value->committed_bytes_per_plane),
-        shared_page_count_before(state_value->shared_page_count),
-        cow_copied_bytes_before(state_value->cow_copied_bytes),
-        finished(false) {
-    for (std::size_t index = 0U; index != planes.size(); ++index) {
-      mapped_before[index] = planes[index]->mapped_bytes;
-    }
-  }
-
-  ~KvVmmAppendTransaction() {
-    if (finished || rollback()) {
-      return;
-    }
-    std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
-    poison_context_locked(state->context);
-  }
-
-  bool rollback() noexcept {
-    if (finished) {
-      return true;
-    }
-    hipError_t first = hipSuccess;
-    for (std::size_t index = planes.size(); index > 0U; --index) {
-      const hipError_t status =
-          planes[index - 1U]->rollback_pending_cow(shared_access);
-      if (first == hipSuccess && status != hipSuccess) {
-        first = status;
-      }
-    }
-    for (std::size_t index = planes.size(); index > 0U; --index) {
-      const hipError_t status =
-          planes[index - 1U]->rollback_growth_to(mapped_before[index - 1U]);
-      if (first == hipSuccess && status != hipSuccess) {
-        first = status;
-      }
-    }
-    state->mapped_token_capacity = mapped_token_capacity_before;
-    state->committed_bytes_per_plane = committed_bytes_before;
-    state->shared_page_count = shared_page_count_before;
-    state->cow_copied_bytes = cow_copied_bytes_before;
-    finished = true;
-    return first == hipSuccess;
-  }
-
-  bool commit() noexcept {
-    if (finished) {
-      return false;
-    }
-    hipError_t first = hipSuccess;
-    for (KvVmmPlane *const plane : planes) {
-      const hipError_t status = plane->commit_pending_cow();
-      if (first == hipSuccess && status != hipSuccess) {
-        first = status;
-      }
-    }
-    if (first == hipSuccess) {
-      finished = true;
-      return true;
-    }
-    return false;
-  }
-};
 
 struct KvView final : QuarantineNode {
   Context *context;
@@ -1925,7 +1381,6 @@ struct KvView final : QuarantineNode {
   uint64_t generation;
   uint64_t context_identity;
   uint64_t state_identity;
-  bool readback_active;
   bool release_active;
 
   KvView(Context *const context_value, KvState *const state_value,
@@ -1937,8 +1392,7 @@ struct KvView final : QuarantineNode {
         state(state_value), session_id(session_value), layer_id(layer_value),
         capacity_tokens(capacity_value), observed_length(length_value),
         generation(generation_value), context_identity(context_token),
-        state_identity(state_token), readback_active(false),
-        release_active(false) {}
+        state_identity(state_token), release_active(false) {}
 };
 
 struct LinearAttentionState final : QuarantineNode {
@@ -1959,12 +1413,14 @@ struct LinearAttentionState final : QuarantineNode {
   // Non-null only for the compact Phase 78 fresh-state backing allocation.
   // Forked states retain the historical independent plane ownership.
   void *state_backing;
-  // M3 speculative verification checkpoints are private, lazily allocated
-  // planes.  They are deliberately separate from the transactional pair so
-  // a failed checkpoint copy cannot alias an in-flight state slot.
-  std::array<void *, 2> checkpoint_conv_state;
-  std::array<void *, 2> checkpoint_recurrent_state;
+  // Speculative verification checkpoints are private, lazily allocated
+  // per-prefix planes.  Keep enough fixed entries for the largest supported
+  // MTP width (four draft rows); they remain separate from the transactional
+  // pair so a failed checkpoint copy cannot alias an in-flight state slot.
+  std::array<void *, 4> checkpoint_conv_state;
+  std::array<void *, 4> checkpoint_recurrent_state;
   void *checkpoint_backing;
+  uint32_t checkpoint_capacity_rows;
   uint32_t checkpoint_rows;
   uint64_t checkpoint_start;
   uint64_t checkpoint_end;
@@ -2003,16 +1459,17 @@ struct LinearAttentionState final : QuarantineNode {
         qkv_width((2U * qk_heads_value + value_heads_value) * head_dim_value),
         output_width(value_heads_value * head_dim_value),
         conv_state(conv_value), recurrent_state(recurrent_value),
-        state_backing(nullptr), checkpoint_conv_state{nullptr, nullptr},
-        checkpoint_recurrent_state{nullptr, nullptr},
-        checkpoint_backing(nullptr), checkpoint_rows(0U), checkpoint_start(0U),
-        checkpoint_end(0U), checkpoint_generation(0U), checkpoint_armed(false),
-        scratch(nullptr), scratch_bytes(0U), accounting(), published_length(0U),
-        generation(0U), active_slot(0U), import_plane_mask(0U),
-        last_published_start(0U), last_published_end(0U),
-        last_published_generation(0U), transition_token(0U),
-        transition_start(0U), transition_count(0U), transition_end(0U),
-        commit_allowed(false), release_active(false) {}
+        state_backing(nullptr),
+        checkpoint_conv_state{nullptr, nullptr, nullptr, nullptr},
+        checkpoint_recurrent_state{nullptr, nullptr, nullptr, nullptr},
+        checkpoint_backing(nullptr), checkpoint_capacity_rows(0U),
+        checkpoint_rows(0U), checkpoint_start(0U), checkpoint_end(0U),
+        checkpoint_generation(0U), checkpoint_armed(false), scratch(nullptr),
+        scratch_bytes(0U), accounting(), published_length(0U), generation(0U),
+        active_slot(0U), import_plane_mask(0U), last_published_start(0U),
+        last_published_end(0U), last_published_generation(0U),
+        transition_token(0U), transition_start(0U), transition_count(0U),
+        transition_end(0U), commit_allowed(false), release_active(false) {}
 };
 
 struct Event final : QuarantineNode {
@@ -2094,6 +1551,15 @@ struct Completion final : QuarantineNode {
   std::mutex state_mutex;
   sllm_public_runtime::CompletionSafetyState safety;
   std::vector<uint8_t> host_storage;
+  // Some GPU operations publish a small device-side status word only after
+  // all numerical work has been enqueued.  The copy destination lives in the
+  // completion so it remains valid until the terminal event is observed.
+  bool device_status_check;
+  uint32_t *device_status;
+  uint32_t device_status_host;
+  uint32_t *device_status_host_pinned;
+  uint32_t device_status_host_slot;
+  bool device_status_copy_queued;
   void *pinned_host_storage;
   std::size_t pinned_host_size;
   Queue *pinned_host_queue;
@@ -2156,6 +1622,12 @@ struct Completion final : QuarantineNode {
   uint64_t kv_append_start;
   uint64_t kv_append_count;
   uint64_t kv_append_end;
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  std::unique_ptr<sllm_paged_kv::State::Append> paged_append;
+  std::unique_ptr<sllm_paged_kv::SlidingState::Append> paged_sliding_append;
+  std::vector<sllm_paged_kv::LogicalEntryUpdate> paged_table_updates;
+  bool paged_table_update_queued;
+#endif
   bool causal_attention;
   bool causal_scaled_prefill_plan_acquired;
   KvState *causal_attention_state;
@@ -2228,7 +1700,10 @@ struct Completion final : QuarantineNode {
         validator_kind(CompletionValidatorKind::None),
         semantic_failure_detail(SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK),
         api_pins(0U), wait_active(false), state_mutex(), safety(),
-        host_storage(std::move(storage)), pinned_host_storage(nullptr),
+        host_storage(std::move(storage)), device_status_check(false),
+        device_status(nullptr), device_status_host(0U),
+        device_status_host_pinned(nullptr), device_status_host_slot(UINT32_MAX),
+        device_status_copy_queued(false), pinned_host_storage(nullptr),
         pinned_host_size(0U), pinned_host_queue(nullptr),
         pinned_host_slot(UINT32_MAX), rmsnorm(rmsnorm_plan_value != nullptr),
         rmsnorm_fused(rmsnorm_fused_value), rmsnorm_plan(rmsnorm_plan_value),
@@ -2268,6 +1743,10 @@ struct Completion final : QuarantineNode {
         kv_append_start(kv_append_start_value),
         kv_append_count(kv_append_count_value),
         kv_append_end(kv_append_end_value),
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+        paged_append(nullptr), paged_sliding_append(nullptr),
+        paged_table_updates(), paged_table_update_queued(false),
+#endif
         causal_attention(causal_attention_state_value != nullptr),
         causal_scaled_prefill_plan_acquired(false),
         causal_attention_state(causal_attention_state_value),
@@ -2280,7 +1759,8 @@ struct Completion final : QuarantineNode {
         dependent_attention_claimed(false), dependent_append(nullptr),
         d2d_copy(d2d_source_value != nullptr ||
                  d2d_destination_value != nullptr),
-        d2d_source(d2d_source_value), d2d_destination(d2d_destination_value) {}
+        d2d_source(d2d_source_value), d2d_destination(d2d_destination_value) {
+  }
 
   Completion(Context *const context_value, Queue *const queue_value,
              Buffer *const buffer_value, ElementwisePlan *const plan_value,
@@ -2294,10 +1774,421 @@ struct Completion final : QuarantineNode {
                    logits_value, output_value) {}
 
   ~Completion() {
-    if (!orphaned)
+    if (!orphaned) {
+      release_pinned_device_status_storage(this);
       release_pinned_host_storage(this);
+    }
   }
 };
+
+/* Arm and enqueue a small device-status readback for a completion.  The copy
+ * is ordered after the numerical kernel and before the completion event, so
+ * polling the event never needs a host/device synchronization.  Keeping the
+ * destination inside Completion also makes it safe for a dependent operation
+ * to reuse the state's status word after this operation has been ordered. */
+[[maybe_unused]] bool
+arm_completion_device_status(Completion *const completion,
+                             uint32_t *const device_status) noexcept {
+  if (completion == nullptr || device_status == nullptr ||
+      completion->device_status_check) {
+    return false;
+  }
+  uint32_t *host_pointer = nullptr;
+  uint32_t host_slot = UINT32_MAX;
+  if (!reserve_pinned_device_status_slot(completion->queue, &host_pointer,
+                                         &host_slot))
+    return false;
+  completion->device_status_check = true;
+  completion->device_status = device_status;
+  completion->device_status_host = 0U;
+  completion->device_status_host_pinned = host_pointer;
+  completion->device_status_host_slot = host_slot;
+  completion->device_status_copy_queued = false;
+  return true;
+}
+
+[[maybe_unused]] hipError_t
+enqueue_completion_device_status_copy(Completion *const completion,
+                                      const hipStream_t stream) noexcept {
+  if (completion == nullptr || !completion->device_status_check ||
+      completion->device_status == nullptr ||
+      completion->device_status_host_pinned == nullptr ||
+      completion->device_status_copy_queued || stream == nullptr) {
+    return hipErrorInvalidValue;
+  }
+  const hipError_t status = hipMemcpyAsync(
+      completion->device_status_host_pinned, completion->device_status,
+      sizeof(completion->device_status_host), hipMemcpyDeviceToHost, stream);
+  if (status == hipSuccess) {
+    completion->device_status_copy_queued = true;
+  }
+  return status;
+}
+
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+std::vector<sllm_paged_kv::LogicalEntryUpdate>
+make_paged_table_updates(const sllm_paged_kv::State::Append &append) {
+  std::vector<sllm_paged_kv::LogicalEntryUpdate> updates;
+  updates.reserve(append.changes.size());
+  for (const sllm_paged_kv::State::Change &change : append.changes) {
+    updates.push_back(sllm_paged_kv::LogicalEntryUpdate{
+        change.logical_block, change.old_physical, change.new_physical});
+  }
+  return updates;
+}
+
+std::vector<sllm_paged_kv::LogicalEntryUpdate> make_paged_sliding_table_updates(
+    const sllm_paged_kv::SlidingState::Append &append,
+    const sllm_paged_kv::DevicePool::LogicalTable &device_table) {
+  std::vector<sllm_paged_kv::LogicalEntryUpdate> updates;
+  updates.reserve(append.changes.size());
+  for (const sllm_paged_kv::SlidingState::Change &change : append.changes) {
+    const uint32_t expected =
+        change.old_physical == sllm_paged_kv::kInvalidBlock
+            ? device_table.host_entry(change.ring_slot)
+            : change.old_physical;
+    updates.push_back(sllm_paged_kv::LogicalEntryUpdate{
+        change.ring_slot, expected, change.new_physical});
+  }
+  return updates;
+}
+
+void make_paged_sliding_tags(const sllm_paged_kv::SlidingState &state,
+                             const sllm_paged_kv::SlidingState::Append &append,
+                             uint64_t *const tags) noexcept {
+  if (tags == nullptr)
+    return;
+  for (uint32_t slot = 0U; slot < sllm_paged_kv::kSlidingRingSlots; ++slot)
+    tags[slot] = state.absolute_block_tag(slot);
+  for (const sllm_paged_kv::SlidingState::Change &change : append.changes)
+    tags[change.ring_slot] = change.absolute_block;
+  const uint64_t retained_begin =
+      append.end > sllm_paged_kv::kSlidingWindowTokens
+          ? append.end - sllm_paged_kv::kSlidingWindowTokens
+          : 0U;
+  const uint64_t first_kept = retained_begin / sllm_paged_kv::kBlockTokens;
+  for (uint32_t slot = 0U; slot < sllm_paged_kv::kSlidingRingSlots; ++slot) {
+    if (tags[slot] != std::numeric_limits<uint64_t>::max() &&
+        tags[slot] < first_kept)
+      tags[slot] = std::numeric_limits<uint64_t>::max();
+  }
+}
+
+hipError_t copy_paged_cow_planes(KvState *const state,
+                                 const sllm_paged_kv::State::Append &append,
+                                 const hipStream_t stream) noexcept {
+  if (state == nullptr || state->paged_device_pool == nullptr ||
+      stream == nullptr) {
+    return hipErrorInvalidValue;
+  }
+  const std::array<uint64_t, 6U> bytes_per_token = {
+      state->value_bytes_per_token,       state->value_bytes_per_token,
+      state->scale_bytes_per_token,       state->scale_bytes_per_token,
+      state->outer_scale_bytes_per_token, state->outer_scale_bytes_per_token};
+  for (const sllm_paged_kv::State::Change &change : append.changes) {
+    if (change.old_physical == sllm_paged_kv::kInvalidBlock ||
+        change.prefix_tokens_to_copy == 0U) {
+      continue;
+    }
+    try {
+      const sllm_paged_kv::BlockDescriptor &old_descriptor =
+          state->paged_device_pool->host_descriptor(change.old_physical);
+      const sllm_paged_kv::BlockDescriptor &new_descriptor =
+          state->paged_device_pool->host_descriptor(change.new_physical);
+      std::uint8_t *const old_planes[] = {old_descriptor.key,
+                                          old_descriptor.value,
+                                          old_descriptor.key_scale,
+                                          old_descriptor.value_scale,
+                                          old_descriptor.key_outer_scale,
+                                          old_descriptor.value_outer_scale};
+      std::uint8_t *const new_planes[] = {new_descriptor.key,
+                                          new_descriptor.value,
+                                          new_descriptor.key_scale,
+                                          new_descriptor.value_scale,
+                                          new_descriptor.key_outer_scale,
+                                          new_descriptor.value_outer_scale};
+      for (std::size_t plane = 0U; plane != bytes_per_token.size(); ++plane) {
+        if (bytes_per_token[plane] == 0U) {
+          continue;
+        }
+        if (old_planes[plane] == nullptr || new_planes[plane] == nullptr ||
+            static_cast<uint64_t>(change.prefix_tokens_to_copy) >
+                std::numeric_limits<uint64_t>::max() / bytes_per_token[plane]) {
+          return hipErrorInvalidValue;
+        }
+        const std::size_t copy_bytes = static_cast<std::size_t>(
+            static_cast<uint64_t>(change.prefix_tokens_to_copy) *
+            bytes_per_token[plane]);
+        const hipError_t status =
+            hipMemcpyAsync(new_planes[plane], old_planes[plane], copy_bytes,
+                           hipMemcpyDeviceToDevice, stream);
+        if (status != hipSuccess) {
+          return status;
+        }
+      }
+    } catch (...) {
+      return hipErrorInvalidValue;
+    }
+  }
+  return hipSuccess;
+}
+
+hipError_t
+copy_paged_sliding_cow_planes(KvState *const state,
+                              const sllm_paged_kv::SlidingState::Append &append,
+                              const hipStream_t stream) noexcept {
+  if (state == nullptr || state->paged_device_pool == nullptr ||
+      stream == nullptr)
+    return hipErrorInvalidValue;
+  const std::array<uint64_t, 6U> bytes_per_token = {
+      state->value_bytes_per_token,       state->value_bytes_per_token,
+      state->scale_bytes_per_token,       state->scale_bytes_per_token,
+      state->outer_scale_bytes_per_token, state->outer_scale_bytes_per_token};
+  for (const sllm_paged_kv::SlidingState::Change &change : append.changes) {
+    if (change.old_physical == sllm_paged_kv::kInvalidBlock ||
+        change.prefix_tokens_to_copy == 0U ||
+        change.old_physical == change.new_physical)
+      continue;
+    try {
+      const sllm_paged_kv::BlockDescriptor &old_descriptor =
+          state->paged_device_pool->host_descriptor(change.old_physical);
+      const sllm_paged_kv::BlockDescriptor &new_descriptor =
+          state->paged_device_pool->host_descriptor(change.new_physical);
+      std::uint8_t *const old_planes[] = {old_descriptor.key,
+                                          old_descriptor.value,
+                                          old_descriptor.key_scale,
+                                          old_descriptor.value_scale,
+                                          old_descriptor.key_outer_scale,
+                                          old_descriptor.value_outer_scale};
+      std::uint8_t *const new_planes[] = {new_descriptor.key,
+                                          new_descriptor.value,
+                                          new_descriptor.key_scale,
+                                          new_descriptor.value_scale,
+                                          new_descriptor.key_outer_scale,
+                                          new_descriptor.value_outer_scale};
+      for (std::size_t plane = 0U; plane != bytes_per_token.size(); ++plane) {
+        if (bytes_per_token[plane] == 0U)
+          continue;
+        if (old_planes[plane] == nullptr || new_planes[plane] == nullptr ||
+            static_cast<uint64_t>(change.prefix_tokens_to_copy) >
+                std::numeric_limits<uint64_t>::max() / bytes_per_token[plane])
+          return hipErrorInvalidValue;
+        const std::size_t copy_bytes = static_cast<std::size_t>(
+            static_cast<uint64_t>(change.prefix_tokens_to_copy) *
+            bytes_per_token[plane]);
+        const hipError_t status =
+            hipMemcpyAsync(new_planes[plane], old_planes[plane], copy_bytes,
+                           hipMemcpyDeviceToDevice, stream);
+        if (status != hipSuccess)
+          return status;
+      }
+    } catch (...) {
+      return hipErrorInvalidValue;
+    }
+  }
+  return hipSuccess;
+}
+
+bool rollback_paged_completion_transaction(
+    Completion *const completion, const bool stream_already_synchronized,
+    sllm_error_sink_t *const sink) noexcept {
+  if (completion == nullptr || !completion->kv_state_append ||
+      completion->kv_state == nullptr ||
+      (completion->paged_append == nullptr &&
+       completion->paged_sliding_append == nullptr)) {
+    return true;
+  }
+  KvState *const state = completion->kv_state;
+  if ((completion->paged_sliding_append == nullptr &&
+       state->paged_host_state == nullptr) ||
+      (completion->paged_sliding_append != nullptr &&
+       state->paged_sliding_host_state == nullptr) ||
+      state->paged_logical_table == nullptr || completion->queue == nullptr) {
+    poison_context(state->context);
+    return false;
+  }
+  if (!stream_already_synchronized) {
+    const hipError_t sync = hipStreamSynchronize(completion->queue->stream);
+    if (sync != hipSuccess) {
+      poison_context(state->context);
+      (void)hip_failure(sink, sync, "synchronize paged KV rollback");
+      return false;
+    }
+  }
+  if (completion->paged_table_update_queued) {
+    const sllm_paged_kv::DeviceStatus pending =
+        state->paged_logical_table->poll_pending();
+    if (pending != sllm_paged_kv::DeviceStatus::Ok) {
+      poison_context(state->context);
+      return false;
+    }
+    const sllm_paged_kv::DeviceStatus restore =
+        state->paged_logical_table->restore_entries(
+            completion->paged_table_updates, completion->queue->stream);
+    if (restore != sllm_paged_kv::DeviceStatus::Ok) {
+      poison_context(state->context);
+      return false;
+    }
+    const hipError_t sync = hipStreamSynchronize(completion->queue->stream);
+    if (sync != hipSuccess || state->paged_logical_table->poll_pending() !=
+                                  sllm_paged_kv::DeviceStatus::Ok) {
+      poison_context(state->context);
+      if (sync != hipSuccess) {
+        (void)hip_failure(sink, sync, "synchronize paged KV table restore");
+      }
+      return false;
+    }
+  }
+  const sllm_paged_kv::Status rollback_status =
+      completion->paged_sliding_append != nullptr
+          ? state->paged_sliding_host_state->rollback_append(
+                *completion->paged_sliding_append)
+          : state->paged_host_state->rollback_append(*completion->paged_append);
+  if (rollback_status != sllm_paged_kv::Status::Ok) {
+    poison_context(state->context);
+    return false;
+  }
+  if (completion->paged_sliding_append != nullptr &&
+      state->paged_sliding_ring_tags_device != nullptr &&
+      state->paged_sliding_ring_tags_host != nullptr) {
+    for (uint32_t slot = 0U; slot < sllm_paged_kv::kSlidingRingSlots; ++slot)
+      state->paged_sliding_ring_tags_host[slot] =
+          state->paged_sliding_host_state->absolute_block_tag(slot);
+    const hipError_t tag_status =
+        hipMemcpyAsync(state->paged_sliding_ring_tags_device,
+                       state->paged_sliding_ring_tags_host,
+                       sllm_paged_kv::kSlidingRingSlots * sizeof(uint64_t),
+                       hipMemcpyHostToDevice, completion->queue->stream);
+    if (tag_status != hipSuccess ||
+        hipStreamSynchronize(completion->queue->stream) != hipSuccess) {
+      poison_context(state->context);
+      return false;
+    }
+  }
+  completion->paged_append.reset();
+  completion->paged_sliding_append.reset();
+  completion->paged_table_update_queued = false;
+  return true;
+}
+#endif
+
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+bool finish_paged_completion_transaction(Completion *const completion,
+                                         const bool publish) noexcept {
+  if (completion == nullptr || !completion->kv_state_append ||
+      completion->kv_state == nullptr ||
+      (completion->paged_append == nullptr &&
+       completion->paged_sliding_append == nullptr)) {
+    return true;
+  }
+  KvState *const state = completion->kv_state;
+  if ((completion->paged_sliding_append == nullptr &&
+       state->paged_host_state == nullptr) ||
+      (completion->paged_sliding_append != nullptr &&
+       state->paged_sliding_host_state == nullptr) ||
+      state->paged_logical_table == nullptr) {
+    poison_context(state->context);
+    return false;
+  }
+  if (state->paged_logical_table->poll_pending() !=
+      sllm_paged_kv::DeviceStatus::Ok) {
+    poison_context(state->context);
+    return false;
+  }
+  if (!publish) {
+    return rollback_paged_completion_transaction(completion, false, nullptr);
+  }
+  uint64_t bytes_per_token = 0U;
+  const auto checked_add = [](const uint64_t lhs, const uint64_t rhs,
+                              uint64_t *const result) noexcept {
+    if (result == nullptr || rhs > std::numeric_limits<uint64_t>::max() - lhs)
+      return false;
+    *result = lhs + rhs;
+    return true;
+  };
+  if (!checked_add(bytes_per_token, state->value_bytes_per_token,
+                   &bytes_per_token) ||
+      !checked_add(bytes_per_token, state->value_bytes_per_token,
+                   &bytes_per_token) ||
+      !checked_add(bytes_per_token, state->scale_bytes_per_token,
+                   &bytes_per_token) ||
+      !checked_add(bytes_per_token, state->scale_bytes_per_token,
+                   &bytes_per_token) ||
+      !checked_add(bytes_per_token, state->outer_scale_bytes_per_token,
+                   &bytes_per_token) ||
+      !checked_add(bytes_per_token, state->outer_scale_bytes_per_token,
+                   &bytes_per_token)) {
+    (void)rollback_paged_completion_transaction(completion, false, nullptr);
+    poison_context(state->context);
+    return false;
+  }
+  uint64_t pending_cow_blocks = 0U;
+  uint64_t pending_cow_bytes = 0U;
+  bool account_ok = true;
+  const auto account_cow = [&](const auto &changes) {
+    for (const auto &change : changes) {
+      if (!account_ok)
+        break;
+      if (change.old_physical == sllm_paged_kv::kInvalidBlock ||
+          change.prefix_tokens_to_copy == 0U ||
+          change.old_physical == change.new_physical)
+        continue;
+      if (pending_cow_blocks == std::numeric_limits<uint64_t>::max() ||
+          static_cast<uint64_t>(change.prefix_tokens_to_copy) >
+              std::numeric_limits<uint64_t>::max() / bytes_per_token) {
+        (void)rollback_paged_completion_transaction(completion, false, nullptr);
+        poison_context(state->context);
+        account_ok = false;
+        break;
+      }
+      ++pending_cow_blocks;
+      const uint64_t change_bytes =
+          static_cast<uint64_t>(change.prefix_tokens_to_copy) * bytes_per_token;
+      if (change_bytes >
+              std::numeric_limits<uint64_t>::max() - pending_cow_bytes ||
+          pending_cow_blocks > std::numeric_limits<uint64_t>::max() -
+                                   state->paged_cow_block_count) {
+        (void)rollback_paged_completion_transaction(completion, false, nullptr);
+        poison_context(state->context);
+        account_ok = false;
+        break;
+      }
+      pending_cow_bytes += change_bytes;
+    }
+  };
+  if (completion->paged_sliding_append != nullptr)
+    account_cow(completion->paged_sliding_append->changes);
+  else
+    account_cow(completion->paged_append->changes);
+  if (!account_ok) {
+    (void)rollback_paged_completion_transaction(completion, false, nullptr);
+    poison_context(state->context);
+    return false;
+  }
+  if (pending_cow_bytes >
+      std::numeric_limits<uint64_t>::max() - state->cow_copied_bytes) {
+    (void)rollback_paged_completion_transaction(completion, false, nullptr);
+    poison_context(state->context);
+    return false;
+  }
+  const sllm_paged_kv::Status commit_status =
+      completion->paged_sliding_append != nullptr
+          ? state->paged_sliding_host_state->commit_append(
+                *completion->paged_sliding_append)
+          : state->paged_host_state->commit_append(*completion->paged_append);
+  if (commit_status != sllm_paged_kv::Status::Ok) {
+    (void)rollback_paged_completion_transaction(completion, false, nullptr);
+    poison_context(state->context);
+    return false;
+  }
+  state->paged_cow_block_count += pending_cow_blocks;
+  state->cow_copied_bytes += pending_cow_bytes;
+  completion->paged_append.reset();
+  completion->paged_sliding_append.reset();
+  completion->paged_table_update_queued = false;
+  return true;
+}
+#endif
 
 /* A pinned result slot is a queue-owned resource.  Every path that drops a
  * completion's queue/accounting reference calls this first; the destructor is
@@ -2313,6 +2204,16 @@ void release_pinned_host_storage(Completion *const completion) noexcept {
   completion->pinned_host_size = 0U;
   completion->pinned_host_queue = nullptr;
   completion->pinned_host_slot = UINT32_MAX;
+}
+
+void release_pinned_device_status_storage(
+    Completion *const completion) noexcept {
+  if (completion == nullptr || completion->device_status_host_pinned == nullptr)
+    return;
+  release_pinned_device_status_slot(completion->queue,
+                                    completion->device_status_host_slot);
+  completion->device_status_host_pinned = nullptr;
+  completion->device_status_host_slot = UINT32_MAX;
 }
 
 /* The plan stores copied descriptor metadata and its three retained buffer
@@ -5372,11 +5273,34 @@ bool rollback_reserved_kv_submission(KvState *const state, Queue *const queue,
   Context *const context = state->context;
   std::lock_guard<std::mutex> lock(context->accounting_mutex);
   const uint64_t token = state->transition_token;
+  bool paged_rolled_back = true;
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  if (state->paged && ((state->sliding_window == 0U &&
+                        state->paged_pending_append != nullptr) ||
+                       (state->sliding_window != 0U &&
+                        state->paged_sliding_pending_append != nullptr))) {
+    if (state->sliding_window != 0U) {
+      paged_rolled_back = state->paged_sliding_host_state != nullptr &&
+                          state->paged_sliding_host_state->rollback_append(
+                              *state->paged_sliding_pending_append) ==
+                              sllm_paged_kv::Status::Ok;
+    } else {
+      paged_rolled_back =
+          state->paged_host_state != nullptr &&
+          state->paged_host_state->rollback_append(
+              *state->paged_pending_append) == sllm_paged_kv::Status::Ok;
+    }
+    if (paged_rolled_back) {
+      state->paged_pending_append.reset();
+      state->paged_sliding_pending_append.reset();
+    }
+  }
+#endif
   if (sllm_public_runtime::AccountingState::rollback_kv_append(
           context->accounting, queue->accounting, state->accounting,
           key_input->accounting, value_input->accounting,
           state->key_buffer->accounting, state->value_buffer->accounting) &&
-      clear_kv_transition_locked(state, token, false)) {
+      paged_rolled_back && clear_kv_transition_locked(state, token, false)) {
     return true;
   }
   poison_context_locked(context);
@@ -5390,7 +5314,7 @@ bool finalize_kv_append(Completion *const completion) noexcept {
   if (!completion->kv_state_append) {
     return true;
   }
-  std::lock_guard<std::mutex> lock(completion->context->accounting_mutex);
+  std::unique_lock<std::mutex> lock(completion->context->accounting_mutex);
   if (completion->kv_state == nullptr ||
       completion->kv_state->transition_token != completion->kv_append_token ||
       completion->kv_state->transition_start != completion->kv_append_start ||
@@ -5401,6 +5325,29 @@ bool finalize_kv_append(Completion *const completion) noexcept {
   }
   const bool publish =
       completion->kv_state != nullptr && completion->kv_state->commit_allowed;
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  if (completion->kv_state->paged) {
+    if (publish) {
+      if (!finish_paged_completion_transaction(completion, true)) {
+        poison_context_locked(completion->context);
+        return false;
+      }
+    } else {
+      lock.unlock();
+      const bool restored =
+          finish_paged_completion_transaction(completion, false);
+      lock.lock();
+      if (!restored) {
+        poison_context_locked(completion->context);
+        return false;
+      }
+    }
+    if (completion->kv_state->transition_token != completion->kv_append_token) {
+      poison_context_locked(completion->context);
+      return false;
+    }
+  }
+#endif
   if (!clear_kv_transition_locked(completion->kv_state,
                                   completion->kv_append_token, publish)) {
     poison_context_locked(completion->context);
@@ -5926,6 +5873,7 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
   // releasable; uncertain accounting failures leave the completion quarantined
   // but the host staging memory is no longer touched by the completed event.
   release_pinned_host_storage(completion);
+  release_pinned_device_status_storage(completion);
   std::lock_guard<std::mutex> lock(completion->context->accounting_mutex);
   bool released = false;
   if (!sllm_public_runtime::FaultInjector::consume(
@@ -6176,6 +6124,69 @@ finalize_completion_semantic_failure(Completion *const completion,
                                            sink);
 }
 
+[[maybe_unused]] sllm_status_t finalize_completion_device_status_failure(
+    Completion *const completion, const uint32_t device_status,
+    sllm_error_sink_t *const sink) noexcept {
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  if (completion->kv_state_append && completion->kv_state != nullptr &&
+      completion->kv_state->paged &&
+      !rollback_paged_completion_transaction(completion, false, sink)) {
+    completion->terminal = true;
+    completion->success = false;
+    completion->safe_to_release = false;
+    completion->failure_status = hipErrorInvalidValue;
+    completion->safety.quarantine();
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "paged KV append device status rollback failed; context poisoned");
+  }
+#endif
+  if (!release_submission_references(completion)) {
+    completion->terminal = true;
+    completion->success = false;
+    completion->safe_to_release = false;
+    completion->safety.quarantine();
+    completion->reference_accounting_failed = true;
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "completion reference accounting failed; release is disabled");
+  }
+  if (completion->kv_state_append) {
+    std::lock_guard<std::mutex> lock(completion->context->accounting_mutex);
+    if (completion->kv_state == nullptr ||
+        !clear_kv_transition_locked(completion->kv_state,
+                                    completion->kv_append_token, false)) {
+      poison_context_locked(completion->context);
+      completion->terminal = true;
+      completion->success = false;
+      completion->safe_to_release = false;
+      completion->safety.quarantine();
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INTERNAL_ERROR,
+          "KV append transition rollback failed; context poisoned");
+    }
+  }
+  if (completion->causal_attention &&
+      !clear_dependent_append_claim(completion)) {
+    completion->terminal = true;
+    completion->success = false;
+    completion->safe_to_release = false;
+    completion->safety.quarantine();
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "causal attention dependency claim cleanup failed; graph quarantined");
+  }
+  completion->terminal = true;
+  completion->success = false;
+  completion->failure_status = hipErrorInvalidValue;
+  completion->semantic_failure_detail = static_cast<int32_t>(device_status);
+  completion->safety.observe_positive_completion();
+  completion->safe_to_release = true;
+  return sllm_public_runtime::write_error(
+      sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+      "paged KV device status reported an invalid table or position");
+}
+
 sllm_status_t
 finalize_completion_success(Completion *const completion,
                             sllm_error_sink_t *const sink) noexcept {
@@ -6332,6 +6343,21 @@ sllm_status_t poll_completion(Completion *const completion,
             "hipEventElapsedTime rounded to zero nanoseconds");
       }
     }
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    if (completion->device_status_check) {
+      if (!completion->device_status_copy_queued ||
+          completion->device_status_host_pinned == nullptr) {
+        return finalize_completion_device_status_failure(completion, UINT32_MAX,
+                                                         sink);
+      }
+      completion->device_status_host = *completion->device_status_host_pinned;
+      if (completion->device_status_host !=
+          sllm_kv_state_kernel::kPagedAppendStatusOk) {
+        return finalize_completion_device_status_failure(
+            completion, completion->device_status_host, sink);
+      }
+    }
+#endif
     return finalize_completion_success(completion, sink);
   }
   if (status == hipErrorNotReady) {
@@ -6422,6 +6448,16 @@ sllm_status_t cleanup_failed_submission(
     return hip_failure(sink, synchronize_status,
                        "hipStreamSynchronize cleanup after async failure");
   }
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  if (candidate->paged_append != nullptr &&
+      !rollback_paged_completion_transaction(candidate.get(), true, sink)) {
+    candidate->orphaned = true;
+    retain_poisoned(candidate, candidate->context);
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "paged KV append rollback failed after async submission failure");
+  }
+#endif
   if (candidate->event != nullptr) {
     const hipError_t destroy_status =
         destroy_event_with_fault_injection(candidate->event);
@@ -6660,6 +6696,16 @@ sllm_status_t rollback_unpublished_submission(
   }
   // Registration failed before the transfer was enqueued.  Release staging
   // while the completion still owns its queue reference.
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  if (candidate->paged_append != nullptr &&
+      !rollback_paged_completion_transaction(candidate.get(), true, sink)) {
+    candidate->orphaned = true;
+    retain_poisoned(candidate, candidate->context);
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "paged KV append rollback failed before completion registration");
+  }
+#endif
   release_pinned_host_storage(candidate.get());
   if (!rollback_submission_references(candidate.get())) {
     candidate->orphaned = true;
@@ -7672,6 +7718,13 @@ sllm_context_create(const sllm_context_create_info_t *const info,
           error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
           "requested device gcnArchName does not match exactly");
     }
+    if (!matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030") &&
+        !matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201")) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "the current public HIP runtime supports only exact gfx1030 and "
+          "gfx1201");
+    }
     const hipError_t set_status =
         hipSetDevice(static_cast<int>(info->device_index));
     if (set_status != hipSuccess) {
@@ -7682,11 +7735,9 @@ sllm_context_create(const sllm_context_create_info_t *const info,
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
     const bool create_matmul_blas =
         matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030") ||
-        matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201") ||
-        matches_runtime_gcn_arch(properties.gcnArchName, "gfx942");
+        matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201");
     const bool create_matmul_lt =
-        matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201") ||
-        matches_runtime_gcn_arch(properties.gcnArchName, "gfx942");
+        matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201");
     const char *const rocblas_solution_environment =
         std::getenv("SLLM_MATMUL_GFX1030_ROCBLAS_SOLUTION_445");
     const char *const short_mixed_rocblas_solution_environment =
@@ -9823,7 +9874,9 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
     if (queue_profiles_completions(queue)) {
       hipEvent_t native_event = nullptr;
       const hipError_t event_status =
-          hipEventCreateWithFlags(&native_event, 0U);
+          queue_profiles_completions(queue)
+              ? hipEventCreateWithFlags(&native_event, 0U)
+              : hipSuccess;
       if (event_status != hipSuccess) {
         if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
           execute_guard.disarm();
@@ -10326,7 +10379,9 @@ extern "C" sllm_status_t sllm_residual_rmsnorm_execute(
     if (queue_profiles_completions(queue)) {
       hipEvent_t native_event = nullptr;
       const hipError_t event_status =
-          hipEventCreateWithFlags(&native_event, 0U);
+          queue_profiles_completions(queue)
+              ? hipEventCreateWithFlags(&native_event, 0U)
+              : hipSuccess;
       if (event_status != hipSuccess) {
         if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
           execute_guard.disarm();
@@ -11080,36 +11135,41 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
 #include "token_selector_runtime.inc"
 #include "windowed_attention_runtime.inc"
 
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+#include "paged_kv_image_runtime.inc"
+#endif
+
 namespace {
 
 sllm_status_t
-validate_kv_view_info_input(const sllm_kv_view_info_t *const info,
-                            sllm_error_sink_t *const sink) noexcept {
+validate_kv_paged_view_info_input(const sllm_kv_paged_view_info_t *const info,
+                                  sllm_error_sink_t *const sink) noexcept {
   if (info == nullptr) {
-    return sllm_public_runtime::write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
-                                            "KV view info output is null");
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "paged KV view info output is null");
   }
   if (info->struct_size != sizeof(*info)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_ARGUMENT,
-        "KV view info has an unsupported struct size");
+        "paged KV view info has an unsupported struct size");
   }
   if (info->abi_version != SLLM_HIP_ABI_VERSION) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_ABI_VERSION,
-        "KV view info ABI version is unsupported");
+        "paged KV view info ABI version is unsupported");
   }
-  if (info->info_version != SLLM_HIP_KV_VIEW_INFO_VERSION ||
+  if (info->info_version != SLLM_HIP_KV_PAGED_VIEW_INFO_VERSION ||
       info->reserved0 != 0U || info->reserved1 != 0U) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_RESERVED_NONZERO,
-        "KV view info version or reserved fields are invalid");
+        "paged KV view info version or reserved fields are invalid");
   }
   for (const uint32_t value : info->reserved) {
     if (value != 0U) {
       return sllm_public_runtime::write_error(
           sink, SLLM_STATUS_RESERVED_NONZERO,
-          "KV view info reserved fields must be zero");
+          "paged KV view info reserved fields must be zero");
     }
   }
   return SLLM_STATUS_OK;
@@ -11152,8 +11212,8 @@ validate_kv_append_info_input(const sllm_kv_append_info_t *const info,
 // retaining the logical head_dim in their public shape.  Keep this helper in
 // the ABI owner so allocation, view strides, and page accounting cannot drift
 // from the device kernels' row addressing.
-uint64_t kv_value_row_stride(const uint32_t head_dim,
-                             const uint32_t encoding) noexcept {
+[[maybe_unused]] uint64_t
+kv_value_row_stride(const uint32_t head_dim, const uint32_t encoding) noexcept {
   if (encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
       encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2) {
     return ((static_cast<uint64_t>(head_dim) + 15U) / 16U) * 16U;
@@ -11165,138 +11225,139 @@ uint64_t kv_value_row_stride(const uint32_t head_dim,
   return static_cast<uint64_t>(head_dim);
 }
 
-void fill_kv_view_info(const KvState *const state, const uint64_t length,
-                       const uint64_t generation, const uint64_t context_id,
-                       const uint64_t state_id,
-                       sllm_kv_view_info_t *const info) noexcept {
-  sllm_kv_state::initialize_view_info(info);
-  if (state->sliding_window != 0U) {
-    info->info_version = SLLM_HIP_KV_VIEW_INFO_SLIDING_VERSION;
-    const uint64_t retained_start =
-        length > state->sliding_window ? length - state->sliding_window : 0U;
-    info->reserved[0] = static_cast<uint32_t>(state->sliding_window);
-    info->reserved[1] =
-        static_cast<uint32_t>(state->sliding_window >> UINT32_C(32));
-    info->reserved[2] = static_cast<uint32_t>(retained_start);
-    info->reserved[3] = static_cast<uint32_t>(retained_start >> UINT32_C(32));
-  }
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+void fill_kv_paged_view_info(const KvState *const state, const uint64_t length,
+                             const uint64_t generation,
+                             const uint64_t context_id, const uint64_t state_id,
+                             sllm_kv_paged_view_info_t *const info) noexcept {
+  std::memset(info, 0, sizeof(*info));
+  info->struct_size = sizeof(*info);
+  info->abi_version = SLLM_HIP_ABI_VERSION;
+  info->info_version = SLLM_HIP_KV_PAGED_VIEW_INFO_VERSION;
   info->session_id = state->session_id;
   info->layer_id = state->layer_id;
   info->dtype = state->dtype;
-  info->encoding =
-      state->encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-          ? SLLM_TENSOR_ENCODING_UNQUANTIZED
-          : (state->encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
-                     state->encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
-                 ? SLLM_TENSOR_ENCODING_FP8_BLOCK16_E8M0
-                 : (state->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
-                            state->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
-                        ? SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0
-                        : (state->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
-                                   state->encoding ==
-                                       SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
-                               ? SLLM_TENSOR_ENCODING_FP8_OUTER_F32
-                               : SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32)));
+  info->encoding = state->encoding;
   info->head_count = state->head_count;
   info->head_dim = state->head_dim;
-  info->memory_kind = state->memory_kind;
+  info->memory_kind = SLLM_HIP_KV_MEMORY_KIND_PAGED;
   info->layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
+  info->token_block_size = state->paged_token_block_size;
+  info->physical_layout_version = state->paged_physical_layout_version;
   info->capacity_tokens = state->capacity_tokens;
   info->observed_length = length;
   info->generation = generation;
+  info->logical_table_capacity = state->paged_logical_table_capacity;
+  info->max_physical_blocks = state->paged_max_physical_blocks;
+  if (state->paged_device_pool != nullptr) {
+    info->allocated_physical_blocks =
+        state->paged_device_pool->allocated_physical_blocks();
+    const std::array<uint64_t, 6U> bytes =
+        state->paged_device_pool->committed_bytes_per_plane();
+    info->committed_bytes_per_plane[0] = bytes[0];
+    info->committed_bytes_per_plane[1] = bytes[1];
+    info->committed_bytes_per_plane[2] = bytes[2];
+    info->committed_bytes_per_plane[3] = bytes[3];
+    info->committed_bytes_per_plane[4] = bytes[4];
+    info->committed_bytes_per_plane[5] = bytes[5];
+    info->committed_bytes_total =
+        state->paged_device_pool->committed_bytes_total();
+  }
   info->context_identity = context_id;
   info->state_identity = state_id;
-  info->physical_page_bytes = state->physical_page_bytes;
-  info->tokens_per_page = state->tokens_per_page;
-  info->mapped_token_capacity = state->mapped_token_capacity;
-  info->committed_bytes_per_plane = state->committed_bytes_per_plane;
-  const uint64_t value_row_stride =
-      kv_value_row_stride(state->head_dim, state->encoding);
-  info->k_stride_elements[0] =
-      static_cast<uint64_t>(state->head_count) * value_row_stride;
-  info->k_stride_elements[1] = value_row_stride;
-  info->k_stride_elements[2] = 1U;
-  info->v_stride_elements[0] =
-      static_cast<uint64_t>(state->head_count) * value_row_stride;
-  info->v_stride_elements[1] = value_row_stride;
-  info->v_stride_elements[2] = 1U;
 }
+#endif
 
-void fill_kv_append_info(sllm_kv_append_info_t *const info,
-                         const uint64_t dispatch_id, const uint64_t start,
-                         const uint64_t count, const uint64_t end,
-                         const uint32_t head_count, const uint32_t head_dim,
-                         const uint32_t encoding,
-                         const char *const arch_name) noexcept {
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+/* The public ABI only assigned dedicated numeric IDs to the first two paged
+ * append kernels. Keep the existing codec IDs for the newly enabled paged
+ * formats, but always publish the paged device symbol so dispatch evidence
+ * cannot be mistaken for the contiguous provider. */
+void fill_paged_kv_append_info(sllm_kv_append_info_t *const info,
+                               const uint64_t dispatch_id, const uint64_t start,
+                               const uint64_t count, const uint64_t end,
+                               const uint32_t head_count,
+                               const uint32_t head_dim, const uint32_t encoding,
+                               const char *const arch_name) noexcept {
   sllm_kv_state::initialize_append_info(info);
   info->dispatch_id = dispatch_id;
   info->dispatch_count = 1U;
-  info->kernel_id =
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-          ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2
-          : (encoding == SLLM_HIP_KV_ENCODING_FP8_V1
-                 ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1
-             : encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
-                 ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_STATIC_TOKEN_MAJOR_V1
-             : encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2
-                 ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E4_BLOCK16_TOKEN_MAJOR_V2
-             : encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
-                 ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E5_BLOCK16_TOKEN_MAJOR_V2
-             : encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1
-                 ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E4_TOKEN_MAJOR_V1
-             : encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
-                 ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E5_TOKEN_MAJOR_V1
-                 : SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1);
   info->workgroup_size_x = SLLM_HIP_KV_WORKGROUP_SIZE;
+  const uint64_t rows = count * head_count;
   info->grid_size_x =
       encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-          ? static_cast<uint32_t>((count * head_count * head_dim +
-                                   SLLM_HIP_KV_WORKGROUP_SIZE - 1U) /
-                                  SLLM_HIP_KV_WORKGROUP_SIZE)
-          : static_cast<uint32_t>(count * head_count);
+          ? static_cast<uint32_t>(
+                (rows * head_dim + SLLM_HIP_KV_WORKGROUP_SIZE - 1U) /
+                SLLM_HIP_KV_WORKGROUP_SIZE)
+          : static_cast<uint32_t>(rows);
   info->start_position = start;
   info->token_count = count;
   info->end_position = end;
   info->commit_allowed = 1U;
   info->fallback_allowed = 0U;
   info->fallback_used = 0U;
-  sllm_public_runtime::copy_fixed_string(
-      info->kernel_symbol, SLLM_HIP_KV_KERNEL_SYMBOL_MAX,
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-          ? ::sllm_kv_state_kernel::kLogicalKernelId
-          : (encoding == SLLM_HIP_KV_ENCODING_FP8_V1
-                 ? ::sllm_kv_state_kernel::kFp8LogicalKernelId
-             : encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
-                 ? ::sllm_kv_state_kernel::kFp8StaticLogicalKernelId
-             : encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2
-                 ? ::sllm_kv_state_kernel::kFp8E4Block16LogicalKernelIdV2
-             : encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
-                 ? ::sllm_kv_state_kernel::kFp8E5Block16LogicalKernelIdV2
-             : encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1
-                 ? ::sllm_kv_state_kernel::kMxfp8E4LogicalKernelId
-             : encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
-                 ? ::sllm_kv_state_kernel::kMxfp8E5LogicalKernelId
-                 : ::sllm_kv_state_kernel::kNvfp4LogicalKernelId));
-  sllm_public_runtime::copy_fixed_string(
-      info->device_symbol, SLLM_HIP_KV_DEVICE_SYMBOL_MAX,
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-          ? ::sllm_kv_state_kernel::kDeviceSymbol
-          : (encoding == SLLM_HIP_KV_ENCODING_FP8_V1
-                 ? ::sllm_kv_state_kernel::kFp8DeviceSymbol
-             : encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
-                 ? ::sllm_kv_state_kernel::kFp8StaticDeviceSymbol
-             : encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2
-                 ? ::sllm_kv_state_kernel::kFp8E4Block16DeviceSymbolV2
-             : encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
-                 ? ::sllm_kv_state_kernel::kFp8E5Block16DeviceSymbolV2
-             : encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1
-                 ? ::sllm_kv_state_kernel::kMxfp8E4DeviceSymbol
-             : encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
-                 ? ::sllm_kv_state_kernel::kMxfp8E5DeviceSymbol
-                 : ::sllm_kv_state_kernel::kNvfp4DeviceSymbol));
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
+  switch (encoding) {
+  case SLLM_HIP_KV_ENCODING_FP16_V1:
+    info->kernel_id = SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_F16_V1;
+    sllm_public_runtime::copy_fixed_string(
+        info->kernel_symbol, SLLM_HIP_KV_KERNEL_SYMBOL_MAX,
+        sllm_kv_state_kernel::kPagedFp16LogicalKernelId);
+    sllm_public_runtime::copy_fixed_string(
+        info->device_symbol, SLLM_HIP_KV_DEVICE_SYMBOL_MAX,
+        sllm_kv_state_kernel::kPagedFp16DeviceSymbol);
+    break;
+  case SLLM_HIP_KV_ENCODING_MXFP8_E4_V1:
+    info->kernel_id = SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_MXFP8_E4_V1;
+    sllm_public_runtime::copy_fixed_string(
+        info->kernel_symbol, SLLM_HIP_KV_KERNEL_SYMBOL_MAX,
+        sllm_kv_state_kernel::kPagedMxfp8E4LogicalKernelId);
+    sllm_public_runtime::copy_fixed_string(
+        info->device_symbol, SLLM_HIP_KV_DEVICE_SYMBOL_MAX,
+        sllm_kv_state_kernel::kPagedMxfp8E4DeviceSymbol);
+    break;
+  case SLLM_HIP_KV_ENCODING_FP8_V1:
+    info->kernel_id = SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_FP8_E4_V1;
+    sllm_public_runtime::copy_fixed_string(
+        info->kernel_symbol, SLLM_HIP_KV_KERNEL_SYMBOL_MAX,
+        sllm_kv_state_kernel::kPagedFp8LogicalKernelId);
+    sllm_public_runtime::copy_fixed_string(
+        info->device_symbol, SLLM_HIP_KV_DEVICE_SYMBOL_MAX,
+        sllm_kv_state_kernel::kPagedFp8DeviceSymbol);
+    break;
+  case SLLM_HIP_KV_ENCODING_FP8_STATIC_V1:
+    info->kernel_id = SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_FP8_STATIC_E4_V1;
+    sllm_public_runtime::copy_fixed_string(
+        info->kernel_symbol, SLLM_HIP_KV_KERNEL_SYMBOL_MAX,
+        sllm_kv_state_kernel::kPagedFp8StaticLogicalKernelId);
+    sllm_public_runtime::copy_fixed_string(
+        info->device_symbol, SLLM_HIP_KV_DEVICE_SYMBOL_MAX,
+        sllm_kv_state_kernel::kPagedFp8StaticDeviceSymbol);
+    break;
+  case SLLM_HIP_KV_ENCODING_NVFP4_V1:
+    info->kernel_id = SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_NVFP4_V1;
+    sllm_public_runtime::copy_fixed_string(
+        info->kernel_symbol, SLLM_HIP_KV_KERNEL_SYMBOL_MAX,
+        sllm_kv_state_kernel::kPagedNvfp4LogicalKernelId);
+    sllm_public_runtime::copy_fixed_string(
+        info->device_symbol, SLLM_HIP_KV_DEVICE_SYMBOL_MAX,
+        sllm_kv_state_kernel::kPagedNvfp4DeviceSymbol);
+    break;
+  case SLLM_HIP_KV_ENCODING_MXFP8_E5_V1:
+    info->kernel_id = SLLM_HIP_KV_KERNEL_ID_BF16_TO_PAGED_MXFP8_E5_V1;
+    sllm_public_runtime::copy_fixed_string(
+        info->kernel_symbol, SLLM_HIP_KV_KERNEL_SYMBOL_MAX,
+        sllm_kv_state_kernel::kPagedMxfp8E5LogicalKernelId);
+    sllm_public_runtime::copy_fixed_string(
+        info->device_symbol, SLLM_HIP_KV_DEVICE_SYMBOL_MAX,
+        sllm_kv_state_kernel::kPagedMxfp8E5DeviceSymbol);
+    break;
+  default:
+    break;
+  }
 }
+#endif
 
 bool kv_intervals_overlap(const Buffer *const left_buffer,
                           const uint64_t left_start, const uint64_t left_end,
@@ -11307,107 +11368,6 @@ bool kv_intervals_overlap(const Buffer *const left_buffer,
          right_start < left_end;
 }
 
-bool checked_kv_plane_bytes(const uint64_t capacity, const uint32_t head_count,
-                            const uint32_t head_dim,
-                            uint64_t *const plane_bytes) noexcept {
-  if (plane_bytes == nullptr || capacity == 0U ||
-      capacity > SLLM_HIP_KV_MAX_CAPACITY) {
-    return false;
-  }
-  if (capacity > std::numeric_limits<uint64_t>::max() /
-                     static_cast<uint64_t>(head_count) ||
-      capacity * static_cast<uint64_t>(head_count) >
-          std::numeric_limits<uint64_t>::max() /
-              static_cast<uint64_t>(head_dim) ||
-      capacity * static_cast<uint64_t>(head_count) *
-              static_cast<uint64_t>(head_dim) >
-          std::numeric_limits<uint64_t>::max() / UINT64_C(2)) {
-    return false;
-  }
-  *plane_bytes = capacity * static_cast<uint64_t>(head_count) *
-                 static_cast<uint64_t>(head_dim) * UINT64_C(2);
-  return *plane_bytes <= SLLM_HIP_KV_EVIDENCE_MAX_READBACK_BYTES;
-}
-
-sllm_status_t validate_kv_readback_request(
-    const sllm_hip_kv_readback_request_t *const request,
-    sllm_error_sink_t *const error_sink) noexcept {
-  if (request == nullptr) {
-    return sllm_public_runtime::write_error(
-        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-        "KV evidence readback request is null");
-  }
-  if (request->struct_size != sizeof(*request)) {
-    return sllm_public_runtime::write_error(
-        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-        "KV evidence readback request struct size is unsupported");
-  }
-  if (request->abi_version != SLLM_HIP_KV_EVIDENCE_ABI_VERSION) {
-    return sllm_public_runtime::write_error(
-        error_sink, SLLM_STATUS_INVALID_ABI_VERSION,
-        "KV evidence readback ABI is unsupported");
-  }
-  if (request->reserved0 != 0U || request->reserved[0] != 0U ||
-      request->reserved[1] != 0U || request->reserved[2] != 0U ||
-      request->reserved[3] != 0U) {
-    return sllm_public_runtime::write_error(
-        error_sink, SLLM_STATUS_RESERVED_NONZERO,
-        "KV evidence readback reserved fields must be zero");
-  }
-  if (request->view == nullptr ||
-      (request->plane != SLLM_HIP_KV_EVIDENCE_PLANE_K &&
-       request->plane != SLLM_HIP_KV_EVIDENCE_PLANE_V)) {
-    return sllm_public_runtime::write_error(
-        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-        "KV evidence readback view or plane is invalid");
-  }
-  if (request->byte_length == 0U || request->host_output == nullptr) {
-    return sllm_public_runtime::write_error(
-        error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-        "KV evidence readback length or host output is invalid");
-  }
-  if (request->byte_offset % UINT64_C(2) != 0U ||
-      request->byte_length % UINT64_C(2) != 0U) {
-    return sllm_public_runtime::write_error(
-        error_sink, SLLM_STATUS_MISALIGNED_OFFSET,
-        "KV evidence readback range must be FP16-aligned");
-  }
-  if (request->byte_length > SLLM_HIP_KV_EVIDENCE_MAX_READBACK_BYTES ||
-      request->byte_offset >
-          std::numeric_limits<uint64_t>::max() - request->byte_length) {
-    return sllm_public_runtime::write_error(
-        error_sink, SLLM_STATUS_METADATA_OVERFLOW,
-        "KV evidence readback range overflows its bounded contract");
-  }
-  if (request->host_capacity < request->byte_length) {
-    return sllm_public_runtime::write_error(
-        error_sink, SLLM_STATUS_BUFFER_TOO_SMALL,
-        "KV evidence readback host output is undersized");
-  }
-  if (request->byte_length > std::numeric_limits<std::size_t>::max()) {
-    return sllm_public_runtime::write_error(
-        error_sink, SLLM_STATUS_METADATA_OVERFLOW,
-        "KV evidence readback length does not fit the host ABI");
-  }
-  return SLLM_STATUS_OK;
-}
-
-class KvReadbackActivityGuard final {
-public:
-  explicit KvReadbackActivityGuard(KvView *const view) noexcept : view_(view) {}
-
-  KvReadbackActivityGuard(const KvReadbackActivityGuard &) = delete;
-  KvReadbackActivityGuard &operator=(const KvReadbackActivityGuard &) = delete;
-
-  ~KvReadbackActivityGuard() noexcept {
-    std::lock_guard<std::mutex> lock(registry_mutex);
-    view_->readback_active = false;
-  }
-
-private:
-  KvView *view_;
-};
-
 } // namespace
 
 extern "C" sllm_status_t
@@ -11415,38 +11375,17 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
                      const sllm_kv_state_create_info_t *const info,
                      sllm_kv_state_t **const raw_state,
                      sllm_error_sink_t *const error_sink) noexcept {
-  if (raw_state != nullptr) {
+  (void)raw_context;
+  (void)info;
+  if (raw_state != nullptr)
     *raw_state = nullptr;
-  }
   const sllm_status_t sink_status =
       sllm_public_runtime::validate_error_sink(error_sink);
-  if (sink_status != SLLM_STATUS_OK) {
+  if (sink_status != SLLM_STATUS_OK)
     return sink_status;
-  }
-  const sllm_status_t info_status =
-      sllm_kv_state::validate_state_create_info(info, error_sink);
-  if (info_status != SLLM_STATUS_OK) {
-    return info_status;
-  }
-  const sllm_kv_state_create_info_v2_t v2 = {
-      sizeof(sllm_kv_state_create_info_v2_t),
-      SLLM_HIP_ABI_VERSION,
-      SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION,
-      0U,
-      info->session_id,
-      info->layer_id,
-      info->flags,
-      info->capacity_tokens,
-      info->head_count,
-      info->head_dim,
-      info->memory_kind,
-      info->layout,
-      SLLM_TENSOR_DTYPE_F16,
-      SLLM_HIP_KV_ENCODING_FP16_V1,
-      0U,
-      0U,
-      {0U, 0U, 0U, 0U}};
-  return sllm_kv_state_create_v2(raw_context, &v2, raw_state, error_sink);
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_UNSUPPORTED,
+      "legacy KV state creation requires sllm_kv_state_create_paged");
 }
 
 extern "C" sllm_status_t
@@ -11454,26 +11393,48 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
                         const sllm_kv_state_create_info_v2_t *const info,
                         sllm_kv_state_t **const raw_state,
                         sllm_error_sink_t *const error_sink) noexcept {
+  (void)raw_context;
+  (void)info;
+  if (raw_state != nullptr)
+    *raw_state = nullptr;
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_UNSUPPORTED,
+      "legacy KV state creation requires sllm_kv_state_create_paged");
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_create_paged(const sllm_context_t *const raw_context,
+                           const sllm_kv_state_paged_create_info_t *const info,
+                           sllm_kv_state_t **const raw_state,
+                           sllm_error_sink_t *const error_sink) noexcept {
+  if (raw_state != nullptr) {
+    *raw_state = nullptr;
+  }
   try {
-    if (raw_state != nullptr) {
-      *raw_state = nullptr;
-    }
     const sllm_status_t sink_status =
         sllm_public_runtime::validate_error_sink(error_sink);
     if (sink_status != SLLM_STATUS_OK) {
       return sink_status;
     }
     const sllm_status_t info_status =
-        sllm_kv_state::validate_state_create_info_v2(info, error_sink);
+        sllm_kv_state::validate_state_create_info_paged(info, error_sink);
     if (info_status != SLLM_STATUS_OK) {
       return info_status;
     }
     if (raw_context == nullptr || raw_state == nullptr) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-          "KV state context or output is null");
+          "paged KV state context or output is null");
     }
-
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_UNSUPPORTED,
+        "paged KV state creation requires the HIP runtime build");
+#else
     Context *context = nullptr;
     const uintptr_t context_token = handle_key(raw_context);
     {
@@ -11482,7 +11443,7 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
       if (context == nullptr) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
-            "KV state context handle is stale or has the wrong kind");
+            "paged KV state context handle is stale or has the wrong kind");
       }
       std::lock_guard<std::mutex> accounting_lock(context->accounting_mutex);
       if (context->poisoned.load() || context->release_active ||
@@ -11493,255 +11454,206 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
             context->release_active ? SLLM_STATUS_PUBLIC_BUSY
                                     : SLLM_STATUS_INTERNAL_ERROR,
             context->release_active
-                ? "KV state context release is already in progress"
-                : "KV state context accounting is exhausted");
+                ? "paged KV context release is already in progress"
+                : "paged KV context accounting is exhausted");
       }
       ++context->accounting.child_count;
     }
 
+    const auto rollback_reserved_child = [&]() {
+      (void)rollback_child(
+          context, error_sink,
+          "paged KV state provisional accounting rollback failed");
+    };
     const sllm_status_t device_status =
         select_context_device(context, error_sink);
     if (device_status != SLLM_STATUS_OK) {
-      (void)rollback_child(context, error_sink,
-                           "KV state provisional accounting rollback failed");
+      rollback_reserved_child();
       return device_status;
     }
-    if (info->encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
-        info->encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2 ||
+    const bool exact_gfx1030 = matches_runtime_gcn_arch(
+        context->device_properties.gcnArchName, "gfx1030");
+    const bool exact_gfx1201 = matches_runtime_gcn_arch(
+        context->device_properties.gcnArchName, "gfx1201");
+    const bool exact_supported_target = exact_gfx1030 || exact_gfx1201;
+    const bool supported_encoding =
+        info->encoding == SLLM_HIP_KV_ENCODING_FP16_V1 ||
+        info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
+        info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 ||
+        info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 ||
         info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
-        info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) {
-      hipDeviceProp_t properties{};
-      const hipError_t property_status =
-          hipGetDeviceProperties(&properties,
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-                                 context->device_index
-#else
-                                 static_cast<int>(context->device_index)
-#endif
-          );
-      const bool e4_ocp =
-          info->encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 &&
-          info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
-          (matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201")
-#if SLLM_ENABLE_PHASE54_KV_RESEARCH
-           || matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030")
-#endif
-          );
-      const bool e4_fnuz =
-          info->encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 &&
-          info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ &&
-          matches_runtime_gcn_arch(properties.gcnArchName, "gfx942");
-      const bool e5_software =
-          info->encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2 &&
-          info->dtype == SLLM_TENSOR_DTYPE_F8_E5M2 &&
-          matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030");
-      const bool mxfp8_e4_ocp =
-          info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
-          info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
-          info->block_size == 32U &&
-          (matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030") ||
-           matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201") ||
-           matches_runtime_gcn_arch(properties.gcnArchName, "gfx942"));
-      const bool mxfp8_e5_software =
-          info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1 &&
-          info->dtype == SLLM_TENSOR_DTYPE_F8_E5M2 && info->block_size == 32U &&
-          matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030");
-      if (property_status != hipSuccess ||
-          (!e4_ocp && !e4_fnuz && !e5_software && !mxfp8_e4_ocp &&
-           !mxfp8_e5_software)) {
-        (void)rollback_child(
-            context, error_sink,
-            "KV state target-recipe provisional accounting rollback failed");
-        return property_status != hipSuccess
-                   ? hip_failure(error_sink, property_status,
-                                 "query target for FP8 KV recipe")
-                   : sllm_public_runtime::write_error(
-                         error_sink, SLLM_STATUS_UNSUPPORTED,
-                         "FP8 KV encoding recipe is unsupported on the "
-                         "selected exact target");
-      }
+        (info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1 && exact_gfx1030);
+    if (!exact_supported_target || !supported_encoding) {
+      rollback_reserved_child();
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "paged KV create supports FP16, dynamic/static FP8 E4, NVFP4, and "
+          "MXFP8 E4 on exact gfx1030/gfx1201; MXFP8 E5 is gfx1030-only");
     }
+    const bool sliding_static_fp8 =
+        info->sliding_window_tokens == sllm_paged_kv::kSlidingWindowTokens &&
+        info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1;
+    if (info->sliding_window_tokens != 0U && !sliding_static_fp8) {
+      rollback_reserved_child();
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "paged sliding state requires static FP8 with a 1024-token window");
+    }
+
     const uint32_t head_count =
         info->head_count == 0U ? SLLM_HIP_KV_HEAD_COUNT : info->head_count;
     const uint32_t head_dim =
         info->head_dim == 0U ? SLLM_HIP_KV_HEAD_DIM : info->head_dim;
     const uint64_t row_stride = kv_value_row_stride(head_dim, info->encoding);
-    const uint64_t row_elements =
+    const uint64_t value_elements =
         static_cast<uint64_t>(head_count) * row_stride;
     const uint64_t value_bytes_per_token =
         info->encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-            ? row_elements * UINT64_C(2)
-            : (info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
-                       info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 ||
-                       info->encoding ==
-                           SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
-                       info->encoding ==
-                           SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2 ||
-                       info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
-                       info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
-                   ? row_elements
-                   : static_cast<uint64_t>(head_count) *
-                         ((static_cast<uint64_t>(head_dim) + 1U) / 2U));
+            ? value_elements * UINT64_C(2)
+        : info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
+            ? static_cast<uint64_t>(head_count) *
+                  ((static_cast<uint64_t>(head_dim) + 1U) / 2U)
+            : value_elements;
     const uint64_t scale_bytes_per_token =
         info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1
             ? static_cast<uint64_t>(head_count) * UINT64_C(4)
-            : (info->encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
-                       info->encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
+        : info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
+            ? static_cast<uint64_t>(head_count) *
+                  ((static_cast<uint64_t>(head_dim) + 15U) / 16U)
+            : (info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+                       info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
                    ? static_cast<uint64_t>(head_count) *
-                         ((static_cast<uint64_t>(head_dim) + 15U) / 16U)
-                   : (info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
-                              info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
-                          ? static_cast<uint64_t>(head_count) *
-                                ((static_cast<uint64_t>(head_dim) + 31U) / 32U)
-                          : (info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
-                                 ? static_cast<uint64_t>(head_count) *
-                                       ((static_cast<uint64_t>(head_dim) +
-                                         15U) /
-                                        16U)
-                                 : 0U)));
+                         ((static_cast<uint64_t>(head_dim) + 31U) / 32U)
+                   : 0U);
     const uint64_t outer_scale_bytes_per_token =
         info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
             ? static_cast<uint64_t>(head_count) * UINT64_C(4)
             : 0U;
-    const uint64_t sliding_window =
-        info->create_info_version ==
-                SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION
-            ? static_cast<uint64_t>(info->reserved[2]) |
-                  (static_cast<uint64_t>(info->reserved[3]) << UINT32_C(32))
-            : 0U;
-    /* One spare logical slot prevents a canceled or failed decode append from
-     * overwriting the oldest still-published token. VMM page rounding remains
-     * the authoritative physical accounting. */
-    const uint64_t storage_capacity_tokens =
-        sliding_window == 0U
-            ? info->capacity_tokens
-            : std::min(info->capacity_tokens, sliding_window + UINT64_C(1));
-    const uint64_t allocation_bytes =
-        storage_capacity_tokens * value_bytes_per_token;
-    hipMemAllocationProp allocation_properties{};
-    allocation_properties.type = hipMemAllocationTypePinned;
-    allocation_properties.location.type = hipMemLocationTypeDevice;
-    allocation_properties.location.id = static_cast<int>(context->device_index);
-    std::size_t page_bytes = 0U;
-    hipError_t key_status =
-        hipMemGetAllocationGranularity(&page_bytes, &allocation_properties,
-                                       hipMemAllocationGranularityRecommended);
-    int vmm_supported = 0;
-    const hipError_t capability_status = hipDeviceGetAttribute(
-        &vmm_supported, hipDeviceAttributeVirtualMemoryManagementSupported,
-        static_cast<int>(context->device_index));
-    if (capability_status != hipSuccess) {
-      (void)rollback_child(context, error_sink,
-                           "KV state provisional accounting rollback failed");
-      return hip_failure(error_sink, capability_status,
-                         "query HIP VMM capability for KV provider");
-    }
-    const bool sliding_state =
-        info->create_info_version ==
-        SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION;
-    const uint32_t selected_memory_kind =
-        sliding_state ? SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
-        : info->memory_kind == SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
-            ? (vmm_supported != 0 ? SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
-                                  : SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT)
-            : info->memory_kind;
-    if (selected_memory_kind == SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) {
-      key_status = hipSuccess;
-      page_bytes = static_cast<std::size_t>(value_bytes_per_token);
-    }
-    if (selected_memory_kind == SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
-        vmm_supported == 0) {
-      (void)rollback_child(context, error_sink,
-                           "KV state provisional accounting rollback failed");
+    if (value_elements == 0U ||
+        value_elements > std::numeric_limits<uint64_t>::max() /
+                             (info->encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+                                  ? UINT64_C(2)
+                                  : UINT64_C(1)) ||
+        info->logical_table_capacity >
+            std::numeric_limits<uint64_t>::max() /
+                static_cast<uint64_t>(info->token_block_size)) {
+      rollback_reserved_child();
       return sllm_public_runtime::write_error(
-          error_sink, SLLM_STATUS_UNSUPPORTED,
-          "explicit virtual-contiguous KV requires HIP VMM capability");
+          error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "paged KV byte or logical-table arithmetic overflow");
     }
-    if (key_status == hipSuccess &&
-        (page_bytes == 0U ||
-         allocation_bytes >
-             std::numeric_limits<std::size_t>::max() - (page_bytes - 1U))) {
-      key_status = hipErrorInvalidValue;
-    }
-    KvVmmPlane key_plane;
-    KvVmmPlane value_plane;
-    KvVmmPlane key_scale_plane;
-    KvVmmPlane value_scale_plane;
-    KvVmmPlane key_outer_scale_plane;
-    KvVmmPlane value_outer_scale_plane;
-    const auto reserve_plane =
-        [&](KvVmmPlane &plane, const uint64_t bytes_per_token) -> hipError_t {
-      if (bytes_per_token == 0U) {
-        return hipSuccess;
-      }
-      if (sllm_public_runtime::FaultInjector::consume(
-              sllm_public_runtime::FaultPoint::NativeCreationFailure)) {
-        return hipErrorUnknown;
-      }
-      const uint64_t logical = storage_capacity_tokens * bytes_per_token;
-      if (selected_memory_kind == SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) {
-        return plane.reserve_contiguous(logical, bytes_per_token);
-      }
-      const uint64_t reservation =
-          ((logical + page_bytes - 1U) / page_bytes) * page_bytes;
-      return plane.reserve(logical, reservation, page_bytes);
-    };
-    if (key_status == hipSuccess) {
-      key_status = reserve_plane(key_plane, value_bytes_per_token);
-    }
-    if (key_status == hipSuccess) {
-      key_status = reserve_plane(value_plane, value_bytes_per_token);
-    }
-    if (key_status == hipSuccess) {
-      key_status = reserve_plane(key_scale_plane, scale_bytes_per_token);
-    }
-    if (key_status == hipSuccess) {
-      key_status = reserve_plane(value_scale_plane, scale_bytes_per_token);
-    }
-    if (key_status == hipSuccess) {
-      key_status =
-          reserve_plane(key_outer_scale_plane, outer_scale_bytes_per_token);
-    }
-    if (key_status == hipSuccess) {
-      key_status =
-          reserve_plane(value_outer_scale_plane, outer_scale_bytes_per_token);
-    }
-    if (key_status != hipSuccess) {
-      (void)rollback_child(context, error_sink,
-                           "KV state provisional accounting rollback failed");
-      return hip_failure(error_sink, key_status,
-                         "reserve selected KV value or scale plane");
-    }
+    const uint64_t logical_capacity_tokens =
+        info->logical_table_capacity *
+        static_cast<uint64_t>(info->token_block_size);
+
+    std::shared_ptr<sllm_paged_kv::Pool> host_pool;
+    std::unique_ptr<sllm_paged_kv::State> host_state;
+    std::shared_ptr<sllm_paged_kv::DevicePool> device_pool;
+    std::unique_ptr<sllm_paged_kv::DevicePool::LogicalTable> logical_table;
     std::unique_ptr<Buffer> key_buffer;
     std::unique_ptr<Buffer> value_buffer;
     std::unique_ptr<KvState> candidate;
-    float static_key_scale = 0.0F;
-    float static_value_scale = 0.0F;
-    if (info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1) {
-      std::memcpy(&static_key_scale, &info->reserved[0], sizeof(float));
-      std::memcpy(&static_value_scale, &info->reserved[1], sizeof(float));
-    }
+    uint32_t *paged_device_status = nullptr;
+    const auto cleanup_failed_allocation = [&]() noexcept {
+      if (paged_device_status != nullptr) {
+        if (free_allocation_with_fault_injection(paged_device_status) !=
+            hipSuccess)
+          orphan_owner.retain_allocation(context, paged_device_status);
+        paged_device_status = nullptr;
+      }
+      if (candidate != nullptr)
+        (void)release_paged_state_resources(candidate.get(), error_sink);
+    };
     try {
-      key_buffer = std::make_unique<Buffer>(context, key_plane.address,
-                                            allocation_bytes);
-      value_buffer = std::make_unique<Buffer>(context, value_plane.address,
-                                              allocation_bytes);
+      const sllm_paged_kv::SlabPlan plan =
+          sllm_paged_kv::SlabPlan::make(sllm_paged_kv::SlabPlanInput{
+              value_bytes_per_token, scale_bytes_per_token,
+              outer_scale_bytes_per_token, logical_capacity_tokens,
+              info->max_physical_blocks});
+      device_pool = std::make_shared<sllm_paged_kv::DevicePool>(plan);
+      logical_table = device_pool->make_logical_table(
+          sliding_static_fp8 ? sllm_paged_kv::kSlidingRingSlots
+                             : info->logical_table_capacity,
+          nullptr);
+      host_pool = std::make_shared<sllm_paged_kv::Pool>(
+          static_cast<uint32_t>(info->max_physical_blocks));
+      if (!sliding_static_fp8) {
+        host_state = std::make_unique<sllm_paged_kv::State>(
+            host_pool, info->capacity_tokens);
+      }
+      key_buffer = std::make_unique<Buffer>(context, nullptr, 0U);
+      value_buffer = std::make_unique<Buffer>(context, nullptr, 0U);
       candidate = std::make_unique<KvState>(
-          context, info->session_id, info->layer_id, info->capacity_tokens,
-          head_count, head_dim, key_buffer.get(), value_buffer.get(),
-          std::move(key_plane), std::move(value_plane),
-          std::move(key_scale_plane), std::move(value_scale_plane),
-          std::move(key_outer_scale_plane), std::move(value_outer_scale_plane),
-          info->dtype, info->encoding, static_key_scale, static_value_scale,
-          value_bytes_per_token, scale_bytes_per_token,
-          outer_scale_bytes_per_token, page_bytes, context_token,
-          storage_capacity_tokens, sliding_window);
+          context, *info, head_count, head_dim, key_buffer.get(),
+          value_buffer.get(), std::move(device_pool), std::move(logical_table),
+          std::move(host_pool), std::move(host_state), value_bytes_per_token,
+          scale_bytes_per_token, context_token, nullptr);
+      candidate->outer_scale_bytes_per_token = outer_scale_bytes_per_token;
+      if (info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1) {
+        std::memcpy(&candidate->static_key_scale, &info->static_key_scale_bits,
+                    sizeof(candidate->static_key_scale));
+        std::memcpy(&candidate->static_value_scale,
+                    &info->static_value_scale_bits,
+                    sizeof(candidate->static_value_scale));
+      }
+      candidate->sliding_window = info->sliding_window_tokens;
+      if (sliding_static_fp8) {
+        candidate->paged_sliding_host_pool = candidate->paged_host_pool;
+        candidate->paged_sliding_host_state =
+            std::make_unique<sllm_paged_kv::SlidingState>(
+                candidate->paged_sliding_host_pool);
+        candidate->paged_host_pool.reset();
+      }
+      if (sliding_static_fp8) {
+        if (hipMalloc(reinterpret_cast<void **>(
+                          &candidate->paged_sliding_ring_tags_device),
+                      sllm_paged_kv::kSlidingRingSlots * sizeof(uint64_t)) !=
+                hipSuccess ||
+            hipHostMalloc(reinterpret_cast<void **>(
+                              &candidate->paged_sliding_ring_tags_host),
+                          sllm_paged_kv::kSlidingRingSlots * sizeof(uint64_t),
+                          hipHostMallocPortable) != hipSuccess) {
+          throw std::runtime_error("paged sliding ring tag allocation");
+        }
+        for (uint32_t slot = 0U; slot < sllm_paged_kv::kSlidingRingSlots;
+             ++slot)
+          candidate->paged_sliding_ring_tags_host[slot] =
+              std::numeric_limits<uint64_t>::max();
+        if (hipMemcpy(candidate->paged_sliding_ring_tags_device,
+                      candidate->paged_sliding_ring_tags_host,
+                      sllm_paged_kv::kSlidingRingSlots * sizeof(uint64_t),
+                      hipMemcpyHostToDevice) != hipSuccess)
+          throw std::runtime_error("paged sliding ring tag initialization");
+      }
+      if (hipMalloc(reinterpret_cast<void **>(&paged_device_status),
+                    sizeof(*paged_device_status)) != hipSuccess) {
+        throw std::runtime_error("hipMalloc paged KV device status");
+      }
+      const hipError_t status_clear =
+          hipMemset(paged_device_status, 0, sizeof(*paged_device_status));
+      if (status_clear != hipSuccess) {
+        const hipError_t status_free =
+            free_allocation_with_fault_injection(paged_device_status);
+        if (status_free != hipSuccess) {
+          orphan_owner.retain_allocation(context, paged_device_status);
+        }
+        paged_device_status = nullptr;
+        throw std::runtime_error("hipMemset paged KV device status");
+      }
+      candidate->paged_device_status = paged_device_status;
+      paged_device_status = nullptr;
+    } catch (const std::exception &error) {
+      cleanup_failed_allocation();
+      rollback_reserved_child();
+      return sllm_public_runtime::write_error_n_bounded(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR, error.what(),
+          std::strlen(error.what()), 255U);
     } catch (...) {
-      (void)rollback_child(context, error_sink,
-                           "KV state provisional accounting rollback failed");
+      cleanup_failed_allocation();
+      rollback_reserved_child();
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INTERNAL_ERROR,
-          "KV state allocation failed after device buffers were created");
+          "unexpected paged KV device allocation failure");
     }
 
     {
@@ -11755,9 +11667,10 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
         value_buffer.release();
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
-            "KV state accounting reservation is exhausted; state quarantined");
+            "paged KV state accounting reservation is exhausted; state "
+            "quarantined");
       }
-      --context->accounting.child_count; // replace provisional child guard
+      --context->accounting.child_count;
     }
 
     uintptr_t token = 0U;
@@ -11775,30 +11688,28 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
         value_buffer.release();
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
-            "KV state accounting rollback failed; state quarantined");
+            "paged KV state accounting rollback failed; state quarantined");
       }
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INTERNAL_ERROR,
-          "KV state registry allocation failed");
+          "paged KV state registry insertion failed");
     }
     if (token == 0U) {
       std::lock_guard<std::mutex> accounting_lock(context->accounting_mutex);
-      const bool released =
-          sllm_public_runtime::AccountingState::release_kv_state(
+      if (!sllm_public_runtime::AccountingState::release_kv_state(
               context->accounting, key_buffer->accounting,
-              value_buffer->accounting);
-      if (!released) {
+              value_buffer->accounting)) {
         poison_context_locked(context);
         poison_owner.retain(std::move(candidate));
         key_buffer.release();
         value_buffer.release();
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
-            "KV state accounting rollback failed; state quarantined");
+            "paged KV state accounting rollback failed; state quarantined");
       }
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INTERNAL_ERROR,
-          "KV state handle token allocation failed");
+          "paged KV state handle token allocation failed");
     }
     candidate->state_identity = token;
     *raw_state = reinterpret_cast<sllm_kv_state_t *>(token);
@@ -11806,10 +11717,11 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
     value_buffer.release();
     (void)candidate.release();
     return SLLM_STATUS_OK;
+#endif
   } catch (...) {
     return sllm_public_runtime::write_error(
         error_sink, SLLM_STATUS_INTERNAL_ERROR,
-        "unexpected exception in KV state create");
+        "unexpected exception in paged KV state create");
   }
 }
 
@@ -11853,76 +11765,67 @@ sllm_kv_state_release(sllm_kv_state_t **const raw_state,
       state->release_active = true;
     }
 
-    const sllm_status_t device_status =
-        select_context_device(state->context, error_sink);
-    if (device_status != SLLM_STATUS_OK) {
-      std::lock_guard<std::mutex> registry_lock(registry_mutex);
-      state->release_active = false;
-      return device_status;
-    }
-    const hipError_t key_status = state->key_plane.release_checked();
-    const hipError_t value_status = state->value_plane.release_checked();
-    const hipError_t key_scale_status =
-        state->key_scale_plane.release_checked();
-    const hipError_t value_scale_status =
-        state->value_scale_plane.release_checked();
-    const hipError_t key_outer_status =
-        state->key_outer_scale_plane.release_checked();
-    const hipError_t value_outer_status =
-        state->value_outer_scale_plane.release_checked();
-    state->key_buffer->device_pointer = nullptr;
-    state->value_buffer->device_pointer = nullptr;
-    if (key_status != hipSuccess || value_status != hipSuccess ||
-        key_scale_status != hipSuccess || value_scale_status != hipSuccess ||
-        key_outer_status != hipSuccess || value_outer_status != hipSuccess) {
-      {
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    if (state->paged) {
+      // Drop any incomplete image transaction before the state can be
+      // unregistered or its address can be reused for a later state.
+      sllm_paged_kv_image_runtime::discard_pending_import(state);
+      const sllm_status_t device_status =
+          select_context_device(state->context, error_sink);
+      if (device_status != SLLM_STATUS_OK) {
         std::lock_guard<std::mutex> registry_lock(registry_mutex);
-        unregister_handle(*raw_state);
-        *raw_state = nullptr;
+        state->release_active = false;
+        return device_status;
       }
-      retain_poisoned(state, state->context);
-      const hipError_t first_status =
-          key_status != hipSuccess           ? key_status
-          : value_status != hipSuccess       ? value_status
-          : key_scale_status != hipSuccess   ? key_scale_status
-          : value_scale_status != hipSuccess ? value_scale_status
-          : key_outer_status != hipSuccess   ? key_outer_status
-                                             : value_outer_status;
-      return hip_failure(error_sink, first_status,
-                         "release virtual KV state buffers");
-    }
+      const sllm_status_t resource_status =
+          release_paged_state_resources(state, error_sink);
+      if (resource_status != SLLM_STATUS_OK) {
+        {
+          std::lock_guard<std::mutex> registry_lock(registry_mutex);
+          unregister_handle(*raw_state);
+          *raw_state = nullptr;
+        }
+        retain_poisoned(state, state->context);
+        return resource_status;
+      }
 
-    bool accounting_released = false;
-    {
-      std::lock_guard<std::mutex> accounting_lock(
-          state->context->accounting_mutex);
-      accounting_released =
-          !sllm_public_runtime::FaultInjector::consume(
-              sllm_public_runtime::FaultPoint::AccountingFailure) &&
-          sllm_public_runtime::AccountingState::release_kv_state(
-              state->context->accounting, state->key_buffer->accounting,
-              state->value_buffer->accounting);
-    }
-    if (!accounting_released) {
+      bool accounting_released = false;
+      {
+        std::lock_guard<std::mutex> accounting_lock(
+            state->context->accounting_mutex);
+        accounting_released =
+            !sllm_public_runtime::FaultInjector::consume(
+                sllm_public_runtime::FaultPoint::AccountingFailure) &&
+            sllm_public_runtime::AccountingState::release_kv_state(
+                state->context->accounting, state->key_buffer->accounting,
+                state->value_buffer->accounting);
+      }
+      if (!accounting_released) {
+        {
+          std::lock_guard<std::mutex> registry_lock(registry_mutex);
+          unregister_handle(*raw_state);
+          *raw_state = nullptr;
+        }
+        retain_poisoned(state, state->context);
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "paged KV state accounting release failed; state quarantined");
+      }
       {
         std::lock_guard<std::mutex> registry_lock(registry_mutex);
         unregister_handle(*raw_state);
         *raw_state = nullptr;
       }
-      retain_poisoned(state, state->context);
-      return sllm_public_runtime::write_error(
-          error_sink, SLLM_STATUS_INTERNAL_ERROR,
-          "KV state accounting release failed; state quarantined");
+      delete state->key_buffer;
+      delete state->value_buffer;
+      delete state;
+      return SLLM_STATUS_OK;
     }
-    {
-      std::lock_guard<std::mutex> registry_lock(registry_mutex);
-      unregister_handle(*raw_state);
-      *raw_state = nullptr;
-    }
-    delete state->key_buffer;
-    delete state->value_buffer;
-    delete state;
-    return SLLM_STATUS_OK;
+#endif
+
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_UNSUPPORTED,
+        "legacy KV state release is unsupported; use a Paged KV state");
   } catch (...) {
     return sllm_public_runtime::write_error(
         error_sink, SLLM_STATUS_INTERNAL_ERROR,
@@ -11934,6 +11837,21 @@ extern "C" sllm_status_t
 sllm_kv_state_query(const sllm_kv_state_t *const raw_state,
                     sllm_kv_view_info_t *const info,
                     sllm_error_sink_t *const error_sink) noexcept {
+  (void)raw_state;
+  (void)info;
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_UNSUPPORTED,
+      "legacy KV query requires sllm_kv_state_query_paged");
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_query_paged(const sllm_kv_state_t *const raw_state,
+                          sllm_kv_paged_view_info_t *const info,
+                          sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status =
         sllm_public_runtime::validate_error_sink(error_sink);
@@ -11941,31 +11859,44 @@ sllm_kv_state_query(const sllm_kv_state_t *const raw_state,
       return sink_status;
     }
     const sllm_status_t info_status =
-        validate_kv_view_info_input(info, error_sink);
+        validate_kv_paged_view_info_input(info, error_sink);
     if (info_status != SLLM_STATUS_OK) {
       return info_status;
     }
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    (void)raw_state;
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_UNSUPPORTED,
+        "paged KV state query requires the HIP runtime build");
+#else
     std::lock_guard<std::mutex> registry_lock(registry_mutex);
     KvState *const state = lookup<KvState>(raw_state, HandleKind::KvState);
     if (state == nullptr) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
-          "KV state handle is stale or has the wrong kind");
+          "paged KV state handle is stale or has the wrong kind");
     }
     std::lock_guard<std::mutex> accounting_lock(
         state->context->accounting_mutex);
+    if (!state->paged) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "legacy KV state requires sllm_kv_state_query");
+    }
     if (state->context->poisoned.load() || state->release_active) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_PUBLIC_BUSY,
-          "KV state is releasing or its context is poisoned");
+          "paged KV state is releasing or its context is poisoned");
     }
-    fill_kv_view_info(state, state->published_length, state->generation,
-                      state->context_identity, state->state_identity, info);
+    fill_kv_paged_view_info(state, state->published_length, state->generation,
+                            state->context_identity, state->state_identity,
+                            info);
     return SLLM_STATUS_OK;
+#endif
   } catch (...) {
     return sllm_public_runtime::write_error(
         error_sink, SLLM_STATUS_INTERNAL_ERROR,
-        "unexpected exception in KV state query");
+        "unexpected exception in paged KV state query");
   }
 }
 
@@ -11974,6 +11905,8 @@ sllm_kv_state_rewind_last(const sllm_kv_state_t *const raw_state,
                           const uint64_t expected_length,
                           const uint64_t rewind_length,
                           sllm_error_sink_t *const error_sink) noexcept {
+  (void)expected_length;
+  (void)rewind_length;
   try {
     const sllm_status_t sink_status =
         sllm_public_runtime::validate_error_sink(error_sink);
@@ -11995,25 +11928,183 @@ sllm_kv_state_rewind_last(const sllm_kv_state_t *const raw_state,
           error_sink, SLLM_STATUS_PUBLIC_BUSY,
           "KV rewind requires a quiescent state without live views");
     }
-    if (rewind_length >= expected_length ||
-        state->published_length != expected_length ||
-        (state->sliding_window != 0U &&
-         rewind_length != state->last_published_start) ||
-        state->generation == std::numeric_limits<uint64_t>::max()) {
+    if (state->paged) {
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      if (state->paged_device_pool == nullptr ||
+          state->paged_logical_table == nullptr ||
+          state->paged_device_status == nullptr ||
+          (state->sliding_window == 0U
+               ? state->paged_host_state == nullptr
+               : state->paged_sliding_host_state == nullptr)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "paged KV rewind has incomplete ownership");
+      }
+      const uint64_t current_length = state->published_length;
+      if (rewind_length >= expected_length ||
+          current_length != expected_length ||
+          state->generation == std::numeric_limits<uint64_t>::max() ||
+          (state->sliding_window != 0U &&
+           rewind_length < state->retained_start)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "paged KV rewind length is stale or outside the retained tail");
+      }
+      std::vector<sllm_paged_kv::LogicalEntryUpdate> trims;
+      std::array<uint64_t, sllm_paged_kv::kSlidingRingSlots> old_tags{};
+      std::array<uint64_t, sllm_paged_kv::kSlidingRingSlots> new_tags{};
+      const uint64_t old_used =
+          current_length / sllm_paged_kv::kBlockTokens +
+          (current_length % sllm_paged_kv::kBlockTokens != 0U ? 1U : 0U);
+      const uint64_t new_used =
+          rewind_length / sllm_paged_kv::kBlockTokens +
+          (rewind_length % sllm_paged_kv::kBlockTokens != 0U ? 1U : 0U);
+      if (state->sliding_window == 0U) {
+        for (uint64_t logical = new_used; logical < old_used; ++logical) {
+          const uint32_t physical = state->paged_host_state->physical_block(
+              static_cast<uint32_t>(logical));
+          if (physical == sllm_paged_kv::kInvalidBlock)
+            return sllm_public_runtime::write_error(
+                error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                "paged KV rewind found an invalid suffix block");
+          trims.push_back(sllm_paged_kv::LogicalEntryUpdate{
+              static_cast<uint32_t>(logical), physical,
+              sllm_paged_kv::kInvalidBlock});
+        }
+      } else {
+        for (uint32_t slot = 0U; slot < sllm_paged_kv::kSlidingRingSlots;
+             ++slot) {
+          old_tags[slot] =
+              state->paged_sliding_host_state->absolute_block_tag(slot);
+          new_tags[slot] = old_tags[slot];
+        }
+        const uint64_t new_begin =
+            rewind_length > sllm_paged_kv::kSlidingWindowTokens
+                ? rewind_length - sllm_paged_kv::kSlidingWindowTokens
+                : 0U;
+        const uint64_t first_kept = new_begin / sllm_paged_kv::kBlockTokens;
+        const uint64_t first_removed = new_used;
+        for (uint32_t slot = 0U; slot < sllm_paged_kv::kSlidingRingSlots;
+             ++slot) {
+          const uint64_t tag = old_tags[slot];
+          if (tag == std::numeric_limits<uint64_t>::max() ||
+              (tag >= first_kept && tag < first_removed))
+            continue;
+          const uint32_t physical =
+              state->paged_logical_table->host_entry(slot);
+          trims.push_back(sllm_paged_kv::LogicalEntryUpdate{
+              slot, physical, sllm_paged_kv::kInvalidBlock});
+          new_tags[slot] = std::numeric_limits<uint64_t>::max();
+        }
+      }
+      hipStream_t rewind_stream = nullptr;
+      const hipError_t stream_status =
+          hipStreamCreateWithFlags(&rewind_stream, hipStreamNonBlocking);
+      if (stream_status != hipSuccess)
+        return hip_failure(error_sink, stream_status,
+                           "create paged KV rewind stream");
+      auto fail_rewind = [&](const sllm_status_t result) noexcept {
+        if (hipStreamDestroy(rewind_stream) != hipSuccess)
+          poison_context_locked(state->context);
+        return result;
+      };
+      auto poison_rewind = [&](const char *const message) noexcept {
+        poison_context_locked(state->context);
+        return fail_rewind(sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR, message));
+      };
+      auto restore_trim = [&]() noexcept {
+        if (trims.empty())
+          return true;
+        const sllm_paged_kv::DeviceStatus status =
+            state->paged_logical_table->restore_entries(trims, rewind_stream);
+        if (status != sllm_paged_kv::DeviceStatus::Ok)
+          return false;
+        if (hipStreamSynchronize(rewind_stream) != hipSuccess)
+          return false;
+        return state->paged_logical_table->poll_pending() ==
+               sllm_paged_kv::DeviceStatus::Ok;
+      };
+      auto restore_tags = [&]() noexcept {
+        if (state->sliding_window == 0U)
+          return true;
+        std::memcpy(state->paged_sliding_ring_tags_host, old_tags.data(),
+                    old_tags.size() * sizeof(uint64_t));
+        const hipError_t status =
+            hipMemcpyAsync(state->paged_sliding_ring_tags_device,
+                           state->paged_sliding_ring_tags_host,
+                           old_tags.size() * sizeof(uint64_t),
+                           hipMemcpyHostToDevice, rewind_stream);
+        return status == hipSuccess &&
+               hipStreamSynchronize(rewind_stream) == hipSuccess;
+      };
+      if (!trims.empty()) {
+        const sllm_paged_kv::DeviceStatus table_status =
+            state->paged_logical_table->update_entries(trims, rewind_stream);
+        if (table_status != sllm_paged_kv::DeviceStatus::Ok ||
+            hipStreamSynchronize(rewind_stream) != hipSuccess ||
+            state->paged_logical_table->poll_pending() !=
+                sllm_paged_kv::DeviceStatus::Ok) {
+          return poison_rewind("paged KV rewind table trim failed");
+        }
+      }
+      if (state->sliding_window != 0U) {
+        std::memcpy(state->paged_sliding_ring_tags_host, new_tags.data(),
+                    new_tags.size() * sizeof(uint64_t));
+        const hipError_t tag_status =
+            hipMemcpyAsync(state->paged_sliding_ring_tags_device,
+                           state->paged_sliding_ring_tags_host,
+                           new_tags.size() * sizeof(uint64_t),
+                           hipMemcpyHostToDevice, rewind_stream);
+        if (tag_status != hipSuccess ||
+            hipStreamSynchronize(rewind_stream) != hipSuccess) {
+          const bool restored = restore_tags() && restore_trim();
+          if (!restored)
+            return poison_rewind("paged sliding rewind tag rollback failed");
+          return fail_rewind(sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_INTERNAL_ERROR,
+              "paged sliding rewind tag update failed"));
+        }
+      }
+      const sllm_paged_kv::Status host_status =
+          state->sliding_window == 0U
+              ? state->paged_host_state->rewind_last(expected_length,
+                                                     rewind_length)
+              : state->paged_sliding_host_state->rewind_last(expected_length,
+                                                             rewind_length);
+      if (host_status != sllm_paged_kv::Status::Ok) {
+        const bool restored = restore_trim() && restore_tags();
+        if (!restored)
+          return poison_rewind("paged KV host rewind rollback failed");
+        return fail_rewind(sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "paged KV host rewind failed; table restored"));
+      }
+      const hipError_t destroy_status = hipStreamDestroy(rewind_stream);
+      if (destroy_status != hipSuccess) {
+        state->context->poisoned.store(true);
+        return hip_failure(error_sink, destroy_status,
+                           "destroy paged KV rewind stream");
+      }
+      state->published_length = rewind_length;
+      state->retained_start =
+          state->sliding_window != 0U && rewind_length > state->sliding_window
+              ? rewind_length - state->sliding_window
+              : 0U;
+      ++state->generation;
+      state->last_published_start = 0U;
+      state->last_published_end = 0U;
+      state->last_published_generation = 0U;
+      return SLLM_STATUS_OK;
+#else
       return sllm_public_runtime::write_error(
-          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-          "KV rewind length is stale or outside the committed tail");
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "paged KV rewind requires the HIP runtime build");
+#endif
     }
-    state->published_length = rewind_length;
-    state->retained_start =
-        state->sliding_window != 0U && rewind_length > state->sliding_window
-            ? rewind_length - state->sliding_window
-            : 0U;
-    ++state->generation;
-    state->last_published_start = 0U;
-    state->last_published_end = 0U;
-    state->last_published_generation = 0U;
-    return SLLM_STATUS_OK;
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_UNSUPPORTED,
+        "legacy KV rewind is unsupported; use a Paged KV state");
   } catch (...) {
     return sllm_public_runtime::write_error(
         error_sink, SLLM_STATUS_INTERNAL_ERROR,
@@ -12105,6 +12196,21 @@ extern "C" sllm_status_t
 sllm_kv_view_query(const sllm_kv_view_t *const raw_view,
                    sllm_kv_view_info_t *const info,
                    sllm_error_sink_t *const error_sink) noexcept {
+  (void)raw_view;
+  (void)info;
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_UNSUPPORTED,
+      "legacy KV view query requires sllm_kv_view_query_paged");
+}
+
+extern "C" sllm_status_t
+sllm_kv_view_query_paged(const sllm_kv_view_t *const raw_view,
+                         sllm_kv_paged_view_info_t *const info,
+                         sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status =
         sllm_public_runtime::validate_error_sink(error_sink);
@@ -12112,31 +12218,44 @@ sllm_kv_view_query(const sllm_kv_view_t *const raw_view,
       return sink_status;
     }
     const sllm_status_t info_status =
-        validate_kv_view_info_input(info, error_sink);
+        validate_kv_paged_view_info_input(info, error_sink);
     if (info_status != SLLM_STATUS_OK) {
       return info_status;
     }
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    (void)raw_view;
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_UNSUPPORTED,
+        "paged KV snapshot query requires the HIP runtime build");
+#else
     std::lock_guard<std::mutex> registry_lock(registry_mutex);
     KvView *const view = lookup<KvView>(raw_view, HandleKind::KvView);
     if (view == nullptr) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
-          "KV snapshot handle is stale or has the wrong kind");
+          "paged KV snapshot handle is stale or has the wrong kind");
     }
     std::lock_guard<std::mutex> accounting_lock(
         view->context->accounting_mutex);
+    if (!view->state->paged) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "legacy KV snapshot requires sllm_kv_view_query");
+    }
     if (view->context->poisoned.load() || view->release_active) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_PUBLIC_BUSY,
-          "KV snapshot is releasing or its context is poisoned");
+          "paged KV snapshot is releasing or its context is poisoned");
     }
-    fill_kv_view_info(view->state, view->observed_length, view->generation,
-                      view->context_identity, view->state_identity, info);
+    fill_kv_paged_view_info(view->state, view->observed_length,
+                            view->generation, view->context_identity,
+                            view->state_identity, info);
     return SLLM_STATUS_OK;
+#endif
   } catch (...) {
     return sllm_public_runtime::write_error(
         error_sink, SLLM_STATUS_INTERNAL_ERROR,
-        "unexpected exception in KV snapshot query");
+        "unexpected exception in paged KV snapshot query");
   }
 }
 
@@ -12161,10 +12280,10 @@ sllm_kv_view_release(sllm_kv_view_t **const raw_view,
           error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
           "KV snapshot handle is stale or has the wrong kind");
     }
-    if (view->release_active || view->readback_active) {
+    if (view->release_active) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_PUBLIC_BUSY,
-          "KV snapshot release or evidence readback is already in progress");
+          "KV snapshot release is already in progress");
     }
     std::lock_guard<std::mutex> accounting_lock(
         view->context->accounting_mutex);
@@ -12196,159 +12315,14 @@ sllm_kv_view_release(sllm_kv_view_t **const raw_view,
 extern "C" sllm_status_t
 sllm_hip_kv_view_readback(const sllm_hip_kv_readback_request_t *const request,
                           sllm_error_sink_t *const error_sink) noexcept {
-  try {
-    const sllm_status_t sink_status =
-        sllm_public_runtime::validate_error_sink(error_sink);
-    if (sink_status != SLLM_STATUS_OK) {
-      return sink_status;
-    }
-    const sllm_status_t request_status =
-        validate_kv_readback_request(request, error_sink);
-    if (request_status != SLLM_STATUS_OK) {
-      return request_status;
-    }
-
-    KvView *view = nullptr;
-    {
-      std::lock_guard<std::mutex> registry_lock(registry_mutex);
-      view = lookup<KvView>(request->view, HandleKind::KvView);
-      if (view == nullptr) {
-        return sllm_public_runtime::write_error(
-            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
-            "KV evidence readback view is stale or has the wrong kind");
-      }
-      if (view->readback_active || view->release_active) {
-        return sllm_public_runtime::write_error(
-            error_sink, SLLM_STATUS_PUBLIC_BUSY,
-            "KV evidence readback view is already active or releasing");
-      }
-      view->readback_active = true;
-    }
-    KvReadbackActivityGuard readback_guard(view);
-
-    std::lock_guard<std::mutex> accounting_lock(
-        view->context->accounting_mutex);
-    KvState *const state = view->state;
-    if (state == nullptr || state->context != view->context ||
-        view->context->poisoned.load() || view->context->release_active ||
-        view->release_active || state->release_active ||
-        state->key_buffer == nullptr || state->value_buffer == nullptr ||
-        state->key_buffer->context != view->context ||
-        state->value_buffer->context != view->context ||
-        state->key_buffer->release_active ||
-        state->value_buffer->release_active) {
-      return sllm_public_runtime::write_error(
-          error_sink, SLLM_STATUS_PUBLIC_BUSY,
-          "KV evidence readback state is releasing or unsafe");
-    }
-    if (state->encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
-      return sllm_public_runtime::write_error(
-          error_sink, SLLM_STATUS_UNSUPPORTED_ENCODING,
-          "KV evidence readback v1 supports only FP16 value planes");
-    }
-    if (view->context_identity != state->context_identity ||
-        view->state_identity != state->state_identity ||
-        view->session_id != state->session_id ||
-        view->layer_id != state->layer_id ||
-        view->capacity_tokens != state->capacity_tokens ||
-        view->observed_length != state->published_length ||
-        view->generation != state->generation ||
-        state->transition_token != 0U ||
-        state->accounting.active_submissions != 0U ||
-        state->accounting.completion_references != 0U ||
-        state->key_buffer->accounting.active_submissions != 0U ||
-        state->key_buffer->accounting.completion_references != 0U ||
-        state->value_buffer->accounting.active_submissions != 0U ||
-        state->value_buffer->accounting.completion_references != 0U) {
-      return sllm_public_runtime::write_error(
-          error_sink, SLLM_STATUS_PUBLIC_BUSY,
-          "KV evidence readback snapshot is stale or append is in flight");
-    }
-
-    uint64_t plane_bytes = 0U;
-    if (!checked_kv_plane_bytes(state->capacity_tokens, state->head_count,
-                                state->head_dim, &plane_bytes)) {
-      return sllm_public_runtime::write_error(
-          error_sink, SLLM_STATUS_METADATA_OVERFLOW,
-          "KV evidence readback state storage size is invalid");
-    }
-    const uint64_t storage_bytes = plane_bytes;
-    const uint64_t visible_bytes = view->observed_length *
-                                   static_cast<uint64_t>(state->head_count) *
-                                   state->head_dim * UINT64_C(2);
-    if (state->key_buffer->size_bytes != storage_bytes ||
-        state->value_buffer->size_bytes != storage_bytes ||
-        request->byte_offset > visible_bytes ||
-        request->byte_length > visible_bytes - request->byte_offset) {
-      return sllm_public_runtime::write_error(
-          error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
-          "KV evidence readback range is outside the published mapped token "
-          "range");
-    }
-
-    Buffer *const buffer = request->plane == SLLM_HIP_KV_EVIDENCE_PLANE_K
-                               ? state->key_buffer
-                               : state->value_buffer;
-    const uint64_t source_offset = request->byte_offset;
-    if (buffer->device_pointer == nullptr ||
-        source_offset > buffer->size_bytes ||
-        request->byte_length > buffer->size_bytes - source_offset) {
-      return sllm_public_runtime::write_error(
-          error_sink, SLLM_STATUS_PUBLIC_BUSY,
-          "KV evidence readback storage is unavailable");
-    }
-
-    const sllm_status_t device_status =
-        select_context_device(view->context, error_sink);
-    if (device_status != SLLM_STATUS_OK) {
-      return device_status;
-    }
-    hipStream_t stream = nullptr;
-    const hipError_t create_status =
-        hipStreamCreateWithFlags(&stream, hipStreamNonBlocking);
-    if (create_status != hipSuccess) {
-      return hip_failure(error_sink, create_status,
-                         "hipStreamCreateWithFlags KV evidence readback");
-    }
-    const auto destroy_stream = [&]() noexcept -> hipError_t {
-      const hipError_t status = hipStreamDestroy(stream);
-      stream = nullptr;
-      return status;
-    };
-    const void *const source =
-        static_cast<const char *>(buffer->device_pointer) +
-        static_cast<std::size_t>(source_offset);
-    const hipError_t copy_status =
-        hipMemcpyAsync(request->host_output, source,
-                       static_cast<std::size_t>(request->byte_length),
-                       hipMemcpyDeviceToHost, stream);
-    if (copy_status != hipSuccess) {
-      const hipError_t destroy_status = destroy_stream();
-      if (destroy_status != hipSuccess) {
-        poison_context_locked(view->context);
-        return hip_failure(error_sink, destroy_status,
-                           "hipStreamDestroy KV evidence readback");
-      }
-      return hip_failure(error_sink, copy_status,
-                         "hipMemcpyAsync KV evidence readback");
-    }
-    const hipError_t synchronize_status = hipStreamSynchronize(stream);
-    const hipError_t destroy_status = destroy_stream();
-    if (destroy_status != hipSuccess) {
-      poison_context_locked(view->context);
-      return hip_failure(error_sink, destroy_status,
-                         "hipStreamDestroy KV evidence readback");
-    }
-    if (synchronize_status != hipSuccess) {
-      return hip_failure(error_sink, synchronize_status,
-                         "hipStreamSynchronize KV evidence readback");
-    }
-    return SLLM_STATUS_OK;
-  } catch (...) {
-    return sllm_public_runtime::write_error(
-        error_sink, SLLM_STATUS_INTERNAL_ERROR,
-        "unexpected exception in KV evidence readback");
-  }
+  (void)request;
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_UNSUPPORTED,
+      "legacy KV raw-plane readback is unsupported; use the Paged image ABI");
 }
 
 extern "C" sllm_status_t
@@ -12436,17 +12410,32 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
             error_sink, SLLM_STATUS_PUBLIC_BUSY,
             "KV state is owned by a whole-decode graph");
       }
+      bool paged_capture_state_valid = true;
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      paged_capture_state_valid =
+          !state->paged ||
+          (state->sliding_window != 0U
+               ? (state->paged_sliding_pending_append == nullptr &&
+                  state->paged_sliding_host_state != nullptr &&
+                  state->paged_logical_table != nullptr &&
+                  state->paged_device_pool != nullptr &&
+                  state->paged_device_status != nullptr)
+               : (state->paged_pending_append == nullptr &&
+                  state->paged_host_state != nullptr &&
+                  state->paged_logical_table != nullptr &&
+                  state->paged_device_pool != nullptr &&
+                  state->paged_device_status != nullptr));
+#endif
       if (capture_append) {
         // Capture describes future ordered draft positions. The published
         // state stays at the initial position until replay has drained.
         if (metadata.expected_length != metadata.start_position ||
             metadata.start_position < state->published_length ||
             metadata.start_position - state->published_length > 8U ||
-            (state->memory_kind == SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
-             state->shared_page_count != 0U)) {
+            !paged_capture_state_valid) {
           return sllm_public_runtime::write_error(
               error_sink, SLLM_STATUS_PUBLIC_BUSY,
-              "captured KV append requires unshared or resident storage");
+              "captured Paged KV append requires an idle state and valid pool");
         }
       } else if (metadata.expected_length != state->published_length ||
                  metadata.start_position != state->published_length) {
@@ -12464,15 +12453,6 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_KV_CAPACITY_EXCEEDED,
             "KV append exceeds state capacity");
-      }
-      if (state->sliding_window != 0U &&
-          ((state->published_length < state->sliding_window &&
-            metadata.end_position > state->sliding_window) ||
-           (state->published_length >= state->sliding_window &&
-            metadata.token_count != 1U))) {
-        return sllm_public_runtime::write_error(
-            error_sink, SLLM_STATUS_INVALID_KV_APPEND_DESCRIPTOR,
-            "saturated sliding KV append must contain exactly one token");
       }
       if (metadata.key_input.end_offset > key_input->size_bytes ||
           metadata.value_input.end_offset > value_input->size_bytes) {
@@ -12503,7 +12483,96 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
             error_sink, SLLM_STATUS_ALIAS_OVERLAP,
             "KV append inputs must not overlap each other or KV state storage");
       }
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      /* Whole-decode capture records the device-side append against the
+       * graph's stable descriptor/table pointers.  Its physical blocks and
+       * logical table entries are prepared by graph_span_prepare_paged_kv
+       * after capture, so host State must remain untouched here. */
+      if (state->paged && !capture_append) {
+        if ((state->sliding_window == 0U &&
+             state->paged_host_state == nullptr) ||
+            (state->sliding_window != 0U &&
+             state->paged_sliding_host_state == nullptr) ||
+            state->paged_logical_table == nullptr ||
+            state->paged_device_pool == nullptr ||
+            state->paged_device_status == nullptr ||
+            (state->sliding_window == 0U
+                 ? state->paged_pending_append != nullptr
+                 : state->paged_sliding_pending_append != nullptr) ||
+            (state->sliding_window == 0U
+                 ? state->paged_host_state->published_length()
+                 : state->paged_sliding_host_state->published_length()) !=
+                state->published_length) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_INTERNAL_ERROR,
+              "paged KV host and public state metadata are inconsistent");
+        }
+        std::unique_ptr<sllm_paged_kv::State::Append> pending_append;
+        std::unique_ptr<sllm_paged_kv::SlidingState::Append>
+            pending_sliding_append;
+        try {
+          sllm_paged_kv::Status prepare_status = sllm_paged_kv::Status::Ok;
+          if (state->sliding_window != 0U) {
+            pending_sliding_append =
+                std::make_unique<sllm_paged_kv::SlidingState::Append>();
+            prepare_status = state->paged_sliding_host_state->prepare_append(
+                metadata.token_count, *pending_sliding_append);
+          } else {
+            pending_append = std::make_unique<sllm_paged_kv::State::Append>();
+            prepare_status = state->paged_host_state->prepare_append(
+                metadata.token_count, *pending_append);
+          }
+          if (prepare_status != sllm_paged_kv::Status::Ok) {
+            const sllm_status_t public_status =
+                prepare_status == sllm_paged_kv::Status::PoolExhausted ||
+                        prepare_status == sllm_paged_kv::Status::Capacity
+                    ? SLLM_STATUS_KV_CAPACITY_EXCEEDED
+                : prepare_status == sllm_paged_kv::Status::Busy
+                    ? SLLM_STATUS_PUBLIC_BUSY
+                    : SLLM_STATUS_INTERNAL_ERROR;
+            return sllm_public_runtime::write_error(
+                error_sink, public_status,
+                "paged KV append host reservation could not be prepared");
+          }
+          if (state->sliding_window != 0U)
+            state->paged_sliding_pending_append =
+                std::move(pending_sliding_append);
+          else
+            state->paged_pending_append = std::move(pending_append);
+        } catch (...) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_INTERNAL_ERROR,
+              "paged KV append host reservation allocation failed");
+        }
+      }
+#endif
+      const auto rollback_prepared_paged = [&]() noexcept {
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+        if (state->paged &&
+            ((state->sliding_window == 0U &&
+              state->paged_pending_append != nullptr) ||
+             (state->sliding_window != 0U &&
+              state->paged_sliding_pending_append != nullptr))) {
+          const sllm_paged_kv::Status rollback_status =
+              state->sliding_window != 0U
+                  ? state->paged_sliding_host_state->rollback_append(
+                        *state->paged_sliding_pending_append)
+                  : state->paged_host_state->rollback_append(
+                        *state->paged_pending_append);
+          if (rollback_status != sllm_paged_kv::Status::Ok) {
+            poison_context_locked(state->context);
+            return false;
+          }
+          state->paged_pending_append.reset();
+          state->paged_sliding_pending_append.reset();
+        }
+#endif
+        return true;
+      };
       if (state->context->next_dispatch_id == 0U) {
+        if (!rollback_prepared_paged()) {
+          return SLLM_STATUS_INTERNAL_ERROR;
+        }
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
             "KV append context dispatch id is exhausted");
@@ -12518,6 +12587,9 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
               state->context->accounting, queue->accounting, state->accounting,
               key_input->accounting, value_input->accounting,
               state->key_buffer->accounting, state->value_buffer->accounting)) {
+        if (!rollback_prepared_paged()) {
+          return SLLM_STATUS_INTERNAL_ERROR;
+        }
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
             "KV append accounting reservation is exhausted");
@@ -12527,6 +12599,9 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
             state->context->accounting, queue->accounting, state->accounting,
             key_input->accounting, value_input->accounting,
             state->key_buffer->accounting, state->value_buffer->accounting);
+        if (!rollback_prepared_paged()) {
+          return SLLM_STATUS_INTERNAL_ERROR;
+        }
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
             "KV append submission serial is exhausted");
@@ -12600,333 +12675,448 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
           "KV state device target does not match the compiled exact target");
     }
 #endif
-    hipMemAllocationProp allocation_properties{};
-    allocation_properties.type = hipMemAllocationTypePinned;
-    allocation_properties.location.type = hipMemLocationTypeDevice;
-    allocation_properties.location.id =
-        static_cast<int>(state->context->device_index);
-    hipMemAccessDesc access{};
-    access.location = allocation_properties.location;
-    access.flags = hipMemAccessFlagsProtReadWrite;
-    hipMemAccessDesc shared_access = access;
-    shared_access.flags = hipMemAccessFlagsProtRead;
-    KvVmmAppendTransaction vmm_transaction(state, shared_access);
-    const auto grow_plane = [&](KvVmmPlane &plane,
-                                const uint64_t bytes_per_token) -> hipError_t {
-      if (bytes_per_token == 0U) {
-        return hipSuccess;
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    if (state->paged) {
+      if (capture_append) {
+        /* A whole-decode graph captures only the device operation.  The
+         * graph preflight performed after capture reserves the physical
+         * blocks and publishes the logical table entries before replay.  Do
+         * not prepare host ownership, allocate slabs, enqueue a pageable
+         * status readback, or publish the host state while capture is active.
+         */
+        const bool exact_paged_encoding =
+            state->encoding == SLLM_HIP_KV_ENCODING_FP16_V1 ||
+            state->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1;
+        const bool exact_paged_target =
+            matches_runtime_gcn_arch(arch_name, "gfx1030") ||
+            matches_runtime_gcn_arch(arch_name, "gfx1201");
+        const sllm_paged_kv::DeviceStatus table_poll_status =
+            state->paged_logical_table != nullptr
+                ? state->paged_logical_table->poll_pending()
+                : sllm_paged_kv::DeviceStatus::Invalid;
+        const bool stable_paged_bindings =
+            state->paged_host_state != nullptr &&
+            state->paged_logical_table != nullptr &&
+            state->paged_device_pool != nullptr &&
+            state->paged_device_status != nullptr &&
+            state->paged_logical_table->device_table() != nullptr &&
+            state->paged_device_pool->device_descriptor_table() != nullptr &&
+            state->paged_logical_table->size() != 0U &&
+            state->paged_logical_table->size() <= UINT32_MAX &&
+            state->paged_max_physical_blocks != 0U &&
+            state->paged_max_physical_blocks <= UINT32_MAX &&
+            state->paged_device_pool->physical_capacity() != 0U &&
+            table_poll_status == sllm_paged_kv::DeviceStatus::Ok &&
+            !state->paged_logical_table->pending() &&
+            !state->paged_host_state->graph_staged() &&
+            state->paged_host_state->published_length() ==
+                state->published_length;
+        if (!exact_paged_encoding || !exact_paged_target) {
+          execute_guard.disarm();
+          if (!rollback_reserved_kv_submission(state, queue, key_input,
+                                               value_input, error_sink)) {
+            return SLLM_STATUS_INTERNAL_ERROR;
+          }
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_UNSUPPORTED,
+              "captured paged KV append supports only FP16 or MXFP8 E4 on "
+              "exact gfx1030 and gfx1201");
+        }
+        if (!stable_paged_bindings) {
+          execute_guard.disarm();
+          if (!rollback_reserved_kv_submission(state, queue, key_input,
+                                               value_input, error_sink)) {
+            return SLLM_STATUS_INTERNAL_ERROR;
+          }
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_PUBLIC_BUSY,
+              "captured paged KV append requires stable preflight bindings");
+        }
+
+        std::unique_ptr<Completion> paged_capture_candidate;
+        try {
+          paged_capture_candidate =
+              std::make_unique<Completion>(state->context, queue, nullptr, 0U,
+                                           false, std::vector<uint8_t>{});
+          paged_capture_candidate->kv_state_append = true;
+          paged_capture_candidate->kv_state = state;
+          paged_capture_candidate->kv_key_input = key_input;
+          paged_capture_candidate->kv_value_input = value_input;
+          paged_capture_candidate->kv_key_buffer = state->key_buffer;
+          paged_capture_candidate->kv_value_buffer = state->value_buffer;
+          paged_capture_candidate->kv_append_token = dispatch_id;
+          paged_capture_candidate->kv_append_start = metadata.start_position;
+          paged_capture_candidate->kv_append_count = metadata.token_count;
+          paged_capture_candidate->kv_append_end = metadata.end_position;
+          paged_capture_candidate->submission_serial = submission_serial;
+          /* No paged_append is attached: graph preflight owns the staged
+           * reservation and marker transfer owns transition rollback. */
+          candidate = std::move(paged_capture_candidate);
+          execute_guard.candidate_allocated();
+        } catch (...) {
+          execute_guard.disarm();
+          if (!rollback_reserved_kv_submission(state, queue, key_input,
+                                               value_input, error_sink)) {
+            return SLLM_STATUS_INTERNAL_ERROR;
+          }
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_INTERNAL_ERROR,
+              "captured paged KV append completion allocation failed");
+        }
+
+        uintptr_t token = 0U;
+        try {
+          std::lock_guard<std::mutex> registry_lock(registry_mutex);
+          token = register_handle(candidate.get(), HandleKind::Completion);
+        } catch (...) {
+          execute_guard.disarm();
+          return rollback_unpublished_submission(
+              candidate, event_guard,
+              "captured paged KV append completion registry allocation "
+              "failed",
+              error_sink);
+        }
+        if (token == 0U) {
+          execute_guard.disarm();
+          return rollback_unpublished_submission(
+              candidate, event_guard,
+              "captured paged KV append completion token allocation failed",
+              error_sink);
+        }
+        execute_guard.completion_registered(token);
+
+        const auto byte_pointer = [](Buffer *const buffer,
+                                     const uint64_t offset) -> void * {
+          return static_cast<char *>(buffer->device_pointer) +
+                 static_cast<std::size_t>(offset);
+        };
+        const uint16_t *const key_input_pointer = static_cast<const uint16_t *>(
+            byte_pointer(key_input, metadata.key_input.byte_offset));
+        const uint16_t *const value_input_pointer =
+            static_cast<const uint16_t *>(
+                byte_pointer(value_input, metadata.value_input.byte_offset));
+        const hipError_t launch_status =
+            ::sllm_kv_state_kernel::launch_paged_device(
+                key_input_pointer, value_input_pointer,
+                state->paged_device_pool->device_descriptor_table(),
+                state->paged_logical_table->device_table(),
+                static_cast<uint32_t>(state->paged_logical_table->size()),
+                state->paged_device_pool->physical_capacity(),
+                static_cast<uint32_t>(metadata.token_count),
+                state->capacity_tokens, state->head_count, state->head_dim,
+                state->encoding,
+                static_cast<sllm_decode_control::ControlV1 *>(
+                    whole_graph_capture_device_control()),
+                state->paged_device_status, queue->stream,
+                state->static_key_scale, state->static_value_scale);
+        if (launch_status != hipSuccess) {
+          execute_guard.disarm();
+          return cleanup_failed_submission(
+              candidate, token, launch_status,
+              "captured paged KV append kernel launch", queue, error_sink);
+        }
+
+        fill_paged_kv_append_info(append_info, dispatch_id,
+                                  metadata.start_position, metadata.token_count,
+                                  metadata.end_position, state->head_count,
+                                  state->head_dim, state->encoding, arch_name);
+        *completion_output = reinterpret_cast<sllm_completion_t *>(token);
+        (void)candidate.release();
+        execute_guard.disarm();
+        return SLLM_STATUS_OK;
       }
-      // Capture may describe inactive rows beyond the logical tail. Reserve
-      // the physical capacity for both resident and VMM planes; device
-      // control admits the active prefix before any write.
-      const uint64_t required_tokens =
-          capture_append ? state->storage_capacity_tokens
-          : state->sliding_window == 0U
-              ? metadata.end_position
-              : std::min(metadata.end_position, state->storage_capacity_tokens);
-      const uint64_t required_bytes = required_tokens * bytes_per_token;
-      const uint64_t required_mapped_bytes =
-          plane.contiguous
-              ? required_bytes
-              : ((required_bytes + plane.page_bytes - 1U) / plane.page_bytes) *
-                    plane.page_bytes;
-      return plane.grow(required_mapped_bytes, allocation_properties, access);
-    };
-    const auto cow_plane = [&](KvVmmPlane &plane,
-                               const uint64_t bytes_per_token) -> hipError_t {
-      if (bytes_per_token == 0U || plane.contiguous ||
-          (capture_append &&
-           state->memory_kind == SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS)) {
-        return hipSuccess;
+      if ((state->sliding_window == 0U &&
+           state->paged_pending_append == nullptr) ||
+          (state->sliding_window != 0U &&
+           state->paged_sliding_pending_append == nullptr) ||
+          state->paged_device_pool == nullptr ||
+          state->paged_logical_table == nullptr ||
+          state->paged_device_status == nullptr) {
+        execute_guard.disarm();
+        if (!rollback_reserved_kv_submission(state, queue, key_input,
+                                             value_input, error_sink)) {
+          return SLLM_STATUS_INTERNAL_ERROR;
+        }
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "paged KV append reservation is incomplete");
       }
-      const uint64_t physical_start =
-          state->sliding_window == 0U
-              ? metadata.start_position
-              : metadata.start_position % state->storage_capacity_tokens;
-      const uint64_t start_bytes = physical_start * bytes_per_token;
-      const uint64_t end_bytes =
-          (physical_start + metadata.token_count) * bytes_per_token;
-      return plane.make_private(start_bytes, end_bytes, allocation_properties,
-                                access, shared_access);
-    };
-    const uint64_t shared_before =
-        state->key_plane.shared_page_count() +
-        state->value_plane.shared_page_count() +
-        state->key_scale_plane.shared_page_count() +
-        state->value_scale_plane.shared_page_count() +
-        state->key_outer_scale_plane.shared_page_count() +
-        state->value_outer_scale_plane.shared_page_count();
-    /* Shared VMM pages are protected read-only at fork.  COW every KV plane
-     * before any append kernel can observe the new token; a partial tail page
-     * is intentionally included by the ceil-page calculation. */
-    hipError_t cow_status =
-        cow_plane(state->key_plane, state->value_bytes_per_token);
-    if (cow_status == hipSuccess) {
-      cow_status = cow_plane(state->value_plane, state->value_bytes_per_token);
-    }
-    if (cow_status == hipSuccess) {
-      cow_status =
-          cow_plane(state->key_scale_plane, state->scale_bytes_per_token);
-    }
-    if (cow_status == hipSuccess) {
-      cow_status =
-          cow_plane(state->value_scale_plane, state->scale_bytes_per_token);
-    }
-    if (cow_status == hipSuccess) {
-      cow_status = cow_plane(state->key_outer_scale_plane,
-                             state->outer_scale_bytes_per_token);
-    }
-    if (cow_status == hipSuccess) {
-      cow_status = cow_plane(state->value_outer_scale_plane,
-                             state->outer_scale_bytes_per_token);
-    }
-    if (cow_status != hipSuccess) {
-      execute_guard.disarm();
-      const bool vmm_rolled_back = vmm_transaction.rollback();
-      if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
-                                           error_sink)) {
-        return SLLM_STATUS_INTERNAL_ERROR;
+
+      std::unique_ptr<Completion> paged_candidate;
+      try {
+        paged_candidate = std::make_unique<Completion>(
+            state->context, queue, nullptr, 0U, false, std::vector<uint8_t>{});
+        paged_candidate->kv_state_append = true;
+        paged_candidate->kv_state = state;
+        paged_candidate->kv_key_input = key_input;
+        paged_candidate->kv_value_input = value_input;
+        paged_candidate->kv_key_buffer = state->key_buffer;
+        paged_candidate->kv_value_buffer = state->value_buffer;
+        paged_candidate->kv_append_token = dispatch_id;
+        paged_candidate->kv_append_start = metadata.start_position;
+        paged_candidate->kv_append_count = metadata.token_count;
+        paged_candidate->kv_append_end = metadata.end_position;
+        paged_candidate->submission_serial = submission_serial;
+        if (state->sliding_window != 0U) {
+          paged_candidate->paged_sliding_append =
+              std::move(state->paged_sliding_pending_append);
+          paged_candidate->paged_table_updates =
+              make_paged_sliding_table_updates(
+                  *paged_candidate->paged_sliding_append,
+                  *state->paged_logical_table);
+          make_paged_sliding_tags(*state->paged_sliding_host_state,
+                                  *paged_candidate->paged_sliding_append,
+                                  state->paged_sliding_ring_tags_host);
+        } else {
+          paged_candidate->paged_append =
+              std::move(state->paged_pending_append);
+          paged_candidate->paged_table_updates =
+              make_paged_table_updates(*paged_candidate->paged_append);
+        }
+        if (!arm_completion_device_status(paged_candidate.get(),
+                                          state->paged_device_status)) {
+          throw std::runtime_error("paged KV completion status setup");
+        }
+        candidate = std::move(paged_candidate);
+        execute_guard.candidate_allocated();
+      } catch (...) {
+        execute_guard.disarm();
+        if (paged_candidate != nullptr &&
+            (paged_candidate->paged_append != nullptr ||
+             paged_candidate->paged_sliding_append != nullptr)) {
+          state->paged_pending_append =
+              std::move(paged_candidate->paged_append);
+          state->paged_sliding_pending_append =
+              std::move(paged_candidate->paged_sliding_append);
+        }
+        if (!rollback_reserved_kv_submission(state, queue, key_input,
+                                             value_input, error_sink)) {
+          return SLLM_STATUS_INTERNAL_ERROR;
+        }
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "paged KV append completion allocation failed");
       }
-      if (!vmm_rolled_back) {
-        std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
-        poison_context_locked(state->context);
-        return SLLM_STATUS_INTERNAL_ERROR;
+
+      std::vector<uint32_t> physical_ids;
+      try {
+        if (candidate->paged_sliding_append != nullptr) {
+          physical_ids.reserve(candidate->paged_sliding_append->changes.size());
+          for (const sllm_paged_kv::SlidingState::Change &change :
+               candidate->paged_sliding_append->changes) {
+            if (change.new_physical != sllm_paged_kv::kInvalidBlock)
+              physical_ids.push_back(change.new_physical);
+          }
+        } else {
+          physical_ids.reserve(candidate->paged_append->changes.size());
+          for (const sllm_paged_kv::State::Change &change :
+               candidate->paged_append->changes) {
+            if (change.new_physical != sllm_paged_kv::kInvalidBlock)
+              physical_ids.push_back(change.new_physical);
+          }
+        }
+      } catch (...) {
+        execute_guard.disarm();
+        if (!rollback_paged_completion_transaction(candidate.get(), true,
+                                                   error_sink) ||
+            !rollback_reserved_kv_submission(state, queue, key_input,
+                                             value_input, error_sink)) {
+          return SLLM_STATUS_INTERNAL_ERROR;
+        }
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "paged KV append physical reservation allocation failed");
       }
-      return hip_failure(error_sink, cow_status,
-                         "copy-on-write shared KV pages");
-    }
-    hipError_t grow_status =
-        grow_plane(state->key_plane, state->value_bytes_per_token);
-    if (grow_status == hipSuccess) {
-      grow_status =
-          grow_plane(state->value_plane, state->value_bytes_per_token);
-    }
-    if (grow_status == hipSuccess) {
-      grow_status =
-          grow_plane(state->key_scale_plane, state->scale_bytes_per_token);
-    }
-    if (grow_status == hipSuccess) {
-      grow_status =
-          grow_plane(state->value_scale_plane, state->scale_bytes_per_token);
-    }
-    if (grow_status == hipSuccess) {
-      grow_status = grow_plane(state->key_outer_scale_plane,
-                               state->outer_scale_bytes_per_token);
-    }
-    if (grow_status == hipSuccess) {
-      grow_status = grow_plane(state->value_outer_scale_plane,
-                               state->outer_scale_bytes_per_token);
-    }
-    if (grow_status != hipSuccess) {
-      execute_guard.disarm();
-      const bool vmm_rolled_back = vmm_transaction.rollback();
-      if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
-                                           error_sink)) {
-        return SLLM_STATUS_INTERNAL_ERROR;
+
+      const sllm_paged_kv::DeviceStatus ensure_status =
+          state->paged_device_pool->ensure_blocks(physical_ids, queue->stream);
+      if (ensure_status != sllm_paged_kv::DeviceStatus::Ok) {
+        if (state->paged_device_pool->poisoned()) {
+          poison_context(state->context);
+        }
+        execute_guard.disarm();
+        if (!rollback_paged_completion_transaction(candidate.get(), false,
+                                                   error_sink) ||
+            !rollback_reserved_kv_submission(state, queue, key_input,
+                                             value_input, error_sink)) {
+          return SLLM_STATUS_INTERNAL_ERROR;
+        }
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "paged KV physical slab reservation failed");
       }
-      if (!vmm_rolled_back) {
-        std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
-        poison_context_locked(state->context);
-        return SLLM_STATUS_INTERNAL_ERROR;
+
+      hipEvent_t native_event = nullptr;
+      const hipError_t event_status =
+          queue_profiles_completions(queue)
+              ? hipEventCreateWithFlags(&native_event, 0U)
+              : hipSuccess;
+      if (event_status != hipSuccess) {
+        execute_guard.disarm();
+        if (!rollback_unpublished_submission(
+                candidate, event_guard, "paged KV append event creation failed",
+                error_sink)) {
+          return SLLM_STATUS_INTERNAL_ERROR;
+        }
+        return hip_failure(error_sink, event_status,
+                           "hipEventCreateWithFlags paged KV append");
       }
-      return hip_failure(error_sink, grow_status,
-                         "grow virtual KV physical commitment");
-    }
-    try {
-      candidate = std::make_unique<Completion>(
-          state->context, queue, nullptr, 0U, false, std::vector<uint8_t>{});
-      candidate->kv_state_append = true;
-      candidate->kv_state = state;
-      candidate->kv_key_input = key_input;
-      candidate->kv_value_input = value_input;
-      candidate->kv_key_buffer = state->key_buffer;
-      candidate->kv_value_buffer = state->value_buffer;
-      candidate->kv_append_token = dispatch_id;
-      candidate->kv_append_start = metadata.start_position;
-      candidate->kv_append_count = metadata.token_count;
-      candidate->kv_append_end = metadata.end_position;
-      candidate->submission_serial = submission_serial;
-      execute_guard.candidate_allocated();
-    } catch (...) {
-      execute_guard.disarm();
-      if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
-                                           error_sink)) {
-        return SLLM_STATUS_INTERNAL_ERROR;
+      if (native_event != nullptr)
+        event_guard.adopt(state->context, native_event);
+      candidate->event = native_event;
+      hipEvent_t timing_start_event = nullptr;
+      const hipError_t timing_status =
+          queue_profiles_completions(queue)
+              ? hipEventCreateWithFlags(&timing_start_event, 0U)
+              : hipSuccess;
+      if (timing_status != hipSuccess) {
+        execute_guard.disarm();
+        return rollback_unpublished_submission(
+            candidate, event_guard,
+            "paged KV append timing event creation failed", error_sink);
       }
-      return sllm_public_runtime::write_error(
-          error_sink, SLLM_STATUS_INTERNAL_ERROR,
-          "KV append completion allocation failed before enqueue");
-    }
-    hipEvent_t native_event = nullptr;
-    const hipError_t event_status =
-        queue_profiles_completions(queue)
-            ? hipEventCreateWithFlags(&native_event, 0U)
-            : hipSuccess;
-    if (event_status != hipSuccess) {
-      execute_guard.disarm();
-      if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
-                                           error_sink)) {
-        return SLLM_STATUS_INTERNAL_ERROR;
+      candidate->timing_start_event = timing_start_event;
+
+      uintptr_t token = 0U;
+      try {
+        std::lock_guard<std::mutex> registry_lock(registry_mutex);
+        token = register_handle(candidate.get(), HandleKind::Completion);
+      } catch (...) {
+        execute_guard.disarm();
+        return rollback_unpublished_submission(
+            candidate, event_guard,
+            "paged KV append completion registry allocation failed",
+            error_sink);
       }
-      return hip_failure(error_sink, event_status, "hipEventCreateWithFlags");
-    }
-    event_guard.adopt(state->context, native_event);
-    candidate->event = native_event;
-    hipEvent_t timing_start_event = nullptr;
-    const hipError_t timing_status =
-        queue_profiles_completions(queue)
-            ? hipEventCreateWithFlags(&timing_start_event, 0U)
-            : hipSuccess;
-    if (timing_status != hipSuccess) {
-      execute_guard.disarm();
-      return rollback_unpublished_submission(
-          candidate, event_guard, "KV append timing event creation failed",
-          error_sink);
-    }
-    candidate->timing_start_event = timing_start_event;
-    uintptr_t token = 0U;
-    try {
-      std::lock_guard<std::mutex> registry_lock(registry_mutex);
-      token = register_handle(candidate.get(), HandleKind::Completion);
-    } catch (...) {
-      execute_guard.disarm();
-      return rollback_unpublished_submission(
-          candidate, event_guard,
-          "KV append completion registry allocation failed", error_sink);
-    }
-    if (token == 0U) {
-      execute_guard.disarm();
-      return rollback_unpublished_submission(
-          candidate, event_guard,
-          "KV append completion token allocation failed", error_sink);
-    }
-    if (candidate->event != nullptr) {
-      event_guard.release();
-    }
-    execute_guard.completion_registered(token);
-    const hipError_t timing_record_status =
-        candidate->timing_start_event != nullptr
-            ? hipEventRecord(candidate->timing_start_event, queue->stream)
-            : hipSuccess;
-    if (timing_record_status != hipSuccess) {
-      execute_guard.disarm();
-      return cleanup_failed_submission(candidate, token, timing_record_status,
-                                       "hipEventRecord KV timing start", queue,
-                                       error_sink);
-    }
-    if (!vmm_transaction.commit()) {
-      const bool vmm_rolled_back = vmm_transaction.rollback();
-      execute_guard.disarm();
-      const sllm_status_t cleanup_status = cleanup_failed_submission(
-          candidate, token, hipErrorUnknown, "commit private shared KV pages",
-          queue, error_sink);
-      if (!vmm_rolled_back) {
-        std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
-        poison_context_locked(state->context);
-        return SLLM_STATUS_INTERNAL_ERROR;
+      if (token == 0U) {
+        execute_guard.disarm();
+        return rollback_unpublished_submission(
+            candidate, event_guard,
+            "paged KV append completion token allocation failed", error_sink);
       }
-      return cleanup_status;
-    }
-    const uint64_t shared_after =
-        state->key_plane.shared_page_count() +
-        state->value_plane.shared_page_count() +
-        state->key_scale_plane.shared_page_count() +
-        state->value_scale_plane.shared_page_count() +
-        state->key_outer_scale_plane.shared_page_count() +
-        state->value_outer_scale_plane.shared_page_count();
-    state->shared_page_count = shared_after;
-    state->cow_copied_bytes +=
-        (shared_before - shared_after) * state->physical_page_bytes;
-    state->committed_bytes_per_plane =
-        std::min(state->key_plane.mapped_bytes,
-                 state->value_plane.mapped_bytes) +
-        std::min(state->key_scale_plane.mapped_bytes,
-                 state->value_scale_plane.mapped_bytes) +
-        std::min(state->key_outer_scale_plane.mapped_bytes,
-                 state->value_outer_scale_plane.mapped_bytes);
-    state->mapped_token_capacity =
-        std::min(state->storage_capacity_tokens,
-                 std::min(state->key_plane.mapped_bytes,
-                          state->value_plane.mapped_bytes) /
-                     state->value_bytes_per_token);
-    if (state->scale_bytes_per_token != 0U) {
-      state->mapped_token_capacity =
-          std::min(state->mapped_token_capacity,
-                   std::min(state->key_scale_plane.mapped_bytes,
-                            state->value_scale_plane.mapped_bytes) /
-                       state->scale_bytes_per_token);
-    }
-    if (state->outer_scale_bytes_per_token != 0U) {
-      state->mapped_token_capacity =
-          std::min(state->mapped_token_capacity,
-                   std::min(state->key_outer_scale_plane.mapped_bytes,
-                            state->value_outer_scale_plane.mapped_bytes) /
-                       state->outer_scale_bytes_per_token);
-    }
-    const auto byte_pointer = [](Buffer *const buffer,
-                                 const uint64_t offset) -> void * {
-      return static_cast<char *>(buffer->device_pointer) +
-             static_cast<std::size_t>(offset);
-    };
-    const uint16_t *const key_input_pointer = static_cast<const uint16_t *>(
-        byte_pointer(key_input, metadata.key_input.byte_offset));
-    const uint16_t *const value_input_pointer = static_cast<const uint16_t *>(
-        byte_pointer(value_input, metadata.value_input.byte_offset));
-    const bool whole_capture = whole_graph_capture_active();
-    const hipError_t launch_status =
-        whole_capture
-            ? ::sllm_kv_state_kernel::launch_device(
-                  key_input_pointer, value_input_pointer,
-                  state->key_buffer->device_pointer,
-                  state->value_buffer->device_pointer,
-                  state->key_scale_plane.address,
-                  state->value_scale_plane.address,
-                  static_cast<float *>(state->key_outer_scale_plane.address),
-                  static_cast<float *>(state->value_outer_scale_plane.address),
-                  static_cast<uint32_t>(metadata.token_count),
-                  state->storage_capacity_tokens, state->head_count,
-                  state->head_dim, state->encoding, state->static_key_scale,
-                  state->static_value_scale,
-                  static_cast<sllm_decode_control::ControlV1 *>(
-                      whole_graph_capture_device_control()),
-                  queue->stream)
-            : ::sllm_kv_state_kernel::launch(
-                  key_input_pointer, value_input_pointer,
-                  state->key_buffer->device_pointer,
-                  state->value_buffer->device_pointer,
-                  state->key_scale_plane.address,
-                  state->value_scale_plane.address,
-                  static_cast<float *>(state->key_outer_scale_plane.address),
-                  static_cast<float *>(state->value_outer_scale_plane.address),
-                  static_cast<uint32_t>(metadata.token_count),
-                  state->storage_capacity_tokens, metadata.start_position,
-                  state->head_count, state->head_dim, state->encoding,
-                  state->static_key_scale, state->static_value_scale,
-                  queue->stream);
-    if (launch_status != hipSuccess) {
+      if (native_event != nullptr)
+        event_guard.release();
+      execute_guard.completion_registered(token);
+
+      const hipError_t timing_record_status =
+          candidate->timing_start_event != nullptr
+              ? hipEventRecord(candidate->timing_start_event, queue->stream)
+              : hipSuccess;
+      if (timing_record_status != hipSuccess) {
+        execute_guard.disarm();
+        return cleanup_failed_submission(candidate, token, timing_record_status,
+                                         "hipEventRecord paged KV timing start",
+                                         queue, error_sink);
+      }
+
+      const sllm_paged_kv::DeviceStatus table_status =
+          candidate->paged_table_updates.empty()
+              ? sllm_paged_kv::DeviceStatus::Ok
+              : state->paged_logical_table->update_entries(
+                    candidate->paged_table_updates, queue->stream);
+      if (table_status != sllm_paged_kv::DeviceStatus::Ok) {
+        execute_guard.disarm();
+        return cleanup_failed_submission(candidate, token, hipErrorInvalidValue,
+                                         "paged KV logical table update", queue,
+                                         error_sink);
+      }
+      candidate->paged_table_update_queued =
+          !candidate->paged_table_updates.empty();
+      hipError_t tag_status = hipSuccess;
+      if (candidate->paged_sliding_append != nullptr) {
+        tag_status =
+            hipMemcpyAsync(state->paged_sliding_ring_tags_device,
+                           state->paged_sliding_ring_tags_host,
+                           sllm_paged_kv::kSlidingRingSlots * sizeof(uint64_t),
+                           hipMemcpyHostToDevice, queue->stream);
+      }
+      const hipError_t cow_status =
+          candidate->paged_sliding_append != nullptr
+              ? copy_paged_sliding_cow_planes(
+                    state, *candidate->paged_sliding_append, queue->stream)
+              : copy_paged_cow_planes(state, *candidate->paged_append,
+                                      queue->stream);
+      if (tag_status != hipSuccess || cow_status != hipSuccess) {
+        execute_guard.disarm();
+        return cleanup_failed_submission(candidate, token, cow_status,
+                                         "paged KV COW copy", queue,
+                                         error_sink);
+      }
+
+      const auto byte_pointer = [](Buffer *const buffer,
+                                   const uint64_t offset) -> void * {
+        return static_cast<char *>(buffer->device_pointer) +
+               static_cast<std::size_t>(offset);
+      };
+      const uint16_t *const key_input_pointer = static_cast<const uint16_t *>(
+          byte_pointer(key_input, metadata.key_input.byte_offset));
+      const uint16_t *const value_input_pointer = static_cast<const uint16_t *>(
+          byte_pointer(value_input, metadata.value_input.byte_offset));
+      const hipError_t launch_status =
+          candidate->paged_sliding_append != nullptr
+              ? ::sllm_kv_state_kernel::launch_paged_sliding_static_fp8(
+                    key_input_pointer, value_input_pointer,
+                    state->paged_device_pool->device_descriptor_table(),
+                    state->paged_logical_table->device_table(),
+                    state->paged_sliding_ring_tags_device,
+                    sllm_paged_kv::kSlidingRingSlots,
+                    state->paged_device_pool->physical_capacity(),
+                    static_cast<uint32_t>(metadata.token_count),
+                    metadata.end_position > sllm_paged_kv::kSlidingWindowTokens
+                        ? metadata.end_position -
+                              sllm_paged_kv::kSlidingWindowTokens
+                        : 0U,
+                    metadata.start_position, state->head_count, state->head_dim,
+                    state->static_key_scale, state->static_value_scale,
+                    state->paged_device_status, queue->stream)
+              : ::sllm_kv_state_kernel::launch_paged(
+                    key_input_pointer, value_input_pointer,
+                    state->paged_device_pool->device_descriptor_table(),
+                    state->paged_logical_table->device_table(),
+                    static_cast<uint32_t>(state->paged_logical_table->size()),
+                    state->paged_device_pool->physical_capacity(),
+                    static_cast<uint32_t>(metadata.token_count),
+                    state->capacity_tokens, metadata.start_position,
+                    state->head_count, state->head_dim, state->encoding,
+                    state->paged_device_status, queue->stream,
+                    state->static_key_scale, state->static_value_scale);
+      if (launch_status != hipSuccess) {
+        execute_guard.disarm();
+        return cleanup_failed_submission(candidate, token, launch_status,
+                                         "paged KV append kernel launch", queue,
+                                         error_sink);
+      }
+      const hipError_t status_copy_status =
+          enqueue_completion_device_status_copy(candidate.get(), queue->stream);
+      if (status_copy_status != hipSuccess) {
+        execute_guard.disarm();
+        return cleanup_failed_submission(
+            candidate, token, status_copy_status,
+            "paged KV append status readback enqueue", queue, error_sink);
+      }
+      const hipError_t record_status =
+          candidate->event != nullptr
+              ? hipEventRecord(candidate->event, queue->stream)
+              : hipSuccess;
+      if (record_status != hipSuccess) {
+        execute_guard.disarm();
+        return cleanup_failed_submission(candidate, token, record_status,
+                                         "hipEventRecord paged KV append",
+                                         queue, error_sink);
+      }
+      fill_paged_kv_append_info(append_info, dispatch_id,
+                                metadata.start_position, metadata.token_count,
+                                metadata.end_position, state->head_count,
+                                state->head_dim, state->encoding, arch_name);
+      *completion_output = reinterpret_cast<sllm_completion_t *>(token);
+      (void)candidate.release();
       execute_guard.disarm();
-      return cleanup_failed_submission(candidate, token, launch_status,
-                                       "KV state kernel launch", queue,
-                                       error_sink);
+      return SLLM_STATUS_OK;
     }
-    const hipError_t record_status =
-        candidate->event != nullptr
-            ? hipEventRecord(candidate->event, queue->stream)
-            : hipSuccess;
-    if (record_status != hipSuccess) {
-      execute_guard.disarm();
-      return cleanup_failed_submission(candidate, token, record_status,
-                                       "hipEventRecord KV append", queue,
-                                       error_sink);
-    }
-    fill_kv_append_info(append_info, dispatch_id, metadata.start_position,
-                        metadata.token_count, metadata.end_position,
-                        state->head_count, state->head_dim, state->encoding,
-                        arch_name);
-    *completion_output = reinterpret_cast<sllm_completion_t *>(token);
-    (void)candidate.release();
-    execute_guard.disarm();
-    return SLLM_STATUS_OK;
+#endif
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_UNSUPPORTED,
+        "legacy KV append requires the Paged KV append path");
   } catch (...) {
     return sllm_public_runtime::write_error(
         error_sink, SLLM_STATUS_INTERNAL_ERROR,
@@ -12994,6 +13184,290 @@ sllm_kv_state_append_cancel(const sllm_kv_state_t *const raw_state,
 
 #include "linear_attention_runtime.inc"
 #include "state_fork_runtime.inc"
+
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+extern "C" sllm_status_t
+sllm_kv_state_paged_image_query(const sllm_kv_state_t *const raw_state,
+                                sllm_kv_paged_image_info_t *const image_info,
+                                sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    KvState *const state = lookup<KvState>(raw_state, HandleKind::KvState);
+    if (state == nullptr)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "paged KV image query state handle is stale or has the wrong kind");
+    if (state->context == nullptr)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "paged KV image query state context is null");
+    std::lock_guard<std::mutex> accounting_lock(
+        state->context->accounting_mutex);
+    if (!state->paged)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "legacy KV state requires the Paged image ABI");
+    if (state->context->poisoned.load() || state->release_active)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "paged KV image query state is releasing or its context is poisoned");
+    const sllm_status_t device_status =
+        select_context_device(state->context, error_sink);
+    if (device_status != SLLM_STATUS_OK)
+      return device_status;
+    return sllm_paged_kv_image_runtime::paged_kv_image_query(state, image_info,
+                                                             error_sink);
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in paged KV image query");
+  }
+}
+
+extern "C" sllm_status_t sllm_kv_state_paged_image_section_size(
+    const sllm_kv_state_t *const raw_state, const uint32_t section,
+    const uint32_t plane, uint64_t *const size_bytes,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (size_bytes == nullptr)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "paged KV image section size output is null");
+    *size_bytes = 0U;
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    KvState *const state = lookup<KvState>(raw_state, HandleKind::KvState);
+    if (state == nullptr)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "paged KV image section state handle is stale or has the wrong kind");
+    if (state->context == nullptr)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "paged KV image section state context is null");
+    std::lock_guard<std::mutex> accounting_lock(
+        state->context->accounting_mutex);
+    if (!state->paged)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "legacy KV state requires the Paged image ABI");
+    if (state->context->poisoned.load() || state->release_active)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "paged KV image section state is releasing or its context is "
+          "poisoned");
+    const sllm_status_t device_status =
+        select_context_device(state->context, error_sink);
+    if (device_status != SLLM_STATUS_OK)
+      return device_status;
+    sllm_kv_paged_image_info_t image_info{};
+    image_info.struct_size = sizeof(image_info);
+    image_info.abi_version = SLLM_HIP_ABI_VERSION;
+    image_info.image_version = SLLM_HIP_KV_PAGED_IMAGE_VERSION;
+    sllm_status_t status = sllm_paged_kv_image_runtime::paged_kv_image_query(
+        state, &image_info, error_sink);
+    if (status != SLLM_STATUS_OK)
+      return status;
+    return sllm_paged_kv_image::section_size(&image_info, section, plane,
+                                             size_bytes, error_sink);
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in paged KV image section size");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_paged_image_export(const sllm_kv_state_t *const raw_state,
+                                 const sllm_kv_paged_image_chunk_t *const chunk,
+                                 sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    KvState *const state = lookup<KvState>(raw_state, HandleKind::KvState);
+    if (state == nullptr)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "paged KV image export state handle is stale or has the wrong kind");
+    if (state->context == nullptr)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "paged KV image export state context is null");
+    std::lock_guard<std::mutex> accounting_lock(
+        state->context->accounting_mutex);
+    if (!state->paged)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "legacy KV state requires the Paged image ABI");
+    if (state->context->poisoned.load() || state->release_active)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "paged KV image export state is releasing or its context is "
+          "poisoned");
+    return sllm_paged_kv_image_runtime::paged_kv_image_export(state, chunk,
+                                                              error_sink);
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in paged KV image export");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_paged_image_import(const sllm_kv_state_t *const raw_state,
+                                 const sllm_kv_paged_image_chunk_t *const chunk,
+                                 sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    KvState *const state = lookup<KvState>(raw_state, HandleKind::KvState);
+    if (state == nullptr)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "paged KV image import state handle is stale or has the wrong kind");
+    if (state->context == nullptr)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "paged KV image import state context is null");
+    std::lock_guard<std::mutex> accounting_lock(
+        state->context->accounting_mutex);
+    if (!state->paged)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "legacy KV state requires the Paged image ABI");
+    if (state->context->poisoned.load() || state->release_active)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "paged KV image import state is releasing or its context is "
+          "poisoned");
+    return sllm_paged_kv_image_runtime::paged_kv_image_import(state, chunk,
+                                                              error_sink);
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in paged KV image import");
+  }
+}
+
+extern "C" sllm_status_t sllm_kv_state_paged_image_import_finalize(
+    const sllm_kv_state_t *const raw_state,
+    const sllm_kv_paged_image_info_t *const image_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    KvState *const state = lookup<KvState>(raw_state, HandleKind::KvState);
+    if (state == nullptr)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "paged KV image finalize state handle is stale or has the wrong "
+          "kind");
+    if (state->context == nullptr)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "paged KV image finalize state context is null");
+    std::lock_guard<std::mutex> accounting_lock(
+        state->context->accounting_mutex);
+    if (!state->paged)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "legacy KV state requires the Paged image ABI");
+    if (state->context->poisoned.load() || state->release_active)
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "paged KV image finalize state is releasing or its context is "
+          "poisoned");
+    const sllm_status_t device_status =
+        select_context_device(state->context, error_sink);
+    if (device_status != SLLM_STATUS_OK)
+      return device_status;
+    return sllm_paged_kv_image_runtime::paged_kv_image_import_finalize(
+        state, image_info, error_sink);
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in paged KV image finalize");
+  }
+}
+
+#else
+namespace {
+sllm_status_t
+paged_image_host_unavailable(sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "Paged KV images are unavailable in the host test runtime");
+}
+} // namespace
+
+extern "C" sllm_status_t
+sllm_kv_state_paged_image_query(const sllm_kv_state_t *const raw_state,
+                                sllm_kv_paged_image_info_t *const image_info,
+                                sllm_error_sink_t *const error_sink) noexcept {
+  (void)raw_state;
+  (void)image_info;
+  return paged_image_host_unavailable(error_sink);
+}
+
+extern "C" sllm_status_t sllm_kv_state_paged_image_section_size(
+    const sllm_kv_state_t *const raw_state, const uint32_t section,
+    const uint32_t plane, uint64_t *const size_bytes,
+    sllm_error_sink_t *const error_sink) noexcept {
+  (void)raw_state;
+  (void)section;
+  (void)plane;
+  if (size_bytes != nullptr)
+    *size_bytes = 0U;
+  return paged_image_host_unavailable(error_sink);
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_paged_image_export(const sllm_kv_state_t *const raw_state,
+                                 const sllm_kv_paged_image_chunk_t *const chunk,
+                                 sllm_error_sink_t *const error_sink) noexcept {
+  (void)raw_state;
+  (void)chunk;
+  return paged_image_host_unavailable(error_sink);
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_paged_image_import(const sllm_kv_state_t *const raw_state,
+                                 const sllm_kv_paged_image_chunk_t *const chunk,
+                                 sllm_error_sink_t *const error_sink) noexcept {
+  (void)raw_state;
+  (void)chunk;
+  return paged_image_host_unavailable(error_sink);
+}
+
+extern "C" sllm_status_t sllm_kv_state_paged_image_import_finalize(
+    const sllm_kv_state_t *const raw_state,
+    const sllm_kv_paged_image_info_t *const image_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  (void)raw_state;
+  (void)image_info;
+  return paged_image_host_unavailable(error_sink);
+}
+#endif
 
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 extern "C" std::size_t sllm_test_orphan_count() noexcept {

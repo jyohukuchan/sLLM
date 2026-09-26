@@ -8,6 +8,7 @@
 #include <lowp/detail/lowp_provider_plan.hpp>
 #include <lowp/lowp.h>
 
+#include <array>
 #include <cassert>
 #include <charconv>
 #include <cstdint>
@@ -16,6 +17,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #ifndef LOWP_SELECTION_FIXTURE_PATH
@@ -176,6 +178,46 @@ void compare_row(const Expected &row) {
     assert(lowp_matmul_plan(&request, &plan) != LOWP_SUCCESS);
     return;
   }
+  // The frozen fixture predates the WU-3P exact MTP prefix adoption. Keep its
+  // source rows intact, and check the four affected rows against the current
+  // selector and public plan contract here.
+  if (f == MatmulFormat::Nvfp4W4A4 &&
+      (t == ExactTarget::Gfx1030 || t == ExactTarget::Gfx1201) &&
+      sllm_matmul_kernel::phase87_wu3p_mtp_nvfp4_prefix_shape(row.m, row.k,
+                                                              row.n)) {
+    const auto expected =
+        t == ExactTarget::Gfx1030
+            ? KernelVariant::Nvfp4W4A4PrefillDp4a64x64
+            : KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64;
+    const auto decision = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+        row.m, row.k, row.n, row.target.c_str());
+    assert(decision.variant == expected && decision.supported &&
+           decision.enabled && decision.adopted);
+    const auto prepared = sllm_lowp::prepare_provider_plan(
+        sllm_lowp::make_provider_request(f, t, row.m, row.n, row.k));
+    assert(prepared.supported() &&
+           static_cast<int>(prepared.provider) == row.provider);
+    const auto concrete = sllm_lowp::concrete_provider_plan(prepared, expected);
+    assert(concrete.has_value());
+    lowp_matmul_plan_t plan{};
+    const auto request = api_request(row);
+    assert(lowp_matmul_plan(&request, &plan) == LOWP_SUCCESS);
+    assert(plan.variant == static_cast<uint32_t>(expected));
+    assert(plan.provider == static_cast<uint32_t>(concrete->provider));
+    assert(plan.tile == static_cast<uint32_t>(concrete->tile));
+    assert(plan.inner_product ==
+           static_cast<uint32_t>(concrete->inner_product));
+    // ID62 keeps its logical 64x64 plan identity. The production launcher
+    // uses the 32x64 device body for M<=32; the WU-3P GPU probe covers it.
+    if (t == ExactTarget::Gfx1030 && row.m <= 32U)
+      assert(concrete->tile == sllm_lowp::TilePolicy::BlockRow64Column64);
+    assert(plan.selector_supported == 1U && plan.selector_enabled == 1U &&
+           plan.adopted == 1U);
+    assert(plan.activation_value_bytes == row.activation_value_bytes);
+    assert(plan.activation_scale_bytes == row.activation_scale_bytes);
+    assert(plan.workspace_bytes == row.total_workspace_bytes);
+    return;
+  }
   const auto native = native_variant(row);
   assert(static_cast<int>(native) == row.native_variant);
   const auto prepared = sllm_lowp::prepare_provider_plan(
@@ -253,5 +295,74 @@ int main() {
   assert(rows.size() == 3002U);
   for (const auto &row : rows)
     compare_row(row);
+
+  // WU-3P selects only the measured Qwen3.8 MTP prefix projection tuples.
+  // The non-aligned final chunk and both sides of the M gate stay explicit.
+  for (const auto target : {"gfx1030", "gfx1201"}) {
+    const auto adopted = std::string_view(target) == "gfx1030"
+                             ? KernelVariant::Nvfp4W4A4PrefillDp4a64x64
+                             : KernelVariant::Nvfp4W4A4PrefillGfx1201Wmma128x64;
+    for (const auto m : {32U, 33U, 1023U, 1024U}) {
+      for (const auto shape : {std::array<uint64_t, 2>{10240U, 5120U},
+                               {5120U, 12288U},
+                               {5120U, 1024U}}) {
+        const auto decision = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+            m, shape[0], shape[1], target);
+        assert(decision.variant == adopted && decision.supported &&
+               decision.enabled && decision.adopted);
+      }
+    }
+    for (const auto m : {31U, 1025U}) {
+      const auto decision = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+          m, 5120U, 12288U, target);
+      assert(decision.variant == KernelVariant::Nvfp4W4A4PrefillRow8Tiled256);
+    }
+    const auto body = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+        1024U, 5120U, 17408U, target);
+    assert(body.variant != adopted);
+  }
+
+  // WU-12C extends the direct ID94 contract through M=5 for the two exact
+  // Qwen3.8 projection tuples. The projection-pack lane keeps its separate
+  // M<=4 admission rule; this check covers only the decomposed lowp API.
+  for (const auto target_name : {"gfx1030", "gfx1201"}) {
+    const auto target_value = target(target_name);
+    for (const auto shape :
+         {std::array<uint64_t, 2>{5120U, 17408U}, {17408U, 5120U}}) {
+      Expected m5{};
+      m5.format = "nvfp4_w4a4";
+      m5.target = target_name;
+      m5.m = 5U;
+      m5.k = shape[0];
+      m5.n = shape[1];
+      const auto m5_decision = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+          m5.m, m5.k, m5.n, target_name);
+      assert(m5_decision.variant == KernelVariant::Nvfp4W4A4SmallMVgprReuse &&
+             m5_decision.supported && m5_decision.enabled &&
+             m5_decision.adopted);
+      const auto m5_prepared =
+          sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
+              MatmulFormat::Nvfp4W4A4, target_value, m5.m, m5.n, m5.k));
+      assert(m5_prepared.supported());
+      const auto m5_concrete =
+          sllm_lowp::concrete_provider_plan(m5_prepared, m5_decision.variant);
+      assert(m5_concrete.has_value());
+      lowp_matmul_plan_t m5_plan{};
+      const auto m5_request = api_request(m5);
+      assert(lowp_matmul_plan(&m5_request, &m5_plan) == LOWP_SUCCESS);
+      assert(m5_plan.variant ==
+             static_cast<uint32_t>(KernelVariant::Nvfp4W4A4SmallMVgprReuse));
+      assert(m5_plan.provider == static_cast<uint32_t>(m5_concrete->provider));
+      assert(m5_plan.tile == static_cast<uint32_t>(m5_concrete->tile));
+      assert(m5_plan.inner_product ==
+             static_cast<uint32_t>(m5_concrete->inner_product));
+      assert(m5_plan.selector_supported == 1U &&
+             m5_plan.selector_enabled == 1U && m5_plan.adopted == 1U);
+
+      const auto m6_decision = sllm_matmul_kernel::select_nvfp4_w4a4_decision(
+          6U, m5.k, m5.n, target_name);
+      assert(m6_decision.variant != KernelVariant::Nvfp4W4A4SmallMVgprReuse);
+    }
+  }
   return 0;
 }

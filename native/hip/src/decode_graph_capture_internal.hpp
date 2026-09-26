@@ -98,6 +98,15 @@ sllm_status_t sllm_graph_span_select_linear_state(
     sllm_graph_span_t *span, const sllm_linear_attention_state_t *state,
     uint32_t token_count, sllm_error_sink_t *error_sink) noexcept;
 
+/* Reserve paged KV mappings through an exclusive conservative end before a
+ * whole-decode replay. The caller may have one speculative successor queued;
+ * all descriptor and logical-table updates precede the next graph launch on
+ * the bound queue. This does not publish KV length or generation. */
+sllm_status_t
+sllm_graph_span_prepare_paged_kv(sllm_graph_span_t *span,
+                                 uint64_t conservative_end,
+                                 sllm_error_sink_t *error_sink) noexcept;
+
 /* Adopt host metadata only after every graph replay has drained.  This call
  * performs no GPU work; all device-side state selection has already been
  * performed by the captured control kernels. */

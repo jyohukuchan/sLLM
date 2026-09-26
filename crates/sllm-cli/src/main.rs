@@ -81,7 +81,7 @@ fn print_help() {
     println!("  [--prefill-chunk-tokens 1..16384] (dense Qwen text only; default: auto)");
     println!("  [--mtp-draft-width 0..8] (default: auto; 0 target-only; 1..8 forced MTP)");
     println!(
-        "  Qwen3.8 NVFP4: --qwen38-nvfp4 ABSOLUTE_DIRECTORY [--mtp-weights ABSOLUTE_SIDECAR_DIRECTORY]"
+        "  Qwen3.8 NVFP4: --qwen38-nvfp4 ABSOLUTE_DIRECTORY [--mtp-weights ABSOLUTE_SIDECAR_DIRECTORY] [--mtp-draft-width 0|2|3|4] (MTP default: reviewed .sllm/mtp-nvfp4-v1; width 2)"
     );
     println!(
         "  Gemma 4 MTP width 1: --mtp-assistant-gguf PATH --mtp-assistant-derived-lock PATH (exact gfx1201, greedy, FP16 KV, context <=2048)"

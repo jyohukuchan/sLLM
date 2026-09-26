@@ -13,12 +13,12 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use sllm_core::{
-    Backend, ExecutionSessionRequest, GEMMA4_MOE_TEXT_RESIDENT_BYTES, Gemma4MoeExecutionLayout,
-    Gemma4MoeExecutionOutput, Gemma4MoeGraph, Gemma4MoeResidentModel, Gemma4MoeWeightSource,
-    VerifiedGemma4Moe, VerifiedGgufGemma4Moe, WeightLoadPlan, build_gemma4_moe_execution_layout,
-    build_gemma4_moe_gguf_graph, build_gemma4_moe_graph,
-    build_gemma4_moe_resident_weight_load_plan, read_derived_gguf_lock, verify_derived_gguf,
-    verify_gemma4_moe_artifact, verify_gguf_gemma4_moe,
+    Backend, CheckpointIdentity, ExecutionSessionRequest, GEMMA4_MOE_TEXT_RESIDENT_BYTES,
+    Gemma4MoeExecutionLayout, Gemma4MoeExecutionOutput, Gemma4MoeGraph, Gemma4MoeResidentModel,
+    Gemma4MoeWeightSource, KvCacheEncoding, VerifiedGemma4Moe, VerifiedGgufGemma4Moe,
+    WeightLoadPlan, build_gemma4_moe_execution_layout, build_gemma4_moe_gguf_graph,
+    build_gemma4_moe_graph, build_gemma4_moe_resident_weight_load_plan, read_derived_gguf_lock,
+    verify_derived_gguf, verify_gemma4_moe_artifact, verify_gguf_gemma4_moe,
 };
 use sllm_hip::HipBackend;
 
@@ -84,6 +84,7 @@ struct SmokeReport {
     fallback_used: bool,
     nonfinite_free: bool,
     cancel_recovery_verified: bool,
+    v2_roundtrip_verified: bool,
     final_committed_length: u64,
     cleanup_retryable: usize,
     cleanup_durable: usize,
@@ -116,6 +117,7 @@ impl SmokeReport {
         assert!(!self.fallback_used);
         assert!(self.nonfinite_free);
         assert!(self.cancel_recovery_verified);
+        assert!(self.v2_roundtrip_verified);
         assert_eq!(self.final_committed_length, FINAL_COMMITTED_LENGTH);
         assert_eq!(self.cleanup_retryable, 0);
         assert_eq!(self.cleanup_durable, 0);
@@ -299,6 +301,15 @@ fn assert_layer_lengths(
     Ok(())
 }
 
+fn hex_digest(bytes: &[u8; 32]) -> String {
+    let mut output = String::with_capacity(71);
+    output.push_str("sha256:");
+    for byte in bytes {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
 fn execute_resident<S: Gemma4MoeWeightSource + 'static>(
     contract: TargetContract,
     device_index: u32,
@@ -370,7 +381,7 @@ fn execute_resident<S: Gemma4MoeWeightSource + 'static>(
         }
 
         let mut request = resident
-            .new_request(graph)
+            .new_request(graph.clone())
             .map_err(|error| format!("request provisioning failed: {error}"))?;
         request
             .ensure_dispatchable()
@@ -398,6 +409,69 @@ fn execute_resident<S: Gemma4MoeWeightSource + 'static>(
         if !request.transition_committed() || request.is_poisoned() {
             return Err("prefill did not commit cleanly".to_owned());
         }
+        // Every session is Paged, so the V2 checkpoint roundtrip always runs.
+        let v2_roundtrip_verified = {
+            let image = request
+                .state_image_v2()
+                .map_err(|error| format!("Paged V2 image export failed: {error}"))?;
+            let tokens = PREFILL_TOKENS
+                .iter()
+                .map(|&token| {
+                    u32::try_from(token).map_err(|_| "token conversion failed".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let identity = CheckpointIdentity::for_tokens(
+                image.model_fingerprint(),
+                image.source_container_identity(),
+                "no-adapter",
+                "phase55-gemma4-moe",
+                "phase55-tokenizer",
+                contract.target,
+                hex_digest(image.plan_digest()),
+                &tokens,
+                KvCacheEncoding::Fp8E4M3FnStatic,
+                image.kv_descriptor_digest(),
+                *image.config_digest(),
+            )
+            .map_err(|error| format!("V2 checkpoint identity failed: {error}"))?;
+            let checkpoint = image
+                .without_terminal_output()
+                .to_checkpoint_v2(
+                    identity.clone(),
+                    &tokens,
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                    PREFILL_TOKEN_COUNT,
+                    PREFILL_TOKEN_COUNT,
+                    1,
+                )
+                .map_err(|error| format!("V2 checkpoint capture failed: {error}"))?;
+            let checkpoint = sllm_core::SessionCheckpointV2::decode(
+                &checkpoint
+                    .encode()
+                    .map_err(|error| format!("V2 checkpoint encode failed: {error}"))?,
+            )
+            .map_err(|error| format!("V2 checkpoint decode failed: {error}"))?;
+            let mut restored = resident
+                .new_request_from_checkpoint_v2(&checkpoint, graph.clone(), &identity)
+                .map_err(|error| format!("V2 checkpoint restore failed: {error}"))?;
+            let restored_output = restored
+                .execute_next(&[prefill.token_ids()[PREFILL_TOKENS.len() - 1]])
+                .map_err(|error| format!("V2 suffix execution failed: {error}"))?;
+            if restored_output
+                .token_ids()
+                .iter()
+                .any(|token| *token < 0 || *token >= vocab_size)
+                || restored_output.token_ids().is_empty()
+            {
+                return Err("V2 restored suffix produced an invalid token".to_owned());
+            }
+            drop(restored_output);
+            drop(restored);
+            true
+        };
         let mut current_token = *prefill
             .token_ids()
             .last()
@@ -455,6 +529,7 @@ fn execute_resident<S: Gemma4MoeWeightSource + 'static>(
             decode_milliseconds,
             totals,
             available,
+            v2_roundtrip_verified,
         ))
     })();
 
@@ -476,8 +551,14 @@ fn execute_resident<S: Gemma4MoeWeightSource + 'static>(
             "resource cleanup differs: memory={memory:?}, shutdown={cleanup:?}"
         ));
     }
-    let (upload_milliseconds, prefill_milliseconds, decode_milliseconds, totals, available) =
-        operation?;
+    let (
+        upload_milliseconds,
+        prefill_milliseconds,
+        decode_milliseconds,
+        totals,
+        available,
+        v2_roundtrip_verified,
+    ) = operation?;
     let mut output_digest = Sha256::new();
     for token in &totals.output_token_ids {
         output_digest.update(token.to_le_bytes());
@@ -505,6 +586,7 @@ fn execute_resident<S: Gemma4MoeWeightSource + 'static>(
         fallback_used: false,
         nonfinite_free: true,
         cancel_recovery_verified: true,
+        v2_roundtrip_verified,
         final_committed_length: FINAL_COMMITTED_LENGTH,
         cleanup_retryable: cleanup.retryable_cleanup,
         cleanup_durable: cleanup.durable_quarantine,

@@ -159,5 +159,5 @@ N1相当と考えるが、draftだけの変更をどう分類するかは台帳�
 結果`eval-shortlist.json`・`eval-shortlist-v2.json`。
 中国語Wikipediaのshardは`/home/homelab1/datapool/dataset/wikipedia-zh-20231101/`（SHA256SUMSとREADME付き）。
 
-計画: [Phase 87](../../../../plans/active/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md) ／
+計画: [Phase 87](../../../../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md) ／
 関連: [vllm-mxfp4の分析](vllm-mxfp4-optimization-analysis.md)（P1「MTP draft headの低bit化＋厳密rerank」）

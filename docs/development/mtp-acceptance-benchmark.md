@@ -173,6 +173,8 @@ runtimeが報告する値はtemplate適用後（rendered）で、templateが約1
 - M1はcommitted列とsampling状態を固定するので決定的であり、条件ごと1回で足りる。
 - M2を使う場合のみ 26条件 × 2 seed = 52 run とする。
 - M3・M5は代表4条件、1 warmup＋3 measured。
+  [Phase 87 WU-3S](../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#段階3-mtp-companionの形式)は、
+  promptごとのM4を導くためM3だけTier A 26条件へ広げる作業固有の例外とする。M5の単一prompt値は採否へ使わない。
 
 ## prompt corpusの出所
 
@@ -293,17 +295,19 @@ targetのprefillは系列間で同一なので、条件ごとにprefillを再利
   指標の計算定義の改訂（2026-09-17のM1改訂など）はfixtureを変えないのでversionを上げないが、
   manifestの `revisions` に記録し、改訂前後の値を比較しない。
 
-## 採用判断ルール（凍結）
+## 採否
 
-量子化MTP形式を既定へ昇格させる条件は次のすべてである。
+2026-09-24以降、量子化MTP形式の既定採否は
+[main-planの変更の採否ルール](../plans/main-plan.md#変更の採否ルール2026-09-24ユーザー決定)で判断する。
+draft側の変更はM4または同一process AB/BAの通常計測で受理率込みのdecode速度を測り、M1は採用率の診断値として記録する。
+Tier Bは参考値として併記する。過去の形式比較と当時の判定は[Phase 87 段階3履歴](../history/2026/09/21-30/phase87-stage3.md)に残す。
+WU-3SのNVFP4 companionに限るprefill／TTFT例外も[作業計画](../plans/archive/2026/09/11-20/phase87-qwen38-nvfp4-single-request.md#段階3-mtp-companionの形式)で管理し、このベンチマーク全体の既定条件にはしない。
 
-1. Tier A の M4（M1の期待受理率とM3から導出したdecode tok/s）がBF16を上回り、
-   **prompt cluster単位の**区間が0を跨がない。**両GPUで**成立すること。
-2. Tier A の M1（期待受理率）がBF16より1.0 ptを超えて低くないこと。
-3. prefillとM>1経路（WMMA選択を含む）が退行しないこと。
-4. Tier Bは併記するだけで、上記のいずれの判定にも入れない。
-
-1が片側GPUのみで成立した場合は既定を変えず、成立したGPU・条件を明記して選択可能経路として残す。
+WU-3SのM3では、Tier A 26条件を各1 warmup＋3 measuredの自由生成で測る。
+draft／非draftの時間を分けるrunはwhole-decode graphを無効にし、各proposalの同期的なhost wall時間とdecode総時間を記録する。
+M4は各promptのM1の1段目／2段目と、そのpromptのM3 block時間から導く。
+このM3は製品のwhole-graph実行時間そのものではないため、採否では同じbinary・target・fixtureの
+whole-graph同一process AB/BAも別に測る。M3とwhole-graphの時間差を隠して同一の速度と扱わない。
 
 ## v1のM1初回測定（gfx1030、2026-09-15）
 
@@ -493,7 +497,7 @@ committed列がdraftの質から独立するため、軌跡分岐が原理的に
 
 | 場所 | 制約 |
 | --- | --- |
-| `crates/sllm-cli/src/model.rs:7601` | `Qwen3.8 NVFP4 CLI requires fixed temperature=1.0, zero penalties, and MTP width 0 or 2` |
+| `crates/sllm-cli/src/model.rs` | Qwen3.8 NVFP4 CLIはtemperature=1.0、penalty=0、MTP幅0／2／3／4に限定する |
 | `crates/sllm-hip/src/bin/sllm-phase78-qwen38-benchmark.rs:1077` | `SLLM_PHASE83_MTP=on requires SLLM_PHASE83_SAMPLING=gpu-fixed` |
 
 `decode_mtp_argmax` はdraft側に存在するが、target検証側は
@@ -557,3 +561,21 @@ Pの受理数はdraft top-1と次の強制tokenの一致から決める診断値
 で改訂後のM1（期待p/q受理率）を計算できる。受理数はブロック進行を決める駆動規則としてだけ使い、
 採用率の評価にはM1を使う。Phase86の最終campaignでの結果は
 [Phase86履歴の追記](../history/2026/09/11-20/phase86-mtp-catch-up-conditioning.md)にある。
+
+## Phase87 段階12: 幅2・3・4のv2測定
+
+[`mtp-bench-v2`](../../ci/matrix/mtp-bench-v2.json)はv1のTier A 26条件とfixture hashを参照し、
+promptや固定列を複製しない。既定幅は2、明示選択は2／3／4。v1の幅2報告は履歴証拠として保持する。
+
+- M1は`SLLM_PHASE87_STAGE12_M1=1`、`SLLM_PHASE86_MODE=P`、
+  `SLLM_PHASE83_MTP_WIDTH=2|3|4`で同じ凍結prefixを実行する。targetは幅＋1行、draftは幅行。
+  最後のtarget bonus行を提案受理率へ含めない。`row_matches`は強制列top-1診断値で、
+  採否に使う各段の期待p/q受理率は[幅別M1集計](../../ci/tools/phase87_stage12_acceptance.py)でlogitsから求める。
+- M3は[v2 suite生成](../../ci/tools/phase87_stage12_m3_suite.py)で26入力を固定し、
+  `SLLM_PHASE87_STAGE12_M3=1`、幅2／3／4、各1 warmup＋3 measured、通常のGPU fixed samplerで実行する。
+  suiteのschema・v2 manifest hash・幅集合が一致しなければ測定を拒否する。
+- [幅別M4集計](../../ci/tools/phase87_stage12_m4.py)は段別受理率から
+  `1+a₁+a₁a₂+…+a₁…aₙ`を計算し、M3のdraft／non-draft／合計時間で速度を出す。
+  [幅間比較](../../ci/tools/phase87_stage12_width_compare.py)は同じ26 promptを対にして
+  幅3・4を幅2へ比較する。これはWU-12Dの一次判定であり、既定の変更には通常の複数prompt
+  AB/BAも確認する。

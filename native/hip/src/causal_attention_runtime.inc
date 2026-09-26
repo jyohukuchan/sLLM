@@ -78,24 +78,6 @@ bool causal_intervals_overlap(const Buffer *const left_buffer,
          right_start < left_end;
 }
 
-constexpr uint64_t kScaledPrefillChunkRows = 256U;
-constexpr uint64_t kScaledPrefillQGroup = 4U;
-constexpr uint64_t kScaledPrefillPackedRows =
-    kScaledPrefillChunkRows * kScaledPrefillQGroup;
-constexpr uint64_t kScaledPrefillHeadDim = 256U;
-// The prototype processes at most 256 query rows per chunk.  Keep its
-// temporary allocation explicitly bounded so pathological lengths fail before
-// hipMalloc rather than attempting an M×M score matrix or overflowing a size.
-constexpr uint64_t kScaledPrefillMaxWorkspaceBytes = UINT64_C(1) << 30;
-constexpr uint32_t kDecodeGqa4SplitPartitions = 16U;
-constexpr uint32_t kDecodeGqa4SplitP32Partitions = 32U;
-constexpr uint32_t kDecodeGqa4SplitHeadDim = 256U;
-constexpr uint64_t kDecodeGqa4SplitWorkspaceBytes =
-    static_cast<uint64_t>(16U) * kDecodeGqa4SplitPartitions *
-    (kDecodeGqa4SplitHeadDim + 2U) * sizeof(float);
-constexpr uint64_t kDecodeGqa4SplitP32WorkspaceBytes =
-    static_cast<uint64_t>(16U) * kDecodeGqa4SplitP32Partitions *
-    (kDecodeGqa4SplitHeadDim + 2U) * sizeof(float);
 constexpr uint32_t kDecodeGqa6SplitP32Partitions = 32U;
 constexpr uint32_t kDecodeGqa6SplitP32QHeads = 24U;
 constexpr uint32_t kDecodeGqa6SplitP32KvHeads = 4U;
@@ -104,15 +86,6 @@ constexpr uint32_t kDecodeGqa6SplitP32WorkgroupSize = 192U;
 constexpr uint64_t kDecodeGqa6SplitP32WorkspaceBytes =
     static_cast<uint64_t>(kDecodeGqa6SplitP32QHeads) *
     kDecodeGqa6SplitP32Partitions * (kDecodeGqa6SplitP32HeadDim + 2U) *
-    sizeof(float);
-constexpr uint32_t kDecodeGqa6SplitP64Partitions = 64U;
-constexpr uint32_t kDecodeGqa6SplitP64QHeads = 24U;
-constexpr uint32_t kDecodeGqa6SplitP64KvHeads = 4U;
-constexpr uint32_t kDecodeGqa6SplitP64HeadDim = 256U;
-constexpr uint32_t kDecodeGqa6SplitP64WorkgroupSize = 192U;
-constexpr uint64_t kDecodeGqa6SplitP64WorkspaceBytes =
-    static_cast<uint64_t>(kDecodeGqa6SplitP64QHeads) *
-    kDecodeGqa6SplitP64Partitions * (kDecodeGqa6SplitP64HeadDim + 2U) *
     sizeof(float);
 constexpr uint32_t kDecodeGqa6SplitP128Partitions = 128U;
 constexpr uint32_t kDecodeGqa6SplitP128QHeads = 24U;
@@ -123,84 +96,25 @@ constexpr uint64_t kDecodeGqa6SplitP128WorkspaceBytes =
     static_cast<uint64_t>(kDecodeGqa6SplitP128QHeads) *
     kDecodeGqa6SplitP128Partitions * (kDecodeGqa6SplitP128HeadDim + 2U) *
     sizeof(float);
-constexpr uint32_t kDecodeWaveSplitStagedWaveCount = 8U;
-constexpr uint32_t kDecodeWaveSplitStagedMaxQueryCount = 4U;
-constexpr uint32_t kDecodeWaveSplitStagedQHeads = 24U;
-constexpr uint32_t kDecodeWaveSplitStagedKvHeads = 4U;
-constexpr uint32_t kDecodeWaveSplitStagedHeadDim = 256U;
-constexpr uint64_t kDecodeWaveSplitStagedWorkspaceBytesPerQuery =
-    static_cast<uint64_t>(kDecodeWaveSplitStagedQHeads) *
-    kDecodeWaveSplitStagedWaveCount * (kDecodeWaveSplitStagedHeadDim + 2U) *
-    sizeof(float);
-constexpr uint32_t kDecodeWaveSplitStaged32WaveCount = 32U;
-constexpr uint32_t kDecodeWaveSplitStaged32MaxQueryCount = 9U;
-constexpr uint32_t kDecodeWaveSplitStaged32QHeads = 24U;
-constexpr uint32_t kDecodeWaveSplitStaged32KvHeads = 4U;
-constexpr uint32_t kDecodeWaveSplitStaged32HeadDim = 256U;
-constexpr uint32_t kDecodeWaveSplitStaged32Split128 = 128U;
-constexpr uint64_t kDecodeWaveSplitStaged32Split128WorkspaceBytesPerQuery =
-    static_cast<uint64_t>(kDecodeWaveSplitStaged32QHeads) *
-    kDecodeWaveSplitStaged32Split128 * (kDecodeWaveSplitStaged32HeadDim + 2U) *
-    sizeof(float);
-bool causal_scaled_prefill_workspace_bytes(const uint64_t key_length,
-                                           uint64_t *const result) noexcept {
-  if (result == nullptr || key_length == 0U ||
-      key_length > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
-    return false;
-  }
-  const auto checked_mul = [](const uint64_t left, const uint64_t right,
-                              uint64_t *const output) noexcept -> bool {
-    if (output == nullptr || (right != 0U && left > UINT64_MAX / right)) {
-      return false;
-    }
-    *output = left * right;
-    return true;
-  };
-  uint64_t score = 0U;
-  uint64_t probability = 0U;
-  uint64_t residual = 0U;
-  uint64_t kv = 0U;
-  uint64_t query = 0U;
-  uint64_t scales = 0U;
-  uint64_t output = 0U;
-  uint64_t special = 0U;
-  if (!checked_mul(key_length, kScaledPrefillPackedRows * sizeof(float),
-                   &score) ||
-      !checked_mul(key_length, kScaledPrefillPackedRows * sizeof(uint16_t),
-                   &probability) ||
-      !checked_mul(key_length, kScaledPrefillPackedRows * sizeof(uint16_t),
-                   &residual) ||
-      !checked_mul(key_length, kScaledPrefillHeadDim * sizeof(uint16_t), &kv) ||
-      !checked_mul(kScaledPrefillPackedRows * kScaledPrefillHeadDim,
-                   sizeof(uint16_t), &query) ||
-      !checked_mul(kScaledPrefillPackedRows, sizeof(float), &scales) ||
-      !checked_mul(kScaledPrefillPackedRows * kScaledPrefillHeadDim,
-                   sizeof(float), &output)) {
-    return false;
-  }
-  if (!checked_mul(4U * kScaledPrefillHeadDim * 3U, sizeof(uint64_t),
-                   &special)) {
-    return false;
-  }
-  const auto add = [](uint64_t *const total, const uint64_t value) noexcept {
-    if (total == nullptr || *total > UINT64_MAX - value) {
-      return false;
-    }
-    *total += value;
-    return true;
-  };
-  uint64_t total = score;
-  if (!add(&total, probability) || !add(&total, residual) || !add(&total, kv) ||
-      !add(&total, kv) || !add(&total, query) || !add(&total, scales) ||
-      !add(&total, output) || !add(&total, output) || !add(&total, special) ||
-      total > static_cast<uint64_t>(std::numeric_limits<std::size_t>::max()) ||
-      total > kScaledPrefillMaxWorkspaceBytes) {
-    return false;
-  }
-  *result = total;
-  return true;
-}
 
+bool paged_decode_workspace_bytes(const uint32_t query_count,
+                                  const uint64_t committed_kv_length,
+                                  uint64_t *const result) noexcept {
+  if (result == nullptr || query_count == 0U) {
+    return false;
+  }
+  const uint64_t splits = committed_kv_length >= 8192U ? 128U : 32U;
+  const uint64_t per_query = static_cast<uint64_t>(kDecodeGqa6SplitP32QHeads) *
+                             splits * (kDecodeGqa6SplitP32HeadDim + 2U) *
+                             sizeof(float);
+  if (per_query == 0U ||
+      static_cast<uint64_t>(query_count) > UINT64_MAX / per_query) {
+    return false;
+  }
+  *result = static_cast<uint64_t>(query_count) * per_query;
+  return *result <=
+         static_cast<uint64_t>(std::numeric_limits<std::size_t>::max());
+}
 // Acquire the context-owned scaled-prefill workspace cache so requests reuse
 // one allocation and a resize cannot race an in-flight submission.
 hipError_t prepare_causal_workspace_plan_for_bytes(
@@ -288,46 +202,6 @@ hipError_t prepare_causal_workspace_plan_for_bytes(
 #endif
 }
 
-hipError_t prepare_causal_scaled_prefill_plan(
-    Context *const context, Queue *const queue, const uint64_t key_length,
-    void **const workspace, uint64_t *const workspace_bytes) noexcept {
-  uint64_t required = 0U;
-  if (!causal_scaled_prefill_workspace_bytes(key_length, &required)) {
-    return hipErrorOutOfMemory;
-  }
-  return prepare_causal_workspace_plan_for_bytes(context, queue, required,
-                                                 workspace, workspace_bytes);
-}
-
-#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-// The generic context constructor only creates a rocBLAS handle for matmul
-// providers which request one at context-open time.  The gfx1201 GQA6
-// attention provider is a causal-attention opt-in, so keep its handle
-// initialization in this owned runtime path.  The handle is stored on the
-// context and is therefore reused by later attention and matmul submissions;
-// Context::~Context() owns its eventual destruction.
-hipError_t ensure_gqa6_rocblas_handle(Context *const context) noexcept {
-  if (context == nullptr) {
-    return hipErrorInvalidValue;
-  }
-  std::lock_guard<std::mutex> lock(context->matmul_blas_mutex);
-  if (context->matmul_rocblas_handle != nullptr) {
-    return hipSuccess;
-  }
-  rocblas_handle handle = nullptr;
-  if (rocblas_create_handle(&handle) != rocblas_status_success) {
-    return hipErrorUnknown;
-  }
-  if (rocblas_set_pointer_mode(handle, rocblas_pointer_mode_host) !=
-      rocblas_status_success) {
-    (void)rocblas_destroy_handle(handle);
-    return hipErrorUnknown;
-  }
-  context->matmul_rocblas_handle = handle;
-  return hipSuccess;
-}
-#endif
-
 sllm_status_t validate_causal_attention_dispatch_info(
     const sllm_causal_attention_dispatch_info_t *const info,
     sllm_error_sink_t *const sink) noexcept {
@@ -352,459 +226,12 @@ sllm_status_t validate_causal_attention_dispatch_info(
   return SLLM_STATUS_OK;
 }
 
-struct CausalAttentionProviderSelection final {
-  bool use_gfx1201_wave_provider;
-  bool use_decode_wave_split;
-  bool use_decode_wave_split_staged;
-  bool use_decode_wave_split_staged32;
-  bool use_decode_wave_split_gqa_shared;
-  bool use_decode_wave_split128;
-  bool use_decode_wave_split_fp16_pair;
-  bool use_decode_gqa4_split;
-  bool use_decode_gqa4_split_p32;
-  bool use_decode_gqa6_split_p128;
-  bool use_decode_gqa6_split_p64;
-  bool use_decode_gqa6_split_p32;
-  bool use_prefill_gqa6_blocksoftmax_q8;
-  bool use_prefill_gqa6_blocksoftmax;
-  bool use_decode_wave_split_q_preload;
-  bool use_prefill_gqa4;
-  bool use_prefill_gqa4_qtile4;
-  bool use_prefill_gqa6_qtile8_w16;
-  bool use_prefill_gqa6_qtile4_k4_fp16;
-  bool use_prefill_gqa6_qtile4_k8_fp16;
-  bool use_prefill_gqa6_qtile4_k16_fp16;
-  bool use_prefill_gqa6_qtile4_k32_fp16;
-  bool use_gqa6_rocblas_f32;
-  bool use_gfx1201_gqa6_rocblas_f32;
-  bool use_gfx1201_gqa6_rocblas_f16_tail;
-  bool use_scaled_prefill_gemm;
-};
-
-enum class Gqa6QTile4Fp16KeyTile : uint32_t {
-  None = 0U,
-  K4 = 4U,
-  K8 = 8U,
-  K16 = 16U,
-  K32 = 32U,
-};
-
-// Candidate selection is intentionally a single-valued policy.  If several
-// opt-ins are present, the smallest requested key tile wins in the explicit
-// order K4 > K8 > K16 > K32.  This keeps process-environment composition
-// deterministic and prevents multiple candidate bits from being published.
-Gqa6QTile4Fp16KeyTile select_gqa6_qtile4_fp16_key_tile(
-    const bool eligible, const char *const k4_opt_in,
-    const char *const k8_opt_in, const char *const k16_opt_in,
-    const char *const k32_opt_in) noexcept {
-  if (!eligible) {
-    return Gqa6QTile4Fp16KeyTile::None;
-  }
-  const auto enabled = [](const char *const value) noexcept {
-    return value != nullptr && std::strcmp(value, "1") == 0;
-  };
-  if (enabled(k4_opt_in)) {
-    return Gqa6QTile4Fp16KeyTile::K4;
-  }
-  if (enabled(k8_opt_in)) {
-    return Gqa6QTile4Fp16KeyTile::K8;
-  }
-  if (enabled(k16_opt_in)) {
-    return Gqa6QTile4Fp16KeyTile::K16;
-  }
-  if (enabled(k32_opt_in)) {
-    return Gqa6QTile4Fp16KeyTile::K32;
-  }
-  return Gqa6QTile4Fp16KeyTile::None;
-}
-
-CausalAttentionProviderSelection select_causal_attention_provider(
-    const sllm_causal_attention::DescriptorMetadata &metadata,
-    const uint32_t kv_heads, const uint32_t encoding,
-    const char *const arch_name) noexcept {
-  if (metadata.sliding_window != 0U || metadata.explicit_score_scale) {
-    return {};
-  }
-  const bool use_phase33_common_provider =
-      std::strcmp(arch_name, "gfx1030") == 0 ||
-      std::strcmp(arch_name, "gfx1201") == 0;
-  const char *const force_baseline =
-      std::getenv("SLLM_CAUSAL_ATTENTION_FORCE_BASELINE");
-  const char *const q_preload_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GFX1030_Q_PRELOAD");
-  const char *const short_decode_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT");
-  const char *const short_q_preload_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT_Q_PRELOAD");
-  const char *const staged_decode_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_STAGED");
-  const char *const staged32_decode_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_DECODE_WAVE_STAGED32");
-  const char *const fp16_pair_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_FP16_PAIR");
-  const char *const gqa4_split_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT");
-  const char *const gqa4_split_p32_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT_P32");
-  const char *const gfx1201_gqa4_split_p32_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GFX1201_DECODE_GQA4_SPLIT_P32");
-  const char *const gqa6_split_p32_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P32");
-  const char *const gqa6_split_p64_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P64");
-  const char *const gqa6_split_p128_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_DECODE_SPLIT_P128");
-  const char *const gqa6_blocksoftmax_gfx1030_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1030");
-  const char *const gqa6_blocksoftmax_gfx1201_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_GFX1201");
-  const char *const gqa6_blocksoftmax_q8_gfx1201_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_BLOCKSOFTMAX_Q8_GFX1201");
-  const char *const gqa6_qtile4_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_QTILE4");
-  const char *const gqa6_qtile4_k4_fp16_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K4_FP16");
-  const char *const gqa6_qtile4_k8_fp16_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K8_FP16");
-  const char *const gqa6_qtile4_k16_fp16_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K16_FP16");
-  const char *const gqa6_qtile4_k32_fp16_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_QTILE4_K32_FP16");
-  const char *const gqa6_rocblas_f32_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1030_ROCBLAS_F32");
-  const char *const gfx1201_gqa6_rocblas_f32_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1201_ROCBLAS_F32");
-  const char *const gfx1201_gqa6_rocblas_f16_tail_opt_in = std::getenv(
-      "SLLM_CAUSAL_ATTENTION_GQA6_PREFILL_GFX1201_ROCBLAS_F16_TAIL");
-  const bool allow_prefill_provider =
-      force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0;
-  const bool use_gqa6_rocblas_f32 =
-      allow_prefill_provider && std::strcmp(arch_name, "gfx1030") == 0 &&
-      gqa6_rocblas_f32_opt_in != nullptr &&
-      std::strcmp(gqa6_rocblas_f32_opt_in, "1") == 0 &&
-      metadata.query_count > 1U &&
-      metadata.query_count <= static_cast<uint64_t>(UINT32_MAX) &&
-      metadata.start_position <= UINT64_MAX - metadata.query_count &&
-      metadata.start_position + metadata.query_count ==
-          metadata.expected_kv_length &&
-      metadata.query.q_heads == 24U && kv_heads == 4U &&
-      metadata.query.head_dim == SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1;
-  const bool use_gfx1201_gqa6_rocblas_f32 =
-      allow_prefill_provider && std::strcmp(arch_name, "gfx1201") == 0 &&
-      gfx1201_gqa6_rocblas_f32_opt_in != nullptr &&
-      std::strcmp(gfx1201_gqa6_rocblas_f32_opt_in, "1") == 0 &&
-      metadata.query_count > 1U &&
-      metadata.query_count <= static_cast<uint64_t>(UINT32_MAX) &&
-      metadata.start_position <= UINT64_MAX - metadata.query_count &&
-      metadata.start_position + metadata.query_count ==
-          metadata.expected_kv_length &&
-      metadata.query.q_heads == 24U && kv_heads == 4U &&
-      metadata.query.head_dim == SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1;
-  const bool use_gfx1201_gqa6_rocblas_f16_tail =
-      use_gfx1201_gqa6_rocblas_f32 && metadata.start_position > 0U &&
-      gfx1201_gqa6_rocblas_f16_tail_opt_in != nullptr &&
-      std::strcmp(gfx1201_gqa6_rocblas_f16_tail_opt_in, "1") == 0;
-  const bool use_any_gqa6_rocblas_f32 =
-      use_gqa6_rocblas_f32 || use_gfx1201_gqa6_rocblas_f32;
-  const bool use_decode_wave_split_long =
-      use_phase33_common_provider && metadata.query_count == 1U &&
-      metadata.expected_kv_length >= 1024U &&
-      metadata.query.head_dim == SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-  const bool use_decode_wave_split_staged =
-      allow_prefill_provider && std::strcmp(arch_name, "gfx1030") == 0 &&
-      staged_decode_opt_in != nullptr &&
-      std::strcmp(staged_decode_opt_in, "1") == 0 &&
-      metadata.query_count >= 1U &&
-      metadata.query_count <= kDecodeWaveSplitStagedMaxQueryCount &&
-      metadata.expected_kv_length >= 1024U &&
-      metadata.query.q_heads == kDecodeWaveSplitStagedQHeads &&
-      kv_heads == kDecodeWaveSplitStagedKvHeads &&
-      metadata.query.head_dim == kDecodeWaveSplitStagedHeadDim &&
-      encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
-      metadata.sliding_window == 0U && !metadata.explicit_score_scale;
-  const bool use_decode_wave_split_staged32 =
-      allow_prefill_provider &&
-      (std::strcmp(arch_name, "gfx1030") == 0 ||
-       std::strcmp(arch_name, "gfx1201") == 0) &&
-      ((staged32_decode_opt_in == nullptr && !use_decode_wave_split_staged) ||
-       (staged32_decode_opt_in != nullptr &&
-        std::strcmp(staged32_decode_opt_in, "1") == 0)) &&
-      metadata.query_count >= 1U &&
-      metadata.query_count <= kDecodeWaveSplitStaged32MaxQueryCount &&
-      metadata.expected_kv_length >= 1U &&
-      metadata.query.q_heads == kDecodeWaveSplitStaged32QHeads &&
-      kv_heads == kDecodeWaveSplitStaged32KvHeads &&
-      metadata.query.head_dim == kDecodeWaveSplitStaged32HeadDim &&
-      encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
-      metadata.sliding_window == 0U && !metadata.explicit_score_scale;
-  const bool use_decode_wave_split_gqa_shared =
-      use_decode_wave_split_staged32 &&
-      std::strcmp(arch_name, "gfx1030") == 0 && metadata.query_count >= 1U &&
-      metadata.query_count <= 3U;
-  const bool use_decode_wave_split128 =
-      use_decode_wave_split_staged32 && metadata.query_count <= 3U &&
-      metadata.expected_kv_length >= 8192U &&
-      (std::strcmp(arch_name, "gfx1201") == 0 ||
-       (std::strcmp(arch_name, "gfx1030") == 0 &&
-        use_decode_wave_split_gqa_shared));
-  const bool use_decode_wave_split_short =
-      std::strcmp(arch_name, "gfx1030") == 0 &&
-      (short_decode_opt_in == nullptr ||
-       std::strcmp(short_decode_opt_in, "1") == 0) &&
-      metadata.query_count == 1U && metadata.expected_kv_length >= 32U &&
-      metadata.expected_kv_length < 1024U && metadata.query.q_heads == 16U &&
-      kv_heads == 4U &&
-      metadata.query.head_dim == SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1;
-  const bool use_decode_wave_split =
-      use_decode_wave_split_long || use_decode_wave_split_short;
-  const bool use_decode_wave_split_fp16_pair =
-      std::strcmp(arch_name, "gfx1030") == 0 &&
-      (fp16_pair_opt_in == nullptr ||
-       std::strcmp(fp16_pair_opt_in, "1") == 0) &&
-      allow_prefill_provider && metadata.query_count == 1U &&
-      metadata.expected_kv_length >= 1024U && metadata.query.q_heads == 16U &&
-      kv_heads == 4U && metadata.query.head_dim == 256U &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1;
-  const bool use_decode_gqa4_split =
-      allow_prefill_provider && std::strcmp(arch_name, "gfx1030") == 0 &&
-      gqa4_split_opt_in != nullptr &&
-      std::strcmp(gqa4_split_opt_in, "1") == 0 && metadata.query_count == 1U &&
-      metadata.expected_kv_length >= 4096U && metadata.query.q_heads == 16U &&
-      kv_heads == 4U && metadata.query.head_dim == 256U &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1;
-  const bool use_decode_gqa4_split_p32 =
-      allow_prefill_provider &&
-      ((std::strcmp(arch_name, "gfx1030") == 0 &&
-        (gqa4_split_p32_opt_in == nullptr ||
-         std::strcmp(gqa4_split_p32_opt_in, "1") == 0)) ||
-       (std::strcmp(arch_name, "gfx1201") == 0 &&
-        (gfx1201_gqa4_split_p32_opt_in == nullptr ||
-         std::strcmp(gfx1201_gqa4_split_p32_opt_in, "1") == 0))) &&
-      metadata.query_count == 1U && metadata.expected_kv_length >= 4096U &&
-      metadata.query.q_heads == 16U && kv_heads == 4U &&
-      metadata.query.head_dim == 256U &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1;
-  const bool use_decode_gqa6_split_p128 =
-      allow_prefill_provider && std::strcmp(arch_name, "gfx1030") == 0 &&
-      gqa6_split_p128_opt_in != nullptr &&
-      std::strcmp(gqa6_split_p128_opt_in, "1") == 0 &&
-      metadata.query_count == 1U && metadata.expected_kv_length >= 8192U &&
-      metadata.query.q_heads == kDecodeGqa6SplitP128QHeads &&
-      kv_heads == kDecodeGqa6SplitP128KvHeads &&
-      metadata.query.head_dim == kDecodeGqa6SplitP128HeadDim &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1 &&
-      metadata.sliding_window == 0U && !metadata.explicit_score_scale;
-  const bool use_decode_gqa6_split_p64 =
-      // P64 is the rollback for P128.  P128 is evaluated first above so a
-      // process that requests both partition counts deterministically selects
-      // the larger split; the P32 expression below is then mutually exclusive.
-      allow_prefill_provider && use_phase33_common_provider &&
-      gqa6_split_p64_opt_in != nullptr &&
-      std::strcmp(gqa6_split_p64_opt_in, "1") == 0 &&
-      metadata.query_count == 1U &&
-      ((std::strcmp(arch_name, "gfx1030") == 0 &&
-        metadata.expected_kv_length >= 8192U) ||
-       (std::strcmp(arch_name, "gfx1201") == 0 &&
-        metadata.expected_kv_length >= 4096U)) &&
-      metadata.query.q_heads == kDecodeGqa6SplitP64QHeads &&
-      kv_heads == kDecodeGqa6SplitP64KvHeads &&
-      metadata.query.head_dim == kDecodeGqa6SplitP64HeadDim &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1 && !use_decode_gqa6_split_p128;
-  const bool use_decode_gqa6_split_p32 =
-      allow_prefill_provider && use_phase33_common_provider &&
-      gqa6_split_p32_opt_in != nullptr &&
-      std::strcmp(gqa6_split_p32_opt_in, "1") == 0 &&
-      metadata.query_count == 1U && metadata.expected_kv_length >= 4096U &&
-      metadata.query.q_heads == kDecodeGqa6SplitP32QHeads &&
-      kv_heads == kDecodeGqa6SplitP32KvHeads &&
-      metadata.query.head_dim == kDecodeGqa6SplitP32HeadDim &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1 && !use_decode_gqa6_split_p128 &&
-      !use_decode_gqa6_split_p64;
-  const bool use_prefill_gqa6_blocksoftmax_q8 =
-      allow_prefill_provider && std::strcmp(arch_name, "gfx1201") == 0 &&
-      metadata.query_count >= 128U && metadata.query.q_heads == 24U &&
-      kv_heads == 4U && metadata.query.head_dim == 256U &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1 &&
-      gqa6_blocksoftmax_q8_gfx1201_opt_in != nullptr &&
-      std::strcmp(gqa6_blocksoftmax_q8_gfx1201_opt_in, "1") == 0 &&
-      !use_any_gqa6_rocblas_f32;
-  const bool use_prefill_gqa6_blocksoftmax =
-      allow_prefill_provider && use_phase33_common_provider &&
-      metadata.query_count >= 128U && metadata.query.q_heads == 24U &&
-      kv_heads == 4U && metadata.query.head_dim == 256U &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1 &&
-      ((std::strcmp(arch_name, "gfx1030") == 0 &&
-        gqa6_blocksoftmax_gfx1030_opt_in != nullptr &&
-        std::strcmp(gqa6_blocksoftmax_gfx1030_opt_in, "1") == 0) ||
-       (std::strcmp(arch_name, "gfx1201") == 0 &&
-        gqa6_blocksoftmax_gfx1201_opt_in != nullptr &&
-        std::strcmp(gqa6_blocksoftmax_gfx1201_opt_in, "1") == 0)) &&
-      !use_prefill_gqa6_blocksoftmax_q8 && !use_any_gqa6_rocblas_f32;
-  const bool use_decode_wave_split_short_q_preload =
-      use_decode_wave_split_short &&
-      (short_q_preload_opt_in == nullptr ||
-       std::strcmp(short_q_preload_opt_in, "1") == 0);
-  const bool use_decode_wave_split_q_preload_long =
-      std::strcmp(arch_name, "gfx1030") == 0 &&
-      (use_decode_wave_split_long || use_decode_wave_split_staged) &&
-      (q_preload_opt_in == nullptr || std::strcmp(q_preload_opt_in, "1") == 0);
-  const bool use_decode_wave_split_q_preload =
-      use_decode_wave_split_q_preload_long ||
-      use_decode_wave_split_short_q_preload || use_decode_wave_split_staged32;
-  const bool use_prefill_gqa6_qtile8_w16 =
-      allow_prefill_provider &&
-      (std::strcmp(arch_name, "gfx1030") == 0 ||
-       std::strcmp(arch_name, "gfx1201") == 0) &&
-      metadata.query_count >= 128U && metadata.start_position >= 1024U &&
-      metadata.query.q_heads == 24U && kv_heads == 4U &&
-      metadata.query.head_dim == SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM &&
-      encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
-      gqa6_qtile4_opt_in == nullptr && !use_prefill_gqa6_blocksoftmax_q8 &&
-      !use_any_gqa6_rocblas_f32;
-  const bool use_prefill_gqa4_qtile4_control =
-      allow_prefill_provider && use_phase33_common_provider &&
-      !use_prefill_gqa6_blocksoftmax_q8 && !use_any_gqa6_rocblas_f32 &&
-      metadata.query_count >= 128U &&
-      (metadata.query.q_heads / kv_heads == 4U ||
-       (metadata.query.q_heads / kv_heads == 6U &&
-        ((gqa6_qtile4_opt_in != nullptr &&
-          std::strcmp(gqa6_qtile4_opt_in, "1") == 0) ||
-         (encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
-          gqa6_qtile4_opt_in == nullptr && metadata.query.q_heads == 24U &&
-          kv_heads == 4U && !use_prefill_gqa6_qtile8_w16)))) &&
-      metadata.query.head_dim == SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
-  const bool gqa6_qtile4_fp16_shape =
-      allow_prefill_provider && use_phase33_common_provider &&
-      !use_prefill_gqa6_blocksoftmax_q8 && !use_any_gqa6_rocblas_f32 &&
-      metadata.query_count >= 128U && metadata.query.q_heads == 24U &&
-      kv_heads == 4U && metadata.query.head_dim == 256U &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1 &&
-      metadata.sliding_window == 0U && !metadata.explicit_score_scale;
-  const Gqa6QTile4Fp16KeyTile gqa6_qtile4_fp16_key_tile =
-      select_gqa6_qtile4_fp16_key_tile(
-          gqa6_qtile4_fp16_shape, gqa6_qtile4_k4_fp16_opt_in,
-          gqa6_qtile4_k8_fp16_opt_in, gqa6_qtile4_k16_fp16_opt_in,
-          gqa6_qtile4_k32_fp16_opt_in);
-  const bool use_prefill_gqa6_qtile4_k4_fp16 =
-      gqa6_qtile4_fp16_key_tile == Gqa6QTile4Fp16KeyTile::K4;
-  const bool use_prefill_gqa6_qtile4_k8_fp16 =
-      gqa6_qtile4_fp16_key_tile == Gqa6QTile4Fp16KeyTile::K8;
-  const bool use_prefill_gqa6_qtile4_k16_fp16 =
-      gqa6_qtile4_fp16_key_tile == Gqa6QTile4Fp16KeyTile::K16;
-  const bool use_prefill_gqa6_qtile4_k32_fp16 =
-      gqa6_qtile4_fp16_key_tile == Gqa6QTile4Fp16KeyTile::K32;
-  const bool use_prefill_gqa4_qtile4 =
-      use_prefill_gqa4_qtile4_control || use_prefill_gqa6_qtile8_w16 ||
-      use_prefill_gqa6_qtile4_k4_fp16 || use_prefill_gqa6_qtile4_k8_fp16 ||
-      use_prefill_gqa6_qtile4_k16_fp16 || use_prefill_gqa6_qtile4_k32_fp16;
-  const char *const scaled_prefill_opt_in =
-      std::getenv("SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM");
-  const bool scaled_prefill_encoding_enabled =
-      (encoding == SLLM_HIP_KV_ENCODING_FP16_V1 &&
-       (scaled_prefill_opt_in == nullptr ||
-        std::strcmp(scaled_prefill_opt_in, "1") == 0)) ||
-      (encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
-       scaled_prefill_opt_in != nullptr &&
-       std::strcmp(scaled_prefill_opt_in, "1") == 0);
-  const bool use_scaled_prefill_gemm =
-      allow_prefill_provider && std::strcmp(arch_name, "gfx1030") == 0 &&
-      scaled_prefill_encoding_enabled && metadata.query_count >= 1024U &&
-      metadata.query.q_heads == 16U && kv_heads == 4U &&
-      metadata.query.head_dim == 256U;
-  return {
-      std::strcmp(arch_name, "gfx1201") == 0 &&
-          (metadata.query_count == 1U || metadata.query_count >= 32U),
-      use_decode_wave_split && !use_decode_wave_split_staged,
-      use_decode_wave_split_staged,
-      use_decode_wave_split_staged32,
-      use_decode_wave_split_gqa_shared,
-      use_decode_wave_split128,
-      use_decode_wave_split_fp16_pair && !use_decode_gqa4_split &&
-          !use_decode_gqa4_split_p32 && !use_decode_gqa6_split_p128 &&
-          !use_decode_gqa6_split_p64 && !use_decode_gqa6_split_p32,
-      use_decode_gqa4_split && !use_decode_gqa4_split_p32 &&
-          !use_decode_gqa6_split_p128 && !use_decode_gqa6_split_p64 &&
-          !use_decode_gqa6_split_p32,
-      use_decode_gqa4_split_p32,
-      use_decode_gqa6_split_p128,
-      use_decode_gqa6_split_p64,
-      use_decode_gqa6_split_p32,
-      use_prefill_gqa6_blocksoftmax_q8,
-      use_prefill_gqa6_blocksoftmax,
-      use_decode_wave_split_q_preload,
-      use_phase33_common_provider && metadata.query_count >= 64U &&
-          metadata.query.q_heads / kv_heads == 4U &&
-          metadata.query.head_dim == SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM,
-      use_prefill_gqa4_qtile4,
-      use_prefill_gqa6_qtile8_w16,
-      use_prefill_gqa6_qtile4_k4_fp16,
-      use_prefill_gqa6_qtile4_k8_fp16,
-      use_prefill_gqa6_qtile4_k16_fp16,
-      use_prefill_gqa6_qtile4_k32_fp16,
-      use_gqa6_rocblas_f32,
-      use_gfx1201_gqa6_rocblas_f32,
-      use_gfx1201_gqa6_rocblas_f16_tail,
-      use_scaled_prefill_gemm,
-  };
-}
-
-// Publish the exact provider selected for workspace preparation and launch.
-// Re-selecting here would allow a concurrent process-environment change to
-// report a symbol/grid that was not enqueued.
 void fill_causal_attention_dispatch_info(
     sllm_causal_attention_dispatch_info_t *const info,
     const uint64_t dispatch_id,
     const sllm_causal_attention::DescriptorMetadata &metadata,
     const uint32_t kv_heads, const uint32_t encoding,
-    const char *const arch_name,
-    const CausalAttentionProviderSelection &selection) noexcept {
-  const bool use_gfx1201_wave_provider = selection.use_gfx1201_wave_provider;
-  const bool use_decode_wave_split = selection.use_decode_wave_split;
-  const bool use_decode_wave_split_staged =
-      selection.use_decode_wave_split_staged;
-  const bool use_decode_wave_split_staged32 =
-      selection.use_decode_wave_split_staged32;
-  const bool use_decode_wave_split_gqa_shared =
-      selection.use_decode_wave_split_gqa_shared;
-  const bool use_decode_wave_split128 = selection.use_decode_wave_split128;
-  const bool use_decode_wave_split_fp16_pair =
-      selection.use_decode_wave_split_fp16_pair;
-  const bool use_decode_gqa4_split = selection.use_decode_gqa4_split;
-  const bool use_decode_gqa4_split_p32 = selection.use_decode_gqa4_split_p32;
-  const bool use_decode_gqa6_split_p32 = selection.use_decode_gqa6_split_p32;
-  const bool use_decode_gqa6_split_p128 = selection.use_decode_gqa6_split_p128;
-  const bool use_decode_gqa6_split_p64 = selection.use_decode_gqa6_split_p64;
-  const bool use_prefill_gqa6_blocksoftmax_q8 =
-      selection.use_prefill_gqa6_blocksoftmax_q8;
-  const bool use_prefill_gqa6_blocksoftmax =
-      selection.use_prefill_gqa6_blocksoftmax;
-  const bool use_decode_wave_split_q_preload =
-      selection.use_decode_wave_split_q_preload;
-  const bool use_prefill_gqa4 = selection.use_prefill_gqa4;
-  const bool use_prefill_gqa4_qtile4 = selection.use_prefill_gqa4_qtile4;
-  const bool use_prefill_gqa6_qtile8_w16 =
-      selection.use_prefill_gqa6_qtile8_w16;
-  const bool use_prefill_gqa6_qtile4_k4_fp16 =
-      selection.use_prefill_gqa6_qtile4_k4_fp16;
-  const bool use_prefill_gqa6_qtile4_k8_fp16 =
-      selection.use_prefill_gqa6_qtile4_k8_fp16;
-  const bool use_prefill_gqa6_qtile4_k16_fp16 =
-      selection.use_prefill_gqa6_qtile4_k16_fp16;
-  const bool use_prefill_gqa6_qtile4_k32_fp16 =
-      selection.use_prefill_gqa6_qtile4_k32_fp16;
-  const bool use_gqa6_rocblas_f32 = selection.use_gqa6_rocblas_f32;
-  const bool use_gfx1201_gqa6_rocblas_f32 =
-      selection.use_gfx1201_gqa6_rocblas_f32;
-  const bool use_gfx1201_gqa6_rocblas_f16_tail =
-      selection.use_gfx1201_gqa6_rocblas_f16_tail;
-  const bool use_any_gqa6_rocblas_f32 =
-      use_gqa6_rocblas_f32 || use_gfx1201_gqa6_rocblas_f32;
-  const bool use_scaled_prefill_gemm = selection.use_scaled_prefill_gemm;
-  const bool sliding = metadata.sliding_window != 0U;
-  const bool explicitly_scaled = metadata.explicit_score_scale;
+    const char *const arch_name) noexcept {
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
   std::memset(info, 0, sizeof(*info));
@@ -813,82 +240,11 @@ void fill_causal_attention_dispatch_info(
   info->info_version = SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION;
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
-  // The rocBLAS providers are one logical attention submission, but publish
-  // their physical API launches: ID74 F32 uses seven (K/V/query staging, QK,
-  // softmax, PV, unpack), while the FP16-score tail uses five (query pack,
-  // QK, softmax, PV, unpack). rocBLAS-internal kernels are not counted.
-  info->dispatch_count =
-      (use_decode_wave_split_staged || use_decode_wave_split_staged32) ? 2U
-      : use_gfx1201_gqa6_rocblas_f16_tail                              ? 5U
-      : use_any_gqa6_rocblas_f32                                       ? 7U
-      : (use_decode_gqa4_split || use_decode_gqa4_split_p32 ||
-         use_decode_gqa6_split_p128 || use_decode_gqa6_split_p64 ||
-         use_decode_gqa6_split_p32)
-          ? 2U
-          : 1U;
-  info->kernel_id =
-      sliding ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1
-      : explicitly_scaled
-          ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1
-      : use_decode_wave_split_staged32
-          ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_V1
-      : use_decode_wave_split_staged
-          ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_DECODE_WAVE_SPLIT_STAGED_GFX1030_V1
-      : use_gfx1201_gqa6_rocblas_f16_tail
-          ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F16_TAIL_GFX1201_V1
-      : use_gfx1201_gqa6_rocblas_f32
-          ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_ROCBLAS_F32_GFX1201_V1
-      : use_decode_gqa6_split_p128
-          ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_GQA6_SPLIT_P128_GFX1030_V1
-      : encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-          ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2
-          : SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3;
-  info->workgroup_size_x =
-      (use_decode_wave_split_staged || use_decode_wave_split_staged32)
-          ? SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE
-      : use_prefill_gqa6_qtile8_w16 ? 512U
-      : use_decode_gqa6_split_p128  ? kDecodeGqa6SplitP128WorkgroupSize
-      : use_decode_gqa6_split_p64   ? kDecodeGqa6SplitP64WorkgroupSize
-      : use_decode_gqa6_split_p32   ? kDecodeGqa6SplitP32WorkgroupSize
-      : (use_decode_gqa4_split || use_decode_gqa4_split_p32) ? 128U
-      : use_any_gqa6_rocblas_f32                             ? 256U
-                                 : SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+  info->dispatch_count = 1U;
+  info->kernel_id = 0U;
+  info->workgroup_size_x = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
   info->grid_size_x = static_cast<uint32_t>(
-      use_decode_wave_split128
-          ? static_cast<uint64_t>(use_decode_wave_split_gqa_shared
-                                      ? kDecodeWaveSplitStaged32KvHeads
-                                      : kDecodeWaveSplitStaged32QHeads) *
-                kDecodeWaveSplitStaged32Split128 * metadata.query_count
-      : use_decode_wave_split_staged32
-          ? static_cast<uint64_t>(use_decode_wave_split_gqa_shared
-                                      ? kDecodeWaveSplitStaged32KvHeads
-                                      : kDecodeWaveSplitStaged32QHeads) *
-                kDecodeWaveSplitStaged32WaveCount * metadata.query_count
-      : use_decode_wave_split_staged
-          ? static_cast<uint64_t>(kDecodeWaveSplitStagedQHeads) *
-                kDecodeWaveSplitStagedWaveCount * metadata.query_count
-      : use_decode_gqa6_split_p128
-          ? kDecodeGqa6SplitP128KvHeads * kDecodeGqa6SplitP128Partitions
-      : use_decode_gqa6_split_p64
-          ? kDecodeGqa6SplitP64KvHeads * kDecodeGqa6SplitP64Partitions
-      : use_decode_gqa6_split_p32
-          ? kDecodeGqa6SplitP32KvHeads * kDecodeGqa6SplitP32Partitions
-      : use_decode_gqa4_split_p32 ? 4U * kDecodeGqa4SplitP32Partitions
-      : use_decode_gqa4_split     ? 4U * kDecodeGqa4SplitPartitions
-      : use_decode_wave_split_fp16_pair
-          ? metadata.query_count * metadata.query.q_heads
-      : use_any_gqa6_rocblas_f32
-          ? static_cast<uint64_t>(kv_heads) * metadata.query_count * 6U
-      : use_scaled_prefill_gemm
-          ? ((metadata.query_count + 255U) / 256U) * kv_heads
-      : use_prefill_gqa6_blocksoftmax_q8
-          ? (metadata.query_count + 7U) / 8U * kv_heads
-      : use_prefill_gqa6_qtile8_w16
-          ? (metadata.query_count + 7U) / 8U * kv_heads
-      : (use_prefill_gqa4_qtile4 || use_prefill_gqa6_blocksoftmax)
-          ? (metadata.query_count + 3U) / 4U * kv_heads
-      : use_prefill_gqa4 ? metadata.query_count * kv_heads
-                         : metadata.query_count * metadata.query.q_heads);
+      static_cast<uint64_t>(metadata.query_count) * metadata.query.q_heads);
   info->query_count = metadata.query_count;
   info->start_position = metadata.start_position;
   info->committed_kv_length = metadata.expected_kv_length;
@@ -901,282 +257,76 @@ void fill_causal_attention_dispatch_info(
       static_cast<uint64_t>(implicit_denominator) * implicit_denominator ==
       metadata.query.head_dim;
   info->scale_denominator =
-      explicitly_scaled || !integer_implicit_scale ? 0U : implicit_denominator;
+      metadata.explicit_score_scale || !integer_implicit_scale
+          ? 0U
+          : implicit_denominator;
   info->fallback_allowed = 0U;
   info->fallback_used = 0U;
+  const bool sliding = metadata.sliding_window != 0U;
   const uint64_t retained_start =
       metadata.expected_kv_length > metadata.sliding_window && sliding
           ? metadata.expected_kv_length - metadata.sliding_window
           : 0U;
   info->reserved[0] = static_cast<uint32_t>(metadata.sliding_window);
-  info->reserved[1] = static_cast<uint32_t>(metadata.sliding_window >> 32U);
+  info->reserved[1] =
+      static_cast<uint32_t>(metadata.sliding_window >> UINT32_C(32));
   info->reserved[2] = static_cast<uint32_t>(retained_start);
-  info->reserved[3] = static_cast<uint32_t>(retained_start >> 32U);
-  if (explicitly_scaled || !integer_implicit_scale) {
+  info->reserved[3] = static_cast<uint32_t>(retained_start >> UINT32_C(32));
+  if (metadata.explicit_score_scale || !integer_implicit_scale) {
     const float published_scale =
-        explicitly_scaled
+        metadata.explicit_score_scale
             ? metadata.score_scale
             : 1.0F / std::sqrt(static_cast<float>(metadata.query.head_dim));
     std::memcpy(&info->reserved[4], &published_scale, sizeof(float));
     info->reserved[5] = 1U;
   }
   sllm_public_runtime::copy_fixed_string(
-      info->kernel_symbol, SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX,
-      sliding ? ::sllm_causal_attention_kernel::kSlidingStaticFp8LogicalKernelId
-      : explicitly_scaled
-          ? ::sllm_causal_attention_kernel::kScaledStaticFp8LogicalKernelId
-      : use_decode_wave_split_staged32
-          ? ::sllm_causal_attention_kernel::
-                kDecodeWaveSplitStaged32LogicalKernelId
-      : use_decode_wave_split_staged ? ::sllm_causal_attention_kernel::
-                                           kDecodeWaveSplitStagedLogicalKernelId
-      : use_decode_gqa6_split_p128
-          ? ::sllm_causal_attention_kernel::kDecodeGqa6SplitP128LogicalKernelId
-      : use_decode_gqa6_split_p64
-          ? ::sllm_causal_attention_kernel::kDecodeGqa6SplitP64LogicalKernelId
-      : use_decode_gqa6_split_p32
-          ? ::sllm_causal_attention_kernel::kDecodeGqa6SplitP32LogicalKernelId
-      : use_prefill_gqa6_blocksoftmax_q8
-          ? ::sllm_causal_attention_kernel::
-                kPrefillGqa6BlockSoftmaxQ8Fp16LogicalKernelId
-      : use_prefill_gqa6_blocksoftmax
-          ? ::sllm_causal_attention_kernel::
-                kPrefillGqa6BlockSoftmaxFp16LogicalKernelId
-      : use_decode_gqa4_split_p32
-          ? ::sllm_causal_attention_kernel::kDecodeGqa4SplitP32LogicalKernelId
-      : use_decode_gqa4_split
-          ? ::sllm_causal_attention_kernel::kDecodeGqa4SplitLogicalKernelId
-      : use_decode_wave_split_fp16_pair
-          ? ::sllm_causal_attention_kernel::
-                kDecodeWaveSplitFp16PairLogicalKernelId
-      : use_decode_wave_split
-          ? (use_decode_wave_split_q_preload
-                 ? ::sllm_causal_attention_kernel::
-                       kDecodeWaveSplitQPreloadLogicalKernelId
-                 : ::sllm_causal_attention_kernel::
-                       kDecodeWaveSplitLogicalKernelId)
-      : use_gfx1201_gqa6_rocblas_f16_tail
-          ? ::sllm_causal_attention_kernel::
-                kGfx1201Gqa6RocblasF16TailLogicalKernelId
-      : use_gfx1201_gqa6_rocblas_f32 ? ::sllm_causal_attention_kernel::
-                                           kGfx1201Gqa6RocblasF32LogicalKernelId
-      : use_gqa6_rocblas_f32
-          ? ::sllm_causal_attention_kernel::kGqa6RocblasF32LogicalKernelId
-      : use_scaled_prefill_gemm
-          ? ::sllm_causal_attention_kernel::kScaledPrefillGemmLogicalKernelId
-      : use_prefill_gqa6_qtile8_w16
-          ? ::sllm_causal_attention_kernel::kPrefillGqa6QTile8W16LogicalKernelId
-      : use_prefill_gqa6_qtile4_k4_fp16
-          ? ::sllm_causal_attention_kernel::
-                kPrefillGqa6QTile4K4Fp16LogicalKernelId
-      : use_prefill_gqa6_qtile4_k8_fp16
-          ? ::sllm_causal_attention_kernel::
-                kPrefillGqa6QTile4K8Fp16LogicalKernelId
-      : use_prefill_gqa6_qtile4_k16_fp16
-          ? ::sllm_causal_attention_kernel::
-                kPrefillGqa6QTile4K16Fp16LogicalKernelId
-      : use_prefill_gqa6_qtile4_k32_fp16
-          ? ::sllm_causal_attention_kernel::
-                kPrefillGqa6QTile4K32Fp16LogicalKernelId
-      : use_prefill_gqa4_qtile4 ? (metadata.query.q_heads / kv_heads == 6U
-                                       ? ::sllm_causal_attention_kernel::
-                                             kPrefillGqa6QTile4LogicalKernelId
-                                       : ::sllm_causal_attention_kernel::
-                                             kPrefillGqa4QTile4LogicalKernelId)
-      : use_prefill_gqa4
-          ? ::sllm_causal_attention_kernel::kPrefillGqa4LogicalKernelId
-      : use_gfx1201_wave_provider
-          ? (encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-                 ? ::sllm_causal_attention_kernel::kGfx1201WaveLogicalKernelId
-                 : ::sllm_causal_attention_kernel::
-                       kGfx1201WavePackedKvLogicalKernelId)
-          : (encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-                 ? ::sllm_causal_attention_kernel::kLogicalKernelId
-                 : ::sllm_causal_attention_kernel::kPackedKvLogicalKernelId));
-  sllm_public_runtime::copy_fixed_string(
-      info->device_symbol, SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX,
-      sliding ? ::sllm_causal_attention_kernel::kSlidingStaticFp8DeviceSymbol
-      : explicitly_scaled
-          ? ::sllm_causal_attention_kernel::kScaledStaticFp8DeviceSymbol
-      : use_decode_wave_split_staged32
-          ? ::sllm_causal_attention_kernel::kDecodeWaveSplitStaged32DeviceSymbol
-      : use_decode_wave_split_staged
-          ? ::sllm_causal_attention_kernel::kDecodeWaveSplitStagedDeviceSymbol
-      : use_decode_gqa6_split_p128
-          ? ::sllm_causal_attention_kernel::kDecodeGqa6SplitP128DeviceSymbol
-      : use_decode_gqa6_split_p64
-          ? ::sllm_causal_attention_kernel::kDecodeGqa6SplitP64DeviceSymbol
-      : use_decode_gqa6_split_p32
-          ? ::sllm_causal_attention_kernel::kDecodeGqa6SplitP32DeviceSymbol
-      : use_prefill_gqa6_blocksoftmax_q8
-          ? ::sllm_causal_attention_kernel::
-                kPrefillGqa6BlockSoftmaxQ8Fp16DeviceSymbol
-      : use_prefill_gqa6_blocksoftmax
-          ? ::sllm_causal_attention_kernel::
-                kPrefillGqa6BlockSoftmaxFp16DeviceSymbol
-      : use_decode_gqa4_split_p32
-          ? ::sllm_causal_attention_kernel::kDecodeGqa4SplitP32DeviceSymbol
-      : use_decode_gqa4_split
-          ? ::sllm_causal_attention_kernel::kDecodeGqa4SplitDeviceSymbol
-      : use_decode_wave_split_fp16_pair
-          ? ::sllm_causal_attention_kernel::kDecodeWaveSplitFp16PairDeviceSymbol
-      : use_decode_wave_split
-          ? (use_decode_wave_split_q_preload
-                 ? ::sllm_causal_attention_kernel::
-                       kDecodeWaveSplitQPreloadDeviceSymbol
-                 : ::sllm_causal_attention_kernel::kDecodeWaveSplitDeviceSymbol)
-      : use_gfx1201_gqa6_rocblas_f16_tail
-          ? ::sllm_causal_attention_kernel::
-                kGfx1201Gqa6RocblasF16TailDeviceSymbol
-      : use_gfx1201_gqa6_rocblas_f32
-          ? ::sllm_causal_attention_kernel::kGfx1201Gqa6RocblasF32DeviceSymbol
-      : use_gqa6_rocblas_f32
-          ? ::sllm_causal_attention_kernel::kGqa6RocblasF32DeviceSymbol
-      : use_scaled_prefill_gemm
-          ? ::sllm_causal_attention_kernel::kScaledPrefillGemmDeviceSymbol
-      : use_prefill_gqa6_qtile8_w16
-          ? ::sllm_causal_attention_kernel::kPrefillGqa6QTile8W16DeviceSymbol
-      : use_prefill_gqa6_qtile4_k4_fp16
-          ? ::sllm_causal_attention_kernel::kPrefillGqa6QTile4K4Fp16DeviceSymbol
-      : use_prefill_gqa6_qtile4_k8_fp16
-          ? ::sllm_causal_attention_kernel::kPrefillGqa6QTile4K8Fp16DeviceSymbol
-      : use_prefill_gqa6_qtile4_k16_fp16
-          ? ::sllm_causal_attention_kernel::
-                kPrefillGqa6QTile4K16Fp16DeviceSymbol
-      : use_prefill_gqa6_qtile4_k32_fp16
-          ? ::sllm_causal_attention_kernel::
-                kPrefillGqa6QTile4K32Fp16DeviceSymbol
-      : use_prefill_gqa4_qtile4 ? (metadata.query.q_heads / kv_heads == 6U
-                                       ? ::sllm_causal_attention_kernel::
-                                             kPrefillGqa6QTile4DeviceSymbol
-                                       : ::sllm_causal_attention_kernel::
-                                             kPrefillGqa4QTile4DeviceSymbol)
-      : use_prefill_gqa4
-          ? ::sllm_causal_attention_kernel::kPrefillGqa4DeviceSymbol
-      : use_gfx1201_wave_provider
-          ? (encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-                 ? ::sllm_causal_attention_kernel::kGfx1201WaveDeviceSymbol
-                 : ::sllm_causal_attention_kernel::
-                       kGfx1201WavePackedKvDeviceSymbol)
-          : (encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-                 ? ::sllm_causal_attention_kernel::kDeviceSymbol
-                 : ::sllm_causal_attention_kernel::kPackedKvDeviceSymbol));
-  sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
-                                         SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
+      info->gcn_arch_name, SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
+  (void)encoding;
 }
 
 } // namespace
 
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-// Host-only selector introspection for target-scope contract tests.  The
-// production selector remains private; this bit layout is test ABI only.
-// Bits: gfx1201-wave, decode-wave-split, decode-fp16-pair, gqa4-p16,
-// gqa4-p32, gqa6-p64, gqa6-p32, gqa6-blocksoftmax (bit 18),
-// gqa6-blocksoftmax-q8 (bit 19), gfx1030 gqa6-rocblas-f32 (bit 20),
-// gfx1201 gqa6-rocblas-f32 (bit 21), decode-q-preload,
-// prefill-gqa4, prefill-gqa4-qtile4, scaled-prefill-gemm,
-// and gqa6-qtile4-k32-fp16 (bit 12).
-// Bit 22 is the gfx1030-only GQA6 P128 decode provider.
-// Bit 23 is the gfx1030-only MXFP8 E4 staged wave-split decode provider.
-// Bit 24 is the opt-in gfx1030/gfx1201 MXFP8 E4 wave32 staged decode provider.
-// Bit 25 is the gfx1030/gfx1201 MXFP8 E4 GQA6 Q_TILE8/W16 long-prefix
-// provider.
-// Bits 13..15 contain the mutually-exclusive GQA6 FP16 K4/K8/K16 candidates.
 extern "C" uint32_t sllm_test_select_causal_attention_providers_with_position(
     const uint64_t expected_kv_length, const uint32_t query_count,
     const uint32_t query_heads, const uint32_t kv_heads,
     const uint32_t head_dim, const uint32_t encoding,
     const uint64_t start_position, const uint64_t sliding_window,
     const uint32_t explicit_score_scale, const char *const arch_name) noexcept {
-  if (arch_name == nullptr) {
-    return 0U;
-  }
-  sllm_causal_attention::DescriptorMetadata metadata{};
-  metadata.query_count = query_count;
-  metadata.expected_kv_length = expected_kv_length;
-  metadata.start_position = start_position;
-  metadata.query.query_count = query_count;
-  metadata.query.q_heads = query_heads;
-  metadata.query.head_dim = head_dim;
-  metadata.sliding_window = sliding_window;
-  metadata.explicit_score_scale = explicit_score_scale != 0U;
-  const CausalAttentionProviderSelection selection =
-      select_causal_attention_provider(metadata, kv_heads, encoding, arch_name);
-  uint32_t mask = 0U;
-  mask |= selection.use_gfx1201_wave_provider ? (1U << 0U) : 0U;
-  mask |= selection.use_decode_wave_split ? (1U << 1U) : 0U;
-  mask |= selection.use_decode_wave_split_fp16_pair ? (1U << 2U) : 0U;
-  mask |= selection.use_decode_gqa4_split ? (1U << 3U) : 0U;
-  mask |= selection.use_decode_gqa4_split_p32 ? (1U << 4U) : 0U;
-  mask |= selection.use_decode_gqa6_split_p64 ? (1U << 17U) : 0U;
-  mask |= selection.use_prefill_gqa6_blocksoftmax ? (1U << 18U) : 0U;
-  mask |= selection.use_prefill_gqa6_blocksoftmax_q8 ? (1U << 19U) : 0U;
-  mask |= selection.use_decode_gqa6_split_p32 ? (1U << 16U) : 0U;
-  mask |= selection.use_decode_wave_split_q_preload ? (1U << 5U) : 0U;
-  mask |= selection.use_prefill_gqa4 ? (1U << 6U) : 0U;
-  mask |= selection.use_prefill_gqa4_qtile4 &&
-                  !selection.use_prefill_gqa6_qtile8_w16 &&
-                  !selection.use_prefill_gqa6_qtile4_k4_fp16 &&
-                  !selection.use_prefill_gqa6_qtile4_k8_fp16 &&
-                  !selection.use_prefill_gqa6_qtile4_k16_fp16 &&
-                  !selection.use_prefill_gqa6_qtile4_k32_fp16
-              ? (1U << 7U)
-              : 0U;
-  mask |= selection.use_prefill_gqa6_qtile4_k32_fp16 ? (1U << 12U) : 0U;
-  mask |= selection.use_prefill_gqa6_qtile4_k4_fp16 ? (1U << 13U) : 0U;
-  mask |= selection.use_prefill_gqa6_qtile4_k8_fp16 ? (1U << 14U) : 0U;
-  mask |= selection.use_prefill_gqa6_qtile4_k16_fp16 ? (1U << 15U) : 0U;
-  mask |= selection.use_scaled_prefill_gemm ? (1U << 8U) : 0U;
-  mask |= selection.use_gqa6_rocblas_f32 ? (1U << 20U) : 0U;
-  mask |= selection.use_gfx1201_gqa6_rocblas_f32 ? (1U << 21U) : 0U;
-  mask |= selection.use_decode_gqa6_split_p128 ? (1U << 22U) : 0U;
-  mask |= selection.use_decode_wave_split_staged ? (1U << 23U) : 0U;
-  mask |= selection.use_decode_wave_split_staged32 ? (1U << 24U) : 0U;
-  mask |= selection.use_decode_wave_split_gqa_shared ? (1U << 26U) : 0U;
-  mask |= selection.use_decode_wave_split128 ? (1U << 27U) : 0U;
-  mask |= selection.use_prefill_gqa6_qtile8_w16 ? (1U << 25U) : 0U;
-  return mask;
+  (void)expected_kv_length; (void)query_count; (void)query_heads;
+  (void)kv_heads; (void)head_dim; (void)encoding; (void)start_position;
+  (void)sliding_window; (void)explicit_score_scale; (void)arch_name;
+  return 0U;
 }
-
 extern "C" uint32_t sllm_test_select_causal_attention_providers_with_semantics(
     const uint64_t expected_kv_length, const uint32_t query_count,
     const uint32_t query_heads, const uint32_t kv_heads,
     const uint32_t head_dim, const uint32_t encoding,
     const uint64_t sliding_window, const uint32_t explicit_score_scale,
     const char *const arch_name) noexcept {
-  return sllm_test_select_causal_attention_providers_with_position(
-      expected_kv_length, query_count, query_heads, kv_heads, head_dim,
-      encoding, 0U, sliding_window, explicit_score_scale, arch_name);
+  (void)expected_kv_length; (void)query_count; (void)query_heads;
+  (void)kv_heads; (void)head_dim; (void)encoding; (void)sliding_window;
+  (void)explicit_score_scale; (void)arch_name;
+  return 0U;
 }
-
 extern "C" uint32_t sllm_test_select_causal_attention_providers(
     const uint64_t expected_kv_length, const uint32_t query_count,
     const uint32_t query_heads, const uint32_t kv_heads,
     const uint32_t head_dim, const uint32_t encoding,
     const char *const arch_name) noexcept {
-  return sllm_test_select_causal_attention_providers_with_semantics(
-      expected_kv_length, query_count, query_heads, kv_heads, head_dim,
-      encoding, 0U, 0U, arch_name);
+  (void)expected_kv_length; (void)query_count; (void)query_heads;
+  (void)kv_heads; (void)head_dim; (void)encoding; (void)arch_name;
+  return 0U;
 }
-
 extern "C" uint32_t sllm_test_select_causal_attention_gqa4(
     const uint64_t expected_kv_length, const uint32_t query_count,
     const uint32_t query_heads, const uint32_t kv_heads,
     const uint32_t head_dim, const uint32_t encoding,
     const char *const arch_name) noexcept {
-  if (arch_name == nullptr) {
-    return 0U;
-  }
-  sllm_causal_attention::DescriptorMetadata metadata{};
-  metadata.query_count = query_count;
-  metadata.expected_kv_length = expected_kv_length;
-  metadata.query.query_count = query_count;
-  metadata.query.q_heads = query_heads;
-  metadata.query.head_dim = head_dim;
-  const CausalAttentionProviderSelection selection =
-      select_causal_attention_provider(metadata, kv_heads, encoding, arch_name);
-  return (selection.use_decode_gqa4_split ? 1U : 0U) |
-         (selection.use_decode_gqa4_split_p32 ? 2U : 0U);
+  (void)expected_kv_length; (void)query_count; (void)query_heads;
+  (void)kv_heads; (void)head_dim; (void)encoding; (void)arch_name;
+  return 0U;
 }
 #endif
 
@@ -1279,7 +429,8 @@ static sllm_status_t causal_attention_execute_impl(
                      ? metadata.query_count != 0U &&
                            metadata.query_count <= 9U &&
                            metadata.start_position >= state->published_length &&
-                           metadata.start_position - state->published_length <= 8U &&
+                           metadata.start_position - state->published_length <=
+                               8U &&
                            metadata.start_position <=
                                UINT64_MAX - metadata.query_count
                      : metadata.expected_kv_length == state->published_length &&
@@ -1433,9 +584,134 @@ static sllm_status_t causal_attention_execute_impl(
           "target");
     }
 #endif
-    const CausalAttentionProviderSelection selection =
-        select_causal_attention_provider(metadata, state->head_count,
-                                         state->encoding, arch_name);
+    bool use_paged_decode_gqa6 = false;
+    bool use_paged_decode_gqa6_c1 = false;
+    bool use_paged_prefill_gqa6 = false;
+    bool use_paged_decode_fp16 = false;
+    [[maybe_unused]] bool use_paged_prefill_gqa4 = false;
+    bool use_paged_prefill_fp16 = false;
+    bool use_paged_generic_formats = false;
+    bool use_paged_sliding_static_fp8 = false;
+    bool whole_paged_decode_gqa6_capture = false;
+    bool whole_paged_decode_gqa6_c1_capture = false;
+    bool whole_paged_decode_fp16_capture = false;
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    if (state->paged) {
+      const bool exact_paged_target = std::strcmp(arch_name, "gfx1030") == 0 ||
+                                      std::strcmp(arch_name, "gfx1201") == 0;
+      const bool paged_tables_ready =
+          state->paged_device_status != nullptr &&
+          state->paged_device_pool != nullptr &&
+          state->paged_logical_table != nullptr &&
+          state->paged_logical_table->device_table() != nullptr &&
+          state->paged_device_pool->device_descriptor_table() != nullptr &&
+          state->paged_token_block_size == SLLM_HIP_KV_PAGED_TOKEN_BLOCK_SIZE &&
+          state->paged_physical_layout_version ==
+              SLLM_HIP_KV_PAGED_LAYOUT_VERSION &&
+          state->paged_logical_table->size() <=
+              std::numeric_limits<uint32_t>::max() &&
+          state->paged_device_pool->physical_capacity() != 0U;
+      const bool paged_sliding_static_shape =
+          state->sliding_window == sllm_paged_kv::kSlidingWindowTokens &&
+          state->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 &&
+          state->head_count != 0U && metadata.query.q_heads != 0U &&
+          metadata.query.q_heads % state->head_count == 0U &&
+          metadata.query.head_dim == state->head_dim &&
+          state->head_dim <= SLLM_HIP_KV_MAX_HEAD_DIM &&
+          state->paged_sliding_ring_tags_device != nullptr &&
+          state->paged_sliding_host_state != nullptr &&
+          metadata.sliding_window == sllm_paged_kv::kSlidingWindowTokens &&
+          (!metadata.explicit_score_scale || metadata.score_scale == 1.0F) &&
+          metadata.expected_kv_length != 0U;
+      const bool paged_mxfp8_gqa6_shape =
+          state->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
+          state->head_count == 4U && state->head_dim == 256U &&
+          metadata.query.q_heads == 24U && metadata.query.head_dim == 256U &&
+          metadata.sliding_window == 0U && !metadata.explicit_score_scale &&
+          metadata.expected_kv_length != 0U;
+      const bool paged_fp16_shape =
+          state->encoding == SLLM_HIP_KV_ENCODING_FP16_V1 &&
+          state->head_count == 4U && state->head_dim == 256U &&
+          (metadata.query.q_heads == 16U || metadata.query.q_heads == 24U) &&
+          metadata.query.head_dim == 256U && metadata.sliding_window == 0U &&
+          !metadata.explicit_score_scale && metadata.expected_kv_length != 0U;
+      const bool paged_generic_encoding =
+          state->encoding == SLLM_HIP_KV_ENCODING_FP16_V1 ||
+          state->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
+          state->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 ||
+          state->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 ||
+          state->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+          (state->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1 &&
+           std::strcmp(arch_name, "gfx1030") == 0);
+      const bool paged_generic_shape =
+          paged_generic_encoding && state->head_count != 0U &&
+          metadata.query.q_heads % state->head_count == 0U &&
+          metadata.query.head_dim == state->head_dim &&
+          metadata.sliding_window == 0U && metadata.expected_kv_length != 0U;
+      whole_paged_decode_gqa6_capture =
+          whole_graph_capture_active() && graph_capture_queue == queue &&
+          paged_mxfp8_gqa6_shape && metadata.query_count <= 5U;
+      whole_paged_decode_gqa6_c1_capture =
+          whole_paged_decode_gqa6_capture && metadata.query_count == 3U &&
+          metadata.expected_kv_length >= 8192U;
+      whole_paged_decode_gqa6_capture =
+          whole_paged_decode_gqa6_capture &&
+          !whole_paged_decode_gqa6_c1_capture;
+      whole_paged_decode_fp16_capture =
+          whole_graph_capture_active() && graph_capture_queue == queue &&
+          paged_fp16_shape && metadata.query_count <= 5U;
+      if (!exact_paged_target || !paged_tables_ready ||
+          (!paged_sliding_static_shape && !paged_mxfp8_gqa6_shape &&
+           !paged_fp16_shape && !paged_generic_shape)) {
+        execute_guard.disarm();
+        (void)rollback_reserved_causal_attention(state, queue, {query, output},
+                                                 error_sink);
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_UNSUPPORTED,
+            "paged causal attention format, shape, or exact target is "
+            "unsupported");
+      }
+      if (whole_graph_capture_active() && graph_capture_queue == queue &&
+          !whole_paged_decode_gqa6_capture &&
+          !whole_paged_decode_gqa6_c1_capture &&
+          !whole_paged_decode_fp16_capture) {
+        execute_guard.disarm();
+        (void)rollback_reserved_causal_attention(state, queue, {query, output},
+                                                 error_sink);
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_UNSUPPORTED,
+            "paged causal attention is not available during graph capture");
+      }
+      use_paged_decode_gqa6 =
+          paged_mxfp8_gqa6_shape && metadata.query_count <= 5U;
+      use_paged_decode_gqa6_c1 =
+          use_paged_decode_gqa6 && metadata.query_count == 3U &&
+          metadata.expected_kv_length >= 8192U;
+      use_paged_decode_gqa6 =
+          use_paged_decode_gqa6 && !use_paged_decode_gqa6_c1;
+      use_paged_prefill_gqa6 = paged_mxfp8_gqa6_shape &&
+                               !use_paged_decode_gqa6 &&
+                               !use_paged_decode_gqa6_c1;
+      use_paged_decode_fp16 = paged_fp16_shape && metadata.query_count <= 5U;
+      use_paged_prefill_gqa4 =
+          paged_fp16_shape && !use_paged_decode_fp16 &&
+          metadata.query_count >= 64U && metadata.query.q_heads == 16U &&
+          state->head_count == 4U;
+      use_paged_prefill_fp16 =
+          paged_fp16_shape && !use_paged_decode_fp16 &&
+          !use_paged_prefill_gqa4;
+      use_paged_generic_formats =
+          paged_generic_shape && !paged_mxfp8_gqa6_shape && !paged_fp16_shape;
+      use_paged_sliding_static_fp8 = paged_sliding_static_shape;
+    } else {
+      execute_guard.disarm();
+      (void)rollback_reserved_causal_attention(state, queue, {query, output},
+                                               error_sink);
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "legacy contiguous KV attention is unsupported; use Paged KV");
+    }
+#endif
     void *scaled_prefill_workspace = nullptr;
     uint64_t scaled_prefill_workspace_bytes = 0U;
     try {
@@ -1446,6 +722,22 @@ static sllm_status_t causal_attention_execute_impl(
       candidate->causal_attention_buffers = {query, output};
       candidate->submission_serial = submission_serial;
       candidate->dependent_append = chained ? dependency : nullptr;
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      if (use_paged_decode_gqa6 || use_paged_decode_gqa6_c1 ||
+          use_paged_prefill_gqa6 ||
+          use_paged_decode_fp16 || use_paged_prefill_gqa4 ||
+          use_paged_prefill_fp16 ||
+          use_paged_generic_formats || use_paged_sliding_static_fp8) {
+        if (!whole_paged_decode_gqa6_capture &&
+            !whole_paged_decode_gqa6_c1_capture &&
+            !whole_paged_decode_fp16_capture &&
+            !arm_completion_device_status(candidate.get(),
+                                          state->paged_device_status)) {
+          throw std::runtime_error(
+              "paged causal attention device status arm failed");
+        }
+      }
+#endif
       execute_guard.candidate_allocated();
     } catch (...) {
       execute_guard.disarm();
@@ -1455,90 +747,27 @@ static sllm_status_t causal_attention_execute_impl(
           error_sink, SLLM_STATUS_INTERNAL_ERROR,
           "causal attention completion allocation failed before enqueue");
     }
-    if (selection.use_decode_wave_split_staged32) {
-      const hipError_t plan_status = prepare_causal_workspace_plan_for_bytes(
-          context, queue,
-          kDecodeWaveSplitStaged32Split128WorkspaceBytesPerQuery *
-              kDecodeWaveSplitStaged32MaxQueryCount,
-          &scaled_prefill_workspace, &scaled_prefill_workspace_bytes);
-      if (plan_status != hipSuccess) {
-        execute_guard.disarm();
-        (void)rollback_reserved_causal_attention(state, queue, {query, output},
-                                                 error_sink);
-        return hip_failure(
-            error_sink, plan_status,
-            "causal attention gfx1201 staged decode workspace prepare");
-      }
-      candidate->causal_scaled_prefill_plan_acquired = true;
-    } else if (selection.use_decode_wave_split_staged) {
-      const hipError_t plan_status = prepare_causal_workspace_plan_for_bytes(
-          context, queue,
-          kDecodeWaveSplitStagedWorkspaceBytesPerQuery * metadata.query_count,
-          &scaled_prefill_workspace, &scaled_prefill_workspace_bytes);
-      if (plan_status != hipSuccess) {
-        execute_guard.disarm();
-        (void)rollback_reserved_causal_attention(state, queue, {query, output},
-                                                 error_sink);
-        return hip_failure(error_sink, plan_status,
-                           "causal attention staged decode workspace prepare");
-      }
-      candidate->causal_scaled_prefill_plan_acquired = true;
-    } else if (selection.use_decode_gqa4_split ||
-               selection.use_decode_gqa4_split_p32 ||
-               selection.use_decode_gqa6_split_p128 ||
-               selection.use_decode_gqa6_split_p64 ||
-               selection.use_decode_gqa6_split_p32) {
-      const uint64_t workspace_bytes = selection.use_decode_gqa6_split_p128
-                                           ? kDecodeGqa6SplitP128WorkspaceBytes
-                                       : selection.use_decode_gqa6_split_p64
-                                           ? kDecodeGqa6SplitP64WorkspaceBytes
-                                       : selection.use_decode_gqa6_split_p32
-                                           ? kDecodeGqa6SplitP32WorkspaceBytes
-                                       : selection.use_decode_gqa4_split_p32
-                                           ? kDecodeGqa4SplitP32WorkspaceBytes
-                                           : kDecodeGqa4SplitWorkspaceBytes;
-      const hipError_t plan_status = prepare_causal_workspace_plan_for_bytes(
-          context, queue, workspace_bytes, &scaled_prefill_workspace,
-          &scaled_prefill_workspace_bytes);
-      if (plan_status != hipSuccess) {
-        execute_guard.disarm();
-        (void)rollback_reserved_causal_attention(state, queue, {query, output},
-                                                 error_sink);
-        return hip_failure(error_sink, plan_status,
-                           "causal attention GQA split workspace prepare");
-      }
-      candidate->causal_scaled_prefill_plan_acquired = true;
-    } else if (selection.use_gqa6_rocblas_f32 ||
-               selection.use_gfx1201_gqa6_rocblas_f32) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      const uint64_t workspace_bytes = 0U;
-#else
-      const hipError_t handle_status = ensure_gqa6_rocblas_handle(context);
-      if (handle_status != hipSuccess) {
-        execute_guard.disarm();
-        (void)rollback_reserved_causal_attention(state, queue, {query, output},
-                                                 error_sink);
-        return hip_failure(error_sink, handle_status,
-                           "causal attention GQA6 rocBLAS handle prepare");
-      }
-      const uint64_t workspace_bytes =
-          selection.use_gfx1201_gqa6_rocblas_f16_tail
-              ? ::sllm_causal_attention_kernel::
-                    gqa6_rocblas_f16_tail_workspace_bytes(
-                        static_cast<uint32_t>(metadata.query_count),
-                        metadata.expected_kv_length)
-              : ::sllm_causal_attention_kernel::
-                    gqa6_rocblas_f32_workspace_bytes(
-                        static_cast<uint32_t>(metadata.query_count),
-                        metadata.expected_kv_length);
-#endif
-      if (workspace_bytes == 0U) {
+    if (use_paged_decode_gqa6 || use_paged_decode_gqa6_c1) {
+      uint64_t workspace_bytes = 0U;
+      const bool workspace_valid =
+          (whole_paged_decode_gqa6_capture ||
+           whole_paged_decode_gqa6_c1_capture)
+              ? metadata.query_count != 0U && metadata.query_count <= 5U &&
+                    static_cast<uint64_t>(metadata.query_count) <=
+                        UINT64_MAX / kDecodeGqa6SplitP128WorkspaceBytes &&
+                    (workspace_bytes =
+                         static_cast<uint64_t>(metadata.query_count) *
+                         kDecodeGqa6SplitP128WorkspaceBytes) != 0U
+              : paged_decode_workspace_bytes(
+                    static_cast<uint32_t>(metadata.query_count),
+                    metadata.expected_kv_length, &workspace_bytes);
+      if (!workspace_valid) {
         execute_guard.disarm();
         (void)rollback_reserved_causal_attention(state, queue, {query, output},
                                                  error_sink);
         return sllm_public_runtime::write_error(
-            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-            "causal attention GQA6 rocBLAS workspace shape is invalid");
+            error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+            "paged GQA6 decode workspace size is invalid");
       }
       const hipError_t plan_status = prepare_causal_workspace_plan_for_bytes(
           context, queue, workspace_bytes, &scaled_prefill_workspace,
@@ -1548,21 +777,17 @@ static sllm_status_t causal_attention_execute_impl(
         (void)rollback_reserved_causal_attention(state, queue, {query, output},
                                                  error_sink);
         return hip_failure(error_sink, plan_status,
-                           "causal attention GQA6 rocBLAS workspace prepare");
+                           "causal attention paged GQA6 decode workspace "
+                           "prepare");
       }
       candidate->causal_scaled_prefill_plan_acquired = true;
-    } else if (selection.use_scaled_prefill_gemm) {
-      const hipError_t plan_status = prepare_causal_scaled_prefill_plan(
-          context, queue, metadata.expected_kv_length,
-          &scaled_prefill_workspace, &scaled_prefill_workspace_bytes);
-      if (plan_status != hipSuccess) {
-        execute_guard.disarm();
-        (void)rollback_reserved_causal_attention(state, queue, {query, output},
-                                                 error_sink);
-        return hip_failure(error_sink, plan_status,
-                           "causal attention scaled-prefill workspace prepare");
-      }
-      candidate->causal_scaled_prefill_plan_acquired = true;
+    } else if (use_paged_prefill_gqa6 || use_paged_decode_fp16 ||
+               use_paged_prefill_fp16 || use_paged_generic_formats ||
+               use_paged_sliding_static_fp8) {
+      // The paged qtile8 prefill kernel owns its temporary storage and does
+      // not consume the legacy contiguous-KV workspace cache.
+      scaled_prefill_workspace = nullptr;
+      scaled_prefill_workspace_bytes = 0U;
     }
     hipEvent_t native_event = nullptr;
     const hipError_t event_status =
@@ -1628,9 +853,9 @@ static sllm_status_t causal_attention_execute_impl(
       return static_cast<char *>(buffer->device_pointer) +
              static_cast<std::size_t>(offset);
     };
-    const uint16_t *const query_pointer = static_cast<const uint16_t *>(
+    [[maybe_unused]] const uint16_t *const query_pointer = static_cast<const uint16_t *>(
         byte_pointer(query, metadata.query.byte_offset));
-    uint16_t *const output_pointer = static_cast<uint16_t *>(
+    [[maybe_unused]] uint16_t *const output_pointer = static_cast<uint16_t *>(
         byte_pointer(output, metadata.output.byte_offset));
     auto *const device_control =
         graph_capture_queue == queue
@@ -1644,9 +869,9 @@ static sllm_status_t causal_attention_execute_impl(
           "whole-decode attention requires a device control buffer", queue,
           error_sink);
     }
-    if (device_control != nullptr &&
-        (!selection.use_decode_wave_split_staged32 ||
-         state->encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1)) {
+    if (device_control != nullptr && !whole_paged_decode_gqa6_capture &&
+        !whole_paged_decode_gqa6_c1_capture &&
+        !whole_paged_decode_fp16_capture) {
       execute_guard.disarm();
       return cleanup_failed_submission(
           candidate, token, hipErrorNotSupported,
@@ -1654,294 +879,205 @@ static sllm_status_t causal_attention_execute_impl(
           queue, error_sink);
     }
     hipError_t launch_status = hipSuccess;
-    if (selection.use_decode_wave_split_staged32) {
-      launch_status = device_control != nullptr
-          ? ::sllm_causal_attention_kernel::launch_decode_wave_split_staged32_device(
-              query_pointer, state->key_buffer->device_pointer,
-              state->value_buffer->device_pointer,
-              state->key_scale_plane.address, state->value_scale_plane.address,
-              static_cast<const float *>(state->key_outer_scale_plane.address),
-              static_cast<const float *>(
-                  state->value_outer_scale_plane.address),
-              output_pointer, static_cast<uint32_t>(metadata.query_count),
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    if (use_paged_sliding_static_fp8) {
+      launch_status = ::sllm_causal_attention_kernel::
+          launch_paged_sliding_static_fp8_attention(
+              query_pointer, state->paged_logical_table->device_table(),
+              state->paged_sliding_ring_tags_device,
+              state->paged_device_pool->device_descriptor_table(),
+              sllm_paged_kv::kSlidingRingSlots,
+              state->paged_device_pool->physical_capacity(),
+              state->paged_device_status, output_pointer,
+              static_cast<uint32_t>(metadata.query_count),
               metadata.start_position, metadata.expected_kv_length,
-              metadata.query.q_heads, state->head_count, state->head_dim,
-              state->encoding, state->static_key_scale,
-              state->static_value_scale, scaled_prefill_workspace,
-              scaled_prefill_workspace_bytes,
-              selection.use_decode_wave_split_q_preload,
-              selection.use_decode_wave_split_gqa_shared, device_control,
-              queue->stream)
-          : ::sllm_causal_attention_kernel::launch_decode_wave_split_staged32(
-              query_pointer, state->key_buffer->device_pointer,
-              state->value_buffer->device_pointer,
-              state->key_scale_plane.address, state->value_scale_plane.address,
-              static_cast<const float *>(state->key_outer_scale_plane.address),
-              static_cast<const float *>(
-                  state->value_outer_scale_plane.address),
-              output_pointer, static_cast<uint32_t>(metadata.query_count),
-              metadata.start_position, metadata.expected_kv_length,
-              metadata.query.q_heads, state->head_count, state->head_dim,
-              state->encoding, state->static_key_scale,
-              state->static_value_scale, scaled_prefill_workspace,
-              scaled_prefill_workspace_bytes,
-              selection.use_decode_wave_split_q_preload,
-              selection.use_decode_wave_split_gqa_shared,
-              selection.use_decode_wave_split128, queue->stream);
-    } else if (selection.use_decode_wave_split_staged) {
+              state->retained_start, metadata.query.q_heads, state->head_count,
+              state->head_dim, state->static_key_scale,
+              state->static_value_scale,
+              metadata.explicit_score_scale
+                  ? metadata.score_scale
+                  : 1.0F / std::sqrt(static_cast<float>(state->head_dim)),
+              queue->stream);
+    } else if (use_paged_decode_fp16 || use_paged_prefill_gqa4 ||
+               use_paged_prefill_fp16) {
+      const auto *const table = state->paged_logical_table->device_table();
+      const auto *const descriptors =
+          state->paged_device_pool->device_descriptor_table();
+      const uint32_t logical_count =
+          static_cast<uint32_t>(state->paged_logical_table->size());
+      const uint32_t physical_count =
+          state->paged_device_pool->physical_capacity();
       launch_status =
-          ::sllm_causal_attention_kernel::launch_decode_wave_split_staged(
-              query_pointer, state->key_buffer->device_pointer,
-              state->value_buffer->device_pointer,
-              state->key_scale_plane.address, state->value_scale_plane.address,
-              static_cast<const float *>(state->key_outer_scale_plane.address),
-              static_cast<const float *>(
-                  state->value_outer_scale_plane.address),
-              output_pointer, static_cast<uint32_t>(metadata.query_count),
-              metadata.start_position, metadata.expected_kv_length,
-              metadata.query.q_heads, state->head_count, state->head_dim,
-              state->encoding, state->static_key_scale,
-              state->static_value_scale, scaled_prefill_workspace,
-              scaled_prefill_workspace_bytes,
-              selection.use_decode_wave_split_q_preload, queue->stream);
-    } else if (selection.use_decode_gqa6_split_p128) {
-      launch_status =
-          ::sllm_causal_attention_kernel::launch_decode_gqa6_split_p128(
-              query_pointer, state->key_buffer->device_pointer,
-              state->value_buffer->device_pointer,
-              state->key_scale_plane.address, state->value_scale_plane.address,
-              static_cast<const float *>(state->key_outer_scale_plane.address),
-              static_cast<const float *>(
-                  state->value_outer_scale_plane.address),
-              output_pointer, static_cast<uint32_t>(metadata.query_count),
-              metadata.start_position, metadata.expected_kv_length,
-              metadata.query.q_heads, state->head_count, state->head_dim,
-              state->encoding, state->static_key_scale,
-              state->static_value_scale, scaled_prefill_workspace,
-              scaled_prefill_workspace_bytes, queue->stream);
-    } else if (selection.use_decode_gqa6_split_p64) {
-      launch_status =
-          ::sllm_causal_attention_kernel::launch_decode_gqa6_split_p64(
-              query_pointer, state->key_buffer->device_pointer,
-              state->value_buffer->device_pointer,
-              state->key_scale_plane.address, state->value_scale_plane.address,
-              static_cast<const float *>(state->key_outer_scale_plane.address),
-              static_cast<const float *>(
-                  state->value_outer_scale_plane.address),
-              output_pointer, static_cast<uint32_t>(metadata.query_count),
-              metadata.start_position, metadata.expected_kv_length,
-              metadata.query.q_heads, state->head_count, state->head_dim,
-              state->encoding, state->static_key_scale,
-              state->static_value_scale, scaled_prefill_workspace,
-              scaled_prefill_workspace_bytes, queue->stream);
-    } else if (selection.use_decode_gqa6_split_p32) {
-      launch_status =
-          ::sllm_causal_attention_kernel::launch_decode_gqa6_split_p32(
-              query_pointer, state->key_buffer->device_pointer,
-              state->value_buffer->device_pointer,
-              state->key_scale_plane.address, state->value_scale_plane.address,
-              static_cast<const float *>(state->key_outer_scale_plane.address),
-              static_cast<const float *>(
-                  state->value_outer_scale_plane.address),
-              output_pointer, static_cast<uint32_t>(metadata.query_count),
-              metadata.start_position, metadata.expected_kv_length,
-              metadata.query.q_heads, state->head_count, state->head_dim,
-              state->encoding, state->static_key_scale,
-              state->static_value_scale, scaled_prefill_workspace,
-              scaled_prefill_workspace_bytes, queue->stream);
-    } else if (selection.use_decode_gqa4_split_p32) {
-      launch_status =
-          ::sllm_causal_attention_kernel::launch_decode_gqa4_split_p32(
-              query_pointer, state->key_buffer->device_pointer,
-              state->value_buffer->device_pointer,
-              state->key_scale_plane.address, state->value_scale_plane.address,
-              static_cast<const float *>(state->key_outer_scale_plane.address),
-              static_cast<const float *>(
-                  state->value_outer_scale_plane.address),
-              output_pointer, static_cast<uint32_t>(metadata.query_count),
-              metadata.start_position, metadata.expected_kv_length,
-              metadata.query.q_heads, state->head_count, state->head_dim,
-              state->encoding, state->static_key_scale,
-              state->static_value_scale, scaled_prefill_workspace,
-              scaled_prefill_workspace_bytes, queue->stream);
-    } else if (selection.use_decode_gqa4_split) {
-      launch_status = ::sllm_causal_attention_kernel::launch_decode_gqa4_split(
-          query_pointer, state->key_buffer->device_pointer,
-          state->value_buffer->device_pointer, state->key_scale_plane.address,
-          state->value_scale_plane.address,
-          static_cast<const float *>(state->key_outer_scale_plane.address),
-          static_cast<const float *>(state->value_outer_scale_plane.address),
-          output_pointer, static_cast<uint32_t>(metadata.query_count),
-          metadata.start_position, metadata.expected_kv_length,
-          metadata.query.q_heads, state->head_count, state->head_dim,
-          state->encoding, state->static_key_scale, state->static_value_scale,
-          scaled_prefill_workspace, scaled_prefill_workspace_bytes,
-          queue->stream);
-    } else if (selection.use_gqa6_rocblas_f32 ||
-               selection.use_gfx1201_gqa6_rocblas_f32) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      launch_status = hipErrorNotSupported;
-#else
-      launch_status =
-          selection.use_gfx1201_gqa6_rocblas_f16_tail
-              ? ::sllm_causal_attention_kernel::launch_gqa6_rocblas_f16_tail(
-                    query_pointer, state->key_buffer->device_pointer,
-                    state->value_buffer->device_pointer, output_pointer,
-                    static_cast<uint32_t>(metadata.query_count),
-                    metadata.start_position, metadata.expected_kv_length,
-                    metadata.query.q_heads, state->head_count, state->head_dim,
-                    state->encoding, scaled_prefill_workspace,
-                    scaled_prefill_workspace_bytes,
-                    context->matmul_rocblas_handle, &context->matmul_blas_mutex,
-                    queue->stream)
-              : ::sllm_causal_attention_kernel::launch_gqa6_rocblas_f32(
-                    query_pointer, state->key_buffer->device_pointer,
-                    state->value_buffer->device_pointer, output_pointer,
-                    static_cast<uint32_t>(metadata.query_count),
-                    metadata.start_position, metadata.expected_kv_length,
-                    metadata.query.q_heads, state->head_count, state->head_dim,
-                    state->encoding, scaled_prefill_workspace,
-                    scaled_prefill_workspace_bytes,
-                    context->matmul_rocblas_handle, &context->matmul_blas_mutex,
-                    queue->stream);
-#endif
-    } else if (selection.use_scaled_prefill_gemm) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      launch_status = hipErrorNotSupported;
-#else
-      launch_status =
-          ::sllm_causal_attention_kernel::launch_scaled_prefill_gemm(
-              query_pointer, state->key_buffer->device_pointer,
-              state->value_buffer->device_pointer,
-              state->key_scale_plane.address, state->value_scale_plane.address,
-              static_cast<const float *>(state->key_outer_scale_plane.address),
-              static_cast<const float *>(
-                  state->value_outer_scale_plane.address),
-              output_pointer, static_cast<uint32_t>(metadata.query_count),
-              metadata.start_position, metadata.expected_kv_length,
-              metadata.query.q_heads, state->head_count, state->head_dim,
-              state->encoding, state->static_key_scale,
-              state->static_value_scale, scaled_prefill_workspace,
-              scaled_prefill_workspace_bytes, context->matmul_blas_handle,
-              &context->matmul_blas_mutex, queue->stream);
-#endif
-    } else if (selection.use_prefill_gqa6_blocksoftmax_q8) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      launch_status = hipErrorNotSupported;
-#else
-      launch_status =
-          ::sllm_causal_attention_kernel::launch_gqa6_blocksoftmax_q8_fp16(
-              query_pointer, state->key_buffer->device_pointer,
-              state->value_buffer->device_pointer,
-              state->key_scale_plane.address, state->value_scale_plane.address,
-              static_cast<const float *>(state->key_outer_scale_plane.address),
-              static_cast<const float *>(
-                  state->value_outer_scale_plane.address),
-              output_pointer, static_cast<uint32_t>(metadata.query_count),
-              metadata.start_position, metadata.query.q_heads,
-              state->head_count, state->head_dim, state->static_key_scale,
-              state->static_value_scale, queue->stream);
-#endif
-    } else if (selection.use_prefill_gqa6_blocksoftmax) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      launch_status = hipErrorNotSupported;
-#else
-      const uint32_t key_tile =
-          std::strcmp(arch_name, "gfx1030") == 0 ? 32U : 8U;
-      launch_status =
-          ::sllm_causal_attention_kernel::launch_gqa6_blocksoftmax_fp16(
-              query_pointer, state->key_buffer->device_pointer,
-              state->value_buffer->device_pointer,
-              state->key_scale_plane.address, state->value_scale_plane.address,
-              static_cast<const float *>(state->key_outer_scale_plane.address),
-              static_cast<const float *>(
-                  state->value_outer_scale_plane.address),
-              output_pointer, static_cast<uint32_t>(metadata.query_count),
-              metadata.start_position, metadata.query.q_heads,
-              state->head_count, state->head_dim, state->static_key_scale,
-              state->static_value_scale, key_tile, queue->stream);
-#endif
-    } else if (selection.use_decode_wave_split_fp16_pair) {
-      launch_status =
-          ::sllm_causal_attention_kernel::launch_decode_wave_split_fp16_pair(
-              query_pointer, state->key_buffer->device_pointer,
-              state->value_buffer->device_pointer,
-              state->key_scale_plane.address, state->value_scale_plane.address,
-              static_cast<const float *>(state->key_outer_scale_plane.address),
-              static_cast<const float *>(
-                  state->value_outer_scale_plane.address),
-              output_pointer, static_cast<uint32_t>(metadata.query_count),
-              metadata.start_position, metadata.expected_kv_length,
-              metadata.query.q_heads, state->head_count, state->head_dim,
-              state->encoding, state->static_key_scale,
-              state->static_value_scale, queue->stream);
-    } else if (selection.use_prefill_gqa6_qtile8_w16) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      launch_status = hipErrorNotSupported;
-#else
-      const bool wave_local_kv = std::strcmp(arch_name, "gfx1201") == 0 &&
-                                 metadata.query_count == 2048U;
-      launch_status = ::sllm_causal_attention_kernel::launch_gqa6_qtile8_w16(
-          query_pointer, state->key_buffer->device_pointer,
-          state->value_buffer->device_pointer, state->key_scale_plane.address,
-          state->value_scale_plane.address,
-          static_cast<const float *>(state->key_outer_scale_plane.address),
-          static_cast<const float *>(state->value_outer_scale_plane.address),
-          output_pointer, static_cast<uint32_t>(metadata.query_count),
-          metadata.start_position, metadata.query.q_heads, state->head_count,
-          state->head_dim, state->encoding, state->static_key_scale,
-          state->static_value_scale, wave_local_kv, queue->stream);
-#endif
-    } else if (selection.use_prefill_gqa6_qtile4_k4_fp16 ||
-               selection.use_prefill_gqa6_qtile4_k8_fp16 ||
-               selection.use_prefill_gqa6_qtile4_k16_fp16 ||
-               selection.use_prefill_gqa6_qtile4_k32_fp16) {
-#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-      launch_status = hipErrorNotSupported;
-#else
-      const uint32_t key_tile = selection.use_prefill_gqa6_qtile4_k4_fp16   ? 4U
-                                : selection.use_prefill_gqa6_qtile4_k8_fp16 ? 8U
-                                : selection.use_prefill_gqa6_qtile4_k16_fp16
-                                    ? 16U
-                                    : 32U;
-      launch_status = ::sllm_causal_attention_kernel::launch_gqa6_qtile4_fp16(
-          query_pointer, state->key_buffer->device_pointer,
-          state->value_buffer->device_pointer, state->key_scale_plane.address,
-          state->value_scale_plane.address,
-          static_cast<const float *>(state->key_outer_scale_plane.address),
-          static_cast<const float *>(state->value_outer_scale_plane.address),
-          output_pointer, static_cast<uint32_t>(metadata.query_count),
-          metadata.start_position, metadata.query.q_heads, state->head_count,
-          state->head_dim, state->static_key_scale, state->static_value_scale,
-          key_tile, queue->stream);
-#endif
-    } else {
-      launch_status = ::sllm_causal_attention_kernel::launch(
-          query_pointer, state->key_buffer->device_pointer,
-          state->value_buffer->device_pointer, state->key_scale_plane.address,
-          state->value_scale_plane.address,
-          static_cast<const float *>(state->key_outer_scale_plane.address),
-          static_cast<const float *>(state->value_outer_scale_plane.address),
-          output_pointer, static_cast<uint32_t>(metadata.query_count),
-          state->storage_capacity_tokens, metadata.start_position,
+          use_paged_decode_fp16
+              ? (whole_paged_decode_fp16_capture
+                     ? ::sllm_causal_attention_kernel::
+                           launch_paged_decode_fp16_device(
+                               query_pointer, table, descriptors, logical_count,
+                               physical_count, state->paged_device_status,
+                               output_pointer,
+                               static_cast<uint32_t>(metadata.query_count),
+                               metadata.query.q_heads, state->head_count,
+                               state->head_dim, device_control, queue->stream)
+                     : ::sllm_causal_attention_kernel::launch_paged_decode_fp16(
+                           query_pointer, table, descriptors, logical_count,
+                           physical_count, state->paged_device_status,
+                           output_pointer,
+                           static_cast<uint32_t>(metadata.query_count),
+                           metadata.start_position, metadata.expected_kv_length,
+                           metadata.query.q_heads, state->head_count,
+                           state->head_dim, queue->stream))
+              : use_paged_prefill_gqa4
+                    ? ::sllm_causal_attention_kernel::launch_paged_prefill_gqa4(
+                          query_pointer, table, descriptors, logical_count,
+                          physical_count, state->paged_device_status,
+                          output_pointer,
+                          static_cast<uint32_t>(metadata.query_count),
+                          metadata.start_position, metadata.expected_kv_length,
+                          metadata.query.q_heads, state->head_count,
+                          state->head_dim, queue->stream)
+                    : ::sllm_causal_attention_kernel::launch_paged_prefill_fp16(
+                          query_pointer, table, descriptors, logical_count,
+                          physical_count, state->paged_device_status,
+                          output_pointer,
+                          static_cast<uint32_t>(metadata.query_count),
+                          metadata.start_position, metadata.expected_kv_length,
+                          metadata.query.q_heads, state->head_count,
+                          state->head_dim, queue->stream);
+    } else if (use_paged_generic_formats) {
+      launch_status = ::sllm_causal_attention_kernel::launch_paged_attention(
+          query_pointer, state->paged_logical_table->device_table(),
+          state->paged_device_pool->device_descriptor_table(),
+          static_cast<uint32_t>(state->paged_logical_table->size()),
+          state->paged_device_pool->physical_capacity(),
+          state->paged_device_status, output_pointer,
+          static_cast<uint32_t>(metadata.query_count), metadata.start_position,
           metadata.expected_kv_length, metadata.query.q_heads,
           state->head_count, state->head_dim, state->encoding,
           state->static_key_scale, state->static_value_scale,
-          selection.use_gfx1201_wave_provider, selection.use_decode_wave_split,
-          selection.use_decode_wave_split_q_preload, selection.use_prefill_gqa4,
-          selection.use_prefill_gqa4_qtile4,
-          selection.use_prefill_gqa6_qtile4_k32_fp16, metadata.sliding_window,
           metadata.explicit_score_scale
               ? metadata.score_scale
               : 1.0F / std::sqrt(static_cast<float>(state->head_dim)),
           queue->stream);
+    } else if (use_paged_decode_gqa6_c1) {
+      const bool c1_capture = whole_paged_decode_gqa6_c1_capture;
+      launch_status =
+          c1_capture
+              ? ::sllm_causal_attention_kernel::
+                    launch_paged_decode_gqa6_c1_device(
+                        query_pointer,
+                        state->paged_logical_table->device_table(),
+                        state->paged_device_pool->device_descriptor_table(),
+                        static_cast<uint32_t>(
+                            state->paged_logical_table->size()),
+                        state->paged_device_pool->physical_capacity(),
+                        state->paged_device_status,
+                        static_cast<float *>(scaled_prefill_workspace),
+                        scaled_prefill_workspace_bytes, output_pointer,
+                        static_cast<uint32_t>(metadata.query_count),
+                        metadata.start_position, metadata.expected_kv_length,
+                        metadata.query.q_heads, state->head_count,
+                        state->head_dim, state->encoding, device_control,
+                        queue->stream)
+              : ::sllm_causal_attention_kernel::launch_paged_decode_gqa6_c1(
+                    query_pointer,
+                    state->paged_logical_table->device_table(),
+                    state->paged_device_pool->device_descriptor_table(),
+                    static_cast<uint32_t>(state->paged_logical_table->size()),
+                    state->paged_device_pool->physical_capacity(),
+                    state->paged_device_status,
+                    static_cast<float *>(scaled_prefill_workspace),
+                    scaled_prefill_workspace_bytes, output_pointer,
+                    static_cast<uint32_t>(metadata.query_count),
+                    metadata.start_position, metadata.expected_kv_length,
+                    metadata.query.q_heads, state->head_count, state->head_dim,
+                    state->encoding, queue->stream);
+    } else if (use_paged_decode_gqa6) {
+      const bool use_gqa_shared = std::strcmp(arch_name, "gfx1030") == 0;
+      launch_status =
+          whole_paged_decode_gqa6_capture
+              ? ::sllm_causal_attention_kernel::launch_paged_decode_gqa6_device(
+                    query_pointer, state->paged_logical_table->device_table(),
+                    state->paged_device_pool->device_descriptor_table(),
+                    static_cast<uint32_t>(state->paged_logical_table->size()),
+                    state->paged_device_pool->physical_capacity(),
+                    state->paged_device_status,
+                    static_cast<float *>(scaled_prefill_workspace),
+                    scaled_prefill_workspace_bytes, output_pointer,
+                    static_cast<uint32_t>(metadata.query_count),
+                    metadata.start_position, metadata.expected_kv_length,
+                    metadata.query.q_heads, state->head_count, state->head_dim,
+                    state->encoding, use_gqa_shared, device_control,
+                    queue->stream)
+              : ::sllm_causal_attention_kernel::launch_paged_decode_gqa6(
+                    query_pointer, state->paged_logical_table->device_table(),
+                    state->paged_device_pool->device_descriptor_table(),
+                    static_cast<uint32_t>(state->paged_logical_table->size()),
+                    state->paged_device_pool->physical_capacity(),
+                    state->paged_device_status,
+                    static_cast<float *>(scaled_prefill_workspace),
+                    scaled_prefill_workspace_bytes, output_pointer,
+                    static_cast<uint32_t>(metadata.query_count),
+                    metadata.start_position, metadata.expected_kv_length,
+                    metadata.query.q_heads, state->head_count, state->head_dim,
+                    state->encoding, use_gqa_shared, queue->stream);
+    } else if (use_paged_prefill_gqa6) {
+      const bool gfx1201 = std::strcmp(arch_name, "gfx1201") == 0;
+      const bool wave_local_kv = gfx1201 && metadata.query_count == 2048U;
+      const bool use_gfx1201_wave_provider =
+          gfx1201 && metadata.query_count < 128U;
+      const bool use_gfx1201_qtile4_provider = gfx1201 &&
+                                               metadata.query_count >= 128U &&
+                                               metadata.start_position < 1024U;
+      launch_status = ::sllm_causal_attention_kernel::launch_paged_prefill_gqa6(
+          query_pointer, state->paged_logical_table->device_table(),
+          state->paged_device_pool->device_descriptor_table(),
+          static_cast<uint32_t>(state->paged_logical_table->size()),
+          state->paged_device_pool->physical_capacity(),
+          state->paged_device_status, output_pointer,
+          static_cast<uint32_t>(metadata.query_count), metadata.start_position,
+          metadata.expected_kv_length, metadata.query.q_heads,
+          state->head_count, state->head_dim, state->encoding,
+          state->static_key_scale, state->static_value_scale, wave_local_kv,
+          use_gfx1201_wave_provider, use_gfx1201_qtile4_provider,
+          queue->stream);
+    } else {
+      launch_status = hipErrorNotSupported;
     }
+#else
+    launch_status = hipErrorNotSupported;
+#endif
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,
                                        "causal attention kernel launch", queue,
                                        error_sink);
     }
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    if (use_paged_decode_gqa6 || use_paged_decode_gqa6_c1 ||
+        use_paged_prefill_gqa6 ||
+          use_paged_decode_fp16 || use_paged_prefill_gqa4 ||
+          use_paged_prefill_fp16 ||
+        use_paged_generic_formats || use_paged_sliding_static_fp8) {
+      /* Whole capture keeps the status word device-resident.  The paged
+       * device-control kernels publish invalid-table failures directly to
+       * ControlV1, and inserting a D2H node here would make the captured
+       * graph host-dependent.  Eager paged submissions retain the ordinary
+       * asynchronous status readback and completion validation. */
+      if (!whole_paged_decode_gqa6_capture &&
+          !whole_paged_decode_gqa6_c1_capture &&
+          !whole_paged_decode_fp16_capture) {
+        const hipError_t status_copy = enqueue_completion_device_status_copy(
+            candidate.get(), queue->stream);
+        if (status_copy != hipSuccess) {
+          execute_guard.disarm();
+          return cleanup_failed_submission(
+              candidate, token, status_copy,
+              "paged causal attention device status readback", queue,
+              error_sink);
+        }
+      }
+    }
+#endif
     const hipError_t record_status =
         candidate->event != nullptr
             ? hipEventRecord(candidate->event, queue->stream)
@@ -1954,7 +1090,139 @@ static sllm_status_t causal_attention_execute_impl(
     }
     fill_causal_attention_dispatch_info(dispatch_info, dispatch_id, metadata,
                                         state->head_count, state->encoding,
-                                        arch_name, selection);
+                                        arch_name);
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    if (use_paged_decode_gqa6 || use_paged_decode_gqa6_c1 ||
+        use_paged_prefill_gqa6) {
+      const bool use_gqa_shared = std::strcmp(arch_name, "gfx1030") == 0;
+      const bool paged_gfx1201_wave = !use_paged_decode_gqa6 &&
+                                      std::strcmp(arch_name, "gfx1201") == 0 &&
+                                      metadata.query_count < 128U;
+      const bool paged_gfx1201_qtile4 =
+          !use_paged_decode_gqa6 && std::strcmp(arch_name, "gfx1201") == 0 &&
+          metadata.query_count >= 128U && metadata.start_position < 1024U;
+      const uint32_t splits = metadata.expected_kv_length >= 8192U ? 128U : 32U;
+      dispatch_info->dispatch_count =
+          (use_paged_decode_gqa6 || use_paged_decode_gqa6_c1) ? 2U : 1U;
+      dispatch_info->kernel_id =
+          use_paged_decode_gqa6_c1
+              ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_GQA6_C1_M3_V1
+          : use_paged_decode_gqa6
+              ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_GQA6_V1
+              : SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_GQA6_V1;
+      dispatch_info->workgroup_size_x =
+          (use_paged_decode_gqa6 || use_paged_decode_gqa6_c1)
+              ? (use_paged_decode_gqa6_c1 ? 192U
+                                          : (use_gqa_shared ? 192U : 32U))
+          : (paged_gfx1201_wave || paged_gfx1201_qtile4) ? 256U
+                                                         : 512U;
+      dispatch_info->grid_size_x =
+          use_paged_decode_gqa6_c1
+              ? static_cast<uint32_t>(4U * splits)
+          : use_paged_decode_gqa6
+              ? static_cast<uint32_t>(
+                    static_cast<uint64_t>(metadata.query_count) *
+                    (use_gqa_shared ? state->head_count
+                                    : metadata.query.q_heads) *
+                    splits)
+          : (paged_gfx1201_wave || paged_gfx1201_qtile4)
+              ? static_cast<uint32_t>(
+                    static_cast<uint64_t>(metadata.query_count) *
+                    metadata.query.q_heads)
+              : static_cast<uint32_t>((metadata.query_count + 7U) / 8U *
+                                      state->head_count);
+      sllm_public_runtime::copy_fixed_string(
+          dispatch_info->kernel_symbol,
+          SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX,
+          use_paged_decode_gqa6_c1
+              ? ::sllm_causal_attention_kernel::
+                    kPagedDecodeGqa6C1M3LogicalKernelId
+          : use_paged_decode_gqa6
+              ? ::sllm_causal_attention_kernel::kPagedDecodeGqa6LogicalKernelId
+          : paged_gfx1201_wave   ? ::sllm_causal_attention_kernel::
+                                       kPagedPrefillGqa6Gfx1201WaveLogicalKernelId
+          : paged_gfx1201_qtile4 ? ::sllm_causal_attention_kernel::
+                                       kPagedPrefillGqa6QTile4LogicalKernelId
+                                 : ::sllm_causal_attention_kernel::
+                                       kPagedPrefillGqa6LogicalKernelId);
+      sllm_public_runtime::copy_fixed_string(
+          dispatch_info->device_symbol,
+          SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX,
+          use_paged_decode_gqa6_c1
+              ? ::sllm_causal_attention_kernel::
+                    kPagedDecodeGqa6C1M3DeviceSymbol
+          : use_paged_decode_gqa6
+              ? ::sllm_causal_attention_kernel::kPagedDecodeGqa6DeviceSymbol
+          : paged_gfx1201_wave ? ::sllm_causal_attention_kernel::
+                                     kPagedPrefillGqa6Gfx1201WaveDeviceSymbol
+          : paged_gfx1201_qtile4
+              ? ::sllm_causal_attention_kernel::
+                    kPagedPrefillGqa6QTile4DeviceSymbol
+              : ::sllm_causal_attention_kernel::kPagedPrefillGqa6DeviceSymbol);
+    } else if (use_paged_decode_fp16 || use_paged_prefill_gqa4 ||
+               use_paged_prefill_fp16) {
+      dispatch_info->dispatch_count = 1U;
+      dispatch_info->kernel_id =
+          use_paged_decode_fp16
+              ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_DECODE_FP16_V1
+              : SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_PREFILL_FP16_V1;
+      dispatch_info->workgroup_size_x =
+          SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+      dispatch_info->grid_size_x =
+          static_cast<uint32_t>(metadata.query_count * metadata.query.q_heads);
+      sllm_public_runtime::copy_fixed_string(
+          dispatch_info->kernel_symbol,
+          SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX,
+          use_paged_decode_fp16
+              ? ::sllm_causal_attention_kernel::kPagedDecodeFp16LogicalKernelId
+          : use_paged_prefill_gqa4
+              ? ::sllm_causal_attention_kernel::
+                    kPagedPrefillGqa4LogicalKernelId
+              : ::sllm_causal_attention_kernel::
+                    kPagedPrefillFp16LogicalKernelId);
+      sllm_public_runtime::copy_fixed_string(
+          dispatch_info->device_symbol,
+          SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX,
+          use_paged_decode_fp16
+              ? ::sllm_causal_attention_kernel::kPagedDecodeFp16DeviceSymbol
+          : use_paged_prefill_gqa4
+              ? ::sllm_causal_attention_kernel::kPagedPrefillGqa4DeviceSymbol
+              : ::sllm_causal_attention_kernel::kPagedPrefillFp16DeviceSymbol);
+    } else if (use_paged_sliding_static_fp8) {
+      dispatch_info->dispatch_count = 1U;
+      dispatch_info->kernel_id =
+          SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_SLIDING_STATIC_FP8_V1;
+      dispatch_info->workgroup_size_x =
+          SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+      dispatch_info->grid_size_x = static_cast<uint32_t>(
+          static_cast<uint64_t>(metadata.query_count) * metadata.query.q_heads);
+      sllm_public_runtime::copy_fixed_string(
+          dispatch_info->kernel_symbol,
+          SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX,
+          ::sllm_causal_attention_kernel::kPagedSlidingStaticFp8LogicalKernelId);
+      sllm_public_runtime::copy_fixed_string(
+          dispatch_info->device_symbol,
+          SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX,
+          ::sllm_causal_attention_kernel::kPagedSlidingStaticFp8DeviceSymbol);
+    } else if (use_paged_generic_formats) {
+      dispatch_info->dispatch_count = 1U;
+      dispatch_info->kernel_id =
+          SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PAGED_GENERIC_FORMATS_V1;
+      dispatch_info->workgroup_size_x =
+          SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+      dispatch_info->grid_size_x =
+          static_cast<uint32_t>(metadata.query_count * metadata.query.q_heads);
+      sllm_public_runtime::copy_fixed_string(
+          dispatch_info->kernel_symbol,
+          SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX,
+          ::sllm_causal_attention_kernel::
+              kPagedAttentionFormatsLogicalKernelId);
+      sllm_public_runtime::copy_fixed_string(
+          dispatch_info->device_symbol,
+          SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX,
+          ::sllm_causal_attention_kernel::kPagedAttentionFormatsDeviceSymbol);
+    }
+#endif
     *completion_output = reinterpret_cast<sllm_completion_t *>(token);
     (void)candidate.release();
     execute_guard.disarm();
